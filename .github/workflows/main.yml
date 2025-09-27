@@ -1,15 +1,24 @@
 name: Build & Deploy market feed
 
+# --- Mikor fusson ---
 on:
+  # 1) 5 percenként (UTC szerint)
+  schedule:
+    - cron: "*/5 * * * *"
+  # 2) Azonnal, ha a public/ vagy a kód változik (push a main-re)
   push:
     branches: [ main ]
     paths:
       - 'public/**'
       - 'Trading.py'
       - 'requirements.txt'
-  schedule:
-    - cron: "*/5 * * * *"     # maradhat biztonsági tartaléknak
+  # 3) Kézi indítás az Actions felületről
   workflow_dispatch:
+
+# --- Ne fusson párhuzamosan; mindig a legutóbbit tartsuk meg ---
+concurrency:
+  group: market-feed
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -18,10 +27,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Setup Python 3.11 (pip cache)
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install deps
         run: |
