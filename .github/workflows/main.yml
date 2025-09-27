@@ -1,0 +1,55 @@
+name: Build & Deploy market feed
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # 5 percenként fut
+  workflow_dispatch:         # kézzel is indítható az Actions fülről
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Trading.py
+        run: |
+          python Trading.py
+          mkdir -p public
+          # Ha a script nem public/ alá ír, ide bemásoljuk:
+          [ -f spot.json ] && mv spot.json public/ || true
+          [ -f klines_5m.json ] && mv klines_5m.json public/ || true
+          [ -f klines_1h.json ] && mv klines_1h.json public/ || true
+          [ -f klines_4h.json ] && mv klines_4h.json public/ || true
+          [ -f signal.json ] && mv signal.json public/ || true
+          [ -f chart_1d.png ] && mv chart_1d.png public/ || true
+
+      # A public/ mappát becsomagoljuk egy Pages-artifactba
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
