@@ -6,7 +6,7 @@ Robusztus feed-generátor több tőzsdés (Kraken → Coinbase → OKX) OHLC fal
 - Hiba esetén is public/status.json készül, a script 0-val lép ki.
 
 Kimenetek (public/):
-- spot.json (CoinGecko → fallback Coinbase ticker)
+- spot.json (CoinGecko → fallback Coinbase ticker)  + retrieved_at_utc + age_sec
 - klines_5m.json / klines_1h.json / klines_4h.json
 - chart_1d.png (napi záróár grafikon – ugyanabból a forrásból)
 - signal.json (ATR14 1h minta)
@@ -69,7 +69,7 @@ def fetch_spot():
     try:
         d = fetch_json_with_retry(cg_url)
         px = float(d[COIN_ID]["usd"])
-        ts = d[COIN_ID].get("last_updated_at")
+        ts = d[COIN_ID].get("last_updated_at")  # epoch sec
         return {"price_usd": px, "last_updated_at": iso(ts), "source": cg_url}
     except Exception as e1:
         # Fallback: Coinbase ticker
@@ -82,6 +82,32 @@ def fetch_spot():
             return {"price_usd": px, "last_updated_at": d.get("time",""), "source": cb_url}
         except Exception as e2:
             raise RuntimeError(f"spot fallback failed: CG: {e1} | CB: {e2}")
+
+# ---- Segédfüggvény: többféle last_updated_at formátum parse-olása aware UTC-re ----
+def parse_last_updated_utc(s: str):
+    if not s:
+        return None
+    s = str(s).strip()
+    try:
+        # "YYYY-MM-DD HH:MM:SS UTC" (a mi iso() kimenetünk)
+        if s.endswith(" UTC"):
+            return dt.datetime.strptime(s, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
+        # Coinbase: "...Z"
+        if s.endswith("Z"):
+            return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+        # ISO "+00:00" formátum
+        if "+" in s:
+            return dt.datetime.fromisoformat(s)
+        # numerikus epoch (biztonsági)
+        if s.isdigit():
+            return dt.datetime.fromtimestamp(int(s), tz=timezone.utc)
+    except Exception:
+        pass
+    # végső próbálkozás: szabad formátum
+    try:
+        return dt.datetime.fromisoformat(s)
+    except Exception:
+        return None
 
 # ---------- OHLC több tőzsdéről, egységes DF: time,o,h,l,c,v (ASC, UTC) ----------
 def klines_from_kraken(interval: str, limit: int) -> pd.DataFrame:
@@ -178,6 +204,13 @@ status = {"ok": True, "errors": []}
 # ---------- Spot ----------
 try:
     spot = fetch_spot()
+
+    # --- Frissesség-jelzők hozzáadása a spot.json-hoz ---
+    now_utc = dt.datetime.now(timezone.utc)
+    spot["retrieved_at_utc"] = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+    lu = parse_last_updated_utc(spot.get("last_updated_at"))
+    spot["age_sec"] = int((now_utc - lu).total_seconds()) if lu else None
+
     save_json(spot, "spot.json")
 except Exception as e:
     status["ok"] = False
