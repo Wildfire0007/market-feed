@@ -236,35 +236,46 @@ def index_fetch_spot(symbol: str):
 
 def index_fetch_klines(symbol: str, interval: str, limit: int, asset_status: dict) -> pd.DataFrame:
     if interval == "5m":
-        res = yahoo_chart(symbol, "5d", "5m")    # ~5 nap 5m-en
+        res = yahoo_chart(symbol, "5d", "5m")
         asset_status["klines_5m_provider"] = "yahoo"
         return yahoo_to_df(res).tail(limit)
+
     elif interval == "1h":
         res = yahoo_chart(symbol, "60d", "60m")
         asset_status["klines_1h_provider"] = "yahoo"
         return yahoo_to_df(res).tail(limit)
+
     elif interval == "4h":
-        # 4h: 1h-ból aggregálunk
+        # 4h: 1h-ból aggregálunk, az index nevétől függetlenül
         res = yahoo_chart(symbol, "60d", "60m")
         asset_status["klines_4h_provider"] = "yahoo(agg)"
         df1h = yahoo_to_df(res)
         if df1h.empty:
             raise RuntimeError("Yahoo 1h empty")
+
         d = df1h.copy()
         dt_idx = pd.to_datetime(d["time"], utc=True)
         d = d.set_index(dt_idx)
-        # OHLC aggregálás 4 órás gyertyákra
-        agg = {
-            "o":"first","h":"max","l":"min","c":"last","v":"sum"
-        }
-        df4h = d.resample("4H").agg(agg).dropna().reset_index()
-        df4h["time"] = df4h["index"].dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-        df4h = df4h[["time","o","h","l","c","v"]].tail(limit)
-        return df4h
+
+        agg = {"o":"first","h":"max","l":"min","c":"last","v":"sum"}
+        df4h = d.resample("4H").agg(agg).dropna()
+
+        # Idő oszlop az indexből – ne bízzunk a 'reset_index' oszlopnévben
+        idx = df4h.index
+        if getattr(idx, "tz", None) is None:
+            idx = idx.tz_localize("UTC")
+        times = pd.to_datetime(idx).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        df4h_out = df4h.copy()
+        df4h_out["time"] = times
+        df4h_out = df4h_out.reset_index(drop=True).tail(limit)
+        return df4h_out[["time","o","h","l","c","v"]]
+
     elif interval == "1d":
         res = yahoo_chart(symbol, "2y", "1d")
         asset_status["klines_1d_provider"] = "yahoo"
         return yahoo_to_df(res).tail(limit)
+
     else:
         raise ValueError("Unsupported interval for index")
 
@@ -287,21 +298,28 @@ def build_signal_1h(asset_dir: str, status_obj: dict):
         k1h_path = os.path.join(asset_dir, "klines_1h.json")
         if not os.path.exists(k1h_path):
             raise RuntimeError("klines_1h.json missing")
+
         k1h_df = pd.read_json(k1h_path)
-        if isinstance(k1h_df, pd.DataFrame) and "status" in k1h_df.columns:
-            raise RuntimeError("No 1h data (error json)")
+
+        # Ha nem táblás OHLC érkezett (pl. error-json), fogjuk meg korán
+        if not isinstance(k1h_df, pd.DataFrame) or not set(["o","h","l","c"]).issubset(k1h_df.columns):
+            raise RuntimeError("No valid 1h OHLC columns")
+
         for col in ["o","h","l","c"]:
             k1h_df[col] = k1h_df[col].astype(float)
+
         atr = atr14_from_ohlc(k1h_df)
         sp = json.load(open(os.path.join(asset_dir, "spot.json"), encoding="utf-8")).get("price_usd", float("nan"))
         entry = float(sp)
         if math.isnan(entry) or math.isnan(atr) or atr <= 0:
             raise RuntimeError("entry/ATR invalid")
+
         sl  = entry - 2.0*atr
         tp1 = entry + 1.5*atr
         tp2 = entry + 3.0*atr
         lev = 3
         qty = 100.0/entry
+
         signal = {
             "side":"LONG","entry":round(entry,4),"SL":round(sl,4),
             "TP1":round(tp1,4),"TP2":round(tp2,4),"leverage":lev,
@@ -313,10 +331,12 @@ def build_signal_1h(asset_dir: str, status_obj: dict):
             "notes":"ATR14(1h) MINTA; igazítsd a saját szabályaidhoz."
         }
         save_json(signal, os.path.join(asset_dir, "signal.json"))
+
     except Exception as e:
         status_obj["ok"] = False
         status_obj["errors"].append(f"signal: {e}")
-        save_json({"status":"Insufficient data (signal)","error":str(e)}, os.path.join(asset_dir, "signal.json"))
+        save_json({"status":"Insufficient data (signal)","error":str(e)},
+                  os.path.join(asset_dir, "signal.json"))
 
 # ---------- Egy asset teljes buildje ----------
 def build_asset(name: str, cfg: dict):
@@ -439,3 +459,4 @@ with open(os.path.join(OUTDIR, "index.html"), "w", encoding="utf-8") as f:
     f.write(root_html)
 
 print("Done. Outputs in 'public/<ASSET>/' and public/index.html")
+
