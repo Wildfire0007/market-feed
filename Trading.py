@@ -2,7 +2,7 @@
 """
 Market feed generator for multiple assets (SOL crypto + NSDQ100 index).
 - SOL: CoinGecko spot → fallback Coinbase; OHLC: Kraken → Coinbase → OKX
-- NSDQ100: Yahoo Finance chart API (spot+OHLC); 4H az 1H-ból aggregálva
+- NSDQ100: Yahoo Finance quote+chart API (spot+OHLC); 4H az 1H-ból aggregálva
 - Headless matplotlib; retry/backoff; minden kimenet public/<ASSET>/ alá
 - status.json összesített állapotot ír (per-asset info-val)
 - Minden spot.json tartalmaz: retrieved_at_utc + age_sec
@@ -183,15 +183,23 @@ def crypto_klines_multi(symbols: dict, interval: str, limit: int, asset_status: 
             providers.append(f"{prov}: {e}")
     raise RuntimeError("All crypto providers failed → " + " | ".join(providers))
 
-# ---------- INDEX: NSDQ100 (Yahoo Finance v8 chart) ----------
+# ---------- INDEX: NSDQ100 (Yahoo Finance v7 quote + v8 chart) ----------
 def yahoo_chart(symbol: str, range_str: str, interval: str):
-    # symbol pl. "^NDX" → encode
     s_enc = quote(symbol, safe="")
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{s_enc}?range={range_str}&interval={interval}"
     j = fetch_json_with_retry(url)
     if not j or not j.get("chart", {}).get("result"):
         raise RuntimeError("Yahoo: empty result")
     return j["chart"]["result"][0]
+
+def yahoo_quote(symbol: str):
+    s_enc = quote(symbol, safe="")
+    url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={s_enc}"
+    j = fetch_json_with_retry(url)
+    res = j.get("quoteResponse", {}).get("result", [])
+    if not res:
+        raise RuntimeError("Yahoo quote: empty result")
+    return res[0]
 
 def yahoo_to_df(result) -> pd.DataFrame:
     ts = result.get("timestamp", [])
@@ -216,23 +224,52 @@ def yahoo_to_df(result) -> pd.DataFrame:
     return df[["time","o","h","l","c","v"]]
 
 def index_fetch_spot(symbol: str):
-    # A 'meta.regularMarketPrice' és 'regularMarketTime' a chart meta blokkból
-    res = yahoo_chart(symbol, "1d", "5m")
-    meta = res.get("meta", {})
-    price = meta.get("regularMarketPrice")
-    ts = meta.get("regularMarketTime")  # epoch sec
-    if price is None:
-        # ha nincs meta ár: vegyük az utolsó zárót
-        df = yahoo_to_df(res)
-        if len(df) == 0:
-            raise RuntimeError("Yahoo spot: no data")
-        price = float(df["c"].iloc[-1])
-        # időbélyeg az utolsó gyertyáról
-        last_ts = res.get("timestamp", [None])[-1]
-        ts = last_ts
-    last_updated = iso(ts) if ts else ""
-    return {"price_usd": float(price), "last_updated_at": last_updated,
-            "source": "Yahoo Finance chart meta"}
+    """
+    Válaszd a legfrissebb elérhető árat/időt:
+    postMarket → preMarket → regularMarket → chart utolsó gyertya (5m).
+    Visszatér: price_usd, last_updated_at, source, market_state
+    """
+    q = yahoo_quote(symbol)
+    candidates = []  # (price, epoch_sec, source_label)
+
+    for p_field, t_field in [
+        ("postMarketPrice", "postMarketTime"),
+        ("preMarketPrice",  "preMarketTime"),
+        ("regularMarketPrice", "regularMarketTime"),
+    ]:
+        px = q.get(p_field)
+        ts = q.get(t_field)
+        if px is not None and ts:
+            try:
+                candidates.append((float(px), int(ts), f"Yahoo quote {p_field}"))
+            except Exception:
+                pass
+
+    # chart (v8) – utolsó gyertya
+    try:
+        res = yahoo_chart(symbol, "1d", "5m")
+        ts_arr = res.get("timestamp", [])
+        ind = res.get("indicators", {}).get("quote", [{}])[0]
+        closes = ind.get("close", [])
+        if ts_arr and closes:
+            last_ts = ts_arr[-1]
+            last_px = closes[-1]
+            if last_px is not None:
+                candidates.append((float(last_px), int(last_ts), "Yahoo chart last candle (5m)"))
+    except Exception:
+        pass
+
+    if not candidates:
+        raise RuntimeError("Yahoo spot: no candidates")
+
+    price, ts, src = max(candidates, key=lambda x: x[1])
+    out = {
+        "price_usd": float(price),
+        "last_updated_at": iso(ts),
+        "source": src,
+        "market_state": q.get("marketState", "unknown")
+    }
+    return out
 
 def index_fetch_klines(symbol: str, interval: str, limit: int, asset_status: dict) -> pd.DataFrame:
     if interval == "5m":
@@ -260,7 +297,6 @@ def index_fetch_klines(symbol: str, interval: str, limit: int, asset_status: dic
         agg = {"o":"first","h":"max","l":"min","c":"last","v":"sum"}
         df4h = d.resample("4H").agg(agg).dropna()
 
-        # Idő oszlop az indexből – ne bízzunk a 'reset_index' oszlopnévben
         idx = df4h.index
         if getattr(idx, "tz", None) is None:
             idx = idx.tz_localize("UTC")
@@ -301,7 +337,6 @@ def build_signal_1h(asset_dir: str, status_obj: dict):
 
         k1h_df = pd.read_json(k1h_path)
 
-        # Ha nem táblás OHLC érkezett (pl. error-json), fogjuk meg korán
         if not isinstance(k1h_df, pd.DataFrame) or not set(["o","h","l","c"]).issubset(k1h_df.columns):
             raise RuntimeError("No valid 1h OHLC columns")
 
@@ -401,7 +436,7 @@ def build_asset(name: str, cfg: dict):
     # Jel (ATR14 1h minta)
     build_signal_1h(asset_dir, astatus)
 
-    # Asset-szintű status.json (hasznos önálló olvasáshoz)
+    # Asset-szintű status.json
     astatus["generated_at_utc"] = now_utc().strftime("%Y-%m-%d %H:%M:%S UTC")
     save_json(astatus, os.path.join(asset_dir, "status.json"))
 
@@ -459,4 +494,3 @@ with open(os.path.join(OUTDIR, "index.html"), "w", encoding="utf-8") as f:
     f.write(root_html)
 
 print("Done. Outputs in 'public/<ASSET>/' and public/index.html")
-
