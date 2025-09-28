@@ -192,15 +192,6 @@ def yahoo_chart(symbol: str, range_str: str, interval: str):
         raise RuntimeError("Yahoo: empty result")
     return j["chart"]["result"][0]
 
-def yahoo_quote(symbol: str):
-    s_enc = quote(symbol, safe="")
-    url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={s_enc}"
-    j = fetch_json_with_retry(url)
-    res = j.get("quoteResponse", {}).get("result", [])
-    if not res:
-        raise RuntimeError("Yahoo quote: empty result")
-    return res[0]
-
 def yahoo_to_df(result) -> pd.DataFrame:
     ts = result.get("timestamp", [])
     ind = result.get("indicators", {}).get("quote", [{}])[0]
@@ -225,25 +216,62 @@ def yahoo_to_df(result) -> pd.DataFrame:
 
 def index_fetch_spot(symbol: str):
     """
-    Válaszd a legfrissebb elérhető árat/időt:
-    postMarket → preMarket → regularMarket → chart utolsó gyertya (5m).
-    Visszatér: price_usd, last_updated_at, source, market_state
+    Spot a Yahoo v8 /chart-ból:
+    - meta.postMarket / preMarket / regularMarket (ha van időbélyeggel)
+    - + utolsó 5m gyertya (timestamp, close)
+    Ha ^NDX hibázna, fallback 'QQQ' proxyra.
     """
-    q = yahoo_quote(symbol)
-    candidates = []  # (price, epoch_sec, source_label)
+    def spot_from_chart(sym):
+        res = yahoo_chart(sym, "1d", "5m")
+        meta = res.get("meta", {})
+        candidates = []
+        for p_field, t_field, lbl in [
+            ("postMarketPrice", "postMarketTime", "postMarket"),
+            ("preMarketPrice",  "preMarketTime",  "preMarket"),
+            ("regularMarketPrice", "regularMarketTime", "regularMarket"),
+        ]:
+            px = meta.get(p_field); ts = meta.get(t_field)
+            if px is not None and ts:
+                try:
+                    candidates.append((float(px), int(ts), f"Yahoo chart meta {lbl}", None))
+                except Exception:
+                    pass
+        # utolsó 5m gyertya
+        ts_arr = res.get("timestamp", [])
+        closes = res.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+        if ts_arr and closes and closes[-1] is not None:
+            candidates.append((float(closes[-1]), int(ts_arr[-1]), "Yahoo chart last candle (5m)", None))
 
-    for p_field, t_field in [
-        ("postMarketPrice", "postMarketTime"),
-        ("preMarketPrice",  "preMarketTime"),
-        ("regularMarketPrice", "regularMarketTime"),
-    ]:
-        px = q.get(p_field)
-        ts = q.get(t_field)
-        if px is not None and ts:
-            try:
-                candidates.append((float(px), int(ts), f"Yahoo quote {p_field}"))
-            except Exception:
-                pass
+        if not candidates:
+            raise RuntimeError("Yahoo chart: no spot candidates")
+
+        price, ts, src, _ = max(candidates, key=lambda x: x[1])
+
+        # egyszerűen származtatott market_state
+        ctp = meta.get("currentTradingPeriod", {}).get("regular", {})
+        start, end = ctp.get("start"), ctp.get("end")
+        now_sec = int(time.time())
+        if isinstance(start, int) and isinstance(end, int) and start <= now_sec <= end:
+            mstate = "REGULAR"
+        else:
+            mstate = "CLOSED"
+
+        out = {
+            "price_usd": float(price),
+            "last_updated_at": iso(ts),
+            "source": src,
+            "market_state": mstate
+        }
+        return out
+
+    # 1) ^NDX elsődlegesen
+    try:
+        return spot_from_chart(symbol)
+    except Exception:
+        # 2) Fallback: QQQ (ETF proxy)
+        out = spot_from_chart("QQQ")
+        out["proxy_from"] = "QQQ"
+        return out
 
     # chart (v8) – utolsó gyertya
     try:
@@ -494,3 +522,4 @@ with open(os.path.join(OUTDIR, "index.html"), "w", encoding="utf-8") as f:
     f.write(root_html)
 
 print("Done. Outputs in 'public/<ASSET>/' and public/index.html")
+
