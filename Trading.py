@@ -219,12 +219,13 @@ def index_fetch_spot(symbol: str):
     Spot a Yahoo v8 /chart-ból:
     - meta.postMarket / preMarket / regularMarket (ha van időbélyeggel)
     - + utolsó 5m gyertya (timestamp, close)
-    Ha ^NDX hibázna, fallback 'QQQ' proxyra.
+    Ha ^NDX hibázna, fallback 'QQQ' proxyra; végső fallback: 'NQ=F' (futures).
     """
     def spot_from_chart(sym):
         res = yahoo_chart(sym, "1d", "5m")
         meta = res.get("meta", {})
         candidates = []
+        # meta-mezők
         for p_field, t_field, lbl in [
             ("postMarketPrice", "postMarketTime", "postMarket"),
             ("preMarketPrice",  "preMarketTime",  "preMarket"),
@@ -233,71 +234,50 @@ def index_fetch_spot(symbol: str):
             px = meta.get(p_field); ts = meta.get(t_field)
             if px is not None and ts:
                 try:
-                    candidates.append((float(px), int(ts), f"Yahoo chart meta {lbl}", None))
+                    candidates.append((float(px), int(ts), f"Yahoo chart meta {lbl}"))
                 except Exception:
                     pass
         # utolsó 5m gyertya
         ts_arr = res.get("timestamp", [])
         closes = res.get("indicators", {}).get("quote", [{}])[0].get("close", [])
         if ts_arr and closes and closes[-1] is not None:
-            candidates.append((float(closes[-1]), int(ts_arr[-1]), "Yahoo chart last candle (5m)", None))
+            candidates.append((float(closes[-1]), int(ts_arr[-1]), "Yahoo chart last candle (5m)"))
 
         if not candidates:
             raise RuntimeError("Yahoo chart: no spot candidates")
 
-        price, ts, src, _ = max(candidates, key=lambda x: x[1])
+        price, ts, src = max(candidates, key=lambda x: x[1])
 
-        # egyszerűen származtatott market_state
+        # egyszerűen származtatott market_state (REGULAR/CLOSED)
         ctp = meta.get("currentTradingPeriod", {}).get("regular", {})
         start, end = ctp.get("start"), ctp.get("end")
         now_sec = int(time.time())
-        if isinstance(start, int) and isinstance(end, int) and start <= now_sec <= end:
-            mstate = "REGULAR"
-        else:
-            mstate = "CLOSED"
+        mstate = "REGULAR" if isinstance(start, int) and isinstance(end, int) and start <= now_sec <= end else "CLOSED"
 
-        out = {
+        return {
             "price_usd": float(price),
             "last_updated_at": iso(ts),
             "source": src,
             "market_state": mstate
         }
-        return out
 
-    # 1) ^NDX elsődlegesen
+    # 1) ^NDX
     try:
         return spot_from_chart(symbol)
     except Exception:
-        # 2) Fallback: QQQ (ETF proxy)
+        pass
+    # 2) QQQ (ETF proxy)
+    try:
         out = spot_from_chart("QQQ")
         out["proxy_from"] = "QQQ"
         return out
-
-    # chart (v8) – utolsó gyertya
-    try:
-        res = yahoo_chart(symbol, "1d", "5m")
-        ts_arr = res.get("timestamp", [])
-        ind = res.get("indicators", {}).get("quote", [{}])[0]
-        closes = ind.get("close", [])
-        if ts_arr and closes:
-            last_ts = ts_arr[-1]
-            last_px = closes[-1]
-            if last_px is not None:
-                candidates.append((float(last_px), int(last_ts), "Yahoo chart last candle (5m)"))
     except Exception:
         pass
-
-    if not candidates:
-        raise RuntimeError("Yahoo spot: no candidates")
-
-    price, ts, src = max(candidates, key=lambda x: x[1])
-    out = {
-        "price_usd": float(price),
-        "last_updated_at": iso(ts),
-        "source": src,
-        "market_state": q.get("marketState", "unknown")
-    }
+    # 3) NQ=F (futures proxy) – ha minden kötél szakad
+    out = spot_from_chart("NQ=F")
+    out["proxy_from"] = "NQ=F"
     return out
+
 
 def index_fetch_klines(symbol: str, interval: str, limit: int, asset_status: dict) -> pd.DataFrame:
     if interval == "5m":
@@ -522,4 +502,5 @@ with open(os.path.join(OUTDIR, "index.html"), "w", encoding="utf-8") as f:
     f.write(root_html)
 
 print("Done. Outputs in 'public/<ASSET>/' and public/index.html")
+
 
