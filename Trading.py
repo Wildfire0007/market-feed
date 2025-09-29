@@ -50,6 +50,10 @@ ASSETS = {
         # Yahoo Finance szimbólum a Nasdaq-100-ra: ^NDX (URL-ben encode-olni kell)
         "yahoo_symbol": "^NDX",
     },
+    "Gold_GLD": {
+        "type": "index",
+        "yahoo_symbol": "GLD",
+    }
 }
 
 os.makedirs(OUTDIR, exist_ok=True)
@@ -526,6 +530,7 @@ root_html = """<!doctype html><html lang="hu"><head><meta charset="utf-8"/>
 <ul>
   <li><a href="./SOL/index.html">SOL</a></li>
   <li><a href="./NSDQ100/index.html">NSDQ100</a></li>
+  <li><a href="./GOLD_GLD/index.html">GOLD_GLD (GLD)</a></li>
 </ul>
 <p>Assetenként külön aloldal: status/spot/klines/signal/chart. Összesített állapot: <a href="./status.json">status.json</a>.</p>
 </body></html>
