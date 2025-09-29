@@ -340,7 +340,7 @@ def index_fetch_klines(symbol: str, interval: str, limit: int, asset_status: dic
         dt_idx = pd.to_datetime(d["time"], utc=True)
         d = d.set_index(dt_idx)
         agg = {"o": "first", "h": "max", "l": "min", "c": "last", "v": "sum"}
-        df4h = d.resample("4H").agg(agg).dropna()
+        df4h = d.resample("4h").agg(agg).dropna()
         idx = df4h.index
         if getattr(idx, "tz", None) is None:
             idx = idx.tz_localize("UTC")
@@ -461,6 +461,7 @@ def build_asset(name: str, cfg: dict):
         df_to_ohlc_json(k5m, os.path.join(asset_dir, "klines_5m.json"))
         df_to_ohlc_json(k1h, os.path.join(asset_dir, "klines_1h.json"))
         df_to_ohlc_json(k4h, os.path.join(asset_dir, "klines_4h.json"))
+        df_to_ohlc_json(k1d, os.path.join(asset_dir, "klines_1d.json"))
     except Exception as e:
         astatus["ok"] = False
         astatus["errors"].append(f"klines: {e}")
@@ -468,18 +469,8 @@ def build_asset(name: str, cfg: dict):
         save_json(err, os.path.join(asset_dir, "klines_5m.json"))
         save_json(err, os.path.join(asset_dir, "klines_1h.json"))
         save_json(err, os.path.join(asset_dir, "klines_4h.json"))
+        save_json(err, os.path.join(asset_dir, "klines_1d.json"))
         k1d = pd.DataFrame()
-
-    # Chart 1D
-    try:
-        if isinstance(k1d, pd.DataFrame) and not k1d.empty:
-            make_chart_png(k1d, f"{name} – Close (1D)", os.path.join(asset_dir, "chart_1d.png"))
-        else:
-            astatus["ok"] = False
-            astatus["errors"].append("chart_1d: no data")
-    except Exception as e:
-        astatus["ok"] = False
-        astatus["errors"].append(f"chart_1d: {e}")
 
     # Jel (ATR14 1h minta)
     build_signal_1h(asset_dir, astatus)
@@ -490,28 +481,28 @@ def build_asset(name: str, cfg: dict):
 
     # Asset index.html
     html = f"""<!doctype html><html lang="hu"><head><meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>{name} – market-feed</title>
-<style>body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif;margin:24px;line-height:1.5}}code{{background:#f4f4f4;padding:2px 6px;border-radius:6px}}</style>
-</head><body>
-<h1>{name} – public outputs</h1>
-<ul>
-  <li><a href="./status.json">status.json</a></li>
-  <li><a href="./spot.json">spot.json</a></li>
-  <li><a href="./klines_5m.json">klines_5m.json</a></li>
-  <li><a href="./klines_1h.json">klines_1h.json</a></li>
-  <li><a href="./klines_4h.json">klines_4h.json</a></li>
-  <li><a href="./signal.json">signal.json</a></li>
-  <li><a href="./chart_1d.png">chart_1d.png</a></li>
-</ul>
-<p>Források: {('Kraken/Coinbase/OKX (crypto multi)') if ASSETS[name]['type']=='crypto' else 'Yahoo Finance (index)'}</p>
-<p><a href="../index.html">« vissza a főoldalra</a></p>
-</body></html>"""
+    <meta name="viewport" content="width=device-width,initial-scale=1"/>
+    <title>{name} – market-feed</title>
+    <style>body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif;margin:24px;line-height:1.5}}code{{background:#f4f4f4;padding:2px 6px;border-radius:6px}}</style>
+    </head><body>
+    <h1>{name} – public outputs</h1>
+    <ul>
+      <li><a href="./status.json">status.json</a></li>
+      <li><a href="./spot.json">spot.json</a></li>
+      <li><a href="./klines_5m.json">klines_5m.json</a></li>
+      <li><a href="./klines_1h.json">klines_1h.json</a></li>
+      <li><a href="./klines_4h.json">klines_4h.json</a></li>
+      <li><a href="./signal.json">signal.json</a></li>
+      <li><a href="./klines_1d.json">klines_1d.json</a></li>
+    </ul>
+    <p>Források: {('Kraken/Coinbase/OKX (crypto multi)') if ASSETS[name]['type'] == 'crypto' else 'Yahoo Finance (index)'}</p>
+    <p><a href="../index.html">« vissza a főoldalra</a></p>
+    </body></html>"""
+
     with open(os.path.join(asset_dir, "index.html"), "w", encoding="utf-8") as f:
         f.write(html)
 
     return astatus
-
 
 # ---------- Fő futás: minden asset legenerálása ----------
 global_status = {"ok": True, "errors": [], "assets": {}}
