@@ -24,7 +24,6 @@ import pandas as pd
 import datetime as dt
 from datetime import timezone
 from urllib.parse import quote
-from typing import Union, List
 
 # Headless plot
 os.environ["MPLBACKEND"] = "Agg"
@@ -51,10 +50,6 @@ ASSETS = {
         # Yahoo Finance szimbólum a Nasdaq-100-ra: ^NDX (URL-ben encode-olni kell)
         "yahoo_symbol": "^NDX",
     },
-    "Gold_CFD": {
-        "type": "index",
-        "yahoo_symbol": ["XAUUSD=X", "GC=F"],
-    }
 }
 
 os.makedirs(OUTDIR, exist_ok=True)
@@ -220,23 +215,13 @@ def crypto_klines_multi(symbols: dict, interval: str, limit: int, asset_status: 
 
 
 # ---------- INDEX: NSDQ100 (Yahoo Finance v7 quote + v8 chart) ----------
-from typing import Union, List
-
-def yahoo_chart(symbol: Union[str, List[str]], range_str: str, interval: str):
-    symbols = symbol if isinstance(symbol, list) else [symbol]
-    last_err = None
-    for sym in symbols:
-        s_enc = quote(sym, safe="")
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{s_enc}?range={range_str}&interval={interval}"
-        try:
-            j = fetch_json_with_retry(url)
-            if j and j.get("chart", {}).get("result"):
-                return j["chart"]["result"][0]
-            else:
-                last_err = f"empty result for {sym}"
-        except Exception as e:
-            last_err = f"{sym}: {e}"
-    raise RuntimeError(f"Yahoo chart failed for all symbols {symbols}: {last_err}")
+def yahoo_chart(symbol: str, range_str: str, interval: str):
+    s_enc = quote(symbol, safe="")
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{s_enc}?range={range_str}&interval={interval}"
+    j = fetch_json_with_retry(url)
+    if not j or not j.get("chart", {}).get("result"):
+        raise RuntimeError("Yahoo: empty result")
+    return j["chart"]["result"][0]
 
 
 def yahoo_to_df(result) -> pd.DataFrame:
@@ -264,12 +249,20 @@ def yahoo_to_df(result) -> pd.DataFrame:
     return df[["time", "o", "h", "l", "c", "v"]]
 
 
-def index_fetch_spot(symbol: Union[str, List[str]]):
+def index_fetch_spot(symbol: str):
+    """
+    Spot a Yahoo v8 /chart-ból:
+    - meta.postMarket / preMarket / regularMarket (ha van időbélyeggel)
+    - + utolsó 5m gyertya (timestamp, close)
+    Ha ^NDX hibázna, fallback 'QQQ' proxyra; végső fallback: 'NQ=F' (futures).
+    """
 
     def spot_from_chart(sym):
         res = yahoo_chart(sym, "1d", "5m")
         meta = res.get("meta", {})
         candidates = []
+
+        # meta-mezők
         for p_field, t_field, lbl in [
             ("postMarketPrice", "postMarketTime", "postMarket"),
             ("preMarketPrice", "preMarketTime", "preMarket"),
@@ -282,61 +275,64 @@ def index_fetch_spot(symbol: Union[str, List[str]]):
                     candidates.append((float(px), int(ts), f"Yahoo chart meta {lbl}"))
                 except Exception:
                     pass
+
+        # utolsó 5m gyertya
         ts_arr = res.get("timestamp", [])
         closes = res.get("indicators", {}).get("quote", [{}])[0].get("close", [])
         if ts_arr and closes and closes[-1] is not None:
             candidates.append((float(closes[-1]), int(ts_arr[-1]), "Yahoo chart last candle (5m)"))
+
         if not candidates:
             raise RuntimeError("Yahoo chart: no spot candidates")
+
         price, ts, src = max(candidates, key=lambda x: x[1])
+
+        # egyszerűen származtatott market_state (REGULAR/CLOSED)
         ctp = meta.get("currentTradingPeriod", {}).get("regular", {})
         start, end = ctp.get("start"), ctp.get("end")
         now_sec = int(time.time())
         mstate = "REGULAR" if isinstance(start, int) and isinstance(end, int) and start <= now_sec <= end else "CLOSED"
-        return {"price_usd": float(price), "last_updated_at": iso(ts), "source": src, "market_state": mstate}
 
-    # Ha lista érkezik, végigpróbáljuk (pl. XAUUSD=X → GC=F)
-    syms = symbol if isinstance(symbol, list) else [symbol]
-    last_err = None
-    for sym in syms:
-        try:
-            out = spot_from_chart(sym)
-            if sym != syms[0]:
-                out["proxy_from"] = sym
-            return out
-        except Exception as e:
-            last_err = f"{sym}: {e}"
-    raise RuntimeError(f"index_fetch_spot failed for all symbols {syms}: {last_err}")
+        return {
+            "price_usd": float(price),
+            "last_updated_at": iso(ts),
+            "source": src,
+            "market_state": mstate,
+        }
+
+    # 1) ^NDX
+    try:
+        return spot_from_chart(symbol)
+    except Exception:
+        pass
+
+    # 2) QQQ (ETF proxy)
+    try:
+        out = spot_from_chart("QQQ")
+        out["proxy_from"] = "QQQ"
+        return out
+    except Exception:
+        pass
+
+    # 3) NQ=F (futures proxy) – ha minden kötél szakad
+    out = spot_from_chart("NQ=F")
+    out["proxy_from"] = "NQ=F"
+    return out
 
 
-def index_fetch_klines(symbol: Union[str, List[str]], interval: str, limit: int, asset_status: dict) -> pd.DataFrame:
-    # Válasszunk működő Yahoo tickert (az első sikeres chart alapján)
-    chosen = None
-    syms = symbol if isinstance(symbol, list) else [symbol]
-    last_err = None
-    for sym in syms:
-        try:
-            # gyors próba: 1 nap / 5m lekérés
-            yahoo_chart(sym, "1d", "5m")
-            chosen = sym
-            break
-        except Exception as e:
-            last_err = f"{sym}: {e}"
-    if not chosen:
-        raise RuntimeError(f"No working Yahoo symbol for {syms}: {last_err}")
-
-    # Innentől a 'chosen' tickert használjuk
+def index_fetch_klines(symbol: str, interval: str, limit: int, asset_status: dict) -> pd.DataFrame:
     if interval == "5m":
-        res = yahoo_chart(chosen, "5d", "5m")
-        asset_status["klines_5m_provider"] = f"yahoo({chosen})"
+        res = yahoo_chart(symbol, "5d", "5m")
+        asset_status["klines_5m_provider"] = "yahoo"
         return yahoo_to_df(res).tail(limit)
     elif interval == "1h":
-        res = yahoo_chart(chosen, "60d", "60m")
-        asset_status["klines_1h_provider"] = f"yahoo({chosen})"
+        res = yahoo_chart(symbol, "60d", "60m")
+        asset_status["klines_1h_provider"] = "yahoo"
         return yahoo_to_df(res).tail(limit)
     elif interval == "4h":
-        res = yahoo_chart(chosen, "60d", "60m")
-        asset_status["klines_4h_provider"] = f"yahoo(agg:{chosen})"
+        # 4h: 1h-ból aggregálunk, az index nevétől függetlenül
+        res = yahoo_chart(symbol, "60d", "60m")
+        asset_status["klines_4h_provider"] = "yahoo(agg)"
         df1h = yahoo_to_df(res)
         if df1h.empty:
             raise RuntimeError("Yahoo 1h empty")
@@ -344,7 +340,7 @@ def index_fetch_klines(symbol: Union[str, List[str]], interval: str, limit: int,
         dt_idx = pd.to_datetime(d["time"], utc=True)
         d = d.set_index(dt_idx)
         agg = {"o": "first", "h": "max", "l": "min", "c": "last", "v": "sum"}
-        df4h = d.resample("4h").agg(agg).dropna()  # <- kisbetűs 'h' a FutureWarning elkerülésére
+        df4h = d.resample("4h").agg(agg).dropna()
         idx = df4h.index
         if getattr(idx, "tz", None) is None:
             idx = idx.tz_localize("UTC")
@@ -354,12 +350,11 @@ def index_fetch_klines(symbol: Union[str, List[str]], interval: str, limit: int,
         df4h_out = df4h_out.reset_index(drop=True).tail(limit)
         return df4h_out[["time", "o", "h", "l", "c", "v"]]
     elif interval == "1d":
-        res = yahoo_chart(chosen, "2y", "1d")
-        asset_status["klines_1d_provider"] = f"yahoo({chosen})"
+        res = yahoo_chart(symbol, "2y", "1d")
+        asset_status["klines_1d_provider"] = "yahoo"
         return yahoo_to_df(res).tail(limit)
     else:
         raise ValueError("Unsupported interval for index")
-
 
 
 # ---------- Jel generálás (ATR14 1h minta, közös) ----------
@@ -503,11 +498,12 @@ def build_asset(name: str, cfg: dict):
     <p>Források: {('Kraken/Coinbase/OKX (crypto multi)') if ASSETS[name]['type'] == 'crypto' else 'Yahoo Finance (index)'}</p>
     <p><a href="../index.html">« vissza a főoldalra</a></p>
     </body></html>"""
-
+    
     with open(os.path.join(asset_dir, "index.html"), "w", encoding="utf-8") as f:
         f.write(html)
 
     return astatus
+
 
 # ---------- Fő futás: minden asset legenerálása ----------
 global_status = {"ok": True, "errors": [], "assets": {}}
@@ -531,7 +527,6 @@ root_html = """<!doctype html><html lang="hu"><head><meta charset="utf-8"/>
 <ul>
   <li><a href="./SOL/index.html">SOL</a></li>
   <li><a href="./NSDQ100/index.html">NSDQ100</a></li>
-  <li><a href="./GOLD_CFD/index.html">GOLD_CFD</a></li>
 </ul>
 <p>Assetenként külön aloldal: status/spot/klines/signal/chart. Összesített állapot: <a href="./status.json">status.json</a>.</p>
 </body></html>
