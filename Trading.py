@@ -3,13 +3,14 @@
 Market feed generator for multiple assets (SOL crypto + NSDQ100 index).
 - SOL: CoinGecko spot → fallback Coinbase; OHLC: Kraken → Coinbase → OKX
 - NSDQ100: Yahoo Finance quote+chart API (spot+OHLC); 4H az 1H-ból aggregálva
-- Headless matplotlib; retry/backoff; minden kimenet public/<ASSET>/ alá
+- (Opció) chart_1d.png készítés matplotlib-pel; ALAPÉRTELMEZÉS: csak chart_1d.json kimenet
+- Retry/backoff; minden kimenet public/<ASSET>/ alá
 - status.json összesített állapotot ír (per-asset info-val)
 - Minden spot.json tartalmaz: retrieved_at_utc + age_sec
 
 Kimenetek / assetenként (public/<ASSET>/):
 - status.json (assetre vonatkozó rész), spot.json, klines_5m.json, klines_1h.json, klines_4h.json,
-  signal.json (ATR14 1h minta), chart_1d.png, index.html (asset-oldal)
+  signal.json (ATR14 1h minta), chart_1d.json (ÚJ), [opcionális] chart_1d.png, index.html (asset-oldal)
 Gyökérben: public/index.html (linkek: SOL, NSDQ100)
 """
 
@@ -20,14 +21,10 @@ import datetime as dt
 from datetime import timezone
 from urllib.parse import quote
 
-# Headless plot
-os.environ["MPLBACKEND"] = "Agg"
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+# ---------- Beállítások ----------
+OUTDIR = "public"
+PNG_CHART = False  # <— ALAP: csak JSON. Ha szeretnéd a PNG-t is, állítsd True-ra.
 
-# ---------- Konfiguráció ----------
-OUTDIR  = "public"
 ASSETS = {
     "SOL": {
         "type": "crypto",
@@ -40,8 +37,7 @@ ASSETS = {
     },
     "NSDQ100": {
         "type": "index",
-        # Yahoo Finance szimbólum a Nasdaq-100-ra: ^NDX (URL-ben encode-olni kell)
-        "yahoo_symbol": "^NDX",
+        "yahoo_symbol": "^NDX",  # URL-ben encode-olni kell
     }
 }
 os.makedirs(OUTDIR, exist_ok=True)
@@ -101,18 +97,24 @@ def df_to_ohlc_json(df: pd.DataFrame, path: str):
     """Elvárt oszlopok: time,o,h,l,c,v (UTC formázott time string)"""
     df.to_json(path, orient="records", indent=2)
 
-def make_chart_png(df_1d: pd.DataFrame, title: str, path: str):
-    d = df_1d.copy()
-    d["date"] = pd.to_datetime(d["time"]).dt.date
-    plt.figure(figsize=(10,4))
-    plt.plot(d["date"], d["c"].astype(float))
-    plt.title(title)
-    plt.xlabel("Dátum (UTC)"); plt.ylabel("Ár")
-    plt.tight_layout()
-    plt.savefig(path, dpi=150)
-    plt.close()
+# --- PNG csak akkor kell, ha PNG_CHART=True ---
+if PNG_CHART:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
-# ---------- CRYPTO: SOL (CoinGecko / Kraken-Coinbase-OKX) ----------
+    def make_chart_png(df_1d: pd.DataFrame, title: str, path: str):
+        d = df_1d.copy()
+        d["date"] = pd.to_datetime(d["time"]).dt.date
+        plt.figure(figsize=(10,4))
+        plt.plot(d["date"], d["c"].astype(float))
+        plt.title(title)
+        plt.xlabel("Dátum (UTC)"); plt.ylabel("Ár")
+        plt.tight_layout()
+        plt.savefig(path, dpi=150)
+        plt.close()
+
+# ---------- CRYPTO: SOL ----------
 def crypto_fetch_spot(coingecko_id: str, coinbase_symbol: str):
     cg_url = f"https://api.coingecko.com/api/v3/simple/price?ids={coingecko_id}&vs_currencies=usd&include_last_updated_at=true"
     try:
@@ -120,7 +122,7 @@ def crypto_fetch_spot(coingecko_id: str, coinbase_symbol: str):
         px = float(d[coingecko_id]["usd"])
         ts = d[coingecko_id].get("last_updated_at")
         return {"price_usd": px, "last_updated_at": iso(ts), "source": cg_url}
-    except Exception as e1:
+    except Exception:
         cb_url = f"https://api.exchange.coinbase.com/products/{coinbase_symbol}/ticker"
         d = fetch_json_with_retry(cb_url)
         px = float(d["price"])
@@ -141,7 +143,7 @@ def klines_from_kraken(symbol: str, interval: str, limit: int) -> pd.DataFrame:
     for col in ["o","h","l","c","vol"]: df[col]=df[col].astype(float)
     df = df.sort_values("t").tail(limit)
     df["time"] = pd.to_datetime(df["t"], unit="s", utc=True).dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-    return df[["time","o","h","l","c","vol"]].rename(columns={"vol":"v"})
+    return df[["time","o","h","l","c","v"]].rename(columns={"vol":"v"})
 
 def klines_from_coinbase(symbol: str, interval: str, limit: int) -> pd.DataFrame:
     mp = {"5m":300, "1h":3600, "4h":14400, "1d":86400}
@@ -183,7 +185,7 @@ def crypto_klines_multi(symbols: dict, interval: str, limit: int, asset_status: 
             providers.append(f"{prov}: {e}")
     raise RuntimeError("All crypto providers failed → " + " | ".join(providers))
 
-# ---------- INDEX: NSDQ100 (Yahoo Finance v7 quote + v8 chart) ----------
+# ---------- INDEX: NSDQ100 (Yahoo Finance) ----------
 def yahoo_chart(symbol: str, range_str: str, interval: str):
     s_enc = quote(symbol, safe="")
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{s_enc}?range={range_str}&interval={interval}"
@@ -195,11 +197,7 @@ def yahoo_chart(symbol: str, range_str: str, interval: str):
 def yahoo_to_df(result) -> pd.DataFrame:
     ts = result.get("timestamp", [])
     ind = result.get("indicators", {}).get("quote", [{}])[0]
-    o = ind.get("open", [])
-    h = ind.get("high", [])
-    l = ind.get("low", [])
-    c = ind.get("close", [])
-    v = ind.get("volume", [])
+    o = ind.get("open", []); h = ind.get("high", []); l = ind.get("low", []); c = ind.get("close", []); v = ind.get("volume", [])
     n = min(len(ts), len(o), len(h), len(l), len(c), len(v))
     df = pd.DataFrame({
         "t": ts[:n],
@@ -209,23 +207,15 @@ def yahoo_to_df(result) -> pd.DataFrame:
         "c": [float(x) if x is not None else float("nan") for x in c[:n]],
         "v": [float(x) if x is not None else 0.0 for x in v[:n]],
     })
-    df = df.dropna(subset=["o","h","l","c"])
-    df = df.sort_values("t")
+    df = df.dropna(subset=["o","h","l","c"]).sort_values("t")
     df["time"] = pd.to_datetime(df["t"], unit="s", utc=True).dt.strftime("%Y-%m-%d %H:%M:%S UTC")
     return df[["time","o","h","l","c","v"]]
 
 def index_fetch_spot(symbol: str):
-    """
-    Spot a Yahoo v8 /chart-ból:
-    - meta.postMarket / preMarket / regularMarket (ha van időbélyeggel)
-    - + utolsó 5m gyertya (timestamp, close)
-    Ha ^NDX hibázna, fallback 'QQQ' proxyra; végső fallback: 'NQ=F' (futures).
-    """
     def spot_from_chart(sym):
         res = yahoo_chart(sym, "1d", "5m")
         meta = res.get("meta", {})
         candidates = []
-        # meta-mezők
         for p_field, t_field, lbl in [
             ("postMarketPrice", "postMarketTime", "postMarket"),
             ("preMarketPrice",  "preMarketTime",  "preMarket"),
@@ -233,22 +223,15 @@ def index_fetch_spot(symbol: str):
         ]:
             px = meta.get(p_field); ts = meta.get(t_field)
             if px is not None and ts:
-                try:
-                    candidates.append((float(px), int(ts), f"Yahoo chart meta {lbl}"))
-                except Exception:
-                    pass
-        # utolsó 5m gyertya
+                try: candidates.append((float(px), int(ts), f"Yahoo chart meta {lbl}"))
+                except Exception: pass
         ts_arr = res.get("timestamp", [])
         closes = res.get("indicators", {}).get("quote", [{}])[0].get("close", [])
         if ts_arr and closes and closes[-1] is not None:
             candidates.append((float(closes[-1]), int(ts_arr[-1]), "Yahoo chart last candle (5m)"))
-
-        if not candidates:
-            raise RuntimeError("Yahoo chart: no spot candidates")
+        if not candidates: raise RuntimeError("Yahoo chart: no spot candidates")
 
         price, ts, src = max(candidates, key=lambda x: x[1])
-
-        # egyszerűen származtatott market_state (REGULAR/CLOSED)
         ctp = meta.get("currentTradingPeriod", {}).get("regular", {})
         start, end = ctp.get("start"), ctp.get("end")
         now_sec = int(time.time())
@@ -261,120 +244,67 @@ def index_fetch_spot(symbol: str):
             "market_state": mstate
         }
 
-    # 1) ^NDX
     try:
         return spot_from_chart(symbol)
     except Exception:
         pass
-    # 2) QQQ (ETF proxy)
     try:
-        out = spot_from_chart("QQQ")
-        out["proxy_from"] = "QQQ"
-        return out
+        out = spot_from_chart("QQQ"); out["proxy_from"] = "QQQ"; return out
     except Exception:
         pass
-    # 3) NQ=F (futures proxy) – ha minden kötél szakad
-    out = spot_from_chart("NQ=F")
-    out["proxy_from"] = "NQ=F"
-    return out
-
+    out = spot_from_chart("NQ=F"); out["proxy_from"] = "NQ=F"; return out
 
 def index_fetch_klines(symbol: str, interval: str, limit: int, asset_status: dict) -> pd.DataFrame:
     if interval == "5m":
-        res = yahoo_chart(symbol, "5d", "5m")
-        asset_status["klines_5m_provider"] = "yahoo"
-        return yahoo_to_df(res).tail(limit)
-
+        res = yahoo_chart(symbol, "5d", "5m"); asset_status["klines_5m_provider"] = "yahoo"; return yahoo_to_df(res).tail(limit)
     elif interval == "1h":
-        res = yahoo_chart(symbol, "60d", "60m")
-        asset_status["klines_1h_provider"] = "yahoo"
-        return yahoo_to_df(res).tail(limit)
-
+        res = yahoo_chart(symbol, "60d", "60m"); asset_status["klines_1h_provider"] = "yahoo"; return yahoo_to_df(res).tail(limit)
     elif interval == "4h":
-        # 4h: 1h-ból aggregálunk, az index nevétől függetlenül
-        res = yahoo_chart(symbol, "60d", "60m")
-        asset_status["klines_4h_provider"] = "yahoo(agg)"
+        res = yahoo_chart(symbol, "60d", "60m"); asset_status["klines_4h_provider"] = "yahoo(agg)"
         df1h = yahoo_to_df(res)
-        if df1h.empty:
-            raise RuntimeError("Yahoo 1h empty")
-
-        d = df1h.copy()
-        dt_idx = pd.to_datetime(d["time"], utc=True)
-        d = d.set_index(dt_idx)
-
+        if df1h.empty: raise RuntimeError("Yahoo 1h empty")
+        d = df1h.copy(); dt_idx = pd.to_datetime(d["time"], utc=True); d = d.set_index(dt_idx)
         agg = {"o":"first","h":"max","l":"min","c":"last","v":"sum"}
         df4h = d.resample("4H").agg(agg).dropna()
-
         idx = df4h.index
-        if getattr(idx, "tz", None) is None:
-            idx = idx.tz_localize("UTC")
+        if getattr(idx, "tz", None) is None: idx = idx.tz_localize("UTC")
         times = pd.to_datetime(idx).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-        df4h_out = df4h.copy()
-        df4h_out["time"] = times
-        df4h_out = df4h_out.reset_index(drop=True).tail(limit)
-        return df4h_out[["time","o","h","l","c","v"]]
-
+        df4h_out = df4h.copy(); df4h_out["time"] = times
+        return df4h_out.reset_index(drop=True).tail(limit)[["time","o","h","l","c","v"]]
     elif interval == "1d":
-        res = yahoo_chart(symbol, "2y", "1d")
-        asset_status["klines_1d_provider"] = "yahoo"
-        return yahoo_to_df(res).tail(limit)
-
+        res = yahoo_chart(symbol, "2y", "1d"); asset_status["klines_1d_provider"] = "yahoo"; return yahoo_to_df(res).tail(limit)
     else:
         raise ValueError("Unsupported interval for index")
 
-# ---------- Jel generálás (ATR14 1h minta, közös) ----------
+# ---------- Jel generálás (ATR14 1h minta) ----------
 def atr14_from_ohlc(df: pd.DataFrame) -> float:
     d = df.copy()
-    for col in ["o","h","l","c"]:
-        d[col] = d[col].astype(float)
+    for col in ["o","h","l","c"]: d[col] = d[col].astype(float)
     d["prev_c"] = d["c"].shift(1)
-    tr = pd.concat([
-        (d["h"] - d["l"]).abs(),
-        (d["h"] - d["prev_c"]).abs(),
-        (d["l"] - d["prev_c"]).abs(),
-    ], axis=1).max(axis=1)
+    tr = pd.concat([(d["h"]-d["l"]).abs(), (d["h"]-d["prev_c"]).abs(), (d["l"]-d["prev_c"]).abs()], axis=1).max(axis=1)
     atr14 = tr.rolling(14).mean()
     return float(atr14.iloc[-1])
 
 def build_signal_1h(asset_dir: str, status_obj: dict):
     try:
         k1h_path = os.path.join(asset_dir, "klines_1h.json")
-        if not os.path.exists(k1h_path):
-            raise RuntimeError("klines_1h.json missing")
-
+        if not os.path.exists(k1h_path): raise RuntimeError("klines_1h.json missing")
         k1h_df = pd.read_json(k1h_path)
-
         if not isinstance(k1h_df, pd.DataFrame) or not set(["o","h","l","c"]).issubset(k1h_df.columns):
             raise RuntimeError("No valid 1h OHLC columns")
-
-        for col in ["o","h","l","c"]:
-            k1h_df[col] = k1h_df[col].astype(float)
-
+        for col in ["o","h","l","c"]: k1h_df[col] = k1h_df[col].astype(float)
         atr = atr14_from_ohlc(k1h_df)
         sp = json.load(open(os.path.join(asset_dir, "spot.json"), encoding="utf-8")).get("price_usd", float("nan"))
         entry = float(sp)
-        if math.isnan(entry) or math.isnan(atr) or atr <= 0:
-            raise RuntimeError("entry/ATR invalid")
-
-        sl  = entry - 2.0*atr
-        tp1 = entry + 1.5*atr
-        tp2 = entry + 3.0*atr
-        lev = 3
-        qty = 100.0/entry
-
+        if math.isnan(entry) or math.isnan(atr) or atr <= 0: raise RuntimeError("entry/ATR invalid")
+        sl  = entry - 2.0*atr; tp1 = entry + 1.5*atr; tp2 = entry + 3.0*atr; lev = 3; qty = 100.0/entry
         signal = {
             "side":"LONG","entry":round(entry,4),"SL":round(sl,4),
             "TP1":round(tp1,4),"TP2":round(tp2,4),"leverage":lev,
-            "P/L@$100":{
-                "TP1":round((tp1-entry)*qty,2),
-                "TP2":round((tp2-entry)*qty,2),
-                "SL": round((sl -entry)*qty,2)
-            },
+            "P/L@$100":{"TP1":round((tp1-entry)*qty,2),"TP2":round((tp2-entry)*qty,2),"SL": round((sl -entry)*qty,2)},
             "notes":"ATR14(1h) MINTA; igazítsd a saját szabályaidhoz."
         }
         save_json(signal, os.path.join(asset_dir, "signal.json"))
-
     except Exception as e:
         status_obj["ok"] = False
         status_obj["errors"].append(f"signal: {e}")
@@ -393,8 +323,6 @@ def build_asset(name: str, cfg: dict):
             spot = crypto_fetch_spot(cfg["coingecko_id"], cfg["symbols"]["coinbase"])
         else:
             spot = index_fetch_spot(cfg["yahoo_symbol"])
-
-        # Frissesség metrikák
         now = now_utc()
         spot["retrieved_at_utc"] = now.strftime("%Y-%m-%d %H:%M:%S UTC")
         lu = parse_last_updated_utc(spot.get("last_updated_at"))
@@ -421,6 +349,22 @@ def build_asset(name: str, cfg: dict):
         df_to_ohlc_json(k5m, os.path.join(asset_dir, "klines_5m.json"))
         df_to_ohlc_json(k1h, os.path.join(asset_dir, "klines_1h.json"))
         df_to_ohlc_json(k4h, os.path.join(asset_dir, "klines_4h.json"))
+
+        # ÚJ: 1D JSON mentése (chart_1d.json)
+        if isinstance(k1d, pd.DataFrame) and not k1d.empty:
+            df_to_ohlc_json(k1d, os.path.join(asset_dir, "chart_1d.json"))
+        else:
+            astatus["ok"] = False
+            astatus["errors"].append("chart_1d.json: no data")
+
+        # (Opció) PNG csak ha kérted
+        if PNG_CHART and isinstance(k1d, pd.DataFrame) and not k1d.empty:
+            try:
+                make_chart_png(k1d, f"{name} – Close (1D)", os.path.join(asset_dir, "chart_1d.png"))
+            except Exception as e:
+                astatus["ok"] = False
+                astatus["errors"].append(f"chart_1d.png: {e}")
+
     except Exception as e:
         astatus["ok"] = False
         astatus["errors"].append(f"klines: {e}")
@@ -428,18 +372,9 @@ def build_asset(name: str, cfg: dict):
         save_json(err, os.path.join(asset_dir, "klines_5m.json"))
         save_json(err, os.path.join(asset_dir, "klines_1h.json"))
         save_json(err, os.path.join(asset_dir, "klines_4h.json"))
+        # ha k1d nincs, akkor chart_1d.json is error legyen
+        save_json({"status":"Insufficient data (chart_1d)","error":str(e)}, os.path.join(asset_dir, "chart_1d.json"))
         k1d = pd.DataFrame()
-
-    # Chart 1D
-    try:
-        if isinstance(k1d, pd.DataFrame) and not k1d.empty:
-            make_chart_png(k1d, f"{name} – Close (1D)", os.path.join(asset_dir, "chart_1d.png"))
-        else:
-            astatus["ok"] = False
-            astatus["errors"].append("chart_1d: no data")
-    except Exception as e:
-        astatus["ok"] = False
-        astatus["errors"].append(f"chart_1d: {e}")
 
     # Jel (ATR14 1h minta)
     build_signal_1h(asset_dir, astatus)
@@ -449,6 +384,17 @@ def build_asset(name: str, cfg: dict):
     save_json(astatus, os.path.join(asset_dir, "status.json"))
 
     # Asset index.html
+    links = f"""
+  <li><a href="./status.json">status.json</a></li>
+  <li><a href="./spot.json">spot.json</a></li>
+  <li><a href="./klines_5m.json">klines_5m.json</a></li>
+  <li><a href="./klines_1h.json">klines_1h.json</a></li>
+  <li><a href="./klines_4h.json">klines_4h.json</a></li>
+  <li><a href="./signal.json">signal.json</a></li>
+  <li><a href="./chart_1d.json">chart_1d.json</a></li>"""
+    if PNG_CHART:
+        links += '\n  <li><a href="./chart_1d.png">chart_1d.png</a></li>'
+
     html = f"""<!doctype html><html lang="hu"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>{name} – market-feed</title>
@@ -456,13 +402,7 @@ def build_asset(name: str, cfg: dict):
 </head><body>
 <h1>{name} – public outputs</h1>
 <ul>
-  <li><a href="./status.json">status.json</a></li>
-  <li><a href="./spot.json">spot.json</a></li>
-  <li><a href="./klines_5m.json">klines_5m.json</a></li>
-  <li><a href="./klines_1h.json">klines_1h.json</a></li>
-  <li><a href="./klines_4h.json">klines_4h.json</a></li>
-  <li><a href="./signal.json">signal.json</a></li>
-  <li><a href="./chart_1d.png">chart_1d.png</a></li>
+{links}
 </ul>
 <p>Források: {('Kraken/Coinbase/OKX (crypto multi)') if ASSETS[name]['type']=='crypto' else 'Yahoo Finance (index)'}</p>
 <p><a href="../index.html">« vissza a főoldalra</a></p>
@@ -495,12 +435,10 @@ root_html = """<!doctype html><html lang="hu"><head><meta charset="utf-8"/>
   <li><a href="./SOL/index.html">SOL</a></li>
   <li><a href="./NSDQ100/index.html">NSDQ100</a></li>
 </ul>
-<p>Assetenként külön aloldal: status/spot/klines/signal/chart. Összesített állapot: <a href="./status.json">status.json</a>.</p>
+<p>Assetenként külön aloldal: status/spot/klines/signal/chart_1d.json. Összesített állapot: <a href="./status.json">status.json</a>.</p>
 </body></html>
 """
 with open(os.path.join(OUTDIR, "index.html"), "w", encoding="utf-8") as f:
     f.write(root_html)
 
 print("Done. Outputs in 'public/<ASSET>/' and public/index.html")
-
-
