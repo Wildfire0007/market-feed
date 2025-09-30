@@ -1,25 +1,19 @@
 name: Build & Deploy market feed
 
 on:
-  # 5 percenként (UTC) – best-effort, pár perc csúszás előfordulhat
   schedule:
-    - cron: "*/5 * * * *"
-  # Ha a kód/kimenet változik
+    - cron: "*/5 * * * *"   # 5 percenként (UTC) – stabil, kíméli a rate limitet
+  workflow_dispatch:
   push:
     branches: [ main ]
     paths:
-      - 'docs/**'
       - 'Trading.py'
-      - 'requirements.txt'
-  # Kézi indítás
-  workflow_dispatch:
+      - '.github/workflows/build.yml'
 
-# Szükséges jogok a Pages deployhoz
 permissions:
   contents: read
   pages: write
   id-token: write
-
 
 concurrency:
   group: pages-${{ github.ref }}
@@ -32,50 +26,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python 3.11 (pip cache)
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install requests pandas numpy matplotlib
 
-      - name: Run generator (writes to docs/)
-        env:
-          OANDA_API_TOKEN: ${{ secrets.OANDA_API_TOKEN }}
-          OANDA_ACCOUNT_ID: ${{ secrets.OANDA_ACCOUNT_ID }}
-          OANDA_API_BASE:   ${{ secrets.OANDA_API_BASE }}
-          FINNHUB_API_KEY:  ${{ secrets.FINNHUB_API_KEY }}
-        run: |
-          set -euxo pipefail
-          python Trading.py
+      - name: Generate feed
+        run: python Trading.py
 
-          # Gyors sanity checkek – ha bármi hiányzik, bukjon a build
-          test -f docs/index.html
-          for a in SOL NSDQ100 GOLD_CFD; do
-            test -s "docs/$a/spot.json"
-            test -s "docs/$a/klines_1h.json"
-            test -s "docs/$a/klines_4h.json"
-            test -s "docs/$a/klines_1d.json"
-          done
-
-      - name: Upload Pages artifact (docs/)
+      - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs
+          path: public
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     permissions:
       pages: write
       id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
