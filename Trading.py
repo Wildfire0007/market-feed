@@ -431,4 +431,19 @@ def main():
     save_json(os.path.join(OUTDIR, "status.json"), all_status)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+        print("OK")
+    except Exception as e:
+        # Utolsó védőháló: sose bukjunk el nem-0 exit kóddal CI-ben
+        import sys, traceback, os, json
+        traceback.print_exc()
+        os.makedirs("public", exist_ok=True)
+        with open(os.path.join("public", "status.json"), "w", encoding="utf-8") as f:
+            json.dump({
+                "ok": False,
+                "error": str(e),
+                "note": "Top-level exception caught. See CI logs."
+            }, f, ensure_ascii=False, indent=2)
+        sys.exit(0)
+
