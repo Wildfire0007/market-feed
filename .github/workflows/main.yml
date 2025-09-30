@@ -4,9 +4,8 @@ on:
   push:
     branches: [ main ]
   workflow_dispatch: {}
-  # Ütemezett futtatás (opcionális) – pl. 15 percenként
   # schedule:
-  #   - cron: "*/15 * * * *"
+  #   - cron: "*/15 * * * *"   # opcionális: 15 percenként
 
 permissions:
   contents: read
@@ -26,7 +25,7 @@ jobs:
 
     steps:
       - name: Checkout
-      - uses: actions/checkout@v4
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -38,7 +37,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # FONTOS: mindig tiszta public/ – ne maradjanak régi/kevert fájlok
+      # FONTOS: mindig tiszta public/, ne maradjanak régi/kevert fájlok
       - name: Wipe public (force clean)
         run: |
           rm -rf public
@@ -50,14 +49,12 @@ jobs:
         run: |
           set -x
           python Trading.py > public/run_log.txt 2>&1 || true
-          # ha bármiért nem készült status.json, tegyünk be minimálisat
           if [ ! -f public/status.json ]; then
             echo '{"ok": false, "note": "script failed - see run_log.txt"}' > public/status.json
           fi
 
-      # (OPCIONÁLIS) Elemzés, ha van Analysis.py a repo gyökerében
-      - name: Analyze & generate signals (ruleset)  # csak ha a fájl létezik
-        if: hashFiles('Analysis.py') != ''
+      # Elemzés (opcionális – de nálunk szükséges)
+      - name: Analyze & generate signals (ruleset)
         run: |
           set -x
           python Analysis.py > public/analysis_log.txt 2>&1 || true
