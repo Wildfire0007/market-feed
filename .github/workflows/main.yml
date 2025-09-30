@@ -5,7 +5,7 @@ on:
     branches: [ main ]
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 * * * *"  # 5 percenként (UTC)
 
 permissions:
   contents: read
@@ -33,13 +33,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pandas numpy matplotlib
 
-      # ← mindig írjunk logot és sose bukjon el “néma” hibával
       - name: Generate feed (safe)
+        env:
+          TWELVE_DATA_KEY: ${{ secrets.TWELVE_DATA_KEY }}
+          FINNHUB_KEY: ${{ secrets.FINNHUB_KEY }}
         run: |
           set -x
           mkdir -p public
           python Trading.py > public/run_log.txt 2>&1 || true
-          # ha a script nem írt status.json-t, gyártsunk egyet, hogy a következő lépés ne bukjon
           if [ ! -f public/status.json ]; then
             echo '{"ok": false, "note": "script failed - see run_log.txt"}' > public/status.json
           fi
