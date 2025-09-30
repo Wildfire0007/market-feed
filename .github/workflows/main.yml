@@ -1,23 +1,26 @@
 name: Build & Deploy market feed
 
 on:
+  # 5 percenként (UTC) – best-effort, pár perc csúszás előfordulhat
   schedule:
-    - cron: "*/5 * * * *"     # 5 percenként (UTC)
+    - cron: "*/5 * * * *"
+  # Ha a kód/kimenet változik
   push:
     branches: [ main ]
     paths:
-      - 'docs/**'             # <-- ha public-ot használsz: 'public/**'
+      - 'docs/**'
       - 'Trading.py'
       - 'requirements.txt'
+  # Kézi indítás
   workflow_dispatch:
 
-# GitHub Pages jogosultságok az actions/deploy-pages-hez
+# Szükséges jogok a Pages deployhoz
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# Pages csak egy futást enged: skóp branch szerint, a régebbit törli
+
 concurrency:
   group: pages-${{ github.ref }}
   cancel-in-progress: true
@@ -29,10 +32,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Setup Python 3.11 (pip cache)
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"   # maradhat 3.11; ha szeretnéd, mehet 3.12 is
+          python-version: "3.11"
           cache: "pip"
 
       - name: Install deps
@@ -41,15 +44,28 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run generator (writes to docs/)
+        env:
+          OANDA_API_TOKEN: ${{ secrets.OANDA_API_TOKEN }}
+          OANDA_ACCOUNT_ID: ${{ secrets.OANDA_ACCOUNT_ID }}
+          OANDA_API_BASE:   ${{ secrets.OANDA_API_BASE }}
+          FINNHUB_API_KEY:  ${{ secrets.FINNHUB_API_KEY }}
         run: |
-          set -eux
+          set -euxo pipefail
           python Trading.py
-          test -f docs/index.html    # <-- ha public-ot használsz: test -f public/index.html
 
-      - name: Upload Pages artifact
+          # Gyors sanity checkek – ha bármi hiányzik, bukjon a build
+          test -f docs/index.html
+          for a in SOL NSDQ100 GOLD_CFD; do
+            test -s "docs/$a/spot.json"
+            test -s "docs/$a/klines_1h.json"
+            test -s "docs/$a/klines_4h.json"
+            test -s "docs/$a/klines_1d.json"
+          done
+
+      - name: Upload Pages artifact (docs/)
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs                 # <-- ha public-ot használsz: path: public
+          path: docs
 
   deploy:
     needs: build
@@ -57,6 +73,9 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
