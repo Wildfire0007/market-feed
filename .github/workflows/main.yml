@@ -1,14 +1,11 @@
 name: Build & Deploy market feed
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"   # 5 percenként (UTC) – stabil, kíméli a rate limitet
-  workflow_dispatch:
   push:
     branches: [ main ]
-    paths:
-      - 'Trading.py'
-      - '.github/workflows/build.yml'
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: read
@@ -36,8 +33,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pandas numpy matplotlib
 
-      - name: Generate feed
-        run: python Trading.py
+      # ← mindig írjunk logot és sose bukjon el “néma” hibával
+      - name: Generate feed (safe)
+        run: |
+          set -x
+          mkdir -p public
+          python Trading.py > public/run_log.txt 2>&1 || true
+          # ha a script nem írt status.json-t, gyártsunk egyet, hogy a következő lépés ne bukjon
+          if [ ! -f public/status.json ]; then
+            echo '{"ok": false, "note": "script failed - see run_log.txt"}' > public/status.json
+          fi
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
