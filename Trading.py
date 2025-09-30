@@ -222,6 +222,97 @@ def yahoo_chart(symbol: Union[str, List[str]], range_str: str, interval: str):
             last_err = f"{sym}: {e}"
     raise RuntimeError(f"Yahoo chart failed for all symbols {symbols}: {last_err}")
 
+# ---------- GOLD_CFD spot – realtime-first (OANDA -> Finnhub -> Binance PAXG -> Yahoo) ----------
+
+def gold_spot_from_oanda() -> dict:
+    api = os.getenv("OANDA_API_BASE", "https://api-fxpractice.oanda.com").rstrip("/")
+    token = os.getenv("OANDA_API_TOKEN")
+    acc   = os.getenv("OANDA_ACCOUNT_ID")
+    if not token or not acc:
+        raise RuntimeError("OANDA credentials missing")
+    url = f"{api}/v3/accounts/{acc}/pricing?instruments=XAU_USD"
+    r = requests.get(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, timeout=12)
+    r.raise_for_status()
+    j = r.json()
+    prices = j.get("prices", [])
+    if not prices:
+        raise RuntimeError("OANDA: empty prices")
+    p = prices[0]
+    bids = p.get("bids", []); asks = p.get("asks", [])
+    if not bids or not asks:
+        raise RuntimeError("OANDA: bids/asks missing")
+    bid = float(bids[0]["price"]); ask = float(asks[0]["price"])
+    mid = (bid + ask) / 2.0
+    t   = p.get("time")
+    return {"price_usd": mid, "last_updated_at": t or "", "source": url, "spot_provider": "oanda", "latency": "realtime"}
+
+def gold_spot_from_finnhub() -> dict:
+    key = os.getenv("FINNHUB_API_KEY")
+    if not key:
+        raise RuntimeError("FINNHUB_API_KEY missing")
+    sym = "OANDA:XAU_USD"
+    url = f"https://finnhub.io/api/v1/forex/quote?symbol={quote(sym)}&token={key}"
+    j = fetch_json_with_retry(url, timeout=12)
+    c = j.get("c"); ts = j.get("t")
+    if c is None:
+        raise RuntimeError("Finnhub: no current price")
+    return {"price_usd": float(c), "last_updated_at": iso(int(ts)) if ts else "", "source": url, "spot_provider": "finnhub", "latency": "realtime"}
+
+def gold_spot_from_binance_paxg() -> dict:
+    url = "https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=1m&limit=1"
+    j = fetch_json_with_retry(url, timeout=12)
+    if not j:
+        raise RuntimeError("Binance: empty kline")
+    k = j[0]; close = float(k[4]); close_time_ms = int(k[6])
+    return {"price_usd": close, "last_updated_at": iso(close_time_ms), "source": url, "spot_provider": "binance_paxg", "latency": "realtime_proxy", "proxy_from": "PAXGUSDT"}
+
+def gold_fetch_spot_realtime(cfg: dict) -> dict:
+    errs = []
+    try: return gold_spot_from_oanda()
+    except Exception as e: errs.append(f"OANDA: {e}")
+    try: return gold_spot_from_finnhub()
+    except Exception as e: errs.append(f"Finnhub: {e}")
+    try: return gold_spot_from_binance_paxg()
+    except Exception as e: errs.append(f"Binance PAXG: {e}")
+    # végső Yahoo fallback
+    y = index_fetch_spot(cfg["yahoo_symbol"])
+    y["spot_provider"] = "yahoo"; y["latency"] = "delayed"; y["notes"] = " -> ".join(errs)
+    return y
+
+
+# ---------- NSDQ100 spot – realtime-first (OANDA -> Yahoo) ----------
+
+def nas100_spot_from_oanda() -> dict:
+    api = os.getenv("OANDA_API_BASE", "https://api-fxpractice.oanda.com").rstrip("/")
+    token = os.getenv("OANDA_API_TOKEN")
+    acc   = os.getenv("OANDA_ACCOUNT_ID")
+    if not token or not acc:
+        raise RuntimeError("OANDA credentials missing")
+    url = f"{api}/v3/accounts/{acc}/pricing?instruments=NAS100_USD"
+    r = requests.get(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, timeout=12)
+    r.raise_for_status()
+    j = r.json()
+    prices = j.get("prices", [])
+    if not prices:
+        raise RuntimeError("OANDA: empty prices (NAS100_USD)")
+    p = prices[0]
+    bids = p.get("bids", []); asks = p.get("asks", [])
+    if not bids or not asks:
+        raise RuntimeError("OANDA: bids/asks missing (NAS100_USD)")
+    bid = float(bids[0]["price"]); ask = float(asks[0]["price"])
+    mid = (bid + ask) / 2.0
+    t   = p.get("time")
+    return {"price_usd": mid, "last_updated_at": t or "", "source": url, "spot_provider": "oanda", "latency": "realtime"}
+
+def nas100_fetch_spot_realtime(cfg: dict) -> dict:
+    try:
+        return nas100_spot_from_oanda()
+    except Exception as e:
+        y = index_fetch_spot(cfg["yahoo_symbol"])
+        y["spot_provider"] = "yahoo"; y["latency"] = "delayed"; y["notes"] = f"OANDA fallback: {e}"
+        return y
+
+
 
 def yahoo_to_df(result) -> pd.DataFrame:
     ts = result.get("timestamp", [])
@@ -415,7 +506,13 @@ def build_asset(name: str, cfg: dict):
         if cfg["type"] == "crypto":
             spot = crypto_fetch_spot(cfg["coingecko_id"], cfg["symbols"]["coinbase"])
         else:
-            spot = index_fetch_spot(cfg["yahoo_symbol"])
+            nm = name.upper()
+            if nm == "GOLD_CFD":
+                spot = gold_fetch_spot_realtime(cfg)
+            elif nm == "NSDQ100":
+                spot = nas100_fetch_spot_realtime(cfg)
+            else:
+                spot = index_fetch_spot(cfg["yahoo_symbol"])
 
         # Frissesség metrikák
         now = now_utc()
@@ -477,7 +574,13 @@ def build_asset(name: str, cfg: dict):
   <li><a href="./klines_1d.json">klines_1d.json</a></li>
   <li><a href="./signal.json">signal.json</a></li>
 </ul>
-<p>Források: {('Kraken/Coinbase/OKX (crypto multi)') if ASSETS[name]['type']=='crypto' else 'Yahoo Finance (index)'}</p>
+<p>Források: {(
+  'Kraken/Coinbase/OKX (crypto multi)'
+  if ASSETS[name]['type']=='crypto'
+  else ('Yahoo Finance (index) + RT spot: OANDA→Finnhub→Binance PAXG→Yahoo' if name.upper()=='GOLD_CFD'
+        else 'Yahoo Finance (index) + RT spot: OANDA→Yahoo' if name.upper()=='NSDQ100'
+        else 'Yahoo Finance (index)')
+)}</p>
 <p><a href="../index.html">« vissza a főoldalra</a></p>
 </body></html>"""
     with open(os.path.join(asset_dir, "index.html"), "w", encoding="utf-8") as f:
