@@ -1,16 +1,19 @@
 # -*- coding: utf-8 -*-
 """
 Market feed generator – GitHub Pages-re ír JSON/PNG kimeneteket.
+
 Források:
-- Crypto (SOL): CoinGecko (kulcsmentes) – spot + 1 napos intraday pontokból 5m OHLC
-- NSDQ100, GOLD_CFD: Twelve Data (elsődleges, kulcsos) → Finnhub (tartalék, kulcsos) → Stooq 1D fallback
+- Crypto (SOL): CoinGecko (kulcsmentes) – spot + 1 nap pontokból 5m OHLC
+- NSDQ100, GOLD_CFD:
+    Intraday 5m: Stooq a2 CSV (kulcsmentes) → stabil
+    Spot: Twelve Data (kulcsos) → ha nincs, 5m utolsó close fallback
+    (Napi CSV fallback már nem kell, mert a2 intraday-t használunk.)
 
 Kimenet assetenként (public/<ASSET>/):
   spot.json, klines_5m.json, klines_1h.json, klines_4h.json, k1d.json, signal.json, chart_1d.png, index.html
-Gyökérben: public/status.json, public/index.html, public/run_log.txt (a workflow írja)
+Gyökér: public/status.json, public/index.html (a workflow írja run_log.txt-t)
 
-Megjegyzés:
-- A script SAFE-MODE: hiba esetén is készül index.html és status.json (CI-ben nem dob 1-es exit kódot).
+SAFE-MODE: hiba esetén is készül index.html és status.json.
 """
 
 import os, json, time, math, traceback
@@ -31,21 +34,20 @@ OUTDIR = "public"
 os.makedirs(OUTDIR, exist_ok=True)
 
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "Mozilla/5.0 (MarketFeed/1.0; +https://github.com/)"})
+SESSION.headers.update({"User-Agent": "Mozilla/5.0 (MarketFeed/1.1; +https://github.com/)"})
 
 # Kulcsok (GitHub Secrets-ből jönnek a workflow env-vel)
 TD_KEY = os.environ.get("TWELVE_DATA_KEY")   # Twelve Data
-FH_KEY = os.environ.get("FINNHUB_KEY")       # Finnhub
 
-# Ticker mapping Twelve Data / Finnhub-hoz
+# Jelölések / Stooq kódok
 PROVIDERS_SYMBOLS = {
     "NSDQ100": {
-        "td": {"spot": "NQ=F",   "series": "NQ=F"},  # futures
-        "fh": {"spot": "NQ",     "series": "NQ"}     # futures rövid kód
+        "stooq_intraday": "%5Endx",   # ^NDX → %5Endx
+        "td_spot": "NQ=F",            # Twelve Data spot próbálkozás (ha nincs coverage, fallback lesz)
     },
     "GOLD_CFD": {
-        "td": {"spot": "XAU/USD","series": "GC=F"},  # arany spot + COMEX futures
-        "fh": {"spot": "XAUUSD", "series": "GC"}     # Finnhub spot + futures
+        "stooq_intraday": "xauusd",   # XAUUSD intraday
+        "td_spot": "XAU/USD",         # Twelve Data spot (alternatíva: GC=F futures, de nem kell most)
     }
 }
 
@@ -58,13 +60,12 @@ COINGECKO_IDS = {
 def utcnow(): return dt.datetime.now(timezone.utc)
 def ts(): return int(utcnow().timestamp())
 def ensure_dir(p): os.makedirs(p, exist_ok=True)
+def backoff_sleep(attempt): time.sleep(min(2 ** attempt + 0.25, 10))
 
 def save_json(path, obj):
     ensure_dir(os.path.dirname(path))
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
-
-def backoff_sleep(attempt): time.sleep(min(2 ** attempt + 0.25, 10))
 
 # ---------- CoinGecko (crypto) ----------
 def cg_simple_price(coin_id, vs="usd"):
@@ -99,7 +100,7 @@ def prices_to_ohlc_from_points(ts_prices):
     out = pd.DataFrame({'open': o, 'high': h, 'low': l, 'close': c}).dropna()
     return out
 
-# ---------- Twelve Data ----------
+# ---------- Twelve Data (spot) ----------
 def td_quote(symbol):
     if not TD_KEY: raise RuntimeError("TWELVE_DATA_KEY hiányzik (GitHub Secret).")
     base = "https://api.twelvedata.com/quote"
@@ -111,55 +112,31 @@ def td_quote(symbol):
         backoff_sleep(a)
     raise RuntimeError(f"Twelve Data quote error: {r.status_code} {r.text[:200]}")
 
-def td_time_series(symbol, interval="5min", outputsize=390):
-    if not TD_KEY: raise RuntimeError("TWELVE_DATA_KEY hiányzik (GitHub Secret).")
-    base = "https://api.twelvedata.com/time_series"
-    params = {
-        "symbol": symbol, "interval": interval, "outputsize": outputsize,
-        "timezone": "UTC", "format": "JSON", "apikey": TD_KEY
-    }
+# ---------- Stooq intraday a2 CSV (5m) ----------
+def stooq_intraday_csv(symbol_encoded, interval="5"):
+    """
+    Pl. ^NDX 5m: https://stooq.com/q/a2/?s=%5Endx&i=5
+        XAUUSD 5m: https://stooq.com/q/a2/?s=xauusd&i=5
+    Visszatér: DataFrame index=UTC Datetime, oszlopok: open, high, low, close
+    """
+    url = f"https://stooq.com/q/a2/?s={symbol_encoded}&i={interval}"
     for a in range(4):
-        r = SESSION.get(base, params=params, timeout=20)
+        r = SESSION.get(url, timeout=20)
         if r.ok:
-            return r.json(), r.url
+            text = r.text.strip()
+            # A válasz CSV: Date,Time,Open,High,Low,Close,Volume
+            if text.startswith("Date,"):
+                from io import StringIO
+                df = pd.read_csv(StringIO(text))
+                # Dátum+idő -> UTC
+                dt_col = pd.to_datetime(df["Date"] + " " + df["Time"], utc=True)
+                o = df["Open"].astype(float); h = df["High"].astype(float)
+                l = df["Low"].astype(float);  c = df["Close"].astype(float)
+                out = pd.DataFrame({"open": o, "high": h, "low": l, "close": c}, index=dt_col)
+                out = out.sort_index()
+                return out, url
         backoff_sleep(a)
-    raise RuntimeError(f"Twelve Data time_series error: {r.status_code} {r.text[:200]}")
-
-# ---------- Finnhub ----------
-def fh_quote(symbol):
-    if not FH_KEY: raise RuntimeError("FINNHUB_KEY hiányzik (GitHub Secret).")
-    base = "https://finnhub.io/api/v1/quote"
-    params = {"symbol": symbol, "token": FH_KEY}
-    for a in range(4):
-        r = SESSION.get(base, params=params, timeout=15)
-        if r.ok:
-            return r.json(), r.url
-        backoff_sleep(a)
-    raise RuntimeError(f"Finnhub quote error: {r.status_code} {r.text[:200]}")
-
-def fh_candle(symbol, resolution="5", count=390):
-    if not FH_KEY: raise RuntimeError("FINNHUB_KEY hiányzik (GitHub Secret).")
-    base = "https://finnhub.io/api/v1/stock/candle"
-    params = {"symbol": symbol, "resolution": resolution, "count": count, "token": FH_KEY}
-    for a in range(4):
-        r = SESSION.get(base, params=params, timeout=20)
-        if r.ok:
-            return r.json(), r.url
-        backoff_sleep(a)
-    raise RuntimeError(f"Finnhub candle error: {r.status_code} {r.text[:200]}")
-
-# ---------- Stooq 1D fallback ----------
-def stooq_daily_csv(symbol_encoded):
-    # ^NDX → %5Endx ; XAUUSD → xauusd
-    url = f"https://stooq.com/q/d/?s={symbol_encoded}"
-    r = SESSION.get(url, timeout=20)
-    if not r.ok:
-        raise RuntimeError(f"Stooq error: {r.status_code}")
-    if "text/csv" in r.headers.get("Content-Type","") or r.text.startswith("Date,"):
-        from io import StringIO
-        df = pd.read_csv(StringIO(r.text))
-        return df, url
-    raise RuntimeError("Stooq CSV nem közvetlen (HTML jött).")
+    raise RuntimeError(f"Stooq a2 intraday error: {r.status_code if 'r' in locals() else 'n/a'}")
 
 # ---------- Idősor-aggregálás ----------
 def resample_ohlc(df, rule):
@@ -272,63 +249,31 @@ def run_asset(asset):
 
         elif asset in PROVIDERS_SYMBOLS:
             sym = PROVIDERS_SYMBOLS[asset]
-            spot, spot_src = None, None
-            df_5m, series_src = pd.DataFrame(), None
 
-            # ---- 1) Twelve Data (elsődleges) ----
+            # ---- 1) Intraday 5m: Stooq a2 (kulcsmentes) ----
+            df_5m, series_src = pd.DataFrame(), None
+            try:
+                df_5m, series_src = stooq_intraday_csv(sym["stooq_intraday"], interval="5")
+            except Exception as e:
+                result["errors"].append(f"Stooq a2 intraday hiba: {e}")
+
+            # ---- 2) Spot: Twelve Data, ha van coverage; különben utolsó 5m close ----
+            spot, spot_src = None, None
             if TD_KEY:
                 try:
-                    tdq, urlq = td_quote(sym["td"]["spot"])
+                    tdq, urlq = td_quote(sym["td_spot"])
                     # tdq: {"price": "...", ...}
                     if isinstance(tdq, dict) and tdq.get("price") is not None:
                         spot = float(tdq["price"])
                         spot_src = urlq
-
-                    tds, urls = td_time_series(sym["td"]["series"], interval="5min", outputsize=390)
-                    vals = tds.get("values", [])
-                    if vals:
-                        df = pd.DataFrame(vals)
-                        df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
-                        df = df.sort_values("datetime").set_index("datetime")
-                        df = df[["open","high","low","close"]].astype(float)
-                        df_5m = df
-                        series_src = urls
                 except Exception as e:
-                    result["errors"].append(f"Twelve Data hiba: {e}")
+                    result["errors"].append(f"Twelve Data spot hiba: {e}")
 
-            # ---- 2) Finnhub (tartalék) ----
-            if (spot is None or df_5m.empty) and FH_KEY:
-                try:
-                    fhq, urlq = fh_quote(sym["fh"]["spot"])
-                    if isinstance(fhq, dict) and fhq.get("c") not in (None, 0):
-                        spot = float(fhq["c"])
-                        spot_src = urlq
-                    fhc, urls = fh_candle(sym["fh"]["series"], resolution="5", count=390)
-                    if fhc.get("s") == "ok":
-                        t = pd.to_datetime(pd.Series(fhc["t"]), unit="s", utc=True)
-                        df = pd.DataFrame({
-                            "open":  fhc["o"],
-                            "high":  fhc["h"],
-                            "low":   fhc["l"],
-                            "close": fhc["c"]
-                        }, index=t).astype(float).sort_index()
-                        df_5m = df
-                        series_src = urls
-                except Exception as e:
-                    result["errors"].append(f"Finnhub hiba: {e}")
+            if spot is None and not df_5m.empty:
+                # Fallback: 5m utolsó close
+                spot = float(df_5m['close'].iloc[-1])
+                spot_src = series_src + "  (fallback: last 5m close)"
 
-            # ---- 3) Stooq 1D fallback (ha nincs intraday) ----
-            if df_5m.empty:
-                try:
-                    st_sym = "%5Endx" if asset=="NSDQ100" else "xauusd"
-                    df_csv, st_url = stooq_daily_csv(st_sym)
-                    save_json(os.path.join(outdir_asset, "stooq_daily.json"),
-                              {"rows": len(df_csv), "source_url": st_url, "retrieved_at_utc": utcnow().isoformat()})
-                    result["components"]["stooq_daily"] = {"rows": len(df_csv)}
-                except Exception as e:
-                    result["errors"].append(f"Stooq fallback hiba: {e}")
-
-            # spot.json mindenképp
             save_json(os.path.join(outdir_asset, "spot.json"), {
                 "price_usd": spot, "source_url": spot_src,
                 "retrieved_at_utc": utcnow().isoformat(), "age_sec": 0,
@@ -336,7 +281,7 @@ def run_asset(asset):
             })
             result["components"]["spot"] = {"ok": spot is not None}
 
-            # Aggregálás + mentések (ha nincs df, üres struktúrák is készülnek)
+            # ---- Aggregálás + mentések (ha nincs df, üres struktúrák) ----
             def dump_or_empty(df, name, src):
                 path = os.path.join(outdir_asset, f"{name}.json")
                 if df is None or df.empty:
@@ -369,7 +314,7 @@ def run_asset(asset):
             else:
                 k1d = {}
             save_json(os.path.join(outdir_asset, "k1d.json"),
-                      {"k1d": k1d, "source": "td/fh_reconstruct", "retrieved_at_utc": utcnow().isoformat()})
+                      {"k1d": k1d, "source": "stooq_a2_reconstruct", "retrieved_at_utc": utcnow().isoformat()})
             result["components"]["k1d"] = k1d
 
             sig = make_signal_sample(asset, spot, df_1h)
@@ -436,4 +381,3 @@ if __name__ == "__main__":
         os.makedirs("public", exist_ok=True)
         with open(os.path.join("public", "status.json"), "w", encoding="utf-8") as f:
             json.dump({"ok": False, "error": str(e), "note": "Top-level exception caught. See run_log.txt."}, f, ensure_ascii=False, indent=2)
-        # exit 0 – hogy a deploy lépés ettől még lefusson
