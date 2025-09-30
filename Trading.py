@@ -35,12 +35,15 @@ TD_KEY = os.environ.get("TWELVE_DATA_KEY")   # kötelező nem-kripto eszközökh
 # Twelve Data ETF mapping – sorrendben próbáljuk
 TD_SYMBOLS = {
     "NSDQ100": {
+        # stabil ETF proxy-k NASDAQ-100-ra
         "series": ["QQQ", "QQQM", "QLD", "TQQQ", "QQQE"],
         "spot":   ["QQQ", "QQQM", "QLD", "TQQQ", "QQQE"],
     },
     "GOLD_CFD": {
-        "series": ["GLD", "IAU", "BAR", "SGOL", "PHYS"],
-        "spot":   ["GLD", "IAU", "BAR", "SGOL", "PHYS"],
+        # CFD-proxy: arany spot FX (XAU/USD). Több névváltozat Twelve Data-hoz.
+        # Utolsó fallback: COMEX futures jelölés.
+        "series": ["XAU/USD", "XAUUSD", "XAUUSD:FOREX", "XAUUSD:CUR", "GC=F"],
+        "spot":   ["XAU/USD", "XAUUSD", "XAUUSD:FOREX", "XAUUSD:CUR", "GC=F"],
     }
 }
 
@@ -323,3 +326,4 @@ if __name__ == "__main__":
         os.makedirs("public", exist_ok=True)
         save_json(os.path.join("public","status.json"),
                   {"ok": False, "error": str(e), "note": "Top-level exception caught. See run_log.txt."})
+
