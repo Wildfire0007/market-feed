@@ -1,94 +1,73 @@
 # -*- coding: utf-8 -*-
 """
-Analysis.py — eToro_Ügynök intraday jelzésképzés (alias-alapú, all_<ASSET>.json)
-Forrás: Cloudflare Worker alias HTML (<pre> JSON) — /h/all?asset=SOL|NSDQ100|GOLD_CFD
+Analysis.py — eToro_Ügynök intraday jelzésképzés (Worker alias forrás)
+Forrás: Cloudflare Worker alias /h/all?asset=SOL|NSDQ100|GOLD_CFD (JSON)
 Kimenet:
   public/<ASSET>/decision.json   — jelzés vagy "no entry" okokkal
   public/analysis_summary.json    — összefoglaló minden eszközre
-
-Szabályok (kivonat):
-- 4H→1H bias
-- 79% Fib (kötelező)
-- 5M BOS
-- 1M trigger (feedből: signal.trigger_1m = True)  ← KÖTELEZŐ!
-- RR ≥ 1.5R, P ≥ 60% → jelzés
+  public/analysis.html            — egyszerű index
+Szabályok: 4H→1H bias, 79% Fib (kötelező), 5M BOS, RR≥1.5R, P≥60% → jelzés
 """
 
-import os, re, json, traceback
+import os, json, re, time, traceback
 from datetime import datetime, timezone
 import requests
 import pandas as pd
 import numpy as np
 
-# --- Beállítások
-ALIAS_BASE = "https://market-feed-proxy.czipo-agnes.workers.dev"
+# --- Worker ALIAS BÁZIS (Cloudflare)
+BASE = "https://market-feed-proxy.czipo-agnes.workers.dev"
+
+# --- Elemzendő eszközök és leverage cap
 ASSETS = ["SOL", "NSDQ100", "GOLD_CFD"]
 LEV_CAP = {"SOL":3, "NSDQ100":3, "GOLD_CFD":2}
 
 session = requests.Session()
-session.headers.update({"User-Agent":"eToro_Ugynok_Analysis/1.3"})
+session.headers.update({"User-Agent":"eToro_Ugynok_Analysis/1.2"})
 
-def nowiso():
-    return datetime.now(timezone.utc).isoformat().replace("+00:00","Z")
+def nowiso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-def save_json(p, o):
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(o, f, ensure_ascii=False, indent=2)
+def save_json(path: str, obj) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
 
-# --- Alias olvasó: <pre> → JSON
-def fetch_all_from_alias(asset: str):
-    url = f"{ALIAS_BASE}/h/all?asset={asset}"
-    r = session.get(url, timeout=25)
+def fetch_all_from_alias(asset: str) -> dict:
+    """/h/all alias hívás cache-busttal (ts=epoch)"""
+    url = f"{BASE}/h/all?asset={asset}&ts={int(time.time())}"
+    r = session.get(url, timeout=30)
     r.raise_for_status()
-    ct = r.headers.get("content-type","").lower()
-    if "text/html" not in ct:
-        # ritka eset: direkt JSON
-        return r.json(), url
-    m = re.search(r"<pre>(.*?)</pre>", r.text, flags=re.S|re.I)
-    if not m:
-        raise RuntimeError(f"HTML wrapper és nincs <pre>: {url}")
-    try:
-        data = json.loads(m.group(1))
-    except Exception as e:
-        raise RuntimeError(f"JSON parse hiba alias <pre>-ből: {e}")
-    return data, url
+    return r.json(), url
 
-# --- OHLC parser — ISO és epoch-ms formátum támogatás
-def df_from_k(ktree: dict) -> pd.DataFrame:
-    """
-    Támogatott formák:
-      A) {"ohlc": [{"ts":"2025-10-01T07:40:00Z","open":...,"high":...,"low":...,"close":...}, ...]}
-      B) {"ohlc_utc_ms": [[ts_ms, open, high, low, close], ...]}
-    """
-    if not isinstance(ktree, dict):
+# --- OHLC normalizáló: támogatja az ohlc_utc_ms listát és az ISO-s 'ohlc' listát is
+def df_from_ohlc_obj(obj) -> pd.DataFrame:
+    if not obj:
         return pd.DataFrame(columns=["open","high","low","close"])
-
-    # A) ISO 'ohlc'
-    arr_iso = ktree.get("ohlc")
-    if isinstance(arr_iso, list) and arr_iso and isinstance(arr_iso[0], dict):
-        ts = pd.to_datetime([x["ts"] for x in arr_iso], utc=True)
+    if "ohlc_utc_ms" in obj and isinstance(obj["ohlc_utc_ms"], list):
+        arr = obj["ohlc_utc_ms"]
+        if not arr:
+            return pd.DataFrame(columns=["open","high","low","close"])
+        idx = pd.to_datetime([x[0] for x in arr], unit="ms", utc=True)
         df = pd.DataFrame({
-            "open": [float(x["open"]) for x in arr_iso],
-            "high": [float(x["high"]) for x in arr_iso],
-            "low":  [float(x["low"])  for x in arr_iso],
-            "close":[float(x["close"]) for x in arr_iso],
-        }, index=ts).sort_index()
+            "open":[float(x[1]) for x in arr],
+            "high":[float(x[2]) for x in arr],
+            "low" :[float(x[3]) for x in arr],
+            "close":[float(x[4]) for x in arr],
+        }, index=idx).sort_index()
         return df
-
-    # B) epoch-ms 'ohlc_utc_ms'
-    arr_ms = ktree.get("ohlc_utc_ms")
-    if isinstance(arr_ms, list) and arr_ms and isinstance(arr_ms[0], (list, tuple)) and len(arr_ms[0]) >= 5:
-        ts = pd.to_datetime([row[0] for row in arr_ms], unit="ms", utc=True)
+    if "ohlc" in obj and isinstance(obj["ohlc"], list):
+        arr = obj["ohlc"]
+        if not arr:
+            return pd.DataFrame(columns=["open","high","low","close"])
+        idx = pd.to_datetime([x.get("ts") for x in arr], utc=True)
         df = pd.DataFrame({
-            "open": [float(row[1]) for row in arr_ms],
-            "high": [float(row[2]) for row in arr_ms],
-            "low":  [float(row[3]) for row in arr_ms],
-            "close":[float(row[4]) for row in arr_ms],
-        }, index=ts).sort_index()
+            "open":[float(x["open"]) for x in arr],
+            "high":[float(x["high"]) for x in arr],
+            "low" :[float(x["low"])  for x in arr],
+            "close":[float(x["close"]) for x in arr],
+        }, index=idx).sort_index()
         return df
-
-    # ha egyik sem:
     return pd.DataFrame(columns=["open","high","low","close"])
 
 # --- Indikátorok
@@ -121,21 +100,20 @@ def rr(entry, sl, tp1):
     if r<=0: return 0.0
     return abs(tp1-entry)/r
 
-def prob_score(bias4, bias1, bos, ema_ok, rsi_ok, macd_ok, near79, bb_ok, rr_ok, trig_ok):
-    base = 40
-    if bias4 in ("bull","bear"): base += 7
-    if bias1 in ("bull","bear"): base += 7
+def prob_score(bias4, bias1, bos, ema_ok, rsi_ok, macd_ok, near79, bb_ok, rr_ok):
+    base = 45
+    if bias4 in ("bull","bear"): base += 8
+    if bias1 in ("bull","bear"): base += 8
     if bos: base += 10
-    if ema_ok: base += 6
-    if rsi_ok: base += 4
-    if macd_ok: base += 4
-    if near79: base += 10
-    if bb_ok: base += 3
-    if rr_ok: base += 6
-    if trig_ok: base += 8       # explicit 1M trigger a feedből
+    if ema_ok: base += 7
+    if rsi_ok: base += 5
+    if macd_ok: base += 5
+    if near79: base += 8
+    if bb_ok: base += 4
+    if rr_ok: base += 8
     return int(max(0,min(95,round(base))))
 
-def bias_from(df):
+def bias_from(df: pd.DataFrame):
     if df.empty or len(df)<60: return None, {}
     c=df["close"]; e20,e50,e200=ema(c,20),ema(c,50),ema(c,200)
     line,signal,_=macd(c); r=rsi14(c)
@@ -162,49 +140,45 @@ def build_signal(asset, side, spot, atr_proxy):
     return {"side":side,"entry":round(e,6),"sl":round(sl,6),"tp1":round(tp1,6),"tp2":round(tp2,6),
             "atr1h_proxy":round(float(atr_proxy),6)}
 
-def analyze(asset):
+# --- fő logika egy eszközre
+def analyze(asset: str) -> dict:
     outdir=os.path.join("public",asset); os.makedirs(outdir,exist_ok=True)
+    res={"asset":asset,"ok":True,"retrieved_at_utc":nowiso(),"errors":[]}
 
-    # --- all_<ASSET>.json a Worker aliasról (<pre> → JSON)
+    # 1) aliasból mindent egyben
     try:
         all_json, used_url = fetch_all_from_alias(asset)
     except Exception as e:
-        trace = traceback.format_exc()
-        decision_obj={"asset":asset,"ok":False,"error":str(e),"trace":trace,"source":"alias"}
-        save_json(os.path.join(outdir,"decision.json"), decision_obj)
-        return decision_obj
+        msg = {"asset":asset,"ok":False,"error":str(e),"source":"alias"}
+        save_json(os.path.join(outdir,"decision.json"), msg)
+        return msg
 
-    # --- mezők
-    spot_obj = all_json.get("spot", {}) or {}
+    # 2) parse
+    spot_obj = all_json.get("spot") or {}
     spot = spot_obj.get("price_usd")
-    # időbélyeg bármelyik mezőből
-    spot_ts = spot_obj.get("last_updated_at") or spot_obj.get("retrieved_at_utc")
-    spot_src = used_url  # alias URL-t logoljuk
+    spot_src = spot_obj.get("source_url") or used_url
+    spot_ts  = spot_obj.get("retrieved_at_utc")
 
-    k5m = all_json.get("k5m", {}); k1h = all_json.get("k1h", {}); k4h = all_json.get("k4h", {})
-    df5, df1, df4 = df_from_k(k5m), df_from_k(k1h), df_from_k(k4h)
+    df5 = df_from_ohlc_obj(all_json.get("k5m"))
+    df1 = df_from_ohlc_obj(all_json.get("k1h"))
+    df4 = df_from_ohlc_obj(all_json.get("k4h"))
 
-    sig_feed = all_json.get("signal", {}) or {}
-    trigger_ok = bool(sig_feed.get("trigger_1m", False))  # hiány = False (blokkol)
+    # 3) bias
+    b4,d4=bias_from(df4); b1,d1=bias_from(df1)
+    bos=bos5m(df5)
 
-    # --- biasok
-    b4,d4 = bias_from(df4)
-    b1,d1 = bias_from(df1)
-    bos = bos5m(df5)
-
-    # --- 79% Fib (1H swing) — kötelező közelség
+    # 4) 79% fib (1H swing)
     near79=False; fib={}
     if not df1.empty:
-        sw = swing_hi_lo(df1["close"], lookback=48)
+        sw=swing_hi_lo(df1["close"],lookback=48)
         if sw:
-            hi,lo = sw
-            up79,dn79 = fib79(hi,lo)
+            hi,lo=sw; up79,dn79=fib79(hi,lo)
             last = df5["close"].iloc[-1] if not df5.empty else df1["close"].iloc[-1]
-            tol = 0.0035*float(last)  # ~0.35%
-            near79 = abs(float(last)-up79)<=tol or abs(float(last)-dn79)<=tol
+            tol=0.0035*float(last)  # ~0.35%
+            near79= abs(float(last)-up79)<=tol or abs(float(last)-dn79)<=tol
             fib={"swing_hi":hi,"swing_lo":lo,"up79":up79,"dn79":dn79,"last":float(last),"tol":float(tol)}
 
-    # --- EMA/RSI/MACD/BB megfelelőség (1H)
+    # 5) EMA/RSI/MACD/BB megfelelőség (1H)
     ema_ok=rsi_ok=macd_ok=bb_ok=False
     if not df1.empty:
         c1=df1["close"]; e20,e50,e200=ema(c1,20),ema(c1,50),ema(c1,200)
@@ -214,7 +188,7 @@ def analyze(asset):
         macd_ok= (line.iloc[-1]-signal.iloc[-1])!=0
         bb_ok  = not (np.isnan(up.iloc[-1]) or np.isnan(lo.iloc[-1]))
 
-    # --- ATR proxy (1H)
+    # 6) ATR proxy (1H)
     atr_proxy=None
     if not df1.empty and len(df1)>=15:
         hi,lo,cl=df1["high"].values,df1["low"].values,df1["close"].values
@@ -224,27 +198,26 @@ def analyze(asset):
             else: trs.append(max(hi[i]-lo[i],abs(hi[i]-cl[i-1]),abs(lo[i]-cl[i-1])))
         atr_proxy=float(pd.Series(trs).rolling(14).mean().iloc[-1])
 
-    # --- irány + jelzés + RR
-    side = side_from(b4,b1,bos)
+    # 7) irány + jelzés + RR
+    side=side_from(b4,b1,bos)
     sig=None; rr_ok=False; rr_val=0.0
     if side and spot is not None:
-        sig=build_signal(asset, side, spot, atr_proxy)
-        rr_val = rr(sig["entry"],sig["sl"],sig["tp1"]) if sig else 0.0
+        sig=build_signal(asset,side,spot,atr_proxy)
+        rr_val=rr(sig["entry"],sig["sl"],sig["tp1"]) if sig else 0.0
         rr_ok = rr_val>=1.5
 
-    # --- P% becslés és végső döntés (1M trigger kötelező!)
-    P = prob_score(b4,b1,bos,ema_ok,rsi_ok,macd_ok,near79,bb_ok,rr_ok,trigger_ok)
-    decision = "enter" if (side and near79 and rr_ok and P>=60 and sig and trigger_ok) else "no entry"
+    # 8) P% és döntés
+    P=prob_score(b4,b1,bos,ema_ok,rsi_ok,macd_ok,near79,bb_ok,rr_ok)
+    decision="enter" if (side and near79 and rr_ok and P>=60 and sig) else "no entry"
     reasons=[]
     if side is None: reasons.append("nincs iránykonzisztencia (4H/1H/BOS)")
     if not near79: reasons.append("79% Fib nincs közel (kötelező)")
     if not rr_ok: reasons.append(f"RR < 1.5R ({round(rr_val,2)})")
-    if not trigger_ok: reasons.append("1M trigger (feed) = false/hiányzik (kötelező)")
     if P<60: reasons.append(f"P < 60% ({P}%)")
 
-    # --- leverage + P/L@$100
-    lev = LEV_CAP.get(asset,2)
-    pl = {}
+    # 9) leverage + P/L@$100
+    lev=LEV_CAP.get(asset,2)
+    pl={}
     if sig:
         pl = {
             "TP1": round(100*lev*abs(sig["tp1"]-sig["entry"])/sig["entry"], 2),
@@ -252,39 +225,40 @@ def analyze(asset):
             "SL":  round(100*lev*abs(sig["sl"] -sig["entry"])/sig["entry"], 2),
         }
 
-    decision_obj = {
-        "asset": asset,
-        "retrieved_at_utc": nowiso(),
-        "spot": {"price_usd": spot, "source": spot_src, "retrieved_at_utc": spot_ts},
-        "urls": {"alias_all": used_url},
-        "diagnostics": {
-            "bias_4h": b4, "diag_4h": d4, "bias_1h": b1, "diag_1h": d1,
-            "bos_5m": bos, "fib_79": fib, "rr": round(rr_val,3),
-            "trigger_1m": trigger_ok, "signal_feed": sig_feed
+    decision_obj={
+        "asset":asset,
+        "retrieved_at_utc":nowiso(),
+        "spot":{"price_usd":spot,"source":spot_src,"retrieved_at_utc":spot_ts},
+        "urls":{
+            "alias_all":f"{BASE}/h/all?asset={asset}",
+            "alias_k5m":f"{BASE}/h/k5m?asset={asset}",
+            "alias_k1h":f"{BASE}/h/k1h?asset={asset}",
+            "alias_k4h":f"{BASE}/h/k4h?asset={asset}",
+            "alias_spot":f"{BASE}/h/spot?asset={asset}",
         },
-        "probability_pct": P,
-        "leverage_cap": lev,
-        "signal": sig,
-        "pl_at_100": pl,
-        "decision": decision,
-        "reasons": reasons,
-        "summary_hu": {
-            "Spot (USD)": spot,
-            "Forrás": spot_src,
-            "Lekérés (UTC)": spot_ts,
-            "Valószínűség": f"{P}%",
-            "Döntés": "JELZÉS" if decision=="enter" else "no entry",
-            "Javaslat": ({
-                "SIDE": sig["side"], "Entry": sig["entry"], "SL": sig["sl"],
-                "TP1 (~1R)": sig["tp1"], "TP2 (2R+)": sig["tp2"],
-                "Ajánlott leverage": f"{lev}x", "P/L@$100": pl,
+        "diagnostics":{"bias_4h":b4,"diag_4h":d4,"bias_1h":b1,"diag_1h":d1,"bos_5m":bos,"fib_79":fib,"rr":round(rr_val,3)},
+        "probability_pct":P,
+        "leverage_cap":lev,
+        "signal":sig,
+        "pl_at_100":pl,
+        "decision":decision,
+        "reasons":reasons,
+        "summary_hu":{
+            "Spot (USD)":spot,
+            "Forrás":spot_src,
+            "Lekérés (UTC)":spot_ts,
+            "Valószínűség":f"{P}%",
+            "Döntés":"JELZÉS" if decision=="enter" else "no entry",
+            "Javaslat":({
+                "SIDE":sig["side"],"Entry":sig["entry"],"SL":sig["sl"],
+                "TP1 (~1R)":sig["tp1"],"TP2 (2R+)":sig["tp2"],
+                "Ajánlott leverage":f"{lev}x","P/L@$100":pl,
                 "Lejárat":"Europe/Budapest – intraday"
             } if decision=="enter" else "—"),
-            "Indoklás": ("; ".join(reasons) if reasons else "Konfluenciák teljesülnek.")
+            "Indoklás":("; ".join(reasons) if reasons else "Konfluenciák teljesülnek.")
         }
     }
-
-    save_json(os.path.join(outdir,"decision.json"), decision_obj)
+    save_json(os.path.join(outdir,"decision.json"),decision_obj)
     return decision_obj
 
 def main():
@@ -294,13 +268,11 @@ def main():
             allout["assets"][a]=analyze(a)
         except Exception as e:
             allout["assets"][a]={"asset":a,"ok":False,"error":str(e),"trace":traceback.format_exc()}
-    save_json(os.path.join("public","analysis_summary.json"), allout)
-
-    # Rövid index HTML
+    save_json(os.path.join("public","analysis_summary.json"),allout)
+    # Rövid HTML index
     idx="<html><meta charset='utf-8'><title>Analysis</title><body><h1>Analysis</h1><ul>"+ \
         "".join([f"<li><a href='{a}/decision.json'>{a}</a></li>" for a in ASSETS])+ \
         "</ul><p><a href='analysis_summary.json'>analysis_summary.json</a></p></body></html>"
-    os.makedirs("public",exist_ok=True)
     with open(os.path.join("public","analysis.html"),"w",encoding="utf-8") as f:
         f.write(idx)
 
