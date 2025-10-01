@@ -3,23 +3,17 @@ name: Build & Publish (Pages)
 on:
   workflow_dispatch:
   schedule:
-    # hétköznap 06:00–20:59 között 30 percenként (UTC)
-    - cron: "*/30 6-20 * * 1-5"
+    - cron: "*/30 6-20 * * 1-5"   # hétköznap 06:00–20:59 között 30 percenként (UTC)
 
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# ne állítsuk le az épp futó deployt egy új push miatt
-concurrency:
-  group: "pages-deploy"
-  cancel-in-progress: false
-
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
@@ -36,52 +30,125 @@ jobs:
           pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
+      # Tiszta kimenet
       - name: Clean public
         run: |
           rm -rf public
           mkdir -p public
 
-      - name: Generate feeds
+      # --- FEED GENERÁLÁS ---
+      # FONTOS: a Trading.py / Analysis.py úgy számoljon, hogy a VÉGÉN
+      # a public/ mappába kerüljenek a fájlok (alább "biztonsági" mozgatás is van).
+      - name: Generate feeds (Trading.py)
         env:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
         run: |
-          python Trading.py
-          # ha létezik, futtasd az Analysis.py-t is
-          if [ -f Analysis.py ]; then python Analysis.py; fi
+          set -e
+          if [ -f Trading.py ]; then
+            python Trading.py
+          else
+            echo "Trading.py nem található a repóban!" >&2
+            exit 1
+          fi
 
+      - name: Generate analysis (Analysis.py)
+        run: |
+          if [ -f Analysis.py ]; then
+            python Analysis.py
+          else
+            echo "Analysis.py nem található – kihagyom (nem kritikus)."
+          fi
+
+      # --- BIZTONSÁGI MOZGATÁS ---
+      # Ha a szkriptek nem közvetlen a public/-ba írtak, innen összeszedjük a fájlokat
+      # és a várt struktúrába pakoljuk:
+      # public/<ASSET>/spot.json, klines_5m.json, klines_1h.json, klines_4h.json, signal.json
+      # public/status.json, public/<ASSET>/chart_1d.png stb.
+      - name: Collect outputs into public/
+        run: |
+          set -e
+
+          # Mappák:
+          mkdir -p public/SOL public/NSDQ100 public/GOLD_CFD
+
+          # 1) Ha van "status.json" bárhol, tegyük a public gyökerébe
+          found_status="$(git ls-files -z | tr '\0' '\n' | grep -E '/status\.json$' || true)"
+          if [ -n "$found_status" ]; then
+            cp -f $(echo "$found_status" | head -n1) public/status.json
+          fi
+
+          # 2) Asset-specifikus minták (bárhonnan bemásoljuk a várt helyre)
+          for A in SOL NSDQ100 GOLD_CFD; do
+            for F in spot.json klines_5m.json klines_1h.json klines_4h.json signal.json; do
+              hit="$(git ls-files -z | tr '\0' '\n' | grep -E "/${A}.*/${F}$" || true)"
+              if [ -z "$hit" ]; then
+                # másik elnevezés / mappa: pl.  A/F  vagy public/A/F stb.
+                hit="$(git ls-files -z | tr '\0' '\n' | grep -E "/${A}/${F}$" || true)"
+              fi
+              if [ -n "$hit" ]; then
+                cp -f $(echo "$hit" | head -n1) "public/${A}/${F}"
+              fi
+            done
+
+            # chart
+            chart_hit="$(git ls-files -z | tr '\0' '\n' | grep -E "/${A}.*/chart_1d\.png$" || true)"
+            if [ -n "$chart_hit" ]; then
+              cp -f $(echo "$chart_hit" | head -n1) "public/${A}/chart_1d.png"
+            fi
+
+            # decision is maradjon (ha van)
+            dec_hit="$(git ls-files -z | tr '\0' '\n' | grep -E "/${A}.*/decision\.json$" || true)"
+            if [ -n "$dec_hit" ]; then
+              cp -f $(echo "$dec_hit" | head -n1) "public/${A}/decision.json"
+            fi
+          done
+
+          # 3) analysis.* ha készült
+          if ls | grep -q '^analysis\.html$'; then cp -f analysis.html public/; fi
+          if ls | grep -q '^analysis_summary\.json$'; then cp -f analysis_summary.json public/; fi
+
+      # --- VALIDÁCIÓ ---
+      - name: Validate required files
+        run: |
+          set -e
+          # Legalább ezek legyenek meg:
+          test -f public/index.html || true     # mindjárt létrehozzuk, ha nincs
+          test -f public/status.json || echo "WARN: public/status.json hiányzik"
+          for A in SOL NSDQ100 GOLD_CFD; do
+            for F in spot.json klines_5m.json klines_1h.json klines_4h.json signal.json; do
+              if [ ! -f "public/${A}/${F}" ]; then
+                echo "WARN: public/${A}/${F} hiányzik"
+              fi
+            done
+          done
+
+      # --- INDEX ---
       - name: Ensure index.html
         run: |
-          if [ ! -f public/index.html ]; then
+          if ! [ -f public/index.html ]; then
             printf '%s\n' \
-              '<!doctype html><meta charset="utf-8"><title>market-feed</title>' \
-              '<h1>market-feed</h1>' \
-              '<ul>' \
-              '<li><a href="./status.json">status.json</a></li>' \
-              '<li><a href="./SOL/spot.json">SOL/spot.json</a></li>' \
-              '<li><a href="./SOL/klines_1h.json">SOL/klines_1h.json</a></li>' \
-              '<li><a href="./SOL/chart_1d.png">SOL/chart_1d.png</a></li>' \
-              '</ul>' \
-              > public/index.html
+            '<!doctype html><meta charset="utf-8"><title>market-feed</title>' \
+            '<h1>market-feed</h1>' \
+            '<ul>' \
+            '<li><a href="./status.json">status.json</a></li>' \
+            '<li><a href="./analysis.html">analysis.html</a></li>' \
+            '<li><a href="./analysis_summary.json">analysis_summary.json</a></li>' \
+            '<li><a href="./SOL/spot.json">SOL/spot.json</a></li>' \
+            '<li><a href="./SOL/klines_1h.json">SOL/klines_1h.json</a></li>' \
+            '<li><a href="./NSDQ100/spot.json">NSDQ100/spot.json</a></li>' \
+            '<li><a href="./GOLD_CFD/spot.json">GOLD_CFD/spot.json</a></li>' \
+            '</ul>' \
+            > public/index.html
           fi
 
       - name: List public (debug)
         run: |
           echo "==== public ===="
-          find public -maxdepth 2 -type f -printf '%p\n' | sort
+          find public -type f -maxdepth 3 | sort
 
+      # Ezt a lépéstől a GitHub Pages hivatalos "pages-build-deployment"
+      # workflow-ja felveszi az artefaktot és kideployolja.
       - name: Upload artifact (Pages)
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./public
-
-  deploy:
-    name: deploy
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
