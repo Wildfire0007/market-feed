@@ -1,0 +1,88 @@
+name: Build & Publish (Pages)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 6-20 * * 1-5"   # hétköznap 06:00–20:59 között 30 percenként (UTC)
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages-deploy"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -V
+          pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Clean & prepare public
+        run: |
+          rm -rf public
+          mkdir -p public
+
+      # Itt generáld a kimenetet a "public/" mappába
+      # Ha nálad két script van (Trading.py + Analysis.py), futtasd mindkettőt.
+      - name: Generate feeds
+        env:
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+        run: |
+          python Trading.py
+          # Ha Analysis.py is kell a "public" feltöltéséhez:
+          if [ -f Analysis.py ]; then python Analysis.py; fi
+
+      # Ha nincs index.html, csináljunk egy minimált, hogy a Pages ne 404-azzon a gyökérben
+      - name: Ensure index.html
+        run: |
+          if [ ! -f public/index.html ]; then
+            cat > public/index.html <<'HTML'
+            <!doctype html><meta charset="utf-8">
+            <title>market-feed</title>
+            <h1>market-feed</h1>
+            <ul>
+              <li><a href="./status.json">status.json</a></li>
+              <li><a href="./SOL/spot.json">SOL/spot.json</a></li>
+              <li><a href="./SOL/klines_1h.json">SOL/klines_1h.json</a></li>
+              <li><a href="./SOL/chart_1d.png">SOL/chart_1d.png</a></li>
+            </ul>
+            HTML
+          fi
+
+      - name: List public (debug)
+        run: |
+          echo "::group::tree public"
+          find public -maxdepth 3 -type f | sort
+          echo "::endgroup::"
+
+      - name: Upload artifact (Pages)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
