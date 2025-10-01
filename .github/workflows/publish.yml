@@ -3,13 +3,15 @@ name: Build & Publish (Pages)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 6-20 * * 1-5"   # hétköznap 06:00–20:59 (UTC)
+    # hétköznap 06:00–20:59 között 30 percenként (UTC)
+    - cron: "*/30 6-20 * * 1-5"
 
 permissions:
   contents: read
   pages: write
   id-token: write
 
+# ne állítsuk le az épp futó deployt egy új push miatt
 concurrency:
   group: "pages-deploy"
   cancel-in-progress: false
@@ -34,49 +36,48 @@ jobs:
           pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Clean & prepare public
+      - name: Clean public
         run: |
           rm -rf public
           mkdir -p public
 
-      # Itt fut a generálás – ide írja a 'public/' mappába a fájlokat
       - name: Generate feeds
         env:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
         run: |
           python Trading.py
+          # ha létezik, futtasd az Analysis.py-t is
           if [ -f Analysis.py ]; then python Analysis.py; fi
 
-      # HEREDOC helyett printf – így nem lehet lezárási hiba
       - name: Ensure index.html
         run: |
           if [ ! -f public/index.html ]; then
             printf '%s\n' \
-'<!doctype html><meta charset="utf-8"><title>market-feed</title>' \
-'<h1>market-feed</h1>' \
-'<ul>' \
-'<li><a href="./status.json">status.json</a></li>' \
-'<li><a href="./SOL/spot.json">SOL/spot.json</a></li>' \
-'<li><a href="./SOL/klines_1h.json">SOL/klines_1h.json</a></li>' \
-'<li><a href="./SOL/chart_1d.png">SOL/chart_1d.png</a></li>' \
-'</ul>' \
-> public/index.html
+              '<!doctype html><meta charset="utf-8"><title>market-feed</title>' \
+              '<h1>market-feed</h1>' \
+              '<ul>' \
+              '<li><a href="./status.json">status.json</a></li>' \
+              '<li><a href="./SOL/spot.json">SOL/spot.json</a></li>' \
+              '<li><a href="./SOL/klines_1h.json">SOL/klines_1h.json</a></li>' \
+              '<li><a href="./SOL/chart_1d.png">SOL/chart_1d.png</a></li>' \
+              '</ul>' \
+              > public/index.html
           fi
 
       - name: List public (debug)
         run: |
-          echo "::group::tree public"
-          find public -maxdepth 3 -type f | sort
-          echo "::endgroup::"
+          echo "==== public ===="
+          find public -maxdepth 2 -type f -printf '%p\n' | sort
 
       - name: Upload artifact (Pages)
         uses: actions/upload-pages-artifact@v3
         with:
-          path: public
+          path: ./public
 
   deploy:
-    runs-on: ubuntu-latest
+    name: deploy
     needs: build
+    runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
