@@ -3,7 +3,7 @@ name: Build & Publish (Pages)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 6-20 * * 1-5"   # hétköznap 06:00–20:59 (UTC) 30 percenként
+    - cron: "*/30 6-20 * * 1-5"  # hétköznap 06:00–20:59 (UTC) 30 percenként
 
 permissions:
   contents: read
@@ -34,118 +34,46 @@ jobs:
           pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Show repo (pre-run)
+      - name: Prepare public dir
         run: |
-          echo "==== repo root (pre) ===="
+          mkdir -p public
+          echo "=== repo root (pre) ==="
           ls -la
-          echo "==== python files ===="
-          ls -la *.py || true
 
-      # 1) Trading.py – hibánál se álljon le a job
+      # --- Itt történik a generálás. A Trading.py közvetlenül a public/ alá ír. ---
       - name: Generate feeds (Trading.py)
-        id: trading
         env:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
-        run: python Trading.py
-        continue-on-error: true
-
-      # 2) Fallback tiszta Bash-ban, ha Trading.py nem sikerült
-      - name: Fallback placeholders (if Trading failed)
-        if: steps.trading.outcome != 'success'
         run: |
-          echo "::warning::Trading.py failed. Creating placeholder JSONs so Pages does not 404."
           set -e
-          ASSETS="SOL NSDQ100 GOLD_CFD"
-          FILES="spot.json klines_5m.json klines_1h.json klines_4h.json signal.json decision.json"
-          for a in $ASSETS; do
-            mkdir -p "$a"
-            for f in $FILES; do
-              p="$a/$f"
-              if [ ! -f "$p" ]; then
-                printf '{"ok": false, "error": "generator failed", "file": "%s"}\n' "$p" > "$p"
-              fi
-            done
-          done
-          echo "Placeholders created."
+          python Trading.py
+          echo "[KÉSZ] Fejlécek/decisions legenerálva."
 
-      # (opcionális) Analysis.py – ha van, fusson (de ne álljon meg hiba esetén)
+      # opcionális – ha van Analysis.py, fusson; ha nincs/hhiba, ne álljon meg a build
       - name: Generate analysis (Analysis.py) — optional
+        continue-on-error: true
         run: |
-          if [ -f Analysis.py ]; then python Analysis.py || echo "::warning::Analysis.py failed (continuing)"; fi
+          if [ -f Analysis.py ]; then python Analysis.py; else echo "Analysis.py nincs, lépek tovább."; fi
 
-      - name: Show repo (post-run)
+      # Minimális index, hogy a Pages gyökér ne legyen 404
+      - name: Ensure index.html
         run: |
-          echo "==== repo root (post) ===="
-          ls -la
-          for a in SOL NSDQ100 GOLD_CFD; do
-            echo "---- $a ----"
-            ls -la "$a" || true
-          done
+          printf '%s\n' \
+            '<!doctype html><meta charset="utf-8"><title>market-feed</title>' \
+            '<h1>market-feed</h1>' \
+            '<ul>' \
+            '<li><a href="./SOL/decision.json">SOL/decision.json</a></li>' \
+            '<li><a href="./NSDQ100/decision.json">NSDQ100/decision.json</a></li>' \
+            '<li><a href="./GOLD_CFD/decision.json">GOLD_CFD/decision.json</a></li>' \
+            '<li><a href="./analysis.html">analysis.html</a></li>' \
+            '</ul>' \
+            > public/index.html
 
-      - name: Collect outputs into public/
-        run: |
-          set -e
-          rm -rf public
-          mkdir -p public
-
-          # top-level
-          [ -f status.json ] && cp status.json public/status.json
-          [ -f analysis.html ] && cp analysis.html public/analysis.html
-          [ -f analysis_summary.json ] && cp analysis_summary.json public/analysis_summary.json
-
-          ASSETS="SOL NSDQ100 GOLD_CFD"
-          for a in $ASSETS; do
-            mkdir -p "public/$a"
-            for f in spot.json klines_5m.json klines_1h.json klines_4h.json signal.json decision.json chart_1d.png; do
-              if [ -f "$a/$f" ]; then
-                cp "$a/$f" "public/$a/$f"
-              fi
-            done
-          done
-
-          # minimál index.html – itt nyugodtan használunk heredocot, mert az HTML-t nem zavarja a behúzás
-          cat > public/index.html <<'HTML'
-          <!doctype html><meta charset="utf-8"><title>market-feed</title>
-          <h1>market-feed</h1>
-          <ul>
-            <li><a href="./status.json">status.json</a></li>
-            <li><a href="./analysis.html">analysis.html</a></li>
-            <li><a href="./analysis_summary.json">analysis_summary.json</a></li>
-          </ul>
-          <h2>SOL</h2>
-          <ul>
-            <li><a href="./SOL/spot.json">SOL/spot.json</a></li>
-            <li><a href="./SOL/klines_5m.json">SOL/klines_5m.json</a></li>
-            <li><a href="./SOL/klines_1h.json">SOL/klines_1h.json</a></li>
-            <li><a href="./SOL/klines_4h.json">SOL/klines_4h.json</a></li>
-            <li><a href="./SOL/signal.json">SOL/signal.json</a></li>
-            <li><a href="./SOL/decision.json">SOL/decision.json</a></li>
-            <li><a href="./SOL/chart_1d.png">SOL/chart_1d.png</a></li>
-          </ul>
-          <h2>NSDQ100</h2>
-          <ul>
-            <li><a href="./NSDQ100/spot.json">NSDQ100/spot.json</a></li>
-            <li><a href="./NSDQ100/klines_5m.json">NSDQ100/klines_5m.json</a></li>
-            <li><a href="./NSDQ100/klines_1h.json">NSDQ100/klines_1h.json</a></li>
-            <li><a href="./NSDQ100/klines_4h.json">NSDQ100/klines_4h.json</a></li>
-            <li><a href="./NSDQ100/signal.json">NSDQ100/signal.json</a></li>
-            <li><a href="./NSDQ100/decision.json">NSDQ100/decision.json</a></li>
-          </ul>
-          <h2>GOLD_CFD</h2>
-          <ul>
-            <li><a href="./GOLD_CFD/spot.json">GOLD_CFD/spot.json</a></li>
-            <li><a href="./GOLD_CFD/klines_5m.json">GOLD_CFD/klines_5m.json</a></li>
-            <li><a href="./GOLD_CFD/klines_1h.json">GOLD_CFD/klines_1h.json</a></li>
-            <li><a href="./GOLD_CFD/klines_4h.json">GOLD_CFD/klines_4h.json</a></li>
-            <li><a href="./GOLD_CFD/signal.json">GOLD_CFD/signal.json</a></li>
-            <li><a href="./GOLD_CFD/decision.json">GOLD_CFD/decision.json</a></li>
-          </ul>
-          HTML
-
+      # Csak listázunk – NEM törlünk, NEM másolunk semmit innen
       - name: List public (debug)
         run: |
-          echo "==== public ===="
-          find public -type f -maxdepth 3 | sort
+          echo "==== public (recursive) ===="
+          find public -type f -maxdepth 3 -print | sort
 
       - name: Upload artifact (Pages)
         uses: actions/upload-pages-artifact@v3
