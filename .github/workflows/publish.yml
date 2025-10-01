@@ -3,7 +3,7 @@ name: Build & Publish (Pages)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 6-20 * * 1-5"   # hétköznap 06:00–20:59 között 30 percenként (UTC)
+    - cron: "*/30 6-20 * * 1-5"   # hétköznap 06:00–20:59 (UTC)
 
 permissions:
   contents: read
@@ -18,6 +18,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,31 +39,28 @@ jobs:
           rm -rf public
           mkdir -p public
 
-      # Itt generáld a kimenetet a "public/" mappába
-      # Ha nálad két script van (Trading.py + Analysis.py), futtasd mindkettőt.
+      # Itt fut a generálás – ide írja a 'public/' mappába a fájlokat
       - name: Generate feeds
         env:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
         run: |
           python Trading.py
-          # Ha Analysis.py is kell a "public" feltöltéséhez:
           if [ -f Analysis.py ]; then python Analysis.py; fi
 
-      # Ha nincs index.html, csináljunk egy minimált, hogy a Pages ne 404-azzon a gyökérben
+      # HEREDOC helyett printf – így nem lehet lezárási hiba
       - name: Ensure index.html
         run: |
           if [ ! -f public/index.html ]; then
-            cat > public/index.html <<'HTML'
-            <!doctype html><meta charset="utf-8">
-            <title>market-feed</title>
-            <h1>market-feed</h1>
-            <ul>
-              <li><a href="./status.json">status.json</a></li>
-              <li><a href="./SOL/spot.json">SOL/spot.json</a></li>
-              <li><a href="./SOL/klines_1h.json">SOL/klines_1h.json</a></li>
-              <li><a href="./SOL/chart_1d.png">SOL/chart_1d.png</a></li>
-            </ul>
-            HTML
+            printf '%s\n' \
+'<!doctype html><meta charset="utf-8"><title>market-feed</title>' \
+'<h1>market-feed</h1>' \
+'<ul>' \
+'<li><a href="./status.json">status.json</a></li>' \
+'<li><a href="./SOL/spot.json">SOL/spot.json</a></li>' \
+'<li><a href="./SOL/klines_1h.json">SOL/klines_1h.json</a></li>' \
+'<li><a href="./SOL/chart_1d.png">SOL/chart_1d.png</a></li>' \
+'</ul>' \
+> public/index.html
           fi
 
       - name: List public (debug)
