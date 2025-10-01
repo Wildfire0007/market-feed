@@ -1,399 +1,421 @@
 # -*- coding: utf-8 -*-
 """
-Trading.py — Market feed generator GitHub Pages-re.
+Trading.py — all_*.json feed generátor 1M triggerrel (SOL, NSDQ100, GOLD_CFD)
+Kimenetek (repo gyökerébe):
+  - all_SOL.json
+  - all_NSDQ100.json
+  - all_GOLD_CFD.json
 
-Források:
-- SOL (crypto): CoinGecko — spot + 24h pontokból 5m OHLC (reconstruct)
-- NSDQ100 (index-proxy): Twelve Data ETF (QQQ/QQQM/QLD/TQQQ/QQQE) — 5m és spot
-- GOLD_CFD (CFD-proxy): Twelve Data XAU/USD — 5m és spot; fallback Stooq a2 (xauusd) 5m
+Adatforrások:
+  Spot:
+    - SOL: CoinGecko simple/price (kulcs nélkül)
+    - NSDQ100 (QQQ): Twelve Data quote (TWELVEDATA_API_KEY szükséges)
+    - GOLD_CFD (XAU/USD): Twelve Data quote (TWELVEDATA_API_KEY szükséges)
+  OHLC:
+    - SOL: Binance klines (SOLUSDT, kulcs nélkül)
+    - NSDQ100 (QQQ): Twelve Data time_series
+    - GOLD_CFD (XAU/USD): Twelve Data time_series
 
-Kimenet (assetenként, public/<ASSET>/):
-  spot.json
-  klines_5m.json
-  klines_1h.json
-  klines_4h.json
-  klines_1d.json     ← a Worker /k1d ezt szolgálja ki
-  signal.json        ← ATR-mintajelzés (DEMO)
-  index.html
-Gyökér:
-  public/status.json
-  public/index.html
-  public/run_log.txt (stdout/err átirányítva a workflow-ból)
+A JSON-ba bekerül:
+  signal.trigger_1m (true/false) + trigger_meta{reason, side, trigger_price, trigger_ts_utc}
 
-SAFE-MODE: hiba esetén is készül index.html és status.json.
+Futtatás:
+  export TWELVEDATA_API_KEY="…"
+  python Trading.py
 """
 
-import os, json, time, traceback
-import datetime as dt
-from datetime import timezone
+import os
+import time
+import json
+import math
+from typing import Optional, Callable, Any, Dict, List
+from datetime import datetime, timezone
+
 import requests
 import pandas as pd
 import numpy as np
 
-# ---------- Alap ----------
-ASSETS = ["SOL", "NSDQ100", "GOLD_CFD"]
-OUTDIR = "public"
-os.makedirs(OUTDIR, exist_ok=True)
 
-SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "MarketFeed/1.4 (+https://github.com/)"})
+# ================================
+# KÖZÖS SEGÉDFÜGGVÉNYEK
+# ================================
 
-TD_KEY = os.environ.get("TWELVE_DATA_KEY")  # Twelve Data API kulcs
+TD_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
 
-# Twelve Data ticker-listák (első működő nyer)
-TD_SYMBOLS = {
-    "NSDQ100": {
-        "series": ["QQQ", "QQQM", "QLD", "TQQQ", "QQQE"],
-        "spot":   ["QQQ", "QQQM", "QLD", "TQQQ", "QQQE"],
-    },
-    "GOLD_CFD": {
-        "series": ["XAU/USD", "XAUUSD", "XAUUSD:FOREX", "XAUUSD:CUR", "GC=F"],
-        "spot":   ["XAU/USD", "XAUUSD", "XAUUSD:FOREX", "XAUUSD:CUR", "GC=F"],
-    }
-}
+def _ts_utc_iso(ts: Optional[float]) -> Optional[str]:
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
-# CoinGecko ID-k
-CG_IDS = {"SOL": "solana"}
-
-# ---------- Util ----------
-def utcnow(): return dt.datetime.now(timezone.utc)
-def ensure_dir(p): os.makedirs(p, exist_ok=True)
-
-def save_json(path, obj):
-    ensure_dir(os.path.dirname(path))
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-
-def backoff_sleep(a): time.sleep(min(2**a + 0.25, 8))
-
-# ---------- CoinGecko ----------
-def cg_simple_price(coin_id, vs="usd"):
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies={vs}"
-    for a in range(4):
-        r = SESSION.get(url, timeout=15)
-        if r.ok: return r.json(), url
-        backoff_sleep(a)
-    raise RuntimeError(f"CG simple/price err {r.status_code}")
-
-def cg_market_chart_range(coin_id, start_unix, end_unix, vs="usd"):
-    url = (f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart/range"
-           f"?vs_currency={vs}&from={start_unix}&to={end_unix}")
-    for a in range(4):
-        r = SESSION.get(url, timeout=20)
-        if r.ok: return r.json(), url
-        backoff_sleep(a)
-    raise RuntimeError(f"CG range err {r.status_code}")
-
-def prices_to_ohlc_5m(ts_prices):
-    # ts_prices = [[ms, price], ...]
-    if not ts_prices: return pd.DataFrame(columns=["open","high","low","close"])
-    s = pd.Series({pd.to_datetime(ms, unit='ms', utc=True): p for ms, p in ts_prices})
-    df = pd.DataFrame({"price": s}).sort_index()
-    o = df['price'].resample("5T").first()
-    h = df['price'].resample("5T").max()
-    l = df['price'].resample("5T").min()
-    c = df['price'].resample("5T").last()
-    return pd.DataFrame({'open': o, 'high': h, 'low': l, 'close': c}).dropna()
-
-# ---------- Twelve Data ----------
-def td_quote(symbol):
-    if not TD_KEY: raise RuntimeError("TWELVE_DATA_KEY hiányzik (GitHub Secrets).")
-    base = "https://api.twelvedata.com/quote"
-    params = {"symbol": symbol, "format": "JSON", "apikey": TD_KEY}
-    for a in range(4):
-        r = SESSION.get(base, params=params, timeout=15)
-        if r.ok: return r.json(), r.url
-        backoff_sleep(a)
-    raise RuntimeError(f"TD quote err {r.status_code}")
-
-def td_time_series(symbol, interval="5min", outputsize=390):
-    if not TD_KEY: raise RuntimeError("TWELVE_DATA_KEY hiányzik (GitHub Secrets).")
-    base = "https://api.twelvedata.com/time_series"
-    params = {"symbol": symbol, "interval": interval, "outputsize": outputsize,
-              "timezone": "UTC", "format": "JSON", "apikey": TD_KEY}
-    for a in range(4):
-        r = SESSION.get(base, params=params, timeout=20)
-        if r.ok: return r.json(), r.url
-        backoff_sleep(a)
-    raise RuntimeError(f"TD time_series err {r.status_code}")
-
-def try_td_series(symbols):
-    """Robusztus 5m OHLC beolvasás Twelve Data-ból (oszlopok kisbetűsítése)."""
-    last_err = None
-    for sym in symbols:
-        try:
-            js, url = td_time_series(sym, interval="5min", outputsize=390)
-            vals = js.get("values") or js.get("data")
-            if not isinstance(vals, list) or not vals:
-                if isinstance(js, dict) and js.get("status") == "error":
-                    last_err = js.get("message") or js
-                else:
-                    last_err = f"no values for {sym}"
-                continue
-            df = pd.DataFrame(vals)
-            df.columns = [str(c).strip().lower() for c in df.columns]
-            if "datetime" in df.columns:
-                dtcol = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
-            elif "date" in df.columns and "time" in df.columns:
-                dtcol = pd.to_datetime(df["date"].astype(str)+" "+df["time"].astype(str), utc=True, errors="coerce")
-            else:
-                last_err = f"missing datetime columns for {sym}"
-                continue
-            for c in ("open","high","low","close"):
-                if c in df.columns:
-                    df[c] = pd.to_numeric(df[c], errors="coerce")
-            need = {"open","high","low","close"}
-            if not need.issubset(set(df.columns)):
-                last_err = f"missing ohlc for {sym}"
-                continue
-            df = df.assign(datetime=dtcol).dropna(subset=["datetime"])
-            df = df.sort_values("datetime").set_index("datetime")
-            df = df[["open","high","low","close"]].dropna()
-            if not df.empty:
-                return df, url, sym
-            last_err = f"empty df after cleaning for {sym}"
-        except Exception as e:
-            last_err = str(e)
-            continue
-    raise RuntimeError(f"TD time_series: nincs használható adat ({last_err})")
-
-def try_td_quote(symbols):
-    """Első működő spot ár (float) + URL + szimbólum; None, ha nincs."""
-    last_err = None
-    for sym in symbols:
-        try:
-            js, url = td_quote(sym)
-            if isinstance(js, dict) and js.get("price") is not None:
-                return float(js["price"]), url, sym
-            if isinstance(js, dict) and js.get("status") == "error":
-                last_err = js.get("message") or js
-        except Exception as e:
-            last_err = str(e)
-            continue
-    return None, None, None
-
-# ---------- Stooq a2 (kulcsmentes) — GOLD_CFD fallback ----------
-def stooq_intraday_csv(symbol_encoded, interval="5"):
-    # pl. XAUUSD 5m: https://stooq.com/q/a2/?s=xauusd&i=5
-    url = f"https://stooq.com/q/a2/?s={symbol_encoded}&i={interval}"
-    for a in range(4):
-        r = SESSION.get(url, timeout=20)
-        if r.ok:
-            text = r.text.strip()
-            if text.startswith("Date,"):
-                from io import StringIO
-                df = pd.read_csv(StringIO(text))
-                dt_col = pd.to_datetime(df["Date"] + " " + df["Time"], utc=True, errors="coerce")
-                o = pd.to_numeric(df["Open"], errors="coerce")
-                h = pd.to_numeric(df["High"], errors="coerce")
-                l = pd.to_numeric(df["Low"], errors="coerce")
-                c = pd.to_numeric(df["Close"], errors="coerce")
-                out = pd.DataFrame({"open": o, "high": h, "low": l, "close": c}, index=dt_col).dropna().sort_index()
-                return out, url
-        backoff_sleep(a)
-    raise RuntimeError(f"Stooq a2 intraday error @ {url}")
-
-# ---------- Idősor-aggregálás ----------
-def resample_ohlc(df, rule):
-    if df is None or df.empty: return pd.DataFrame(columns=["open","high","low","close"])
-    o = df['open'].resample(rule).first()
-    h = df['high'].resample(rule).max()
-    l = df['low'].resample(rule).min()
-    c = df['close'].resample(rule).last()
-    return pd.DataFrame({'open': o, 'high': h, 'low': l, 'close': c}).dropna()
-
-# ---------- ATR-mintajel ----------
-def atr14_from_ohlc(df_1h):
-    if df_1h.empty or len(df_1h) < 15: return None
-    hi, lo, cl = df_1h['high'].values, df_1h['low'].values, df_1h['close'].values
-    trs = [hi[i]-lo[i] if i==0 else max(hi[i]-lo[i], abs(hi[i]-cl[i-1]), abs(lo[i]-cl[i-1])) for i in range(len(cl))]
-    return float(pd.Series(trs).rolling(14).mean().iloc[-1])
-
-def make_signal_sample(asset, spot, df_1h):
-    atr = atr14_from_ohlc(df_1h)
-    if atr is None or spot is None:
-        return {"note":"ATR demo only","atr14_1h": None}
-    entry = spot
-    sl = max(0.0, entry - 0.9*atr)
-    tp1 = entry + 1.0*atr
-    tp2 = entry + 2.0*atr
-    return {
-        "side":"LONG","entry":round(entry,6),"sl":round(sl,6),
-        "tp1":round(tp1,6),"tp2":round(tp2,6),
-        "atr14_1h": round(atr,6),"leverage":"demo","disclaimer":"DEMO"
-    }
-
-# ---------- PNG chart (opcionális, most nem kötelező) ----------
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
-def save_png_chart(asset, df_5m, outdir_asset):
-    if df_5m.empty: return None
-    plt.figure(figsize=(8,3))
-    plt.plot(df_5m.index, df_5m['close'])
-    plt.title(f"{asset} – 1D intraday (close)")
-    plt.tight_layout()
-    path = os.path.join(outdir_asset, "chart_1d.png")
-    plt.savefig(path); plt.close()
-    return path
-
-# ---------- Fő futás ----------
-def dump_ohlc_as_json(outdir_asset, name, df, src, symbol_used=None):
-    path = os.path.join(outdir_asset, f"{name}.json")
-    if df is None or df.empty:
-        save_json(path, {"ohlc_utc_ms": [], "note": "empty"})
-        return 0
-    arr = [[int(ix.value//10**6), float(o), float(h), float(l), float(c)]
-           for ix,(o,h,l,c) in zip(df.index, df[['open','high','low','close']].to_numpy())]
-    payload = {"ohlc_utc_ms": arr, "source_url": src, "retrieved_at_utc": utcnow().isoformat()}
-    if symbol_used: payload["symbol_used"] = symbol_used
-    save_json(path, payload)
-    return len(arr)
-
-def run_asset(asset):
-    started = utcnow()
-    outdir = os.path.join(OUTDIR, asset); ensure_dir(outdir)
-    result = {"asset": asset, "ok": True, "errors": [], "retrieved_at_utc": started.isoformat(), "components": {}}
-
+def _ensure_ok_json(resp: requests.Response) -> Dict[str, Any]:
+    """Twelve Data hibák egységes kezelése, JSON biztosítása."""
     try:
-        if asset == "SOL":
-            # ---- SPOT (CG) ----
-            sp, sp_url = cg_simple_price(CG_IDS["SOL"])
-            spot = float(sp["solana"]["usd"])
-            save_json(os.path.join(outdir,"spot.json"),
-                      {"price_usd":spot,"source_url":sp_url,"retrieved_at_utc":utcnow().isoformat(),"age_sec":0})
-            result["components"]["spot"] = {"ok": True}
+        data = resp.json()
+    except Exception:
+        resp.raise_for_status()
+    if isinstance(data, dict) and data.get("status") == "error":
+        raise RuntimeError(f"TwelveData error: code={data.get('code')} msg={data.get('message')}")
+    return data
 
-            # ---- 24h pontok → 5m ----
-            now = int(utcnow().timestamp()); start = now - 24*3600
-            mc, mc_url = cg_market_chart_range(CG_IDS["SOL"], start, now)
-            df5 = prices_to_ohlc_5m(mc.get("prices", []))
-            df1 = resample_ohlc(df5, "1H"); df4 = resample_ohlc(df1, "4H")
-
-            result["components"]["k5m_rows"] = dump_ohlc_as_json(outdir,"klines_5m",df5,mc_url,"SOLUSD(cg)")
-            result["components"]["k1h_rows"] = dump_ohlc_as_json(outdir,"klines_1h",df1,mc_url,"SOLUSD(cg)")
-            result["components"]["k4h_rows"] = dump_ohlc_as_json(outdir,"klines_4h",df4,mc_url,"SOLUSD(cg)")
-
-            # ---- 1D rekonstrukció az azonos napon belüli 5m-ből ----
-            if not df5.empty:
-                day = df5.index.normalize()[-1]; d = df5[df5.index.normalize()==day]
-                k1d = {"open": float(d['open'].iloc[0]), "high": float(d['high'].max()),
-                       "low": float(d['low'].min()), "close": float(d['close'].iloc[-1])}
-            else:
-                k1d = {}
-            save_json(os.path.join(outdir,"klines_1d.json"),
-                      {"k1d":k1d,"source":"cg_reconstruct","retrieved_at_utc":utcnow().isoformat(),"symbol_used":"SOLUSD(cg)"})
-            result["components"]["k1d"] = k1d
-
-            # ---- minta szignál ----
-            sig = make_signal_sample(asset, spot, df1)
-            save_json(os.path.join(outdir,"signal.json"), sig)
-            save_png_chart(asset, df5, outdir)
-
-        else:
-            # ---- NSDQ100 / GOLD_CFD ----
-            df5, src_series, series_sym = pd.DataFrame(), None, None
-            td_err = None
-
-            # Első próbálkozás: Twelve Data 5m
-            try:
-                df5, src_series, series_sym = try_td_series(TD_SYMBOLS[asset]["series"])
-            except Exception as e:
-                td_err = str(e)
-                result["errors"].append(f"Twelve Data 5m hiba: {e}")
-
-            # GOLD_CFD fallback: Stooq a2 xauusd, ha TD nem adott adatot
-            if asset == "GOLD_CFD" and (df5 is None or df5.empty):
-                try:
-                    df5, src_series = stooq_intraday_csv("xauusd", interval="5")
-                    series_sym = "XAUUSD(stooq)"
-                except Exception as e:
-                    result["errors"].append(f"Stooq a2 5m hiba: {e}")
-
-            # ---- SPOT (TD), ha nincs → utolsó 5m close ----
-            spot, src_spot, spot_sym = None, None, None
-            if TD_KEY:
-                s, u, symu = try_td_quote(TD_SYMBOLS[asset]["spot"])
-                if s is not None:
-                    spot, src_spot, spot_sym = s, u, symu
-            if spot is None and not df5.empty:
-                spot = float(df5['close'].iloc[-1])
-                src_spot = (src_series or "unknown") + " (fallback last 5m close)"
-
-            save_json(os.path.join(outdir,"spot.json"),
-                      {"price_usd": spot, "source_url": src_spot,
-                       "retrieved_at_utc": utcnow().isoformat(), "age_sec": 0, "ok": spot is not None})
-            result["components"]["spot"] = {"ok": spot is not None}
-
-            # ---- Aggregálások ----
-            df1 = resample_ohlc(df5, "1H") if not df5.empty else pd.DataFrame(columns=["open","high","low","close"])
-            df4 = resample_ohlc(df1, "4H") if not df1.empty else pd.DataFrame(columns=["open","high","low","close"])
-
-            result["components"]["k5m_rows"] = dump_ohlc_as_json(outdir,"klines_5m",df5,src_series or "unknown",series_sym)
-            result["components"]["k1h_rows"] = dump_ohlc_as_json(outdir,"klines_1h",df1,src_series or "unknown",series_sym)
-            result["components"]["k4h_rows"] = dump_ohlc_as_json(outdir,"klines_4h",df4,src_series or "unknown",series_sym)
-
-            if not df5.empty:
-                day = df5.index.normalize()[-1]; d = df5[df5.index.normalize()==day]
-                k1d = {"open": float(d['open'].iloc[0]), "high": float(d['high'].max()),
-                       "low": float(d['low'].min()),  "close": float(d['close'].iloc[-1])}
-            else:
-                k1d = {}
-            save_json(os.path.join(outdir,"klines_1d.json"),
-                      {"k1d":k1d,"source":"series_reconstruct","retrieved_at_utc":utcnow().isoformat(),
-                       "symbol_used": series_sym})
-            result["components"]["k1d"] = k1d
-
-            sig = make_signal_sample(asset, spot, df1)
-            save_json(os.path.join(outdir,"signal.json"), sig)
-            if not df5.empty: save_png_chart(asset, df5, outdir)
-
-    except Exception as e:
-        result["ok"] = False
-        result["errors"].append(str(e))
-        result["trace"] = traceback.format_exc()
-    finally:
-        # mini index minden assethez
+def _retry_fetch(fn: Callable[[], Any], tries: int = 3, sleep: float = 0.7) -> Any:
+    last_exc = None
+    for _ in range(tries):
         try:
-            errs = ""
-            if result.get("errors"):
-                errs = "<p><b>Errors:</b><br>" + "<br>".join([str(x) for x in result["errors"]]) + "</p>"
-            html = f"""<html><head><meta charset="utf-8"><title>{asset} feed</title></head>
-<body>
-<h1>{asset}</h1>
-<p>ok: {result.get("ok", True)}</p>
-{errs}
-<ul>
-  <li><a href="spot.json">spot.json</a></li>
-  <li><a href="klines_5m.json">klines_5m.json</a></li>
-  <li><a href="klines_1h.json">klines_1h.json</a></li>
-  <li><a href="klines_4h.json">klines_4h.json</a></li>
-  <li><a href="klines_1d.json">klines_1d.json</a></li>
-  <li><a href="signal.json">signal.json</a></li>
-  <li><a href="chart_1d.png">chart_1d.png</a></li>
-</ul>
-</body></html>"""
-            with open(os.path.join(outdir,"index.html"),"w",encoding="utf-8") as f: f.write(html)
-        except Exception:
-            pass
-    return result
+            return fn()
+        except Exception as e:
+            last_exc = e
+            time.sleep(sleep)
+    # ha itt vagyunk, végleg hibás
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Unknown fetch error")
+
+def _price_tick_for(asset: str) -> float:
+    asset = asset.upper()
+    if asset in ("NSDQ100", "GOLD_CFD"):
+        return 0.01
+    return 0.0001
+
+
+# ================================
+# 1M TRIGGER + 5M ELŐFELTÉTELEK
+# ================================
+
+def last_swing_levels_1m(df1m: pd.DataFrame, lookback: int = 20):
+    """Utolsó lookback×1M ablakból max high / min low (UTC indexet és OHLC oszlopokat vár)."""
+    if df1m is None or df1m.empty or len(df1m) < max(lookback, 5):
+        return (None, None)
+    win = df1m.tail(lookback)
+    return float(win['high'].max()), float(win['low'].min())
+
+def compute_trigger_1m(signal_dict: Dict[str, Any],
+                       df5m: pd.DataFrame,
+                       df1m: pd.DataFrame,
+                       price_tick: float = 0.0001) -> Dict[str, Any]:
+    """
+    Trigger logika:
+      - Előfeltételek: bias_5m in {long,short} AND bos_5m AND continuation_5m AND fib79_ok
+      - Mikró-BOS (1M): utolsó zárt 1M close > swing_high + buffer (long) / < swing_low - buffer (short)
+    """
+    out = {"trigger_1m": False,
+           "trigger_meta": {"reason": None, "side": None, "trigger_price": None, "trigger_ts_utc": None}}
+
+    side = signal_dict.get("bias_5m")
+    if side not in ("long", "short"):
+        out["trigger_meta"]["reason"] = "no_bias_5m"; return out
+    if not signal_dict.get("bos_5m", False):
+        out["trigger_meta"]["reason"] = "no_bos_5m"; return out
+    if not signal_dict.get("continuation_5m", False):
+        out["trigger_meta"]["reason"] = "no_continuation_5m"; return out
+    if not signal_dict.get("fib79_ok", False):
+        out["trigger_meta"]["reason"] = "no_fib79"; return out
+
+    if df1m is None or df1m.empty:
+        out["trigger_meta"]["reason"] = "k1m_missing"; out["trigger_meta"]["side"] = side
+        return out
+
+    last_row = df1m.tail(1).iloc[0]
+    last_close = float(last_row["close"])
+    swing_hi, swing_lo = last_swing_levels_1m(df1m, lookback=20)
+    if swing_hi is None or swing_lo is None:
+        out["trigger_meta"]["reason"] = "not_enough_1m"; out["trigger_meta"]["side"] = side
+        return out
+
+    pct_buffer = 0.0002  # 0.02%
+    price_buffer = max(last_close * pct_buffer, 2.0 * price_tick)
+    ts_utc = df1m.tail(1).index[0].to_pydatetime().replace(tzinfo=timezone.utc).isoformat().replace("+00:00","Z")
+
+    if side == "long":
+        needed = swing_hi + price_buffer
+        if last_close > needed:
+            out["trigger_1m"] = True
+            out["trigger_meta"].update({"reason":"ok","side":"long","trigger_price":round(last_close,8),"trigger_ts_utc":ts_utc})
+        else:
+            out["trigger_meta"].update({"reason":"micro_bos_fail","side":"long","trigger_price":round(last_close,8),"trigger_ts_utc":ts_utc})
+    else:  # short
+        needed = swing_lo - price_buffer
+        if last_close < needed:
+            out["trigger_1m"] = True
+            out["trigger_meta"].update({"reason":"ok","side":"short","trigger_price":round(last_close,8),"trigger_ts_utc":ts_utc})
+        else:
+            out["trigger_meta"].update({"reason":"micro_bos_fail","side":"short","trigger_price":round(last_close,8),"trigger_ts_utc":ts_utc})
+
+    return out
+
+def simple_bias_bos_continuation_fib79(df5m: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Konzervatív 5M előfeltétel detektor (ideiglenes). Ha van saját BOS/FVG/OB/Breaker/79% Fib logikád, cseréld arra.
+    """
+    out = {"bias_5m": None, "bos_5m": False, "continuation_5m": False, "fib79_ok": False}
+    if df5m is None or len(df5m) < 40:  # min. minta
+        return out
+    win = df5m.tail(40)
+    highs = win['high'].values
+    lows  = win['low'].values
+    closes = win['close'].values
+
+    # primitív bias: utolsó 20 close trendje
+    last20 = closes[-20:]
+    bias = "long" if last20[-1] > last20[0] else "short"
+    out["bias_5m"] = bias
+
+    swin_hi = float(highs[-20:].max())
+    swin_lo = float(lows[-20:].min())
+    last_close = float(closes[-1])
+
+    if bias == "long" and last_close > swin_hi:
+        out["bos_5m"] = True
+        mid = 0.5 * (swin_hi + swin_lo)
+        out["continuation_5m"] = bool((win['close'].tail(3) > mid).all())
+        leg = swin_hi - swin_lo
+        if leg > 0:
+            recent_mean = float(pd.Series(closes[-5:]).mean())
+            out["fib79_ok"] = (recent_mean >= swin_lo + 0.62*leg) and (recent_mean <= swin_lo + 0.79*leg)
+    elif bias == "short" and last_close < swin_lo:
+        out["bos_5m"] = True
+        mid = 0.5 * (swin_hi + swin_lo)
+        out["continuation_5m"] = bool((win['close'].tail(3) < mid).all())
+        leg = swin_hi - swin_lo
+        if leg > 0:
+            recent_mean = float(pd.Series(closes[-5:]).mean())
+            out["fib79_ok"] = (recent_mean <= swin_hi - 0.62*leg) and (recent_mean >= swin_hi - 0.79*leg)
+
+    return out
+
+
+# ================================
+# SPOT FORRÁSOK (SOL/QQQ/XAU)
+# ================================
+
+def fetch_spot(asset: str) -> Dict[str, Any]:
+    """
+    Visszaadott forma:
+    {
+      "price_usd": <float>,
+      "last_updated_at": "YYYY-MM-DDTHH:MM:SSZ",
+      "age_sec": <int>
+    }
+    """
+    asset = asset.upper()
+
+    if asset == "SOL":
+        # CoinGecko simple/price — kulcs nélkül
+        url = "https://api.coingecko.com/api/v3/simple/price"
+        params = {"ids": "solana", "vs_currencies": "usd", "include_last_updated_at": "true"}
+        def _do():
+            r = requests.get(url, params=params, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+            price = float(data["solana"]["usd"])
+            ts = int(data["solana"].get("last_updated_at", time.time()))
+            return {
+                "price_usd": price,
+                "last_updated_at": _ts_utc_iso(ts),
+                "age_sec": max(0, int(time.time() - ts))
+            }
+        return _retry_fetch(_do)
+
+    elif asset == "NSDQ100":
+        # Twelve Data quote (QQQ)
+        if not TD_KEY:
+            raise RuntimeError("Missing env TWELVEDATA_API_KEY for NSDQ100 spot")
+        url = "https://api.twelvedata.com/quote"
+        params = {"symbol": "QQQ", "apikey": TD_KEY}
+        def _do():
+            r = requests.get(url, params=params, timeout=15)
+            data = _ensure_ok_json(r)
+            price = float(data["price"])
+            ts_iso = data.get("timestamp")  # pl. "2025-10-01 10:42:39"
+            if ts_iso and " " in ts_iso:
+                ts_iso = ts_iso.replace(" ", "T") + "Z"
+            return {
+                "price_usd": price,
+                "last_updated_at": ts_iso or datetime.now(timezone.utc).isoformat().replace("+00:00","Z"),
+                "age_sec": 0
+            }
+        return _retry_fetch(_do)
+
+    elif asset == "GOLD_CFD":
+        # Twelve Data quote (XAU/USD) — proxy a GOLD_CFD-hez
+        if not TD_KEY:
+            raise RuntimeError("Missing env TWELVEDATA_API_KEY for GOLD_CFD spot")
+        url = "https://api.twelvedata.com/quote"
+        params = {"symbol": "XAU/USD", "apikey": TD_KEY}
+        def _do():
+            r = requests.get(url, params=params, timeout=15)
+            data = _ensure_ok_json(r)
+            price = float(data["price"])
+            ts_iso = data.get("timestamp")
+            if ts_iso and " " in ts_iso:
+                ts_iso = ts_iso.replace(" ", "T") + "Z"
+            return {
+                "price_usd": price,
+                "last_updated_at": ts_iso or datetime.now(timezone.utc).isoformat().replace("+00:00","Z"),
+                "age_sec": 0
+            }
+        return _retry_fetch(_do)
+
+    else:
+        raise ValueError(f"Unknown asset for spot: {asset}")
+
+
+# ================================
+# OHLC FORRÁSOK (SOL/QQQ/XAU)
+# ================================
+
+def _td_interval(interval: str) -> str:
+    m = {"1m": "1min", "5m": "5min", "1h": "1h", "4h": "4h"}
+    if interval not in m:
+        raise ValueError(f"Unsupported interval: {interval}")
+    return m[interval]
+
+def _make_df_from_td(values: List[Dict[str, str]]) -> pd.DataFrame:
+    """Twelve Data time_series -> Pandas DF (UTC index, float OHLC)."""
+    if not values:
+        return pd.DataFrame(columns=["open","high","low","close"])
+    df = pd.DataFrame(values)
+    # Twelve Data gyakran új->régi sorrendben adja: fordítsuk meg
+    df = df.iloc[::-1].copy()
+    dt = pd.to_datetime(df["datetime"].str.replace(" ", "T"), utc=True)
+    df = df.assign(open=df["open"].astype(float),
+                   high=df["high"].astype(float),
+                   low=df["low"].astype(float),
+                   close=df["close"].astype(float)).drop(columns=["datetime"])
+    df.index = dt
+    return df[["open","high","low","close"]]
+
+def _binance_interval(interval: str) -> str:
+    m = {"1m":"1m", "5m":"5m", "1h":"1h", "4h":"4h"}
+    if interval not in m:
+        raise ValueError(f"Unsupported interval: {interval}")
+    return m[interval]
+
+def _make_df_from_binance(klines: List[List[Any]]) -> pd.DataFrame:
+    """
+    Binance kline sor: [openTime, open, high, low, close, volume, closeTime, ...]
+    """
+    if not klines:
+        return pd.DataFrame(columns=["open","high","low","close"])
+    T = []
+    for k in klines:
+        T.append({
+            "ts": pd.to_datetime(int(k[0]), unit="ms", utc=True),
+            "open": float(k[1]),
+            "high": float(k[2]),
+            "low":  float(k[3]),
+            "close":float(k[4])
+        })
+    df = pd.DataFrame(T).set_index("ts")
+    return df[["open","high","low","close"]]
+
+def fetch_ohlc(asset: str, interval: str, periods: int = 240) -> pd.DataFrame:
+    """
+    Vissza: Pandas DataFrame (UTC index), oszlopok: open/high/low/close (float)
+      - SOL → Binance klines (SOLUSDT)
+      - NSDQ100 → Twelve Data time_series (QQQ)
+      - GOLD_CFD → Twelve Data time_series (XAU/USD)
+    """
+    asset = asset.upper()
+
+    if asset == "SOL":
+        sym = "SOLUSDT"
+        url = "https://api.binance.com/api/v3/klines"
+        params = {"symbol": sym, "interval": _binance_interval(interval), "limit": max(200, periods)}
+        def _do():
+            r = requests.get(url, params=params, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+            return _make_df_from_binance(data)
+        return _retry_fetch(_do)
+
+    elif asset == "NSDQ100":
+        if not TD_KEY:
+            raise RuntimeError("Missing env TWELVEDATA_API_KEY for NSDQ100 OHLC")
+        url = "https://api.twelvedata.com/time_series"
+        params = {"symbol": "QQQ", "interval": _td_interval(interval), "outputsize": max(200, periods), "apikey": TD_KEY}
+        def _do():
+            r = requests.get(url, params=params, timeout=20)
+            data = _ensure_ok_json(r)
+            return _make_df_from_td(data.get("values", []))
+        return _retry_fetch(_do)
+
+    elif asset == "GOLD_CFD":
+        if not TD_KEY:
+            raise RuntimeError("Missing env TWELVEDATA_API_KEY for GOLD_CFD OHLC")
+        url = "https://api.twelvedata.com/time_series"
+        params = {"symbol": "XAU/USD", "interval": _td_interval(interval), "outputsize": max(200, periods), "apikey": TD_KEY}
+        def _do():
+            r = requests.get(url, params=params, timeout=20)
+            data = _ensure_ok_json(r)
+            return _make_df_from_td(data.get("values", []))
+        return _retry_fetch(_do)
+
+    else:
+        raise ValueError(f"Unknown asset for OHLC: {asset}")
+
+
+# ================================
+# JSON ÖSSZEÁLLÍTÁS
+# ================================
+
+def df_to_ohlc_list(df: pd.DataFrame, limit: int = 300) -> List[Dict[str, Any]]:
+    if df is None or df.empty:
+        return []
+    dfx = df.tail(limit).copy().reset_index().rename(columns={"index": "ts"})
+    dfx["ts"] = pd.to_datetime(dfx["ts"], utc=True).dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dfx[["ts", "open", "high", "low", "close"]].astype(
+        {k: float for k in ["open", "high", "low", "close"]}
+    ).to_dict(orient="records")
+
+def assemble_all_json_for_asset(asset: str) -> Dict[str, Any]:
+    # 0) spot
+    spot = fetch_spot(asset)
+
+    # 1) OHLC (1m/5m/1h/4h) — 1m a triggerhez, 5m/1h/4h a top-down elemzéshez
+    df1m = fetch_ohlc(asset, "1m")
+    df5m = fetch_ohlc(asset, "5m")
+    df1h = fetch_ohlc(asset, "1h")
+    df4h = fetch_ohlc(asset, "4h")
+
+    # 2) 5M előfeltételek (konzervatív detektor; ha van profibb, cseréld)
+    signal_dict = simple_bias_bos_continuation_fib79(df5m)
+
+    # 3) 1M trigger
+    price_tick = _price_tick_for(asset)
+    trig = compute_trigger_1m(signal_dict, df5m, df1m, price_tick=price_tick)
+    signal_dict["trigger_1m"] = trig["trigger_1m"]
+    signal_dict["trigger_meta"] = trig["trigger_meta"]
+
+    # 4) Kimeneti JSON (k1m nem kötelező; a trigger a signal mezőben van)
+    bundle = {
+        "asset": asset,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "spot": spot,
+        "k5m": {"interval": "5m", "ohlc": df_to_ohlc_list(df5m)},
+        "k1h": {"interval": "1h", "ohlc": df_to_ohlc_list(df1h)},
+        "k4h": {"interval": "4h", "ohlc": df_to_ohlc_list(df4h)},
+        "signal": signal_dict
+    }
+    return bundle
+
+def write_all_json(asset: str, bundle: Dict[str, Any], out_dir: str = ".") -> None:
+    path = os.path.join(out_dir, f"all_{asset}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(bundle, f, ensure_ascii=False, indent=2)
+    print(f"[OK] írás: {path}")
+
+
+# ================================
+# MAIN
+# ================================
 
 def main():
-    status = {"generated_at_utc": utcnow().isoformat(), "assets": {}}
-    for a in ASSETS:
-        status["assets"][a] = run_asset(a)
-    # gyökér index
-    root = "<html><head><meta charset='utf-8'><title>Market Feed</title></head><body><h1>Market Feed</h1><ul>" + \
-           "".join([f"<li><a href='{a}/index.html'>{a}</a></li>" for a in ASSETS]) + "</ul></body></html>"
-    with open(os.path.join(OUTDIR,"index.html"),"w",encoding="utf-8") as f: f.write(root)
-    save_json(os.path.join(OUTDIR,"status.json"), status)
+    for asset in ("SOL", "NSDQ100", "GOLD_CFD"):
+        bundle = assemble_all_json_for_asset(asset)
+        write_all_json(asset, bundle)
+    print("Kész: all_SOL.json, all_NSDQ100.json, all_GOLD_CFD.json")
 
 if __name__ == "__main__":
-    try:
-        main(); print("OK")
-    except Exception as e:
-        traceback.print_exc()
-        os.makedirs("public", exist_ok=True)
-        save_json(os.path.join("public","status.json"),
-                  {"ok": False, "error": str(e), "note": "Top-level exception caught. See public/run_log.txt"})
+    # kis random mag a reálisabb szimulációhoz (ha np-t használsz máshol)
+    np.random.seed(int(time.time()) % 2_000_000_000)
+    main()
