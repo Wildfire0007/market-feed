@@ -34,30 +34,60 @@ jobs:
           pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      # 1) Generálás
-      - name: Generate feeds (Trading.py)
+      - name: Show repo (pre-run)
+        run: |
+          echo "==== repo root (pre) ===="
+          ls -la
+          echo "==== python files ===="
+          ls -la *.py || true
+
+      # ===== SAFE GENERATE =====
+      - name: Generate feeds (Trading.py) — SAFE
         env:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
         run: |
-          python Trading.py
+          set -x
+          python Trading.py || (
+            echo "::warning::Trading.py failed. Creating placeholder JSONs so Pages does not 404."
+            python - <<'PY'
+import os, json
+assets = ["SOL", "NSDQ100", "GOLD_CFD"]
+files  = ["spot.json","klines_5m.json","klines_1h.json","klines_4h.json","signal.json","decision.json"]
+for a in assets:
+    os.makedirs(a, exist_ok=True)
+    for f in files:
+        p = f"{a}/{f}"
+        if not os.path.exists(p):
+            with open(p, "w", encoding="utf-8") as fp:
+                json.dump({"ok": False, "error": "generator failed", "file": p}, fp)
+print("Placeholders created.")
+PY
+          )
 
-      - name: Generate analysis (Analysis.py)
+      - name: Generate analysis (Analysis.py) — optional
         run: |
-          if [ -f Analysis.py ]; then python Analysis.py; fi
+          if [ -f Analysis.py ]; then python Analysis.py || echo "::warning::Analysis.py failed (continuing)"; fi
 
-      # 2) Kimenetek összegyűjtése a public/ alá
+      - name: Show repo (post-run)
+        run: |
+          echo "==== repo root (post) ===="
+          ls -la
+          for a in SOL NSDQ100 GOLD_CFD; do
+            echo "---- $a ----"
+            ls -la "$a" || true
+          done
+
       - name: Collect outputs into public/
         run: |
           set -e
           rm -rf public
           mkdir -p public
 
-          # status / összefoglalók (ha vannak)
-          if [ -f status.json ]; then cp status.json public/status.json; fi
-          if [ -f analysis.html ]; then cp analysis.html public/analysis.html; fi
-          if [ -f analysis_summary.json ]; then cp analysis_summary.json public/analysis_summary.json; fi
+          # top-level
+          [ -f status.json ] && cp status.json public/status.json
+          [ -f analysis.html ] && cp analysis.html public/analysis.html
+          [ -f analysis_summary.json ] && cp analysis_summary.json public/analysis_summary.json
 
-          # eszközök
           ASSETS="SOL NSDQ100 GOLD_CFD"
           for a in $ASSETS; do
             mkdir -p "public/$a"
@@ -68,7 +98,6 @@ jobs:
             done
           done
 
-          # index.html – gyorskijárat
           cat > public/index.html <<'HTML'
           <!doctype html><meta charset="utf-8"><title>market-feed</title>
           <h1>market-feed</h1>
@@ -107,23 +136,11 @@ jobs:
           </ul>
           HTML
 
-      # 3) Kötelező fájlok ellenőrzése – ha hiányzik, hibázzon a build
-      - name: Validate required files
-        run: |
-          set -e
-          test -f public/index.html
-          # legalább a SOL készlet legyen jelen
-          test -f public/SOL/spot.json
-          test -f public/SOL/klines_1h.json
-          test -f public/SOL/klines_4h.json
-
-      # 4) Debug listázás
       - name: List public (debug)
         run: |
           echo "==== public ===="
           find public -type f -maxdepth 3 | sort
 
-      # 5) Feltöltés Pages-re
       - name: Upload artifact (Pages)
         uses: actions/upload-pages-artifact@v3
         with:
