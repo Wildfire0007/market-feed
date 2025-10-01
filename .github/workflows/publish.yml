@@ -3,7 +3,7 @@ name: Build & Publish (Pages)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 6-20 * * 1-5" # hétköznap 06:00–20:59 (UTC) 30 percenként
+    - cron: "*/30 6-20 * * 1-5"   # hétköznap 06:00–20:59 (UTC) 30 percenként
 
 permissions:
   contents: read
@@ -41,15 +41,20 @@ jobs:
           echo "==== python files ===="
           ls -la *.py || true
 
-      # ===== SAFE GENERATE =====
-      - name: Generate feeds (Trading.py) — SAFE
+      # 1) Trading.py futtatása – nem állítjuk le a jobot, ha hibázik
+      - name: Generate feeds (Trading.py)
+        id: trading
         env:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+        run: python Trading.py
+        continue-on-error: true
+
+      # 2) Ha Trading.py NEM sikerült → placeholder JSON-ok készítése
+      - name: Fallback placeholders (if Trading failed)
+        if: steps.trading.outcome != 'success'
         run: |
-          set -x
-          python Trading.py || (
-            echo "::warning::Trading.py failed. Creating placeholder JSONs so Pages does not 404."
-            python - <<'PY'
+          echo "::warning::Trading.py failed. Creating placeholder JSONs so Pages does not 404."
+          python - <<'PY'
 import os, json
 assets = ["SOL", "NSDQ100", "GOLD_CFD"]
 files  = ["spot.json","klines_5m.json","klines_1h.json","klines_4h.json","signal.json","decision.json"]
@@ -59,11 +64,11 @@ for a in assets:
         p = f"{a}/{f}"
         if not os.path.exists(p):
             with open(p, "w", encoding="utf-8") as fp:
-                json.dump({"ok": False, "error": "generator failed", "file": p}, fp)
+                json.dump({"ok": False, "error": "generator failed", "file": p}, fp, ensure_ascii=False)
 print("Placeholders created.")
 PY
-          )
 
+      # (opcionális) Analysis.py – ha van, fusson, de ne álljon meg hiba esetén
       - name: Generate analysis (Analysis.py) — optional
         run: |
           if [ -f Analysis.py ]; then python Analysis.py || echo "::warning::Analysis.py failed (continuing)"; fi
