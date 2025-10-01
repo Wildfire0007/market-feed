@@ -12,22 +12,21 @@ Adatforrások:
     - NSDQ100 (QQQ): Twelve Data quote (TWELVEDATA_API_KEY szükséges)
     - GOLD_CFD (XAU/USD): Twelve Data quote (TWELVEDATA_API_KEY szükséges)
   OHLC:
-    - SOL: Binance klines (SOLUSDT, kulcs nélkül)
+    - SOL: Kraken OHLC (SOLUSD, kulcs nélkül)  ← Binance helyett, hogy ne legyen 451 GH Actions alatt
     - NSDQ100 (QQQ): Twelve Data time_series
     - GOLD_CFD (XAU/USD): Twelve Data time_series
 
 A JSON-ba bekerül:
   signal.trigger_1m (true/false) + trigger_meta{reason, side, trigger_price, trigger_ts_utc}
 
-Futtatás:
-  export TWELVEDATA_API_KEY="…"
+Futtatás (lokál/CI):
+  export TWELVEDATA_API_KEY="..."
   python Trading.py
 """
 
 import os
 import time
 import json
-import math
 from typing import Optional, Callable, Any, Dict, List
 from datetime import datetime, timezone
 
@@ -53,6 +52,7 @@ def _ensure_ok_json(resp: requests.Response) -> Dict[str, Any]:
         data = resp.json()
     except Exception:
         resp.raise_for_status()
+        raise
     if isinstance(data, dict) and data.get("status") == "error":
         raise RuntimeError(f"TwelveData error: code={data.get('code')} msg={data.get('message')}")
     return data
@@ -65,7 +65,6 @@ def _retry_fetch(fn: Callable[[], Any], tries: int = 3, sleep: float = 0.7) -> A
         except Exception as e:
             last_exc = e
             time.sleep(sleep)
-    # ha itt vagyunk, végleg hibás
     if last_exc:
         raise last_exc
     raise RuntimeError("Unknown fetch error")
@@ -225,7 +224,7 @@ def fetch_spot(asset: str) -> Dict[str, Any]:
             r = requests.get(url, params=params, timeout=15)
             data = _ensure_ok_json(r)
             price = float(data["price"])
-            ts_iso = data.get("timestamp")  # pl. "2025-10-01 10:42:39"
+            ts_iso = data.get("timestamp")  # "YYYY-MM-DD HH:MM:SS"
             if ts_iso and " " in ts_iso:
                 ts_iso = ts_iso.replace(" ", "T") + "Z"
             return {
@@ -260,7 +259,7 @@ def fetch_spot(asset: str) -> Dict[str, Any]:
 
 
 # ================================
-# OHLC FORRÁSOK (SOL/QQQ/XAU)
+# OHLC FORRÁSOK
 # ================================
 
 def _td_interval(interval: str) -> str:
@@ -284,48 +283,51 @@ def _make_df_from_td(values: List[Dict[str, str]]) -> pd.DataFrame:
     df.index = dt
     return df[["open","high","low","close"]]
 
-def _binance_interval(interval: str) -> str:
-    m = {"1m":"1m", "5m":"5m", "1h":"1h", "4h":"4h"}
+# --- Kraken (SOL OHLC)
+def _kraken_interval(interval: str) -> int:
+    m = {"1m": 1, "5m": 5, "1h": 60, "4h": 240}
     if interval not in m:
         raise ValueError(f"Unsupported interval: {interval}")
     return m[interval]
 
-def _make_df_from_binance(klines: List[List[Any]]) -> pd.DataFrame:
+def _make_df_from_kraken(values) -> pd.DataFrame:
     """
-    Binance kline sor: [openTime, open, high, low, close, volume, closeTime, ...]
+    Kraken OHLC elem: [time, open, high, low, close, vwap, volume, count]
     """
-    if not klines:
+    if not values:
         return pd.DataFrame(columns=["open","high","low","close"])
-    T = []
-    for k in klines:
-        T.append({
-            "ts": pd.to_datetime(int(k[0]), unit="ms", utc=True),
-            "open": float(k[1]),
-            "high": float(k[2]),
-            "low":  float(k[3]),
-            "close":float(k[4])
+    rows = []
+    for v in values:
+        rows.append({
+            "ts": pd.to_datetime(int(v[0]), unit="s", utc=True),
+            "open": float(v[1]),
+            "high": float(v[2]),
+            "low":  float(v[3]),
+            "close":float(v[4]),
         })
-    df = pd.DataFrame(T).set_index("ts")
+    df = pd.DataFrame(rows).set_index("ts").sort_index()
     return df[["open","high","low","close"]]
 
 def fetch_ohlc(asset: str, interval: str, periods: int = 240) -> pd.DataFrame:
     """
     Vissza: Pandas DataFrame (UTC index), oszlopok: open/high/low/close (float)
-      - SOL → Binance klines (SOLUSDT)
+      - SOL → Kraken OHLC (SOLUSD)
       - NSDQ100 → Twelve Data time_series (QQQ)
       - GOLD_CFD → Twelve Data time_series (XAU/USD)
     """
     asset = asset.upper()
 
     if asset == "SOL":
-        sym = "SOLUSDT"
-        url = "https://api.binance.com/api/v3/klines"
-        params = {"symbol": sym, "interval": _binance_interval(interval), "limit": max(200, periods)}
+        url = "https://api.kraken.com/0/public/OHLC"
+        params = {"pair": "SOLUSD", "interval": _kraken_interval(interval)}
         def _do():
             r = requests.get(url, params=params, timeout=20)
             r.raise_for_status()
             data = r.json()
-            return _make_df_from_binance(data)
+            res = data.get("result", {})
+            key = next((k for k in res.keys() if k != "last"), None)
+            values = res.get(key, [])
+            return _make_df_from_kraken(values)
         return _retry_fetch(_do)
 
     elif asset == "NSDQ100":
@@ -406,16 +408,29 @@ def write_all_json(asset: str, bundle: Dict[str, Any], out_dir: str = ".") -> No
 
 
 # ================================
-# MAIN
+# MAIN (SAFE MODE A CI-HEZ)
 # ================================
 
 def main():
-    for asset in ("SOL", "NSDQ100", "GOLD_CFD"):
-        bundle = assemble_all_json_for_asset(asset)
-        write_all_json(asset, bundle)
-    print("Kész: all_SOL.json, all_NSDQ100.json, all_GOLD_CFD.json")
+    assets = ["SOL", "NSDQ100", "GOLD_CFD"]
+    any_success = False
+    for asset in assets:
+        try:
+            if asset != "SOL" and not TD_KEY:
+                print(f"[SKIP] {asset}: TWELVEDATA_API_KEY hiányzik – SOL megy tovább.")
+                continue
+            bundle = assemble_all_json_for_asset(asset)
+            write_all_json(asset, bundle)
+            any_success = True
+        except Exception as e:
+            print(f"[ERROR] {asset}: {e}")
+
+    if not any_success:
+        # ne buktassuk el a CI-t (pl. forrás oldali outage esetén)
+        print("No feeds generated (errors above). Exiting 0 for CI.")
+    else:
+        print("Kész: all_*.json frissítve, ami sikerült.")
 
 if __name__ == "__main__":
-    # kis random mag a reálisabb szimulációhoz (ha np-t használsz máshol)
     np.random.seed(int(time.time()) % 2_000_000_000)
     main()
