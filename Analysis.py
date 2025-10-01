@@ -26,9 +26,9 @@ ASSETS = ["SOL", "NSDQ100", "GOLD_CFD"]
 LEV_CAP = {"SOL":3, "NSDQ100":3, "GOLD_CFD":2}
 
 session = requests.Session()
-session.headers.update({"User-Agent":"eToro_Ugynok_Analysis/1.2"})
+session.headers.update({"User-Agent":"eToro_Ugynok_Analysis/1.3"})
 
-def nowiso(): 
+def nowiso():
     return datetime.now(timezone.utc).isoformat().replace("+00:00","Z")
 
 def save_json(p, o):
@@ -41,8 +41,9 @@ def fetch_all_from_alias(asset: str):
     url = f"{ALIAS_BASE}/h/all?asset={asset}"
     r = session.get(url, timeout=25)
     r.raise_for_status()
-    if "text/html" not in r.headers.get("content-type","").lower():
-        # ritka eset: direkt JSON-t adna
+    ct = r.headers.get("content-type","").lower()
+    if "text/html" not in ct:
+        # ritka eset: direkt JSON
         return r.json(), url
     m = re.search(r"<pre>(.*?)</pre>", r.text, flags=re.S|re.I)
     if not m:
@@ -53,19 +54,42 @@ def fetch_all_from_alias(asset: str):
         raise RuntimeError(f"JSON parse hiba alias <pre>-ből: {e}")
     return data, url
 
-# --- OHLC list -> DataFrame (UTC)
-def df_from_k(ktree: dict):
-    arr = (ktree or {}).get("ohlc", [])
-    if not arr: 
+# --- OHLC parser — ISO és epoch-ms formátum támogatás
+def df_from_k(ktree: dict) -> pd.DataFrame:
+    """
+    Támogatott formák:
+      A) {"ohlc": [{"ts":"2025-10-01T07:40:00Z","open":...,"high":...,"low":...,"close":...}, ...]}
+      B) {"ohlc_utc_ms": [[ts_ms, open, high, low, close], ...]}
+    """
+    if not isinstance(ktree, dict):
         return pd.DataFrame(columns=["open","high","low","close"])
-    ts = pd.to_datetime([x["ts"] for x in arr], utc=True)
-    df = pd.DataFrame({
-        "open": [float(x["open"]) for x in arr],
-        "high": [float(x["high"]) for x in arr],
-        "low":  [float(x["low"])  for x in arr],
-        "close":[float(x["close"]) for x in arr],
-    }, index=ts).sort_index()
-    return df
+
+    # A) ISO 'ohlc'
+    arr_iso = ktree.get("ohlc")
+    if isinstance(arr_iso, list) and arr_iso and isinstance(arr_iso[0], dict):
+        ts = pd.to_datetime([x["ts"] for x in arr_iso], utc=True)
+        df = pd.DataFrame({
+            "open": [float(x["open"]) for x in arr_iso],
+            "high": [float(x["high"]) for x in arr_iso],
+            "low":  [float(x["low"])  for x in arr_iso],
+            "close":[float(x["close"]) for x in arr_iso],
+        }, index=ts).sort_index()
+        return df
+
+    # B) epoch-ms 'ohlc_utc_ms'
+    arr_ms = ktree.get("ohlc_utc_ms")
+    if isinstance(arr_ms, list) and arr_ms and isinstance(arr_ms[0], (list, tuple)) and len(arr_ms[0]) >= 5:
+        ts = pd.to_datetime([row[0] for row in arr_ms], unit="ms", utc=True)
+        df = pd.DataFrame({
+            "open": [float(row[1]) for row in arr_ms],
+            "high": [float(row[2]) for row in arr_ms],
+            "low":  [float(row[3]) for row in arr_ms],
+            "close":[float(row[4]) for row in arr_ms],
+        }, index=ts).sort_index()
+        return df
+
+    # ha egyik sem:
+    return pd.DataFrame(columns=["open","high","low","close"])
 
 # --- Indikátorok
 def ema(s, n): return s.ewm(span=n, adjust=False).mean()
@@ -93,7 +117,7 @@ def bos5m(df5, win=40):
     return None
 
 def rr(entry, sl, tp1):
-    r = abs(entry-sl); 
+    r = abs(entry-sl)
     if r<=0: return 0.0
     return abs(tp1-entry)/r
 
@@ -140,7 +164,6 @@ def build_signal(asset, side, spot, atr_proxy):
 
 def analyze(asset):
     outdir=os.path.join("public",asset); os.makedirs(outdir,exist_ok=True)
-    res={"asset":asset,"ok":True,"retrieved_at_utc":nowiso(),"errors":[]}
 
     # --- all_<ASSET>.json a Worker aliasról (<pre> → JSON)
     try:
@@ -154,13 +177,15 @@ def analyze(asset):
     # --- mezők
     spot_obj = all_json.get("spot", {}) or {}
     spot = spot_obj.get("price_usd")
-    spot_ts = spot_obj.get("last_updated_at")
-    spot_src = used_url  # explicit source URL (alias)
+    # időbélyeg bármelyik mezőből
+    spot_ts = spot_obj.get("last_updated_at") or spot_obj.get("retrieved_at_utc")
+    spot_src = used_url  # alias URL-t logoljuk
+
     k5m = all_json.get("k5m", {}); k1h = all_json.get("k1h", {}); k4h = all_json.get("k4h", {})
     df5, df1, df4 = df_from_k(k5m), df_from_k(k1h), df_from_k(k4h)
 
     sig_feed = all_json.get("signal", {}) or {}
-    trigger_ok = bool(sig_feed.get("trigger_1m", False))
+    trigger_ok = bool(sig_feed.get("trigger_1m", False))  # hiány = False (blokkol)
 
     # --- biasok
     b4,d4 = bias_from(df4)
@@ -230,7 +255,7 @@ def analyze(asset):
     decision_obj = {
         "asset": asset,
         "retrieved_at_utc": nowiso(),
-        "spot": {"price_usd": spot, "source": used_url, "retrieved_at_utc": spot_ts},
+        "spot": {"price_usd": spot, "source": spot_src, "retrieved_at_utc": spot_ts},
         "urls": {"alias_all": used_url},
         "diagnostics": {
             "bias_4h": b4, "diag_4h": d4, "bias_1h": b1, "diag_1h": d1,
@@ -245,7 +270,7 @@ def analyze(asset):
         "reasons": reasons,
         "summary_hu": {
             "Spot (USD)": spot,
-            "Forrás": used_url,
+            "Forrás": spot_src,
             "Lekérés (UTC)": spot_ts,
             "Valószínűség": f"{P}%",
             "Döntés": "JELZÉS" if decision=="enter" else "no entry",
