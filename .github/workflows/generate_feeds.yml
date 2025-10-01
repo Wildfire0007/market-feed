@@ -11,6 +11,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # A Twelve Data kulcs innen minden stepben elérhető lesz:
+      TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,10 +28,7 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Export Twelve Data key (ha van)
-        if: ${{ secrets.TWELVEDATA_API_KEY != '' }}
-        run: echo "TWELVEDATA_API_KEY=${{ secrets.TWELVEDATA_API_KEY }}" >> $GITHUB_ENV
-
+      # (Nincs külön 'if: secrets…' lépés; a kulcs az env-ben van.)
       - name: Run feed generator
         run: python Trading.py
 
