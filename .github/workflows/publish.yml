@@ -41,7 +41,7 @@ jobs:
           echo "==== python files ===="
           ls -la *.py || true
 
-      # 1) Trading.py futtatása – nem állítjuk le a jobot, ha hibázik
+      # 1) Trading.py – hibánál se álljon le a job
       - name: Generate feeds (Trading.py)
         id: trading
         env:
@@ -49,26 +49,26 @@ jobs:
         run: python Trading.py
         continue-on-error: true
 
-      # 2) Ha Trading.py NEM sikerült → placeholder JSON-ok készítése
+      # 2) Fallback tiszta Bash-ban, ha Trading.py nem sikerült
       - name: Fallback placeholders (if Trading failed)
         if: steps.trading.outcome != 'success'
         run: |
           echo "::warning::Trading.py failed. Creating placeholder JSONs so Pages does not 404."
-          python - <<'PY'
-import os, json
-assets = ["SOL", "NSDQ100", "GOLD_CFD"]
-files  = ["spot.json","klines_5m.json","klines_1h.json","klines_4h.json","signal.json","decision.json"]
-for a in assets:
-    os.makedirs(a, exist_ok=True)
-    for f in files:
-        p = f"{a}/{f}"
-        if not os.path.exists(p):
-            with open(p, "w", encoding="utf-8") as fp:
-                json.dump({"ok": False, "error": "generator failed", "file": p}, fp, ensure_ascii=False)
-print("Placeholders created.")
-PY
+          set -e
+          ASSETS="SOL NSDQ100 GOLD_CFD"
+          FILES="spot.json klines_5m.json klines_1h.json klines_4h.json signal.json decision.json"
+          for a in $ASSETS; do
+            mkdir -p "$a"
+            for f in $FILES; do
+              p="$a/$f"
+              if [ ! -f "$p" ]; then
+                printf '{"ok": false, "error": "generator failed", "file": "%s"}\n' "$p" > "$p"
+              fi
+            done
+          done
+          echo "Placeholders created."
 
-      # (opcionális) Analysis.py – ha van, fusson, de ne álljon meg hiba esetén
+      # (opcionális) Analysis.py – ha van, fusson (de ne álljon meg hiba esetén)
       - name: Generate analysis (Analysis.py) — optional
         run: |
           if [ -f Analysis.py ]; then python Analysis.py || echo "::warning::Analysis.py failed (continuing)"; fi
@@ -103,6 +103,7 @@ PY
             done
           done
 
+          # minimál index.html – itt nyugodtan használunk heredocot, mert az HTML-t nem zavarja a behúzás
           cat > public/index.html <<'HTML'
           <!doctype html><meta charset="utf-8"><title>market-feed</title>
           <h1>market-feed</h1>
