@@ -27,6 +27,10 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Prepare public dir
+        run: |
+          mkdir -p public
+
       - name: Install dependencies
         run: |
           python -V
@@ -43,11 +47,11 @@ jobs:
       - name: Run Analysis (optional)
         continue-on-error: true
         run: |
-          if [ -f analysis.py ]; then python analysis.py; else echo "analysis.py nem található, tovább lépek."; fi
+          if [ -f Analysis.py ]; then python Analysis.py; elif [ -f analysis.py ]; then python analysis.py; else echo "Analysis script nem található, tovább lépek."; fi
 
       - name: Ensure index.html
         run: |
-          # Egyszerű index oldal generálása (ha üres a Pages gyökere)
+          # Egyszerű index oldal a gyökérbe
           printf '%s\n' \
             '<!doctype html><meta charset="utf-8"><title>market-feed</title>' \
             '<h1>market-feed</h1>' \
@@ -58,6 +62,11 @@ jobs:
             '<li><a href="./analysis.html">analysis.html</a></li>' \
             '</ul>' \
             > public/index.html
+
+      - name: List public (debug)
+        run: |
+          echo "==== public (recursive) ===="
+          find public -type f | sort || true
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
@@ -72,5 +81,5 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v4
         id: deployment
+        uses: actions/deploy-pages@v4
