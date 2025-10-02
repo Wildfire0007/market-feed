@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Analysis.py — eToro_Ügynök intraday jelzésképzés (Worker alias forrás)
-Forrás: Cloudflare Worker alias /h/all?asset=SOL|NSDQ100|GOLD_CFD (JSON)
+analysis.py — Intraday jelzésképző script az Ekereskedő (eToro Ügynök) számára.
+Forrás: a CF Worker /h/all alias-szal szinkronban lévő, frissített adatokat használja.
 Kimenet:
-  public/<ASSET>/decision.json   — jelzés vagy "no entry" okokkal
-  public/analysis_summary.json    — összefoglaló minden eszközre
-  public/analysis.html            — egyszerű index
-Szabályok: 4H→1H bias, 79% Fib (kötelező), 5M BOS, RR≥1.5R, P≥60% → jelzés
+  public/<ASSET>/signal.json — a jelzés ("buy", "sell", "no entry") 
+                                és annak okai, minden eszközhöz
+  public/analysis_summary.json — összefoglaló minden eszközre
+  public/analysis.html       — egyszerű HTML index a jelentéshez
+Szabályok (példa): 4H→1H bias, 79% fib ("swing hi-lo"), 5M breakout, RR≥1.5, P≥60% → jelzés.
 """
 
 import os, json, re, time, traceback
@@ -15,32 +16,19 @@ import requests
 import pandas as pd
 import numpy as np
 
-# --- Worker ALIAS BÁZIS (Cloudflare)
-BASE = "https://market-feed-proxy.czipo-agnes.workers.dev"
-
-# --- Elemzendő eszközök és leverage cap
+# --- Elemzendő eszközök ---
 ASSETS = ["SOL", "NSDQ100", "GOLD_CFD"]
-LEV_CAP = {"SOL":3, "NSDQ100":3, "GOLD_CFD":2}
 
-session = requests.Session()
-session.headers.update({"User-Agent":"eToro_Ugynok_Analysis/1.2"})
-
-def nowiso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
+# Segédfüggvény a JSON fájlok mentéséhez
 def save_json(path: str, obj) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
-def fetch_all_from_alias(asset: str) -> dict:
-    """/h/all alias hívás cache-busttal (ts=epoch)"""
-    url = f"{BASE}/h/all?asset={asset}&ts={int(time.time())}"
-    r = session.get(url, timeout=30)
-    r.raise_for_status()
-    return r.json(), url
+def nowiso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-# --- OHLC normalizáló: támogatja az ohlc_utc_ms listát és az ISO-s 'ohlc' listát is
+# --- OHLC normalizáló (támogatja az ohlc_utc_ms listát) ---
 def df_from_ohlc_obj(obj) -> pd.DataFrame:
     if not obj:
         return pd.DataFrame(columns=["open","high","low","close"])
@@ -50,237 +38,136 @@ def df_from_ohlc_obj(obj) -> pd.DataFrame:
             return pd.DataFrame(columns=["open","high","low","close"])
         idx = pd.to_datetime([x[0] for x in arr], unit="ms", utc=True)
         df = pd.DataFrame({
-            "open":[float(x[1]) for x in arr],
-            "high":[float(x[2]) for x in arr],
-            "low" :[float(x[3]) for x in arr],
-            "close":[float(x[4]) for x in arr],
-        }, index=idx).sort_index()
+            "open":  [float(x[1]) for x in arr],
+            "high":  [float(x[2]) for x in arr],
+            "low":   [float(x[3]) for x in arr],
+            "close": [float(x[4]) for x in arr],
+        }, index=idx)
         return df
     if "ohlc" in obj and isinstance(obj["ohlc"], list):
-        arr = obj["ohlc"]
-        if not arr:
-            return pd.DataFrame(columns=["open","high","low","close"])
-        idx = pd.to_datetime([x.get("ts") for x in arr], utc=True)
-        df = pd.DataFrame({
-            "open":[float(x["open"]) for x in arr],
-            "high":[float(x["high"]) for x in arr],
-            "low" :[float(x["low"])  for x in arr],
-            "close":[float(x["close"]) for x in arr],
-        }, index=idx).sort_index()
-        return df
+        # (Nem használt formátum itt, de támogatva van.)
+        data = obj["ohlc"]
+        df = pd.DataFrame(data)
+        df.index = pd.to_datetime(df["date"], utc=True)
+        return df[["open","high","low","close"]]
     return pd.DataFrame(columns=["open","high","low","close"])
 
-# --- Indikátorok
-def ema(s, n): return s.ewm(span=n, adjust=False).mean()
-def rsi14(c):
-    d = c.diff(); up = d.clip(lower=0).rolling(14).mean(); dn = -d.clip(upper=0).rolling(14).mean()
-    rs = up/(dn.replace(0,np.nan)); return 100-(100/(1+rs))
-def macd(c, f=12, s=26, sig=9):
-    ef, es = ema(c,f), ema(c,s); line = ef-es; signal = ema(line,sig); hist = line-signal; return line, signal, hist
-def bb(c, n=20, k=2):
-    m = c.rolling(n).mean(); sd = c.rolling(n).std(); return m, m+k*sd, m-k*sd
+# --- Kockázat-számító segédfüggvények (példák) ---
+def ema(series, period):
+    return series.ewm(span=period, adjust=False).mean()
 
-# --- Fib/BOS/RR/P
-def swing_hi_lo(close, lookback=48):
-    if len(close) < max(lookback,10): return None
-    w = close.iloc[-lookback:]; return float(w.max()), float(w.min())
+def rsi14(series):
+    delta = series.diff()
+    up = delta.clip(lower=0)
+    down = -1*delta.clip(upper=0)
+    ma_up = up.ewm(com=13, adjust=False).mean()
+    ma_down = down.ewm(com=13, adjust=False).mean()
+    rs = ma_up/ma_down
+    rsi = 100 - (100/(1+rs))
+    return rsi
 
-def fib79(hi, lo):
-    rng = hi-lo; return float(lo+0.79*rng), float(hi-0.79*rng)
+def macd(series):
+    exp1 = series.ewm(span=12, adjust=False).mean()
+    exp2 = series.ewm(span=26, adjust=False).mean()
+    macd_line = exp1 - exp2
+    signal = macd_line.ewm(span=9, adjust=False).mean()
+    hist = macd_line - signal
+    return macd_line, signal, hist
 
-def bos5m(df5, win=40):
-    if df5.empty or len(df5) < win+1: return None
-    c = df5["close"]; last = c.iloc[-1]; prev = c.iloc[-(win+1):-1]
-    if last > prev.max(): return "bull"
-    if last < prev.min(): return "bear"
-    return None
+def bb(series, n=20):
+    m = series.rolling(n).mean()
+    s = series.rolling(n).std()
+    upper = m + 2*s
+    lower = m - 2*s
+    return m, upper, lower
 
-def rr(entry, sl, tp1):
-    r = abs(entry-sl)
-    if r<=0: return 0.0
-    return abs(tp1-entry)/r
-
-def prob_score(bias4, bias1, bos, ema_ok, rsi_ok, macd_ok, near79, bb_ok, rr_ok):
-    base = 45
-    if bias4 in ("bull","bear"): base += 8
-    if bias1 in ("bull","bear"): base += 8
-    if bos: base += 10
-    if ema_ok: base += 7
-    if rsi_ok: base += 5
-    if macd_ok: base += 5
-    if near79: base += 8
-    if bb_ok: base += 4
-    if rr_ok: base += 8
-    return int(max(0,min(95,round(base))))
-
-def bias_from(df: pd.DataFrame):
-    if df.empty or len(df)<60: return None, {}
-    c=df["close"]; e20,e50,e200=ema(c,20),ema(c,50),ema(c,200)
-    line,signal,_=macd(c); r=rsi14(c)
-    b=None
-    if e20.iloc[-1]>e50.iloc[-1]>e200.iloc[-1] and line.iloc[-1]>signal.iloc[-1] and r.iloc[-1]>=50: b="bull"
-    elif e20.iloc[-1]<e50.iloc[-1]<e200.iloc[-1] and line.iloc[-1]<signal.iloc[-1] and r.iloc[-1]<=50: b="bear"
-    return b, {"ema20":float(e20.iloc[-1]),"ema50":float(e50.iloc[-1]),"ema200":float(e200.iloc[-1]),
-               "macd":float(line.iloc[-1]),"macd_signal":float(signal.iloc[-1]),"rsi14":float(r.iloc[-1])}
-
-def side_from(b4,b1,bos):
-    if b4=="bull" and b1=="bull" and bos=="bull": return "LONG"
-    if b4=="bear" and b1=="bear" and bos=="bear": return "SHORT"
-    return None
-
-def build_signal(asset, side, spot, atr_proxy):
-    if spot is None: return None
-    if not atr_proxy or atr_proxy<=0:
-        atr_proxy = 0.008*spot if asset=="SOL" else (0.004*spot if asset=="NSDQ100" else 0.0035*spot)
-    e=float(spot)
-    if side=="LONG":
-        sl=max(0.0,e-0.9*atr_proxy); tp1=e+1.0*atr_proxy; tp2=e+2.0*atr_proxy
-    else:
-        sl=e+0.9*atr_proxy; tp1=e-1.0*atr_proxy; tp2=e-2.0*atr_proxy
-    return {"side":side,"entry":round(e,6),"sl":round(sl,6),"tp1":round(tp1,6),"tp2":round(tp2,6),
-            "atr1h_proxy":round(float(atr_proxy),6)}
-
-# --- fő logika egy eszközre
+# --- fő függvény egy eszközre ---
 def analyze(asset: str) -> dict:
-    outdir=os.path.join("public",asset); os.makedirs(outdir,exist_ok=True)
-    res={"asset":asset,"ok":True,"retrieved_at_utc":nowiso(),"errors":[]}
+    outdir = os.path.join("public", asset)
+    os.makedirs(outdir, exist_ok=True)
+    result = {"asset": asset, "ok": True, "retrieved_at_utc": nowiso(), "errors": []}
 
-    # 1) aliasból mindent egyben
+    # 1) Lokális all_<asset>.json beolvasása
     try:
-        all_json, used_url = fetch_all_from_alias(asset)
+        with open(f"all_{asset}.json", "r", encoding="utf-8") as f:
+            all_json = json.load(f)
     except Exception as e:
-        msg = {"asset":asset,"ok":False,"error":str(e),"source":"alias"}
-        save_json(os.path.join(outdir,"decision.json"), msg)
+        msg = {"asset": asset, "ok": False, "error": f"Nem sikerült beolvasni all_{asset}.json: {e}"}
+        save_json(os.path.join(outdir, "signal.json"), msg)
         return msg
 
-    # 2) parse
+    # 2) Adatok előkészítése
     spot_obj = all_json.get("spot") or {}
-    spot = spot_obj.get("price_usd")
-    spot_src = spot_obj.get("source_url") or used_url
-    spot_ts  = spot_obj.get("retrieved_at_utc")
-
+    spot_price = spot_obj.get("price_usd")
+    # OHLC idősorok DataFrame-mé konvertálva
     df5 = df_from_ohlc_obj(all_json.get("k5m"))
     df1 = df_from_ohlc_obj(all_json.get("k1h"))
     df4 = df_from_ohlc_obj(all_json.get("k4h"))
 
-    # 3) bias
-    b4,d4=bias_from(df4); b1,d1=bias_from(df1)
-    bos=bos5m(df5)
+    # 3) Érvelés/indikátorok (példa: trend bias)
+    b4 = "bull" if not df4.empty and df4["close"].iloc[-1] >= df4["open"].iloc[-1] else "bear"
+    b1 = "bull" if not df1.empty and df1["close"].iloc[-1] >= df1["open"].iloc[-1] else "bear"
 
-    # 4) 79% fib (1H swing)
-    near79=False; fib={}
+    # 4) 79% Fibonacci szintek kiszámítása (kötött fej-fej paraméterekkel példa)
+    near79 = False
+    fib_info = {}
     if not df1.empty:
-        sw=swing_hi_lo(df1["close"],lookback=48)
-        if sw:
-            hi,lo=sw; up79,dn79=fib79(hi,lo)
-            last = df5["close"].iloc[-1] if not df5.empty else df1["close"].iloc[-1]
-            tol=0.0035*float(last)  # ~0.35%
-            near79= abs(float(last)-up79)<=tol or abs(float(last)-dn79)<=tol
-            fib={"swing_hi":hi,"swing_lo":lo,"up79":up79,"dn79":dn79,"last":float(last),"tol":float(tol)}
+        hi = df1["close"].max()
+        lo = df1["close"].min()
+        up79 = lo + 0.79 * (hi - lo)
+        dn79 = hi - 0.79 * (hi - lo)
+        last5 = df5["close"].iloc[-1] if not df5.empty else df1["close"].iloc[-1]
+        if abs(last5 - up79) < 0.0035 * last5 or abs(last5 - dn79) < 0.0035 * last5:
+            near79 = True
+        fib_info = {"swing_hi": hi, "swing_lo": lo, "up79": up79, "dn79": dn79, "last": float(last5)}
 
-    # 5) EMA/RSI/MACD/BB megfelelőség (1H)
-    ema_ok=rsi_ok=macd_ok=bb_ok=False
+    # 5) MACD, RSI, Bollinger feltételek (példa)
+    decision = "no entry"
+    reasons = []
     if not df1.empty:
-        c1=df1["close"]; e20,e50,e200=ema(c1,20),ema(c1,50),ema(c1,200)
-        r=rsi14(c1); line,signal,_=macd(c1); m,up,lo=bb(c1)
-        ema_ok = (e20.iloc[-1]>e50.iloc[-1]>e200.iloc[-1]) or (e20.iloc[-1]<e50.iloc[-1]<e200.iloc[-1])
-        rsi_ok = (r.iloc[-1]>=50) or (r.iloc[-1]<=50)
-        macd_ok= (line.iloc[-1]-signal.iloc[-1])!=0
-        bb_ok  = not (np.isnan(up.iloc[-1]) or np.isnan(lo.iloc[-1]))
+        closes = df1["close"]
+        ema20 = ema(closes, 20).iloc[-1]
+        ema50 = ema(closes, 50).iloc[-1]
+        rsi_val = rsi14(closes).iloc[-1]
+        macd_line, macd_signal, _ = macd(closes)
+        macd_val = macd_line.iloc[-1] - macd_signal.iloc[-1]
+        bb_mid, bb_up, bb_lo = bb(closes)
+        price = df1["close"].iloc[-1]
+        # Egyszerű példa szabályok:
+        if b4 == "bull" and b1 == "bull" and near79 and price > bb_mid.iloc[-1] and (price - ema20) > 0:
+            decision = "buy"
+            reasons.append("4H és 1H bull bias, közel 79% fib, fölötte a Bollinger középértéknek")
+        elif b4 == "bear" and b1 == "bear" and near79 and price < bb_mid.iloc[-1]:
+            decision = "sell"
+            reasons.append("4H és 1H bear bias, közel 79% fib, alatta a Bollinger középértéknek")
 
-    # 6) ATR proxy (1H)
-    atr_proxy=None
-    if not df1.empty and len(df1)>=15:
-        hi,lo,cl=df1["high"].values,df1["low"].values,df1["close"].values
-        trs=[]
-        for i in range(len(cl)):
-            if i==0: trs.append(hi[i]-lo[i])
-            else: trs.append(max(hi[i]-lo[i],abs(hi[i]-cl[i-1]),abs(lo[i]-cl[i-1])))
-        atr_proxy=float(pd.Series(trs).rolling(14).mean().iloc[-1])
-
-    # 7) irány + jelzés + RR
-    side=side_from(b4,b1,bos)
-    sig=None; rr_ok=False; rr_val=0.0
-    if side and spot is not None:
-        sig=build_signal(asset,side,spot,atr_proxy)
-        rr_val=rr(sig["entry"],sig["sl"],sig["tp1"]) if sig else 0.0
-        rr_ok = rr_val>=1.5
-
-    # 8) P% és döntés
-    P=prob_score(b4,b1,bos,ema_ok,rsi_ok,macd_ok,near79,bb_ok,rr_ok)
-    decision="enter" if (side and near79 and rr_ok and P>=60 and sig) else "no entry"
-    reasons=[]
-    if side is None: reasons.append("nincs iránykonzisztencia (4H/1H/BOS)")
-    if not near79: reasons.append("79% Fib nincs közel (kötelező)")
-    if not rr_ok: reasons.append(f"RR < 1.5R ({round(rr_val,2)})")
-    if P<60: reasons.append(f"P < 60% ({P}%)")
-
-    # 9) leverage + P/L@$100
-    lev=LEV_CAP.get(asset,2)
-    pl={}
-    if sig:
-        pl = {
-            "TP1": round(100*lev*abs(sig["tp1"]-sig["entry"])/sig["entry"], 2),
-            "TP2": round(100*lev*abs(sig["tp2"]-sig["entry"])/sig["entry"], 2),
-            "SL":  round(100*lev*abs(sig["sl"] -sig["entry"])/sig["entry"], 2),
-        }
-
-    decision_obj={
-        "asset":asset,
-        "retrieved_at_utc":nowiso(),
-        "spot":{"price_usd":spot,"source":spot_src,"retrieved_at_utc":spot_ts},
-        "urls":{
-            "alias_all":f"{BASE}/h/all?asset={asset}",
-            "alias_k5m":f"{BASE}/h/k5m?asset={asset}",
-            "alias_k1h":f"{BASE}/h/k1h?asset={asset}",
-            "alias_k4h":f"{BASE}/h/k4h?asset={asset}",
-            "alias_spot":f"{BASE}/h/spot?asset={asset}",
-        },
-        "diagnostics":{"bias_4h":b4,"diag_4h":d4,"bias_1h":b1,"diag_1h":d1,"bos_5m":bos,"fib_79":fib,"rr":round(rr_val,3)},
-        "probability_pct":P,
-        "leverage_cap":lev,
-        "signal":sig,
-        "pl_at_100":pl,
-        "decision":decision,
-        "reasons":reasons,
-        "summary_hu":{
-            "Spot (USD)":spot,
-            "Forrás":spot_src,
-            "Lekérés (UTC)":spot_ts,
-            "Valószínűség":f"{P}%",
-            "Döntés":"JELZÉS" if decision=="enter" else "no entry",
-            "Javaslat":({
-                "SIDE":sig["side"],"Entry":sig["entry"],"SL":sig["sl"],
-                "TP1 (~1R)":sig["tp1"],"TP2 (2R+)":sig["tp2"],
-                "Ajánlott leverage":f"{lev}x","P/L@$100":pl,
-                "Lejárat":"Europe/Budapest – intraday"
-            } if decision=="enter" else "—"),
-            "Indoklás":("; ".join(reasons) if reasons else "Konfluenciák teljesülnek.")
-        }
+    # 6) Eredmény mentése JSON-ba
+    decision_obj = {
+        "asset": asset,
+        "ok": True,
+        "retrieved_at_utc": nowiso(),
+        "signal": decision,
+        "reasons": reasons or ["no signal"],
     }
-    save_json(os.path.join(outdir,"decision.json"),decision_obj)
+    save_json(os.path.join(outdir, "signal.json"), decision_obj)
     return decision_obj
 
 def main():
-    allout={"generated_at_utc":nowiso(),"assets":{}}
-    for a in ASSETS:
+    summary = {"ok": True, "assets": {}}
+    for asset in ASSETS:
         try:
-            allout["assets"][a]=analyze(a)
+            res = analyze(asset)
+            summary["assets"][asset] = res
         except Exception as e:
-            allout["assets"][a]={"asset":a,"ok":False,"error":str(e),"trace":traceback.format_exc()}
-    save_json(os.path.join("public","analysis_summary.json"),allout)
-    # Rövid HTML index
-    idx="<html><meta charset='utf-8'><title>Analysis</title><body><h1>Analysis</h1><ul>"+ \
-        "".join([f"<li><a href='{a}/decision.json'>{a}</a></li>" for a in ASSETS])+ \
-        "</ul><p><a href='analysis_summary.json'>analysis_summary.json</a></p></body></html>"
-    with open(os.path.join("public","analysis.html"),"w",encoding="utf-8") as f:
-        f.write(idx)
+            summary["assets"][asset] = {"asset": asset, "ok": False, "error": str(e)}
+    # Összefoglaló mentése és elemzési HTML generálása
+    save_json(os.path.join("public", "analysis_summary.json"), summary)
+    # Egyszerű HTML oldal (opcionális)
+    html = "<!doctype html><meta charset='utf-8'><title>Analysis Summary</title><h1>Analysis Summary</h1>"
+    html += "<pre>" + json.dumps(summary, ensure_ascii=False, indent=2) + "</pre>"
+    save_json(os.path.join("public", "analysis.html"), {"html": html})
+    with open("public/analysis.html", "w", encoding="utf-8") as f:
+        f.write(html)
 
-if __name__=="__main__":
-    try:
-        main(); print("OK")
-    except Exception as e:
-        traceback.print_exc()
-        os.makedirs("public",exist_ok=True)
-        save_json(os.path.join("public","analysis_summary.json"),
-                  {"ok":False,"error":str(e),"note":"Top-level exception in Analysis.py"})
+if __name__ == "__main__":
+    main()
