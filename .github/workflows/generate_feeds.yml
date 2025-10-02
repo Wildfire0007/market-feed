@@ -1,8 +1,8 @@
-name: Generate feeds (RAW-ready, 1M trigger)
+name: Generate feeds (RAW-ready, 30m trigger)
 
 on:
   schedule:
-    - cron: "*/30 5-21 * * *"   # UTC; kb. 07:00–23:59 Budapest
+    - cron: "*/30 5-21 * * *"   # UTC; kb. 07:00–23:59 (Budapest)
   workflow_dispatch: {}
 
 permissions:
@@ -12,7 +12,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      # A Twelve Data kulcs innen minden stepben elérhető lesz:
       TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
     steps:
       - name: Checkout
@@ -23,18 +22,16 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: Install deps
+      - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # (Nincs külön 'if: secrets…' lépés; a kulcs az env-ben van.)
-      - name: Run feed generator
+      - name: Run Trading.py (feed-generálás)
         run: python Trading.py
 
       - name: Commit JSON outputs
         run: |
-          set -e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add all_SOL.json all_NSDQ100.json all_GOLD_CFD.json || true
