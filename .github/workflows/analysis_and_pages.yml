@@ -1,4 +1,4 @@
-name: Analysis and Publish (Pages)
+name: Analysis and Publish (GitHub Pages)
 
 on:
   schedule:
@@ -17,20 +17,25 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: Install deps
+      - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run Analysis
-        run: python Analysis.py
+      - name: Generate feeds (Trading.py)
+        run: python Trading.py
+
+      - name: Run Analysis (analysis.py)
+        run: python analysis.py
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
@@ -45,5 +50,5 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
-        id: deployment
         uses: actions/deploy-pages@v4
+        id: deployment
