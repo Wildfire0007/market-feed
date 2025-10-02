@@ -1,4 +1,4 @@
-name: Build & Publish (Pages)
+name: Build & Publish (GitHub Pages)
 
 on:
   workflow_dispatch:
@@ -18,64 +18,48 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -V
           pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Prepare public dir
-        run: |
-          mkdir -p public
-          echo "=== repo root (pre) ==="
-          ls -la
-
-      # --- Itt történik a generálás. A Trading.py közvetlenül a public/ alá ír. ---
       - name: Generate feeds (Trading.py)
         env:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
         run: |
-          set -e
           python Trading.py
           echo "[KÉSZ] Fejlécek/decisions legenerálva."
 
-      # opcionális – ha van Analysis.py, fusson; ha nincs/hhiba, ne álljon meg a build
-      - name: Generate analysis (Analysis.py) — optional
+      - name: Run Analysis (optional)
         continue-on-error: true
         run: |
-          if [ -f Analysis.py ]; then python Analysis.py; else echo "Analysis.py nincs, lépek tovább."; fi
+          if [ -f analysis.py ]; then python analysis.py; else echo "analysis.py nem található, tovább lépek."; fi
 
-      # Minimális index, hogy a Pages gyökér ne legyen 404
       - name: Ensure index.html
         run: |
+          # Egyszerű index oldal generálása (ha üres a Pages gyökere)
           printf '%s\n' \
             '<!doctype html><meta charset="utf-8"><title>market-feed</title>' \
             '<h1>market-feed</h1>' \
             '<ul>' \
-            '<li><a href="./SOL/decision.json">SOL/decision.json</a></li>' \
-            '<li><a href="./NSDQ100/decision.json">NSDQ100/decision.json</a></li>' \
-            '<li><a href="./GOLD_CFD/decision.json">GOLD_CFD/decision.json</a></li>' \
+            '<li><a href="./SOL/signal.json">SOL/signal.json</a></li>' \
+            '<li><a href="./NSDQ100/signal.json">NSDQ100/signal.json</a></li>' \
+            '<li><a href="./GOLD_CFD/signal.json">GOLD_CFD/signal.json</a></li>' \
             '<li><a href="./analysis.html">analysis.html</a></li>' \
             '</ul>' \
             > public/index.html
 
-      # Csak listázunk – NEM törlünk, NEM másolunk semmit innen
-      - name: List public (debug)
-        run: |
-          echo "==== public (recursive) ===="
-          find public -type f -maxdepth 3 -print | sort
-
-      - name: Upload artifact (Pages)
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./public
@@ -88,5 +72,5 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
-        id: deployment
         uses: actions/deploy-pages@v4
+        id: deployment
