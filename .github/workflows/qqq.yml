@@ -49,8 +49,7 @@ jobs:
           DEBUG: "1"
         run: python Trading.py
 
-
-      # >>> EZ AZ ÚJ LÉPÉS: megőrizzük a Pages-en már kint lévő SOL és GOLD_CFD fájlokat
+      # Megőrizzük a SOL és GOLD_CFD meglévő Pages tartalmát
       - name: Merge existing Pages content (preserve SOL,GOLD_CFD)
         run: |
           set -e
@@ -59,12 +58,11 @@ jobs:
           for A in SOL GOLD_CFD; do
             for F in spot.json klines_5m.json klines_1h.json klines_4h.json signal.json; do
               URL="$BASE/$A/$F"
-              curl -fsS -o "public/$A/$F" "$URL" && echo "Preserved $A/$F" || true
+              # retry + follow, csendes hiba ha nincs meg a fájl (|| true)
+              curl -fLsS --retry 3 --retry-delay 1 --retry-connrefused -o "public/$A/$F" "$URL" && echo "Preserved $A/$F" || true
             done
-            # PNG chart (ha van)
-            curl -fsS -o "public/$A/chart_1d.png" "$BASE/$A/chart_1d.png" || true
+            curl -fLsS --retry 3 --retry-delay 1 --retry-connrefused -o "public/$A/chart_1d.png" "$BASE/$A/chart_1d.png" || true
           done
-      # <<<
 
       - name: Ensure index.html
         run: |
@@ -77,6 +75,12 @@ jobs:
             '<li><a href="./GOLD_CFD/signal.json">GOLD_CFD/signal.json</a></li>' \
             '<li><a href="./analysis.html">analysis.html</a></li>' \
             '</ul>' > public/index.html
+
+      # Artefakt-ellenőrzés (hasznos log)
+      - name: List artifact contents
+        run: |
+          echo "---- public/ (max 2 szint) ----"
+          find public -maxdepth 2 -type f -printf '%P\n' | sort
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
