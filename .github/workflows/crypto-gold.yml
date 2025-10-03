@@ -1,0 +1,25 @@
+name: crypto-gold
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      TD_PAUSE: "2.0"
+      ASSET_ONLY: "SOL,GOLD_CFD"   # Trading.py ezt figyeli (ha beépítjük)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Generate feeds (crypto+gold)
+        run: python Trading.py
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
