@@ -55,14 +55,12 @@ if _only:
 
 def nowiso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 # --- DEBUG log ---
 DEBUG = os.getenv("DEBUG", "0") == "1"
-
 def log(msg: str) -> None:
     if DEBUG:
-        # külön nowiso hívás nélkül: itt is időbélyegzünk
         print(f"[DEBUG] {datetime.now(timezone.utc).isoformat()} | {msg}", flush=True)
-
 
 def ensure_dir(p: str) -> None:
     os.makedirs(p, exist_ok=True)
@@ -135,7 +133,6 @@ def save_series_with_guard(asset_dir: str, fname: str, data: dict) -> None:
 
     save_json(path, data)
     log(f"{asset_dir}/{fname}: wrote {cnt} rows.")
-
 
 # ----------------- Coinbase (SOL) -----------------
 
@@ -213,7 +210,6 @@ def td_get(endpoint: str, params: dict, timeout: int = 20, max_retries: int = 3)
                 except Exception:
                     wait = backoff
                 log(f"TwelveData 429 on {endpoint} symbol={params.get('symbol')} interval={params.get('interval')} → wait {wait}s (attempt {attempt+1}/{max_retries})")
-  
                 time.sleep(wait)
                 backoff *= 2
                 continue
@@ -385,7 +381,6 @@ def process_TD_generic(asset_name: str, symbol: str):
                 if prev:
                     spot = prev
     log(f"{asset_name} spot source={spot.get('source')} price={spot.get('price_usd')}")
-
     save_json(os.path.join(adir, "spot.json"), spot)
 
     # 2) OHLC – csak akkor frissítünk, ha a meglévő túl öreg (stale-check)
@@ -399,15 +394,13 @@ def process_TD_generic(asset_name: str, symbol: str):
         ("4h",   "klines_4h.json", h4_min),
     ]
     for interval, fname, min_age in plan:
-    fpath = os.path.join(adir, fname)
-    age = file_age_sec(fpath)
-    do_refresh = should_refresh(fpath, min_age)
-    log(f"{asset_name} {interval}: age={int(age) if age is not None else 'NA'}s min={min_age}s → {'REFRESH' if do_refresh else 'SKIP'}")
-    if do_refresh:
-        data = td_series(symbol, interval, asset_name)
-        save_series_with_guard(adir, fname, data)
-    # ha nem kell frissíteni, meghagyjuk a meglévőt
-
+        fpath = os.path.join(adir, fname)
+        age = file_age_sec(fpath)
+        do_refresh = should_refresh(fpath, min_age)
+        log(f"{asset_name} {interval}: age={int(age) if age is not None else 'NA'}s min={min_age}s → {'REFRESH' if do_refresh else 'SKIP'}")
+        if do_refresh:
+            data = td_series(symbol, interval, asset_name)
+            save_series_with_guard(adir, fname, data)
         # ha nem kell frissíteni, meghagyjuk a meglévőt
 
     # 3) Jelzés 1h alapján
@@ -473,4 +466,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
