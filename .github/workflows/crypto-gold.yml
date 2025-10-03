@@ -5,12 +5,16 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
+concurrency:
+  group: crypto-gold
+  cancel-in-progress: true
+
 jobs:
   run:
     runs-on: ubuntu-latest
     env:
       TD_PAUSE: "2.0"
-      ASSET_ONLY: "SOL,GOLD_CFD"   # Trading.py ezt figyeli (ha beépítjük)
+      ASSET_ONLY: "SOL,GOLD_CFD"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
