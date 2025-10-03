@@ -128,15 +128,37 @@ def df_to_values(df: pd.DataFrame) -> list[dict]:
 
 # ----------------- TwelveData (QQQ, GOLD_CFD) -----------------
 
-def td_get(endpoint: str, params: dict, timeout: int = 20):
+def td_get(endpoint: str, params: dict, timeout: int = 20, max_retries: int = 3):
     if not TD_API_KEY:
         raise RuntimeError("Missing TWELVEDATA_API_KEY")
     url = f"{TD_BASE}/{endpoint}"
-    p = dict(params); p["apikey"] = TD_API_KEY
-    r = requests.get(url, params=p, timeout=timeout, headers={"User-Agent": "market-feed/1.0"})
-    r.raise_for_status()
-    time.sleep(TD_PAUSE)  # kvóta kímélés
-    return r.json()
+    p = dict(params)
+    p["apikey"] = TD_API_KEY
+
+    backoff = 1.2  # kezdő várakozás (s), exponenciálisan nő
+    for attempt in range(max_retries):
+        try:
+            r = requests.get(url, params=p, timeout=timeout, headers={"User-Agent": "market-feed/1.0"})
+            # 429 – túl sok kérés: tiszteljük a Retry-After-t, különben backoff
+            if r.status_code == 429:
+                ra = r.headers.get("Retry-After")
+                wait = float(ra) if (ra and ra.isdigit()) else backoff
+                time.sleep(wait)
+                backoff *= 2
+                continue
+
+            r.raise_for_status()
+            data = r.json()
+            time.sleep(TD_PAUSE)  # kvóta kímélése siker esetén is
+            return data
+
+        except requests.exceptions.RequestException as e:
+            # utolsó próbálkozásnál dobjuk tovább, különben várunk és újrapróbáljuk
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(backoff)
+            backoff *= 2
+
 
 def td_spot(symbol: str, asset_name: str) -> dict:
     try:
@@ -295,4 +317,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
