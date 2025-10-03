@@ -51,7 +51,9 @@ def ensure_dir(p: str) -> None:
     os.makedirs(p, exist_ok=True)
 
 def save_json(path: str, obj: Dict[str, Any]) -> None:
-    ensure_dir(os.path.dirname(path))
+    dirpath = os.path.dirname(path)
+    if dirpath:  # csak akkor hozunk létre könyvtárat, ha van megadott mappa
+        os.makedirs(dirpath, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
@@ -293,3 +295,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
