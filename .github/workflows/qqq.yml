@@ -2,28 +2,58 @@ name: qqq
 
 on:
   schedule:
-    - cron: "*/15 13-20 * * 1-5"
+    - cron: "*/15 13-20 * * 1-5"   # H-P 13:00–20:59 UTC (US piac), 15 perc
   workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 
 concurrency:
   group: qqq
   cancel-in-progress: true
 
 jobs:
-  run:
+  build-and-deploy:
     runs-on: ubuntu-latest
-    env:
-      TD_PAUSE: "2.0"
-      ASSET_ONLY: "NSDQ100"
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
+
+      - name: Install deps
+        run: |
+          python -V
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
       - name: Generate feeds (QQQ only)
+        env:
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          TD_PAUSE: "2.0"
+          ASSET_ONLY: "NSDQ100"
         run: python Trading.py
+
+      - name: Ensure index.html
+        run: |
+          mkdir -p public
+          printf '%s\n' \
+            '<!doctype html><meta charset="utf-8"><title>market-feed</title>' \
+            '<h1>market-feed</h1><ul>' \
+            '<li><a href="./SOL/signal.json">SOL/signal.json</a></li>' \
+            '<li><a href="./NSDQ100/signal.json">NSDQ100/signal.json</a></li>' \
+            '<li><a href="./GOLD_CFD/signal.json">GOLD_CFD/signal.json</a></li>' \
+            '<li><a href="./analysis.html">analysis.html</a></li>' \
+            '</ul>' > public/index.html
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
