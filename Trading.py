@@ -4,22 +4,20 @@
 """
 Trading.py — market-feed generator
 - SOL: Coinbase (public REST)
-- NSDQ100 (QQQ) + GOLD_CFD (XAU/USD): TwelveData REST
-- Kimenetek eszközönként: public/<ASSET>/
-    - spot.json (price_usd, source, ok, retrieved_at_utc)
-    - klines_5m.json
-    - klines_1h.json
-    - klines_4h.json (SOL: 1h->4h aggregálva)
-    - signal.json (egyszerű EMA9/21 trend-placeholder)
-- Extra:
-    - public/all_<ASSET>.json (aggregált)
-    - public/analysis_summary.json + public/analysis.html
-ASSET_ONLY env (pl. "SOL,GOLD_CFD") támogatott.
+- NSDQ100 (QQQ) + GOLD_CFD (XAU/USD): TwelveData (API key szükséges)
+Kimenetek eszközönként: public/<ASSET>/
+  - spot.json (price_usd, source, ok, retrieved_at_utc)
+  - klines_5m.json, klines_1h.json, klines_4h.json
+  - signal.json (egyszerű EMA9/21 trend jelzés)
+Extra:
+  - public/all_<ASSET>.json (aggregált)
+  - public/analysis_summary.json + public/analysis.html
+Env: ASSET_ONLY = "SOL,GOLD_CFD" stb. a szűréshez.
 """
 
 import os, json, time
 from datetime import datetime, timezone
-from typing import List, Dict, Any
+from typing import Dict, Any, List
 
 import requests
 import pandas as pd
@@ -29,22 +27,22 @@ OUT_DIR = "public"
 
 TD_API_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
 TD_BASE = "https://api.twelvedata.com"
-TD_PAUSE = float(os.getenv("TD_PAUSE", "1.5"))  # mp
+TD_PAUSE = float(os.getenv("TD_PAUSE", "1.5"))
 
 CB_BASE = "https://api.exchange.coinbase.com"
 
 ASSETS = [
-    {"name": "SOL",       "source": "coinbase",   "cb_pair": "SOL-USD"},
-    {"name": "NSDQ100",   "source": "twelvedata", "td_symbol": "QQQ"},
-    {"name": "GOLD_CFD",  "source": "twelvedata", "td_symbol": "XAU/USD"},
+    {"name": "SOL",      "source": "coinbase",   "cb_pair": "SOL-USD"},
+    {"name": "NSDQ100",  "source": "twelvedata", "td_symbol": "QQQ"},
+    {"name": "GOLD_CFD", "source": "twelvedata", "td_symbol": "XAU/USD"},
 ]
 
 # --- env alapú szűrés ---
-_raw_only = [x.strip().upper() for x in os.getenv("ASSET_ONLY", "").split(",") if x.strip()]
-if _raw_only:
-    ASSETS = [a for a in ASSETS if a["name"].upper() in _raw_only]
+_only = [x.strip().upper() for x in os.getenv("ASSET_ONLY", "").split(",") if x.strip()]
+if _only:
+    ASSETS = [a for a in ASSETS if a["name"].upper() in _only]
 
-# ----------------------------- IO segédek -----------------------------
+# ----------------- segédek -----------------
 
 def nowiso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -72,7 +70,7 @@ def with_status_ok(payload: Dict[str, Any], ok: bool, error: str | None = None) 
         payload["error"] = error
     return payload
 
-# ----------------------------- Coinbase (SOL) -----------------------------
+# ----------------- Coinbase (SOL) -----------------
 
 def cb_get(path: str, params: dict | None = None, timeout: int = 15):
     url = f"{CB_BASE}{path}"
@@ -96,28 +94,23 @@ def coinbase_spot(pair: str) -> dict:
     except Exception as e:
         return with_status_ok({"asset": "SOL", "source": "coinbase"}, False, f"spot error: {e}")
 
-# Coinbase /candles -> [ time, low, high, open, close, volume ] (max 300)
-# Granularity engedélyezett: 60,300,900,3600,21600,86400. 1h->4h aggregálás külön történik.
-def coinbase_candles(pair: str, granularity_sec: int = 300,
-                     start_iso: str | None = None, end_iso: str | None = None) -> list:
+# candles: [ time, low, high, open, close, volume ] (max ~300), granu: 60/300/900/3600/21600/86400
+def coinbase_candles(pair: str, granularity_sec: int = 300, start_iso: str | None = None, end_iso: str | None = None) -> list:
     params = {"granularity": granularity_sec}
-    if start_iso:
-        params["start"] = start_iso
-    if end_iso:
-        params["end"] = end_iso
+    if start_iso: params["start"] = start_iso
+    if end_iso:   params["end"] = end_iso
     rows = cb_get(f"/products/{pair}/candles", params=params)
     rows = sorted(rows, key=lambda x: x[0])
     return rows
 
 def cb_rows_to_df(rows: list) -> pd.DataFrame:
     idx = pd.to_datetime([int(r[0]) for r in rows], unit="s", utc=True).tz_convert(None)
-    df = pd.DataFrame({
+    return pd.DataFrame({
         "open":  [float(r[3]) for r in rows],
         "high":  [float(r[2]) for r in rows],
         "low":   [float(r[1]) for r in rows],
         "close": [float(r[4]) for r in rows],
     }, index=idx)
-    return df
 
 def df_to_values(df: pd.DataFrame) -> list[dict]:
     out = []
@@ -131,17 +124,16 @@ def df_to_values(df: pd.DataFrame) -> list[dict]:
         })
     return out
 
-# ----------------------------- TwelveData (QQQ, GOLD_CFD) -----------------------------
+# ----------------- TwelveData (QQQ, GOLD_CFD) -----------------
 
 def td_get(endpoint: str, params: dict, timeout: int = 20):
     if not TD_API_KEY:
         raise RuntimeError("Missing TWELVEDATA_API_KEY")
     url = f"{TD_BASE}/{endpoint}"
-    p = dict(params)
-    p["apikey"] = TD_API_KEY
+    p = dict(params); p["apikey"] = TD_API_KEY
     r = requests.get(url, params=p, timeout=timeout, headers={"User-Agent": "market-feed/1.0"})
     r.raise_for_status()
-    time.sleep(TD_PAUSE)  # kvóta-kímélés
+    time.sleep(TD_PAUSE)  # kvóta kímélés
     return r.json()
 
 def td_spot(symbol: str, asset_name: str) -> dict:
@@ -149,51 +141,31 @@ def td_spot(symbol: str, asset_name: str) -> dict:
         j = td_get("price", {"symbol": symbol})
         price = None
         if isinstance(j, dict) and j.get("price") not in (None, "None"):
-            try:
-                price = float(j["price"])
-            except Exception:
-                price = None
+            try: price = float(j["price"])
+            except Exception: price = None
         if price is None and isinstance(j, dict) and j.get("status") == "error":
             return with_status_ok({"asset": asset_name, "source": "twelvedata"}, False, f"spot: {j.get('message')}")
-        return with_status_ok(
-            {"asset": asset_name, "price_usd": price, "source": "twelvedata", "raw": j},
-            price is not None
-        )
+        return with_status_ok({"asset": asset_name, "price_usd": price, "source": "twelvedata", "raw": j}, price is not None)
     except Exception as e:
         return with_status_ok({"asset": asset_name, "source": "twelvedata"}, False, f"spot error: {e}")
 
 def td_series(symbol: str, interval: str, asset_name: str) -> dict:
-    # interval: '5min' | '1h' | '4h'
     try:
-        j = td_get("time_series", {
-            "symbol": symbol,
-            "interval": interval,
-            "outputsize": 300,
-            "timezone": "UTC",
-        })
+        j = td_get("time_series", {"symbol": symbol, "interval": interval, "outputsize": 300, "timezone": "UTC"})
         if isinstance(j, dict) and j.get("status") == "error":
             return {"ok": False, "status": "error", "error": j.get("message"), "meta": {"symbol": symbol, "interval": interval}, "values": [], "retrieved_at_utc": nowiso()}
         meta = j.get("meta", {}) if isinstance(j, dict) else {}
         vals = list(reversed(j.get("values", []) or []))
-        return {
-            "ok": True,
-            "status": "ok",
-            "meta": {
-                "symbol": meta.get("symbol", symbol),
-                "interval": interval,
-                "currency": meta.get("currency"),
-                "exchange": meta.get("exchange"),
-                "exchange_timezone": meta.get("exchange_timezone"),
-                "type": meta.get("type"),
-                "source": "twelvedata",
-            },
-            "values": vals,
-            "retrieved_at_utc": nowiso(),
-        }
+        return {"ok": True, "status": "ok",
+                "meta": {"symbol": meta.get("symbol", symbol), "interval": interval,
+                         "currency": meta.get("currency"), "exchange": meta.get("exchange"),
+                         "exchange_timezone": meta.get("exchange_timezone"), "type": meta.get("type"),
+                         "source": "twelvedata"},
+                "values": vals, "retrieved_at_utc": nowiso()}
     except Exception as e:
         return {"ok": False, "status": "error", "error": f"TwelveData {interval} fetch failed: {e}", "meta": {"symbol": symbol, "interval": interval}, "values": [], "retrieved_at_utc": nowiso()}
 
-# ----------------------------- jelzés (placeholder) -----------------------------
+# ----------------- jelzés (egyszerű EMA9/21) -----------------
 
 def simple_signal_from_df(df: pd.DataFrame) -> tuple[str, list[str]]:
     if df is None or df.empty or len(df) < 30:
@@ -209,22 +181,16 @@ def simple_signal_from_df(df: pd.DataFrame) -> tuple[str, list[str]]:
 
 def dump_signal(asset_dir: str, asset_name: str, df_for_signal: pd.DataFrame | None):
     sig, reasons = simple_signal_from_df(df_for_signal)
-    save_json(os.path.join(asset_dir, "signal.json"), {
-        "asset": asset_name,
-        "ok": True,
-        "retrieved_at_utc": nowiso(),
-        "signal": sig,
-        "reasons": reasons
-    })
+    save_json(os.path.join(asset_dir, "signal.json"),
+              {"asset": asset_name, "ok": True, "retrieved_at_utc": nowiso(), "signal": sig, "reasons": reasons})
 
-# ----------------------------- eszközfeldolgozók -----------------------------
+# ----------------- eszköz feldolgozók -----------------
 
 def process_SOL_coinbase(pair: str):
     asset = "SOL"
-    adir = os.path.join(OUT_DIR, asset)
-    ensure_dir(adir)
+    adir = os.path.join(OUT_DIR, asset); ensure_dir(adir)
 
-    spot = coinbase_spot(pair);                        save_json(os.path.join(adir, "spot.json"), spot)
+    spot = coinbase_spot(pair); save_json(os.path.join(adir, "spot.json"), spot)
 
     # 5m
     try:
@@ -251,8 +217,7 @@ def process_SOL_coinbase(pair: str):
     # 4h (1h->4h)
     try:
         if df1 is None:
-            k1_rows = coinbase_candles(pair, 3600)
-            df1 = cb_rows_to_df(k1_rows)
+            k1_rows = coinbase_candles(pair, 3600); df1 = cb_rows_to_df(k1_rows)
         k4 = df1.resample("4H").agg({"open": "first", "high": "max", "low": "min", "close": "last"}).dropna()
         save_json(os.path.join(adir, "klines_4h.json"),
                   {"meta": {"symbol": pair.replace("-", "/"), "interval": "4h", "source": "coinbase (1h->4h)"},
@@ -263,14 +228,14 @@ def process_SOL_coinbase(pair: str):
     dump_signal(adir, asset, df1 if isinstance(df1, pd.DataFrame) else None)
 
 def process_TD_generic(asset_name: str, symbol: str):
-    adir = os.path.join(OUT_DIR, asset_name)
-    ensure_dir(adir)
+    adir = os.path.join(OUT_DIR, asset_name); ensure_dir(adir)
 
-    spot = td_spot(symbol, asset_name);               save_json(os.path.join(adir, "spot.json"), spot)
+    spot = td_spot(symbol, asset_name); save_json(os.path.join(adir, "spot.json"), spot)
+
     for interval, fname in [("5min", "klines_5m.json"), ("1h", "klines_1h.json"), ("4h", "klines_4h.json")]:
         save_json(os.path.join(adir, fname), td_series(symbol, interval, asset_name))
 
-    # jelzés (1h values -> DF)
+    # jelzés 1h alapján
     vals = read_json(os.path.join(adir, "klines_1h.json")).get("values", [])
     df = None
     if vals:
@@ -283,10 +248,9 @@ def process_TD_generic(asset_name: str, symbol: str):
         }, index=idx)
     dump_signal(adir, asset_name, df)
 
-# ----------------------------- aggregátorok -----------------------------
+# ----------------- aggregátorok -----------------
 
 def write_all_asset(asset: str):
-    """public/<asset> alól összefűz egy all_<ASSET>.json fájlt (gyökérbe és public-ba is)."""
     adir = os.path.join(OUT_DIR, asset)
     obj = {
         "asset": asset,
@@ -299,8 +263,7 @@ def write_all_asset(asset: str):
         "ok": True,
     }
     save_json(os.path.join(OUT_DIR, f"all_{asset}.json"), obj)
-    # kompatibilitás a régi elvárással (repo gyökér)
-    save_json(os.path.join(f"all_{asset}.json"), obj)
+    save_json(os.path.join(f"all_{asset}.json"), obj)  # kompatibilitás
 
 def write_summary(assets: List[dict]):
     summ = {"ok": True, "retrieved_at_utc": nowiso(), "assets": {}}
@@ -315,7 +278,7 @@ def write_summary(assets: List[dict]):
     with open(os.path.join(OUT_DIR, "analysis.html"), "w", encoding="utf-8") as f:
         f.write(html)
 
-# ----------------------------- main -----------------------------
+# ----------------- main -----------------
 
 def main():
     ensure_dir(OUT_DIR)
