@@ -1,8 +1,8 @@
-name: qqq
+name: crypto-gold
 
 on:
   schedule:
-    - cron: "*/15 13-20 * * 1-5"   # H-P 13:00–20:59 UTC (US RTH), 15 percenként
+    - cron: "*/5 * * * *"   # 5 percenként (UTC)
   workflow_dispatch:
 
 permissions:
@@ -11,7 +11,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: qqq
+  group: crypto-gold
   cancel-in-progress: true
 
 jobs:
@@ -32,11 +32,11 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Generate feeds (QQQ only, 15m)
+      - name: Generate feeds (SOL + GOLD_CFD)
         env:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           TD_PAUSE: "2.0"
-          ASSET_ONLY: "NSDQ100"
+          ASSET_ONLY: "SOL,GOLD_CFD"
         run: python Trading.py
 
       - name: Ensure index.html
