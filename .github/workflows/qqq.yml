@@ -2,7 +2,7 @@ name: qqq
 
 on:
   schedule:
-    - cron: "*/15 13-20 * * 1-5"   # H-P 13:00–20:59 UTC (US piac), 15 perc
+    - cron: "*/15 13-20 * * 1-5"   # H-P 13:00–20:59 UTC (US RTH), 15 percenként
   workflow_dispatch:
 
 permissions:
@@ -17,6 +17,8 @@ concurrency:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
     steps:
       - uses: actions/checkout@v4
 
@@ -30,7 +32,7 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Generate feeds (QQQ only)
+      - name: Generate feeds (QQQ only, 15m)
         env:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           TD_PAUSE: "2.0"
@@ -48,6 +50,9 @@ jobs:
             '<li><a href="./GOLD_CFD/signal.json">GOLD_CFD/signal.json</a></li>' \
             '<li><a href="./analysis.html">analysis.html</a></li>' \
             '</ul>' > public/index.html
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
