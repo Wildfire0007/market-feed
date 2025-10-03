@@ -43,6 +43,23 @@ if _only:
     ASSETS = [a for a in ASSETS if a["name"].upper() in _only]
 
 # ----------------- segédek -----------------
+def parse_iso(ts: str):
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+def file_age_sec(path: str) -> float | None:
+    j = read_json(path)
+    ts = j.get("retrieved_at_utc")
+    if not ts: return None
+    dt = parse_iso(ts)
+    if not dt: return None
+    return (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds()
+
+def should_refresh(path: str, min_age_sec: int) -> bool:
+    age = file_age_sec(path)
+    return (age is None) or (age >= min_age_sec)
 
 def nowiso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -71,6 +88,19 @@ def with_status_ok(payload: Dict[str, Any], ok: bool, error: str | None = None) 
     if not ok and error:
         payload["error"] = error
     return payload
+def save_series_with_guard(asset_dir: str, fname: str, data: dict) -> None:
+    """Ha a TwelveData válasz error vagy üres values, megtartjuk a meglévő fájlt."""
+    path = os.path.join(asset_dir, fname)
+    is_bad = False
+    if isinstance(data, dict):
+        if (data.get("status") == "error") or (data.get("ok") is False) or (not data.get("values")):
+            is_bad = True
+    if is_bad:
+        prev = read_json(path)
+        # ha volt már valid tartalom, nem írjuk felül hibával
+        if prev.get("values"):
+            return
+    save_json(path, data)
 
 # ----------------- Coinbase (SOL) -----------------
 
@@ -256,8 +286,12 @@ def process_TD_generic(asset_name: str, symbol: str):
 
     spot = td_spot(symbol, asset_name); save_json(os.path.join(adir, "spot.json"), spot)
 
-    for interval, fname in [("5min", "klines_5m.json"), ("1h", "klines_1h.json"), ("4h", "klines_4h.json")]:
-        save_json(os.path.join(adir, fname), td_series(symbol, interval, asset_name))
+        for interval, fname in [("5min", "klines_5m.json"),
+                            ("1h",   "klines_1h.json"),
+                            ("4h",   "klines_4h.json")]:
+        data = td_series(symbol, interval, asset_name)          # <-- előbb lekérjük
+        save_series_with_guard(adir, fname, data)               # <-- majd GUARDDAL mentjük
+
 
     # jelzés 1h alapján
     vals = read_json(os.path.join(adir, "klines_1h.json")).get("values", [])
@@ -317,5 +351,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
