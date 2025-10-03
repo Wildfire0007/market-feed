@@ -1,357 +1,345 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# Trading.py
+# --- Adatgyűjtés + jel-generálás Pages publikáláshoz -------------------------
+# SOL: Cloudflare Worker (ingyenes), 1h -> 4h aggregálás Pythonban
+# GOLD_CFD, NSDQ100: TwelveData (csak 1 kérés/asset: 5min -> 1h aggregálás)
 
-"""
-Builds JSON feeds under ./public for: SOL, NSDQ100 (QQQ), GOLD_CFD
-- SOL: Coinbase public API
-- GOLD_CFD (XAU/USD): Yahoo Finance (yfinance)
-- NSDQ100 (QQQ): TwelveData (needs TWELVEDATA_API_KEY env)
-Includes TTL-based throttling to spare API quotas.
-
-Output structure per asset (unchanged):
-  public/<ASSET>/
-    spot.json
-    klines_5m.json
-    klines_1h.json
-    klines_4h.json
-    signal.json
-"""
-
-import os, json, time, math
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-
+import os, json, math, time
+from datetime import datetime, timezone
 import requests
 import pandas as pd
 import numpy as np
 
-# yfinance for GOLD (XAUUSD)
-import yfinance as yf
+# ----------------------------- Beállítások -----------------------------------
 
-TD_API_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
+CF_WORKER_BASE = os.getenv(
+    "CF_WORKER_BASE",
+    "https://market-feed-proxy.czipo-agnes.workers.dev"
+).rstrip("/")
 
-ROOT = Path("public")
-ROOT.mkdir(parents=True, exist_ok=True)
+TD_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
 
-# --- TTLs (cache windows) ---
-TTL = {
-    "spot": 5 * 60,       # 5 perc
-    "k5m": 15 * 60,       # 15 perc
-    "k1h": 60 * 60,       # 60 perc
-    "k4h": 4 * 60 * 60,   # 4 óra
-    "signal": 5 * 60,     # jelzés, ha input frissült, úgyis újraírjuk
-}
+OUTDIR = "public"
+
+# Mit publikálunk
+ASSETS = ["SOL", "GOLD_CFD", "NSDQ100"]
+
+# Mennyi historika elég
+TD_OUTPUTSIZE_5M = 300   # ~25 óra (kvótakímélő, de elég 1h resample-hez)
+SOL_OUTPUTSIZE_1H = 400  # worker default bőven elég szignálhoz
+
+# ------------------------------ Segédfüggvények ------------------------------
 
 def nowiso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-def write_json(path: Path, obj: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
+def ensure_dir(path: str):
+    os.makedirs(path, exist_ok=True)
+
+def save_json(path: str, obj):
+    ensure_dir(os.path.dirname(path))
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
-def read_json(path: Path):
+def http_get_json(url: str, params=None, timeout=30):
+    r = requests.get(url, params=params, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+def to_float(x):
     try:
-        with path.open("r", encoding="utf-8") as f:
-            return json.load(f)
+        return float(x)
     except Exception:
-        return None
+        return np.nan
 
-def fresh_enough(path: Path, ttl_sec: int) -> bool:
-    if not path.exists():
-        return False
+def df_from_values(values):
+    """TwelveData/Worker féle values -> pandas OHLC DF UTC index-szel"""
+    if not values:
+        return pd.DataFrame(columns=["open","high","low","close"])
+    rows = []
+    for it in values:
+        dt = pd.to_datetime(it.get("datetime") or it.get("time") or it.get("timestamp"), utc=True)
+        rows.append([
+            dt,
+            to_float(it.get("open")),
+            to_float(it.get("high")),
+            to_float(it.get("low")),
+            to_float(it.get("close")),
+        ])
+    df = pd.DataFrame(rows, columns=["datetime","open","high","low","close"]).set_index("datetime").sort_index()
+    return df
+
+def resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """Pandas OHLC resample (right-closed), utolsó csonka gyertyát eldobjuk"""
+    if df.empty:
+        return df.copy()
+    rs = df.resample(rule, label="right", closed="right").agg({
+        "open":"first","high":"max","low":"min","close":"last"
+    })
+    # Drop csonka utolsó bar, ha épp most képződik
+    if not rs.empty and rs.index[-1] > df.index[-1]:
+        rs = rs.iloc[:-1]
+    return rs.dropna()
+
+# --- indikátorok ---
+
+def ema(series: pd.Series, n: int) -> pd.Series:
+    return series.ewm(span=n, adjust=False).mean()
+
+def rsi(series: pd.Series, n: int = 14) -> pd.Series:
+    delta = series.diff()
+    up = delta.clip(lower=0.0)
+    down = -delta.clip(upper=0.0)
+    ma_up = up.ewm(alpha=1/n, adjust=False).mean()
+    ma_down = down.ewm(alpha=1/n, adjust=False).mean()
+    rs = ma_up / ma_down.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+def macd(series: pd.Series, fast=12, slow=26, signal=9):
+    macd_line = ema(series, fast) - ema(series, slow)
+    signal_line = ema(macd_line, signal)
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
+
+def bollinger(series: pd.Series, n=20, k=2.0):
+    ma = series.rolling(n).mean()
+    sd = series.rolling(n).std()
+    upper = ma + k*sd
+    lower = ma - k*sd
+    return ma, upper, lower
+
+# --- jelgenerálás (egyszerű, óvatos): ---------------------------------------
+def basic_signal(df: pd.DataFrame):
+    """
+    Egyszerű szabály:
+    - BUY: close > EMA(21) és MACD hist > 0 és RSI > 50
+    - SELL: close < EMA(21) és MACD hist < 0 és RSI < 50
+    - különben: no entry
+    """
+    if df is None or df.empty or len(df) < 30:
+        return "no entry", ["insufficient data"]
+
+    close = df["close"]
+    e21 = ema(close, 21)
+    macd_line, sig, hist = macd(close)
+    r = rsi(close, 14)
+
+    last = df.index[-1]
+    cond_buy  = (close.loc[last] > e21.loc[last]) and (hist.loc[last] > 0) and (r.loc[last] > 50)
+    cond_sell = (close.loc[last] < e21.loc[last]) and (hist.loc[last] < 0) and (r.loc[last] < 50)
+
+    if cond_buy:
+        return "buy",  ["close>ema21", "macd_hist>0", "rsi>50"]
+    if cond_sell:
+        return "sell", ["close<ema21", "macd_hist<0", "rsi<50"]
+    return "no entry", ["no signal"]
+
+# ----------------------------- Források --------------------------------------
+
+# --- SOL: Cloudflare Worker ---
+def worker_spot(asset="SOL"):
+    url = f"{CF_WORKER_BASE}/spot"
     try:
-        mtime = path.stat().st_mtime
-        return (time.time() - mtime) < ttl_sec
-    except Exception:
-        return False
-
-def ensure(path: Path, ttl_sec: int, producer_fn):
-    """If path is fresh, return False. Otherwise call producer_fn() and write -> True."""
-    if fresh_enough(path, ttl_sec):
-        return False
-    try:
-        data = producer_fn()
-    except Exception as e:
-        data = {"ok": False, "error": f"{type(e).__name__}: {e}", "retrieved_at_utc": nowiso()}
-    write_json(path, data)
-    return True
-
-# ---- helpers to shape OHLC output ----
-def df_to_values(df: pd.DataFrame) -> list:
-    # Expect df index as datetime (UTC) and columns: open/high/low/close
-    out = []
-    if df is None or df.empty:
+        data = http_get_json(url, {"asset": asset})
+        ok = bool(data.get("ok"))
+        if not ok:
+            return {"asset": asset, "ok": False, "error": data.get("error","worker spot error"), "retrieved_at_utc": nowiso()}
+        # Átnevezés és vékonyítás
+        out = {
+            "asset": asset,
+            "ok": True,
+            "symbol": data.get("symbol","SOL/USD"),
+            "price": to_float(data.get("price")),
+            "bid": to_float(data.get("nav",{}).get("bid")),
+            "ask": to_float(data.get("nav",{}).get("ask")),
+            "volume": to_float(data.get("volume")),
+            "time": data.get("time"),
+            "retrieved_at_utc": nowiso(),
+        }
         return out
-    for ts, row in df.iterrows():
-        out.append({
-            "datetime": ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "open": f"{row['open']:.2f}",
-            "high": f"{row['high']:.2f}",
-            "low":  f"{row['low']:.2f}",
-            "close":f"{row['close']:.2f}",
-        })
-    return out
-
-# =========================
-# SOL (Coinbase)
-# =========================
-def sol_spot_coinbase():
-    url = "https://api.exchange.coinbase.com/products/SOL-USD/ticker"
-    r = requests.get(url, timeout=15)
-    if r.status_code != 200:
-        return {"asset": "SOL", "ok": False, "error": f"HTTP {r.status_code}", "retrieved_at_utc": nowiso()}
-    j = r.json()
-    price = j.get("price")
-    if price is None:
-        return {"asset": "SOL", "ok": False, "error": "no price", "retrieved_at_utc": nowiso()}
-    return {
-        "asset": "SOL",
-        "ok": True,
-        "price": float(price),
-        "raw": j,
-        "symbol": "SOL/USD",
-        "retrieved_at_utc": nowiso(),
-    }
-
-def sol_klines_coinbase(granularity: int, label: str):
-    """
-    Coinbase candles:
-      GET /products/SOL-USD/candles?granularity=300|3600|14400
-      returns [[time, low, high, open, close, volume], ...] (time = Unix)
-    """
-    url = "https://api.exchange.coinbase.com/products/SOL-USD/candles"
-    r = requests.get(url, params={"granularity": granularity}, timeout=20)
-    if r.status_code != 200:
-        return {"ok": False, "status": "error", "meta": {"symbol": "SOL/USD", "interval": label}, "error": f"HTTP {r.status_code}", "retrieved_at_utc": nowiso()}
-    arr = r.json()
-    if not isinstance(arr, list):
-        return {"ok": False, "status": "error", "meta": {"symbol": "SOL/USD", "interval": label}, "error": "bad response", "retrieved_at_utc": nowiso()}
-
-    # Coinbase returns latest first; sort ascending by time
-    arr.sort(key=lambda x: x[0])
-
-    idx = pd.to_datetime([x[0] for x in arr], unit="s", utc=True)
-    df = pd.DataFrame({
-        "open":  [float(x[3]) for x in arr],
-        "high":  [float(x[2]) for x in arr],
-        "low":   [float(x[1]) for x in arr],
-        "close": [float(x[4]) for x in arr],
-    }, index=idx)
-
-    return {
-        "meta": {
-            "symbol": "SOL/USD",
-            "interval": label,
-            "currency_base": "Solana",
-            "currency_quote": "US Dollar",
-            "exchange": "Coinbase",
-            "type": "Digital Currency",
-        },
-        "values": df_to_values(df),
-        "status": "ok",
-        "ok": True,
-        "retrieved_at_utc": nowiso(),
-    }
-
-# =========================
-# GOLD (XAU/USD via yfinance)
-# =========================
-XAU_TICKER = "XAUUSD=X"  # Yahoo Finance symbol for spot XAU/USD
-
-def gold_spot_yf():
-    try:
-        t = yf.Ticker(XAU_TICKER)
-        # fast path: use info['regularMarketPrice'] if available; else last close from 1m
-        price = None
-        info = t.fast_info if hasattr(t, "fast_info") else None
-        if info and getattr(info, "last_price", None) is not None:
-            price = float(info.last_price)
-        if price is None:
-            hist = t.history(period="1d", interval="1m")
-            if not hist.empty:
-                price = float(hist["Close"].iloc[-1])
-        if price is None:
-            return {"asset": "GOLD_CFD", "ok": False, "error": "no price", "retrieved_at_utc": nowiso()}
-        return {
-            "asset": "GOLD_CFD",
-            "ok": True,
-            "price": price,
-            "raw": {"source": "yfinance", "ticker": XAU_TICKER},
-            "symbol": "XAU/USD",
-            "retrieved_at_utc": nowiso(),
-        }
     except Exception as e:
-        return {"asset": "GOLD_CFD", "ok": False, "error": f"{type(e).__name__}: {e}", "retrieved_at_utc": nowiso()}
+        return {"asset": asset, "ok": False, "error": f"spot: {e}", "retrieved_at_utc": nowiso()}
 
-def gold_klines_yf(interval: str, label: str):
-    """
-    interval: '5m' | '60m' | '240m' (yfinance does not have 4h, ezért 15m-ből aggregálunk)
-    """
+def worker_k(asset="SOL", interval="1h"):
+    url = f"{CF_WORKER_BASE}/k{interval}"
     try:
-        if interval == "240m":
-            # build 4h from 15m
-            raw = yf.download(XAU_TICKER, period="60d", interval="15m", progress=False)
-            if raw.empty:
-                raise RuntimeError("empty history")
-            # resample to 4H UTC
-            df = raw.tz_convert("UTC").resample("4H").agg({"Open":"first","High":"max","Low":"min","Close":"last"}).dropna()
-        else:
-            period = "30d" if interval == "5m" else "365d"
-            raw = yf.download(XAU_TICKER, period=period, interval=interval, progress=False)
-            if raw.empty:
-                raise RuntimeError("empty history")
-            df = raw.tz_convert("UTC")[["Open","High","Low","Close"]]
-            df.columns = ["open","high","low","close"]
-        if "open" not in df.columns:
-            df = df.rename(columns={"Open":"open","High":"high","Low":"low","Close":"close"})
-        return {
-            "meta": {
-                "symbol": "XAU/USD",
-                "interval": label,
-                "currency_base": "Gold",
-                "currency_quote": "US Dollar",
-                "exchange": "YahooFinance",
-                "type": "Commodity",
-            },
-            "values": df_to_values(df),
-            "status": "ok",
-            "ok": True,
-            "retrieved_at_utc": nowiso(),
-        }
+        data = http_get_json(url, {"asset": asset})
+        values = data.get("values") or []
+        df = df_from_values(values)
+        return {"ok": True, "df": df, "meta": data.get("meta")}
     except Exception as e:
-        return {"ok": False, "status": "error", "meta": {"symbol":"XAU/USD","interval":label}, "error": f"{type(e).__name__}: {e}", "retrieved_at_utc": nowiso()}
+        return {"ok": False, "error": f"k{interval}: {e}"}
 
-# =========================
-# QQQ (TwelveData) – throttled
-# =========================
-def qqq_spot_td():
+# --- TwelveData: 5m idősor -> resample 1h ---
+def td_timeseries_5m(symbol: str):
     if not TD_API_KEY:
-        return {"asset":"NSDQ100","ok":False,"error":"no TWELVEDATA_API_KEY","retrieved_at_utc":nowiso()}
-    url = "https://api.twelvedata.com/price"
-    r = requests.get(url, params={"symbol":"QQQ","apikey":TD_API_KEY}, timeout=15)
-    j = r.json() if r.ok else {}
-    if "price" not in j:
-        return {"asset":"NSDQ100","ok":False,"error":f"spot: TwelveData error: {j}", "retrieved_at_utc": nowiso()}
-    return {"asset":"NSDQ100","ok":True,"price":float(j["price"]),"raw":j,"symbol":"QQQ","retrieved_at_utc":nowiso()}
-
-def qqq_klines_td(interval: str, label: str):
-    if not TD_API_KEY:
-        return {"ok": False, "status":"error", "meta":{"symbol":"QQQ","interval":label}, "error":"no TWELVEDATA_API_KEY", "retrieved_at_utc":nowiso()}
+        return {"ok": False, "error": "Missing TWELVEDATA_API_KEY"}
     url = "https://api.twelvedata.com/time_series"
-    r = requests.get(url, params={
-        "symbol": "QQQ",
-        "interval": interval,   # '5min' | '1h' | '4h'
-        "outputsize": 500,
-        "apikey": TD_API_KEY,
+    params = {
+        "symbol": symbol,
+        "interval": "5min",
+        "outputsize": TD_OUTPUTSIZE_5M,
         "timezone": "UTC",
-        "order": "ASC"
-    }, timeout=20)
-    j = r.json() if r.ok else {}
-    if "values" not in j:
-        return {"ok": False, "status":"error", "meta":{"symbol":"QQQ","interval":label}, "error": f"TwelveData error: {j}", "retrieved_at_utc":nowiso()}
-    # normalize
-    vals = j["values"]
-    idx = pd.to_datetime([v["datetime"] for v in vals], utc=True)
-    df = pd.DataFrame({
-        "open":  [float(v["open"]) for v in vals],
-        "high":  [float(v["high"]) for v in vals],
-        "low":   [float(v["low"]) for v in vals],
-        "close": [float(v["close"]) for v in vals],
-    }, index=idx)
-    return {
-        "meta": {
-            "symbol": "QQQ",
-            "interval": label,
-            "currency": "USD",
-            "exchange": "NASDAQ",
-            "type": "ETF",
-        },
-        "values": df_to_values(df),
-        "status": "ok",
-        "ok": True,
-        "retrieved_at_utc": nowiso(),
+        "order": "ASC",
+        "format": "JSON",
+        "apikey": TD_API_KEY,
     }
+    try:
+        data = http_get_json(url, params=params)
+        if "status" in data and data["status"] == "error":
+            return {"ok": False, "error": data.get("message", "TwelveData error")}
+        values = data.get("values") or data.get("data") or []
+        df = df_from_values(values)
+        return {"ok": True, "df5m": df, "meta": data.get("meta") or {}}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
-# =========================
-# SIGNAL (dummy – no entry unless you want logic)
-# =========================
-def make_signal(asset: str) -> dict:
-    # Helytartó jelzés: "no entry" – ide később jöhet stratégiád
-    return {
-        "asset": asset,
-        "ok": True,
-        "retrieved_at_utc": nowiso(),
-        "signal": "no entry",
-        "reasons": ["no signal"],
-    }
+# ------------------------------ Pipeline-ek ----------------------------------
 
-# =========================
-# BUILD PIPELINES
-# =========================
 def build_SOL():
-    base = ROOT / "SOL"
-    spot_p = base / "spot.json"
-    k5m_p  = base / "klines_5m.json"
-    k1h_p  = base / "klines_1h.json"
-    k4h_p  = base / "klines_4h.json"
-    sig_p  = base / "signal.json"
+    # Spot
+    spot = worker_spot("SOL")
+    save_json(f"{OUTDIR}/SOL/spot.json", spot)
 
-    changed = False
-    changed |= ensure(spot_p, TTL["spot"], lambda: sol_spot_coinbase())
-    changed |= ensure(k5m_p, TTL["k5m"], lambda: sol_klines_coinbase(300, "5min"))
-    changed |= ensure(k1h_p, TTL["k1h"], lambda: sol_klines_coinbase(3600, "1h"))
-    changed |= ensure(k4h_p, TTL["k4h"], lambda: sol_klines_coinbase(14400, "4h"))
-    if changed or not sig_p.exists() or not fresh_enough(sig_p, TTL["signal"]):
-        write_json(sig_p, make_signal("SOL"))
+    # 1h (worker), 4h aggregálás
+    h1 = worker_k("SOL", "1h")
+    if not h1.get("ok"):
+        save_json(f"{OUTDIR}/SOL/k1h.json", {
+            "asset":"SOL","ok":False,"error":h1.get("error","worker k1h error"),"retrieved_at_utc":nowiso()
+        })
+        # 4h is bukik
+        save_json(f"{OUTDIR}/SOL/k4h.json", {
+            "asset":"SOL","ok":False,"error":"no 1h data","retrieved_at_utc":nowiso()
+        })
+        # jel
+        save_json(f"{OUTDIR}/SOL/signal.json", {
+            "asset":"SOL","ok":True,"retrieved_at_utc":nowiso(),"signal":"no entry","reasons":["no signal"]
+        })
+        return
 
-def build_GOLD():
-    base = ROOT / "GOLD_CFD"
-    spot_p = base / "spot.json"
-    k5m_p  = base / "klines_5m.json"
-    k1h_p  = base / "klines_1h.json"
-    k4h_p  = base / "klines_4h.json"
-    sig_p  = base / "signal.json"
+    df1h = h1["df"]
+    # mentés k1h
+    k1h_out = {
+        "asset":"SOL","ok":True,"retrieved_at_utc":nowiso(),
+        "meta": h1.get("meta"),
+        "values":[
+            {
+                "datetime": ts.isoformat(),
+                "open": float(o), "high": float(h), "low": float(l), "close": float(c)
+            }
+            for ts,(o,h,l,c) in zip(df1h.index, df1h[["open","high","low","close"]].to_numpy())
+        ]
+    }
+    save_json(f"{OUTDIR}/SOL/k1h.json", k1h_out)
 
-    changed = False
-    changed |= ensure(spot_p, TTL["spot"], lambda: gold_spot_yf())
-    changed |= ensure(k5m_p, TTL["k5m"], lambda: gold_klines_yf("5m", "5min"))
-    changed |= ensure(k1h_p, TTL["k1h"], lambda: gold_klines_yf("60m", "1h"))
-    changed |= ensure(k4h_p, TTL["k4h"], lambda: gold_klines_yf("240m", "4h"))
-    if changed or not sig_p.exists() or not fresh_enough(sig_p, TTL["signal"]):
-        write_json(sig_p, make_signal("GOLD_CFD"))
+    # 4h aggregálás
+    df4h = resample_ohlc(df1h, "4H")
+    k4h_out = {
+        "asset":"SOL","ok":True,"retrieved_at_utc":nowiso(),
+        "meta":{"source":"worker 1h → resample 4h"},
+        "values":[
+            {
+                "datetime": ts.isoformat(),
+                "open": float(o), "high": float(h), "low": float(l), "close": float(c)
+            }
+            for ts,(o,h,l,c) in zip(df4h.index, df4h[["open","high","low","close"]].to_numpy())
+        ]
+    }
+    save_json(f"{OUTDIR}/SOL/k4h.json", k4h_out)
 
-def build_QQQ():
-    base = ROOT / "NSDQ100"
-    spot_p = base / "spot.json"
-    k5m_p  = base / "klines_5m.json"
-    k1h_p  = base / "klines_1h.json"
-    k4h_p  = base / "klines_4h.json"
-    sig_p  = base / "signal.json"
+    # Jel (4h alapján, konzervatívabb)
+    signal, reasons = basic_signal(df4h)
+    save_json(f"{OUTDIR}/SOL/signal.json", {
+        "asset":"SOL","ok":True,"retrieved_at_utc":nowiso(),"signal":signal,"reasons":reasons
+    })
 
-    changed = False
-    changed |= ensure(spot_p, TTL["spot"], lambda: qqq_spot_td())
-    changed |= ensure(k5m_p, TTL["k5m"], lambda: qqq_klines_td("5min","5min"))
-    changed |= ensure(k1h_p, TTL["k1h"], lambda: qqq_klines_td("1h","1h"))
-    changed |= ensure(k4h_p, TTL["k4h"], lambda: qqq_klines_td("4h","4h"))
-    if changed or not sig_p.exists() or not fresh_enough(sig_p, TTL["signal"]):
-        write_json(sig_p, make_signal("NSDQ100"))
+def build_TD_asset(asset: str, symbol: str):
+    """
+    Általános TD pipeline: 5m → mentjük, majd 1h resample → jel
+    """
+    td = td_timeseries_5m(symbol)
+    if not td.get("ok"):
+        # legalább egy error-json legyen kint
+        save_json(f"{OUTDIR}/{asset}/k5m.json", {
+            "asset":asset,"ok":False,"error":td.get("error","twelvedata error"),"retrieved_at_utc":nowiso()
+        })
+        save_json(f"{OUTDIR}/{asset}/k1h.json", {
+            "asset":asset,"ok":False,"error":"no 5m data","retrieved_at_utc":nowiso()
+        })
+        save_json(f"{OUTDIR}/{asset}/signal.json", {
+            "asset":asset,"ok":True,"retrieved_at_utc":nowiso(),"signal":"no entry","reasons":["no data"]
+        })
+        return
+
+    df5 = td["df5m"]
+    # Mentsük a 5m sort
+    k5m_out = {
+        "asset":asset,"ok":True,"retrieved_at_utc":nowiso(),
+        "meta": td.get("meta",{}),
+        "values":[
+            {
+                "datetime": ts.isoformat(),
+                "open": float(o), "high": float(h), "low": float(l), "close": float(c)
+            }
+            for ts,(o,h,l,c) in zip(df5.index, df5[["open","high","low","close"]].to_numpy())
+        ]
+    }
+    save_json(f"{OUTDIR}/{asset}/k5m.json", k5m_out)
+
+    # 1h resample
+    df1 = resample_ohlc(df5, "1H")
+    k1h_out = {
+        "asset":asset,"ok":True,"retrieved_at_utc":nowiso(),
+        "meta":{"source":"twelvedata 5m → resample 1h"},
+        "values":[
+            {
+                "datetime": ts.isoformat(),
+                "open": float(o), "high": float(h), "low": float(l), "close": float(c)
+            }
+            for ts,(o,h,l,c) in zip(df1.index, df1[["open","high","low","close"]].to_numpy())
+        ]
+    }
+    save_json(f"{OUTDIR}/{asset}/k1h.json", k1h_out)
+
+    # Jel (1h alapján)
+    signal, reasons = basic_signal(df1)
+    save_json(f"{OUTDIR}/{asset}/signal.json", {
+        "asset":asset,"ok":True,"retrieved_at_utc":nowiso(),"signal":signal,"reasons":reasons
+    })
 
 def main():
-    build_SOL()
-    build_GOLD()
-    build_QQQ()
-    # simple index for convenience
-    idx = ROOT / "index.html"
-    idx.write_text(
-        "<!doctype html><meta charset='utf-8'><title>market-feed</title>"
-        "<h1>market-feed</h1><ul>"
-        "<li><a href='./SOL/signal.json'>SOL/signal.json</a></li>"
-        "<li><a href='./NSDQ100/signal.json'>NSDQ100/signal.json</a></li>"
-        "<li><a href='./GOLD_CFD/signal.json'>GOLD_CFD/signal.json</a></li>"
-        "<li><a href='./analysis.html'>analysis.html</a></li>"
-        "</ul>", encoding="utf-8"
-    )
+    ensure_dir(OUTDIR)
+
+    # --- SOL (worker) ---
+    try:
+        build_SOL()
+        print("[SOL] done.")
+    except Exception as e:
+        print("[SOL] ERROR:", e)
+        save_json(f"{OUTDIR}/SOL/signal.json", {
+            "asset":"SOL","ok":False,"error":str(e),"retrieved_at_utc":nowiso()
+        })
+
+    # --- GOLD_CFD (TD: XAU/USD) ---
+    # TwelveData-hoz a "XAU/USD" a legstabilabb jelölés az aranyra
+    try:
+        build_TD_asset("GOLD_CFD", "XAU/USD")
+        print("[GOLD_CFD] done.")
+    except Exception as e:
+        print("[GOLD_CFD] ERROR:", e)
+        save_json(f"{OUTDIR}/GOLD_CFD/signal.json", {
+            "asset":"GOLD_CFD","ok":False,"error":str(e),"retrieved_at_utc":nowiso()
+        })
+
+    # --- NSDQ100 (TD: QQQ vagy NDX100USD) ---
+    # Itt sok brókernél a QQQ ETF ára közkedvelt proxy — TwelveData-n QQQ működik.
+    try:
+        build_TD_asset("NSDQ100", "QQQ")
+        print("[NSDQ100] done.")
+    except Exception as e:
+        print("[NSDQ100] ERROR:", e)
+        save_json(f"{OUTDIR}/NSDQ100/signal.json", {
+            "asset":"NSDQ100","ok":False,"error":str(e),"retrieved_at_utc":nowiso()
+        })
 
 if __name__ == "__main__":
     main()
