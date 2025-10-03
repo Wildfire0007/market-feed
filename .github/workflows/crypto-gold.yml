@@ -49,6 +49,21 @@ jobs:
           DEBUG: "1"
         run: python Trading.py
 
+      # >>> ÚJ: az NSDQ100 (QQQ) meglévő Pages-tartalom megőrzése
+      - name: Merge existing Pages content (preserve NSDQ100)
+        run: |
+          set -e
+          BASE="https://wildfire0007.github.io/market-feed"
+          mkdir -p public/NSDQ100 public/SOL public/GOLD_CFD
+          for A in NSDQ100; do
+            for F in spot.json klines_5m.json klines_1h.json klines_4h.json signal.json; do
+              URL="$BASE/$A/$F"
+              curl -fsS -o "public/$A/$F" "$URL" && echo "Preserved $A/$F" || true
+            done
+            # PNG chart (ha van)
+            curl -fsS -o "public/$A/chart_1d.png" "$BASE/$A/chart_1d.png" || true
+          done
+      # <<<
 
       - name: Ensure index.html
         run: |
