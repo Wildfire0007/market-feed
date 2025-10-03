@@ -32,7 +32,6 @@ jobs:
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
           restore-keys: ${{ runner.os }}-pip-
 
-
       - name: Install deps
         run: |
           python -V
@@ -44,7 +43,26 @@ jobs:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           TD_PAUSE: "2.0"
           ASSET_ONLY: "NSDQ100"
+          TD_M5_MIN_AGE: "900"      # 5m OHLC csak 15 percenként frissül
+          TD_H1_MIN_AGE: "3600"     # 1h OHLC csak óránként frissül
+          TD_H4_MIN_AGE: "14400"    # 4h OHLC csak 4 óránként frissül
         run: python Trading.py
+
+      # >>> EZ AZ ÚJ LÉPÉS: megőrizzük a Pages-en már kint lévő SOL és GOLD_CFD fájlokat
+      - name: Merge existing Pages content (preserve SOL,GOLD_CFD)
+        run: |
+          set -e
+          BASE="https://wildfire0007.github.io/market-feed"
+          mkdir -p public/SOL public/GOLD_CFD public/NSDQ100
+          for A in SOL GOLD_CFD; do
+            for F in spot.json klines_5m.json klines_1h.json klines_4h.json signal.json; do
+              URL="$BASE/$A/$F"
+              curl -fsS -o "public/$A/$F" "$URL" && echo "Preserved $A/$F" || true
+            done
+            # PNG chart (ha van)
+            curl -fsS -o "public/$A/chart_1d.png" "$BASE/$A/chart_1d.png" || true
+          done
+      # <<<
 
       - name: Ensure index.html
         run: |
