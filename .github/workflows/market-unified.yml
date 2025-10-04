@@ -242,7 +242,9 @@ jobs:
           msg="${msg}
           🔗 ${url}"
 
-          @here
+          
+          # --- Üzenet összeállítva idáig: header, lines, bell, url ---
+
           mention=""
           if [ -n "$bell" ]; then
             mention="@here "
@@ -250,12 +252,14 @@ jobs:
 
           if [ -n "$mention" ]; then
             payload=$(jq -n --arg content "$mention$msg" \
-              '{content:$content, allowed_mentions:{parse:["everyone"]}}')
+                        '{content:$content, allowed_mentions:{parse:["everyone"]}}')
           else
             payload=$(jq -n --arg content "$msg" '{content:$content}')
           fi
 
           curl -fsS -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL"
+          echo "$new_hash" > public/.last_discord_hash
+
 
       - name: Ensure index.html
         run: |
