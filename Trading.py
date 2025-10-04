@@ -6,7 +6,7 @@ Egységes adatelőkészítő és jelzésképző script GitHub Pages publikálás
 
 Eszközök:
 - SOL           (kripto, spot: coinbase→coingecko→kraken fallback; OHLC: TwelveData)
-- NSDQ100       (QQQ proxy; spot: Yahoo;       OHLC: TwelveData)
++ NSDQ100       (QQQ proxy; spot: TwelveData;  OHLC: TwelveData)
 - GOLD_CFD      (XAU/USD;   spot: TwelveData;  OHLC: TwelveData)
 
 Kimenetek (mindig a public/<ASSET>/ alatt):
@@ -268,6 +268,49 @@ def twelvedata_ohlc(symbol: str, interval: str, timeout: int = 20, count: int = 
     except Exception as e:
         return with_status_ok({"asset": symbol, "interval": interval, "source": "twelvedata"}, False, f"ohlc error: {e}")
 
+def twelvedata_quote(symbol: str, timeout: int = 15) -> Dict[str, Any]:
+    """TwelveData /quote – megbízható spot forrás QQQ-hoz."""
+    try:
+        if not TWELVEDATA_API_KEY:
+            raise RuntimeError("TWELVEDATA_API_KEY missing")
+        url = "https://api.twelvedata.com/quote"
+        params = {"symbol": symbol, "apikey": TWELVEDATA_API_KEY}
+        r = requests.get(url, params=params, timeout=timeout,
+                         headers={"User-Agent": "market-feed/1.0"})
+        r.raise_for_status()
+        j = r.json()
+        if isinstance(j, dict) and j.get("status") != "error":
+            price = float(j["price"])
+            return with_status_ok({"asset": symbol, "source": "twelvedata:quote",
+                                   "price_usd": price, "raw": j}, True)
+        return with_status_ok({"asset": symbol, "source": "twelvedata:quote", "raw": j},
+                              False, j.get("message") or "status=error")
+    except Exception as e:
+        return with_status_ok({"asset": symbol, "source": "twelvedata:quote"},
+                              False, f"spot error: {e}")
+
+
+def twelvedata_last_close(symbol: str, interval: str = "5min", timeout: int = 15) -> Optional[float]:
+    """Utolsó záróár lehúzása 1 db gyertyából – fallback spothoz."""
+    try:
+        if not TWELVEDATA_API_KEY:
+            return None
+        url = "https://api.twelvedata.com/time_series"
+        params = {
+            "symbol": symbol, "interval": interval, "outputsize": "1",
+            "order": "desc", "timezone": "UTC", "apikey": TWELVEDATA_API_KEY
+        }
+        r = requests.get(url, params=params, timeout=timeout,
+                         headers={"User-Agent": "market-feed/1.0"})
+        r.raise_for_status()
+        j = r.json()
+        if j.get("status") == "error" or not j.get("values"):
+            return None
+        return float(j["values"][0]["close"])
+    except Exception:
+        return None
+
+
 
 # ---- Jelzésképzés (EMA-k) ----------------------------------------------------
 
@@ -426,21 +469,14 @@ def process_SOL() -> None:
 def process_NSDQ100() -> None:
     """
     NSDQ100 (QQQ proxy)
-    Spot: Yahoo (QQQ)
-    OHLC: TwelveData (QQQ / NDQ100 index -> a projektben "NSDQ100" aliasra publikálunk)
+    Spot: TwelveData (quote → 5m time_series → utolsó 5m close fallback)
+    OHLC: TwelveData (QQQ)
     """
     asset = "NSDQ100"
     adir = os.path.join(OUT_DIR, asset)
     ensure_dir(adir)
 
-    # --- SPOT (Yahoo: QQQ)
-    spot = yahoo_spot("QQQ")
-    log(f"NSDQ100 spot source={spot.get('source')} price={spot.get('price_usd')}")
-    save_json(os.path.join(adir, "spot.json"), spot)
-
-    # --- OHLC
-    # TwelveData szimbólum – ha az API kulcsod QQQ-ra ad idősort, használd QQQ-t.
-    # (Alternatíva: ^NDX, NDX100 - TwelveData támogatástól függ.)
+    # --- OHLC ELŐBB (legyen last_close fallbackhoz)
     path_5m = os.path.join(adir, "klines_5m.json")
     if should_refresh(path_5m, TD_M5_MIN_AGE):
         time.sleep(TD_PAUSE)
@@ -459,7 +495,47 @@ def process_NSDQ100() -> None:
         k4 = twelvedata_ohlc("QQQ", "4h")
         save_series_with_guard(path_4h, k4, k4.get("ok", False))
 
-    # --- SIGNAL
+    # last_close a friss (vagy korábbi) 5m-ből
+    last_close = None
+    try:
+        k5m_json = read_json(path_5m)
+        if k5m_json and k5m_json.get("ok"):
+            vals = k5m_json["raw"]["values"]
+            if vals:
+                last_close = float(vals[-1]["close"])
+    except Exception:
+        last_close = None
+
+    # --- SPOT: TwelveData quote → time_series(5m,1) → last_close → előző spot
+    spot_q = twelvedata_quote("QQQ")
+    if spot_q.get("ok") and (spot_q.get("price_usd") is not None):
+        spot = spot_q
+    else:
+        # próbáljuk a legutóbbi 5m gyertyát közvetlenül TD-ből
+        close_5m = twelvedata_last_close("QQQ", "5min")
+        if close_5m is not None:
+            spot = with_status_ok({
+                "asset": "QQQ", "source": "twelvedata:ts_5m",
+                "price_usd": float(close_5m), "raw": {"note": "1 bar time_series"}
+            }, True)
+        elif last_close is not None:
+            spot = with_status_ok({
+                "asset": "QQQ", "source": "fallback:kline_5m_close",
+                "price_usd": float(last_close)
+            }, True)
+        else:
+            prev = read_json(os.path.join(adir, "spot.json"))
+            spot = prev if prev else with_status_ok(
+                {"asset": "QQQ", "source": "twelvedata"}, False,
+                "no spot from TD and no kline fallback"
+            )
+
+    # a Pages-en az eszköz neve NSDQ100 legyen
+    spot["asset"] = asset
+    log(f"NSDQ100 spot source={spot.get('source')} price={spot.get('price_usd')}")
+    save_json(os.path.join(adir, "spot.json"), spot)
+
+    # --- SIGNAL (5m EMA)
     k5m = read_json(path_5m)
     sig = build_signal_from_ema(k5m)
     sig_out = {
@@ -470,6 +546,7 @@ def process_NSDQ100() -> None:
         "reasons": sig.get("reasons", [])
     }
     save_json(os.path.join(adir, "signal.json"), sig_out)
+
 
 
 def process_GOLD_CFD() -> None:
@@ -551,3 +628,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
