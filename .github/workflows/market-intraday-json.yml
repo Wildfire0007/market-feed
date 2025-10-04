@@ -33,16 +33,18 @@ jobs:
           UA="etoro-agent/1.0"
           HDR=(-H "Accept: application/json" -H "User-Agent: ${UA}")
           log() { echo "[$(date -u +%FT%TZ)] $*"; }
+
           # kis jitter, hogy ne pont a generátor írásával ütközzünk
           sleep $((RANDOM%7+3))
 
-          fetch_asset () { # $1 = ASSET
+          fetch_asset() { # $1 = ASSET
             ASSET="$1"
             PRIMARY="https://market-feed-proxy.czipo-agnes.workers.dev/h/all?asset=${ASSET}&fields=spot,k5m,k1h,k4h"
             log "PRIMARY  : $PRIMARY"
 
-            if RESP="$(curl -fsS "${PRIMARY}" "${HDR[@]}" --retry 5 --retry-delay 3 --retry-all-errors)"; then
-              log "OK       : /h/all JSON for ${ASSET}"
+            # 1) Elsődleges: /h/all (NATÍV JSON) + retry
+            if RESP="$(curl -fsS "$PRIMARY" "${HDR[@]}" --retry 5 --retry-delay 3 --retry-all-errors)"; then
+              log "OK       : /h/all JSON for $ASSET"
             else
               log "WARN     : /h/all failed → Worker single-file"
               SPOT_URL="https://market-feed-proxy.czipo-agnes.workers.dev/spot?asset=${ASSET}"
@@ -50,10 +52,10 @@ jobs:
               K1H_URL="https://market-feed-proxy.czipo-agnes.workers.dev/k1h?asset=${ASSET}"
               K4H_URL="https://market-feed-proxy.czipo-agnes.workers.dev/k4h?asset=${ASSET}"
 
-              SPOT="$(curl -fsS "${SPOT_URL}" "${HDR[@]}" --retry 5 --retry-delay 3 --retry-all-errors || true)"
-              K5M="$(curl -fsS  "${K5M_URL}" "${HDR[@]}" --retry 5 --retry-delay 3 --retry-all-errors || true)"
-              K1H="$(curl -fsS  "${K1H_URL}" "${HDR[@]}" --retry 5 --retry-delay 3 --retry-all-errors || true)"
-              K4H="$(curl -fsS  "${K4H_URL}" "${HDR[@]" --retry 5 --retry-delay 3 --retry-all-errors || true)"
+              SPOT="$(curl -fsS "$SPOT_URL" "${HDR[@]}" --retry 5 --retry-delay 3 --retry-all-errors || true)"
+              K5M="$(curl -fsS "$K5M_URL"  "${HDR[@]}" --retry 5 --retry-delay 3 --retry-all-errors || true)"
+              K1H="$(curl -fsS "$K1H_URL"  "${HDR[@]}" --retry 5 --retry-delay 3 --retry-all-errors || true)"
+              K4H="$(curl -fsS "$K4H_URL"  "${HDR[@]}" --retry 5 --retry-delay 3 --retry-all-errors || true)"
 
               # ha single-file részben hiányos → RAW (cache-bypass)
               NEED_RAW=false
@@ -67,26 +69,31 @@ jobs:
                 K4H="$(curl -fsS  "https://raw.githubusercontent.com/Wildfire0007/market-feed/main/${ASSET}/klines_4h.json?ts=${TS}" || true)"
               fi
 
+              # guard: üres → null, hogy --argjson ne hasaljon
+              [[ -z "${SPOT}" ]] && SPOT=null
+              [[ -z "${K5M}"  ]] && K5M=null
+              [[ -z "${K1H}"  ]] && K1H=null
+              [[ -z "${K4H}"  ]] && K4H=null
+
               RESP="$(jq -n --arg asset "${ASSET}" \
-                           --argjson spot "${SPOT:-null}" \
-                           --argjson k5m  "${K5M:-null}" \
-                           --argjson k1h  "${K1H:-null}" \
-                           --argjson k4h  "${K4H:-null}" \
+                           --argjson spot "${SPOT}" \
+                           --argjson k5m  "${K5M}" \
+                           --argjson k1h  "${K1H}" \
+                           --argjson k4h  "${K4H}" \
                            '{ok:true, asset:$asset, spot:$spot, k5m:$k5m, k1h:$k1h, k4h:$k4h, source:"fallback"}')"
             fi
 
-            # SOL freshness (age_sec > 1200 → ticker fallback log)
+            # 3) SOL freshness (age_sec > 1200 → ticker fallback log)
             if [[ "${ASSET}" == "SOL" ]]; then
               AGE="$(echo "${RESP}" | jq -r '.spot.age_sec // 0')"
               if [[ "${AGE}" == "null" || "${AGE}" -gt 1200 ]]; then
-                log "INFO     : SOL spot stale (${AGE}s) → ticker fallbacks"
+                log "INFO     : SOL spot stale → ticker fallbacks"
                 CG_URL='https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd&include_last_updated_at=true'
-                if ! curl -fsS "${CG_URL}" -H "User-Agent: ${UA}" --retry 3 --retry-delay 2 --retry-all-errors >/dev/null; then
+                if ! curl -fsS "$CG_URL" -H "User-Agent: ${UA}" --retry 3 --retry-delay 2 --retry-all-errors >/dev/null; then
                   curl -fsS 'https://api.exchange.coinbase.com/products/SOL-USD/ticker' >/dev/null || true
                   curl -fsS 'https://api.kraken.com/0/public/Ticker?pair=SOLUSD' >/dev/null || true
                   curl -fsS 'https://www.okx.com/api/v5/market/ticker?instId=SOL-USD' >/dev/null || true
                 fi
-                log "Used     : CoinGecko/CB/Kraken/OKX fallback ha kellett"
               fi
             fi
 
