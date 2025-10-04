@@ -117,26 +117,107 @@ jobs:
           </script>
           HTML
 
-      - name: Post summary to Discord (content)
+      - name: Post summary to Discord (with optional Entry/SL/TP)
         if: ${{ success() }}
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        shell: bash
         run: |
           set -euo pipefail
+
+          # 0) Friss-e az összegző? (<= 25 perc)
           updated=$(jq -r '.updated_utc' public/analysis_summary.json)
+          now=$(date -u +%s)
+          upd=$(date -u -d "$updated" +%s || echo 0)
+          age=$(( now - upd ))
+          if [ "$upd" -eq 0 ] || [ "$age" -gt 1500 ]; then
+            echo "Stale data ($age s) → skip Discord post"
+            exit 0
+          fi
+
+          # 1) Alap jelek
           sol=$(jq -r '.assets.SOL.signal' public/analysis_summary.json)
           ndx=$(jq -r '.assets.NSDQ100.signal' public/analysis_summary.json)
           xau=$(jq -r '.assets.GOLD_CFD.signal' public/analysis_summary.json)
 
-          msg="🕒 ${updated} • market-feed
-          SOL • ${sol}
-          NSDQ100 • ${ndx}
-          GOLD_CFD • ${xau}
-          🔗 https://wildfire0007.github.io/market-feed/analysis.html"
+          # 2) Riport letöltése (ha van)
+          mkdir -p tmp
+          curl -fLsS -o tmp/report.md \
+            https://raw.githubusercontent.com/Wildfire0007/market-feed/main/reports/latest/analysis_report.md || true
+
+          # 3) Kis Python fájl here-doc nélkül (printf-fel), hogy kinyerjük a Belépő blokkokat
+          printf '%s\n' \
+            'import re, json, os' \
+            'out = {}' \
+            'p = "tmp/report.md"' \
+            'if os.path.isfile(p) and os.path.getsize(p) > 0:' \
+            '    txt = open(p, "r", encoding="utf-8", errors="ignore").read()' \
+            '    def section(asset):' \
+            '        m = re.search(rf"(?mi)^##+\\s*{asset}\\b.*?(?=^##\\s|\\Z)", txt, re.M|re.S)' \
+            '        return m.group(0) if m else ""' \
+            '    def entry(block):' \
+            '        m = re.search(r"(?mi)^###?\\s*Belépő.*?(?=^##|\\Z)", block, re.M|re.S)' \
+            '        if not m: return None' \
+            '        b = m.group(0)' \
+            '        def g(rx):' \
+            '            mm = re.search(rx, b, re.I)' \
+            '            return mm.group(1).strip().replace(\",\", \".\") if mm else None' \
+            '        side = g(r"\\b(LONG|SHORT)\\b")' \
+            '        entryp = g(r"Entry[:\\s]*([\\d\\.,]+)")' \
+            '        sl = g(r"SL[:\\s]*([\\d\\.,]+)")' \
+            '        tp1 = g(r"TP1[:\\s]*([\\d\\.,]+)")' \
+            '        tp2 = g(r"TP2[:\\s]*([\\d\\.,]+)")' \
+            '        prob = g(r"prob[^0-9%]*([\\d\\.]+)")' \
+            '        d = {}' \
+            '        if side: d["side"] = side' \
+            '        if entryp: d["entry"] = entryp' \
+            '        if sl: d["sl"] = sl' \
+            '        if tp1: d["tp1"] = tp1' \
+            '        if tp2: d["tp2"] = tp2' \
+            '        if prob: d["prob"] = prob' \
+            '        return d if d else None' \
+            '    for a in ["SOL","NSDQ100","GOLD_CFD"]:' \
+            '        e = entry(section(a))' \
+            '        if e: out[a] = e' \
+            'open("tmp/entries.json", "w", encoding="utf-8").write(json.dumps(out, ensure_ascii=False))' \
+            > tmp/parse_entries.py
+
+          python tmp/parse_entries.py || true
+
+          bell=""
+          if [ -s tmp/entries.json ] && [ "$(jq -r 'keys|length' tmp/entries.json 2>/dev/null || echo 0)" != "0" ]; then
+            bell=$(jq -r '
+              to_entries
+              | map(
+                  "🔔 Belépő • " + .key + " • " + (.value.side // "?") + " • " +
+                  ([
+                    (if .value.entry then "entry=" + .value.entry else empty end),
+                    (if .value.sl    then "SL="    + .value.sl    else empty end),
+                    (if .value.tp1   then "TP1="   + .value.tp1   else empty end),
+                    (if .value.tp2   then "TP2="   + .value.tp2   else empty end),
+                    (if .value.prob  then "prob="  + .value.prob  + "%" else empty end)
+                  ] | join(", "))
+                )
+              | .[]
+            ' tmp/entries.json)
+          fi
+
+          url="https://wildfire0007.github.io/market-feed/analysis.html"
+          header="🕒 ${updated} • market-feed"
+          lines="SOL • ${sol}\nNSDQ100 • ${ndx}\nGOLD_CFD • ${xau}"
+
+          msg="${header}
+          ${lines}"
+          if [ -n "$bell" ]; then
+            msg="${msg}
+          ${bell}"
+          fi
+          msg="${msg}
+          🔗 ${url}"
 
           payload=$(jq -n --arg content "$msg" '{content:$content}')
           curl -fsS -H "Content-Type: application/json" \
-           -d "$payload" "$DISCORD_WEBHOOK_URL"
+               -d "$payload" "$DISCORD_WEBHOOK_URL"
 
 
       - name: Ensure index.html
