@@ -64,16 +64,68 @@ jobs:
             curl -fLsS --retry 3 --retry-delay 1 --retry-connrefused -o "public/$A/chart_1d.png" "$BASE/$A/chart_1d.png" || true
           done
 
+      - name: Ensure jq (for JSON merge)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      - name: Build merged analysis_summary.json (3 asset)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Gondoskodunk, hogy legyen public/<ASSET>/signal.json mindháromra
+          mkdir -p public/SOL public/NSDQ100 public/GOLD_CFD
+          ensure_sig() {
+            A="$1"
+            F="public/$A/signal.json"
+            if [ ! -f "$F" ]; then
+              echo "{\"asset\":\"$A\",\"ok\":false,\"signal\":\"no entry\",\"reasons\":[\"missing signal.json\"]}" > "$F"
+            fi
+          }
+          ensure_sig SOL
+          ensure_sig NSDQ100
+          ensure_sig GOLD_CFD
+
+          UPDATED="$(date -u +%FT%TZ)"
+          jq -n --arg ts "$UPDATED" \
+            --slurpfile sol public/SOL/signal.json \
+            --slurpfile ndx public/NSDQ100/signal.json \
+            --slurpfile xau public/GOLD_CFD/signal.json \
+            '{
+               ok:true,
+               updated_utc:$ts,
+               assets:{
+                 SOL:      $sol[0],
+                 NSDQ100:  $ndx[0],
+                 GOLD_CFD: $xau[0]
+               }
+             }' \
+             > public/analysis_summary.json
+
+          # Opcionális: emberi nézet
+          cat > public/analysis.html <<'HTML'
+          <!doctype html><meta charset="utf-8"><title>Analysis</title>
+          <h1>Analysis summary</h1>
+          <pre id="out"></pre>
+          <script>
+          fetch('./analysis_summary.json')
+            .then(r=>r.json())
+            .then(j=>{document.getElementById('out').textContent=JSON.stringify(j,null,2);});
+          </script>
+          HTML
+
       - name: Ensure index.html
         run: |
           mkdir -p public
           printf '%s\n' \
             '<!doctype html><meta charset="utf-8"><title>market-feed</title>' \
             '<h1>market-feed</h1><ul>' \
+            '<li><a href="./analysis_summary.json">analysis_summary.json</a></li>' \
+            '<li><a href="./analysis.html">analysis.html</a></li>' \
             '<li><a href="./SOL/signal.json">SOL/signal.json</a></li>' \
             '<li><a href="./NSDQ100/signal.json">NSDQ100/signal.json</a></li>' \
             '<li><a href="./GOLD_CFD/signal.json">GOLD_CFD/signal.json</a></li>' \
-            '<li><a href="./analysis.html">analysis.html</a></li>' \
             '</ul>' > public/index.html
 
       # Artefakt-ellenőrzés (hasznos log)
