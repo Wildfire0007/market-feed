@@ -117,6 +117,28 @@ jobs:
           </script>
           HTML
 
+      - name: Post summary to Discord (content)
+        if: ${{ success() }}
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          updated=$(jq -r '.updated_utc' public/analysis_summary.json)
+          sol=$(jq -r '.assets.SOL.signal' public/analysis_summary.json)
+          ndx=$(jq -r '.assets.NSDQ100.signal' public/analysis_summary.json)
+          xau=$(jq -r '.assets.GOLD_CFD.signal' public/analysis_summary.json)
+
+          msg="🕒 ${updated} • market-feed
+          SOL • ${sol}
+          NSDQ100 • ${ndx}
+          GOLD_CFD • ${xau}
+          🔗 https://wildfire0007.github.io/market-feed/analysis.html"
+
+          payload=$(jq -n --arg content "$msg" '{content:$content}')
+          curl -fsS -H "Content-Type: application/json" \
+           -d "$payload" "$DISCORD_WEBHOOK_URL"
+
+
       - name: Ensure index.html
         run: |
           mkdir -p public
