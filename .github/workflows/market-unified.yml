@@ -158,6 +158,14 @@ jobs:
           ndx=$(jq -r '.assets.NSDQ100.signal' public/analysis_summary.json)
           xau=$(jq -r '.assets.GOLD_CFD.signal' public/analysis_summary.json)
 
+          # 1/b) Spot árak (USD) formázva
+          solp=$(jq -r '.price_usd // empty' public/SOL/spot.json)
+          ndxp=$(jq -r '.price_usd // empty' public/NSDQ100/spot.json)
+          xaup=$(jq -r '.price_usd // empty' public/GOLD_CFD/spot.json)
+          fmt() { v="$1"; if [ -z "$v" ] || [ "$v" = "null" ]; then echo "?"; else printf '%.2f' "$v"; fi; }
+          solp=$(fmt "$solp"); ndxp=$(fmt "$ndxp"); xaup=$(fmt "$xaup")
+
+
           # 2) Riport letöltése (ha van)
           mkdir -p tmp
           curl -fLsS -o tmp/report.md \
@@ -222,7 +230,8 @@ jobs:
 
           url="https://wildfire0007.github.io/market-feed/analysis.html"
           header="🕒 ${updated} • market-feed"
-          lines="SOL • ${sol}\nNSDQ100 • ${ndx}\nGOLD_CFD • ${xau}"
+          lines="SOL • ${sol} • \$${solp}\nNSDQ100 • ${ndx} • \$${ndxp}\nGOLD_CFD • ${xau} • \$${xaup}"
+
 
           msg="${header}
           ${lines}"
