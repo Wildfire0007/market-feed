@@ -1,0 +1,89 @@
+name: market-intraday-json
+
+on:
+  workflow_dispatch:
+  schedule:
+    # UTC! 06:02–20:32 UTC ≈ 08:02–22:32 Europe/Budapest (CEST)
+    - cron: "2,32 6-20 * * 1-5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "market-intraday-json"
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure jq & curl
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl
+
+      - name: Fetch natív JSON a Workerből (SOL, NSDQ100, GOLD_CFD) + fallback
+        shell: bash
+        run: |
+          set -euo pipefail
+          UA="etoro-agent/1.0"
+          HDR=(-H "Accept: application/json" -H "User-Agent: ${UA}")
+          log() { echo "[$(date -u +%FT%TZ)] $*"; }
+          sleep $((RANDOM%7+3))
+
+          fetch_asset () { # $1 = ASSET
+            ASSET="$1"
+            PRIMARY="https://market-feed-proxy.czipo-agnes.workers.dev/h/all?asset=${ASSET}&fields=spot,k1h"
+            log "PRIMARY  : $PRIMARY"
+            if RESP="$(curl -fsS "${PRIMARY}" "${HDR[@]}" --retry 5 --retry-delay 3 --retry-all-errors)"; then
+              log "OK       : /h/all JSON for ${ASSET}"
+            else
+              log "WARN     : /h/all failed → Worker single-file"
+              SPOT_URL="https://market-feed-proxy.czipo-agnes.workers.dev/spot?asset=${ASSET}"
+              K1H_URL="https://market-feed-proxy.czipo-agnes.workers.dev/k1h?asset=${ASSET}"
+              SPOT="$(curl -fsS "${SPOT_URL}" "${HDR[@]}" --retry 5 --retry-delay 3 --retry-all-errors || true)"
+              K1H="$(curl -fsS  "${K1H_URL}" "${HDR[@]}" --retry 5 --retry-delay 3 --retry-all-errors || true)"
+              if [[ -z "${SPOT}" || -z "${K1H}" ]]; then
+                log "WARN     : single-file incomplete → RAW (cache-bypass)"
+                TS="$(date +%s)"
+                SPOT="$(curl -fsS "https://raw.githubusercontent.com/Wildfire0007/market-feed/main/${ASSET}/spot.json?ts=${TS}" || true)"
+                K1H="$(curl -fsS  "https://raw.githubusercontent.com/Wildfire0007/market-feed/main/${ASSET}/klines_1h.json?ts=${TS}" || true)"
+              fi
+              RESP="$(jq -n --arg asset "${ASSET}" --argjson spot "${SPOT:-null}" --argjson k1h "${K1H:-null}" \
+                '{ok:true, asset:$asset, spot:$spot, k1h:$k1h}')"
+            fi
+
+            if [[ "${ASSET}" == "SOL" ]]; then
+              AGE="$(echo "${RESP}" | jq -r '.spot.age_sec // 0')"
+              if [[ "${AGE}" == "null" || "${AGE}" -gt 1200 ]]; then
+                log "INFO     : SOL stale → ticker fallbacks (URL log)"
+                CG_URL='https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd&include_last_updated_at=true'
+                if ! curl -fsS "${CG_URL}" -H "User-Agent: ${UA}" --retry 3 --retry-delay 2 --retry-all-errors >/dev/null; then
+                  curl -fsS 'https://api.exchange.coinbase.com/products/SOL-USD/ticker' >/dev/null || true
+                  curl -fsS 'https://api.kraken.com/0/public/Ticker?pair=SOLUSD' >/dev/null || true
+                  curl -fsS 'https://www.okx.com/api/v5/market/ticker?instId=SOL-USD' >/dev/null || true
+                fi
+                log "Used     : CoinGecko/CB/Kraken/OKX fallback ha kellett"
+              fi
+            fi
+
+            echo "${RESP}" | jq '.' > "out_${ASSET}.json"
+            log "SAVED    : out_${ASSET}.json"
+          }
+
+          fetch_asset SOL
+          fetch_asset NSDQ100
+          fetch_asset GOLD_CFD
+
+      - name: Upload artifacts (JSON snapshots)
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-json
+          path: |
+            out_SOL.json
+            out_NSDQ100.json
+            out_GOLD_CFD.json
