@@ -205,7 +205,7 @@ jobs:
             exit 0
           fi
 
-          # 3) Üzenet összeállítás (idő + állapot + 🔔 belépők + link)
+          # 3) Üzenet összeállítás (szép sortörésekkel)
           bell=$(jq -r '
               to_entries
               | map(
@@ -223,12 +223,14 @@ jobs:
 
           url="https://wildfire0007.github.io/market-feed/analysis.html"
           header="🕒 ${updated} • market-feed"
-          # Ha szeretnéd, a bias+spot sorok maradhatnak információnak:
           lines="SOL • ${sol} • \$${solp}\nNSDQ100 • ${ndx} • \$${ndxp}\nGOLD_CFD • ${xau} • \$${xaup}"
 
-          msg="${header}${lines}${bell}🔗 ${url}"
+          msg="${header}
+          ${lines}
+          ${bell}
+          🔗 ${url}"
 
-          # @here csak belépő esetén (most mindig van, hisz gatingeltünk) – mégis szabályosan engedélyezzük:
+          # @here csak belépő esetén (most mindig van, hisz gatingeltünk)
           payload=$(jq -n --arg content "@here ${msg}" \
                      '{content:$content, allowed_mentions:{parse:["everyone"]}}')
 
@@ -236,24 +238,6 @@ jobs:
 
           # duplikátum-szűréshez: belépők hash-e kerüljön a Pages-re
           echo "$entries_hash" > public/.last_discord_hash
-
-          
-          # --- Üzenet összeállítva idáig: header, lines, bell, url ---
-
-          mention=""
-          if [ -n "$bell" ]; then
-            mention="@here "
-          fi
-
-          if [ -n "$mention" ]; then
-            payload=$(jq -n --arg content "$mention$msg" \
-                        '{content:$content, allowed_mentions:{parse:["everyone"]}}')
-          else
-            payload=$(jq -n --arg content "$msg" '{content:$content}')
-          fi
-
-          curl -fsS -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL"
-          echo "$new_hash" > public/.last_discord_hash
 
 
       - name: Ensure index.html
