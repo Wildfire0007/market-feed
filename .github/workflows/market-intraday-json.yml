@@ -2,9 +2,9 @@ name: market-intraday-json
 
 on:
   workflow_dispatch:
+  # 30 percenként, egész nap (UTC). A következő lépésben helyi idő szerint szűrünk (DST-álló).
   schedule:
-    # UTC! 06:02–20:32 UTC ≈ 08:02–22:32 Europe/Budapest (CEST)
-    - cron: "2,32 6-20 * * 1-5"
+    - cron: "*/30 * * * *"
 
 permissions:
   contents: read
@@ -20,6 +20,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Gate by local time (Europe/Budapest)
+        shell: bash
+        run: |
+          TZ="Europe/Budapest"
+          HOUR=$(TZ=$TZ date +%H)
+          DOW=$(TZ=$TZ date +%u)   # 1=hétfő … 7=vasárnap
+          if [ "$DOW" -ge 6 ]; then
+            echo "Weekend → skip"
+            exit 0
+          fi
+          if [ "$HOUR" -lt 8 ] || [ "$HOUR" -gt 22 ]; then
+            echo "Outside 08–22 local → skip"
+            exit 0
+          fi
 
       - name: Ensure jq & curl
         run: |
@@ -41,8 +56,7 @@ jobs:
           log() { echo "[$(date -u +%FT%TZ)] $*"; }
           log_url(){ echo "$1|$2|$3" >> "$LOGF"; }
 
-          # kis jitter, hogy ne pont a generátor írásával ütközzünk
-          sleep $((RANDOM%7+3))
+          sleep $((RANDOM%7+3))  # kis jitter
 
           fetch_asset() { # $1 = ASSET
             ASSET="$1"
@@ -96,7 +110,6 @@ jobs:
             if [[ "${ASSET}" == "SOL" ]]; then
               AGE="$(echo "${RESP}" | jq -r '.spot.age_sec // 0')"
               if [[ "${AGE}" == "null" || "${AGE}" -gt 1200 ]]; then
-                log "INFO     : SOL spot stale → ticker fallbacks"
                 CG_URL='https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd&include_last_updated_at=true'
                 CG="$(curl -fsS "$CG_URL" -H "User-Agent: ${UA}" --retry 3 --retry-delay 2 --retry-all-errors || true)"; [[ -n "${CG}" ]] && log_url "$ASSET" "TICKER" "$CG_URL"
                 if [[ -z "${CG}" ]]; then
@@ -141,6 +154,17 @@ jobs:
         run: |
           python scripts/intraday_report.py
 
+      - name: Highlight signals in job summary
+        if: always()
+        shell: bash
+        run: |
+          echo "## Eredmény összefoglaló" >> $GITHUB_STEP_SUMMARY
+          if grep -q "Belépő" report/analysis_report.md; then
+            echo "🔔 **Talált belépő jelzés!**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ Nincs belépő." >> $GITHUB_STEP_SUMMARY
+          fi
+
       - name: Upload artifacts (JSON + Report + Logs + Charts)
         uses: actions/upload-artifact@v4
         with:
@@ -155,3 +179,4 @@ jobs:
             report/chart_SOL_1d.png
             report/chart_NSDQ100_1d.png
             report/chart_GOLD_CFD_1d.png
+          retention-days: 7
