@@ -117,7 +117,7 @@ jobs:
           </script>
           HTML
 
-      - name: Post summary to Discord (with optional Entry/SL/TP)
+      - name: Post summary to Discord (only if there is an Entry)
         if: ${{ success() }}
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -131,25 +131,7 @@ jobs:
           upd=$(date -u -d "$updated" +%s || echo 0)
           age=$(( now - upd ))
           if [ "$upd" -eq 0 ] || [ "$age" -gt 1500 ]; then
-            echo "Stale data ($age s) → skip Discord post"
-            exit 0
-          fi
-
-          # 0/b) Duplikátum-szűrés (ha nem változott semmi, skip)
-          mkdir -p tmp
-          # jelenlegi állapot lenyomata (hash): updated_utc + 3 signal + (opcionális) entries.json tartalom
-          base_hash=$(jq -r '[.updated_utc, .assets.SOL.signal, .assets.NSDQ100.signal, .assets.GOLD_CFD.signal] | join("|")' public/analysis_summary.json)
-          curl -fLsS -o tmp/report.md https://raw.githubusercontent.com/Wildfire0007/market-feed/main/reports/latest/analysis_report.md || true
-          # durva lenyomat a reportból (ha van)
-          rpt_hash=$(sha256sum tmp/report.md 2>/dev/null | cut -d' ' -f1 || echo "no-report")
-          new_hash=$(printf '%s|%s' "$base_hash" "$rpt_hash" | sha256sum | cut -d' ' -f1)
-
-          # előző hash letöltése a Pages-ről (ha már volt deploy)
-          curl -fLsS -o tmp/prev_hash.txt https://wildfire0007.github.io/market-feed/.last_discord_hash || true
-          prev_hash=$(cat tmp/prev_hash.txt 2>/dev/null || echo "")
-
-          if [ "$new_hash" = "$prev_hash" ]; then
-            echo "No change since last post → skip Discord post"
+            echo "Stale data ($age s) → skip"
             exit 0
           fi
 
@@ -158,20 +140,18 @@ jobs:
           ndx=$(jq -r '.assets.NSDQ100.signal' public/analysis_summary.json)
           xau=$(jq -r '.assets.GOLD_CFD.signal' public/analysis_summary.json)
 
-          # 1/b) Spot árak (USD) formázva
+          # 1/b) Spot árak (USD) – csak kiíráshoz
           solp=$(jq -r '.price_usd // empty' public/SOL/spot.json)
           ndxp=$(jq -r '.price_usd // empty' public/NSDQ100/spot.json)
           xaup=$(jq -r '.price_usd // empty' public/GOLD_CFD/spot.json)
           fmt() { v="$1"; if [ -z "$v" ] || [ "$v" = "null" ]; then echo "?"; else printf '%.2f' "$v"; fi; }
           solp=$(fmt "$solp"); ndxp=$(fmt "$ndxp"); xaup=$(fmt "$xaup")
 
-
-          # 2) Riport letöltése (ha van)
+          # 2) Riport beolvasása és Belépő(k) kinyerése
           mkdir -p tmp
           curl -fLsS -o tmp/report.md \
             https://raw.githubusercontent.com/Wildfire0007/market-feed/main/reports/latest/analysis_report.md || true
 
-          # 3) Kis Python fájl here-doc nélkül (printf-fel), hogy kinyerjük a Belépő blokkokat
           printf '%s\n' \
             'import re, json, os' \
             'out = {}' \
@@ -179,21 +159,21 @@ jobs:
             'if os.path.isfile(p) and os.path.getsize(p) > 0:' \
             '    txt = open(p, "r", encoding="utf-8", errors="ignore").read()' \
             '    def section(asset):' \
-            '        m = re.search(rf"(?mi)^##+\\s*{asset}\\b.*?(?=^##\\s|\\Z)", txt, re.M|re.S)' \
+            '        m = re.search(rf"(?mi)^##+\s*{asset}\b.*?(?=^##\s|\Z)", txt, re.M|re.S)' \
             '        return m.group(0) if m else ""' \
             '    def entry(block):' \
-            '        m = re.search(r"(?mi)^###?\\s*Belépő.*?(?=^##|\\Z)", block, re.M|re.S)' \
+            '        m = re.search(r"(?mi)^###?\s*Belépő.*?(?=^##|\Z)", block, re.M|re.S)' \
             '        if not m: return None' \
             '        b = m.group(0)' \
             '        def g(rx):' \
             '            mm = re.search(rx, b, re.I)' \
-            '            return mm.group(1).strip().replace(\",\", \".\") if mm else None' \
-            '        side = g(r"\\b(LONG|SHORT)\\b")' \
-            '        entryp = g(r"Entry[:\\s]*([\\d\\.,]+)")' \
-            '        sl = g(r"SL[:\\s]*([\\d\\.,]+)")' \
-            '        tp1 = g(r"TP1[:\\s]*([\\d\\.,]+)")' \
-            '        tp2 = g(r"TP2[:\\s]*([\\d\\.,]+)")' \
-            '        prob = g(r"prob[^0-9%]*([\\d\\.]+)")' \
+            '            return mm.group(1).strip().replace(",", ".") if mm else None' \
+            '        side = g(r"\b(LONG|SHORT)\b")' \
+            '        entryp = g(r"Entry[:\s]*([\d\.,]+)")' \
+            '        sl = g(r"SL[:\s]*([\d\.,]+)")' \
+            '        tp1 = g(r"TP1[:\s]*([\d\.,]+)")' \
+            '        tp2 = g(r"TP2[:\s]*([\d\.,]+)")' \
+            '        prob = g(r"prob[^0-9%]*([\d\.]+)")' \
             '        d = {}' \
             '        if side: d["side"] = side' \
             '        if entryp: d["entry"] = entryp' \
@@ -210,9 +190,23 @@ jobs:
 
           python tmp/parse_entries.py || true
 
-          bell=""
-          if [ -s tmp/entries.json ] && [ "$(jq -r 'keys|length' tmp/entries.json 2>/dev/null || echo 0)" != "0" ]; then
-            bell=$(jq -r '
+          # 2/b) Ha nincs belépő → nincs értesítés
+          if [ ! -s tmp/entries.json ] || [ "$(jq -r 'keys|length' tmp/entries.json 2>/dev/null || echo 0)" = "0" ]; then
+            echo "No actionable entry → skip Discord"
+            exit 0
+          fi
+
+          # 2/c) Duplikátum-szűrés CSAK a belépők tartalma alapján
+          entries_hash=$(sha256sum tmp/entries.json | cut -d' ' -f1)
+          curl -fLsS -o tmp/prev_hash.txt https://wildfire0007.github.io/market-feed/.last_discord_hash || true
+          prev_hash=$(cat tmp/prev_hash.txt 2>/dev/null || echo "")
+          if [ "$entries_hash" = "$prev_hash" ]; then
+            echo "Same entries as last alert → skip"
+            exit 0
+          fi
+
+          # 3) Üzenet összeállítás (idő + állapot + 🔔 belépők + link)
+          bell=$(jq -r '
               to_entries
               | map(
                   "🔔 Belépő • " + .key + " • " + (.value.side // "?") + " • " +
@@ -226,18 +220,22 @@ jobs:
                 )
               | .[]
             ' tmp/entries.json)
-          fi
 
           url="https://wildfire0007.github.io/market-feed/analysis.html"
           header="🕒 ${updated} • market-feed"
+          # Ha szeretnéd, a bias+spot sorok maradhatnak információnak:
           lines="SOL • ${sol} • \$${solp}\nNSDQ100 • ${ndx} • \$${ndxp}\nGOLD_CFD • ${xau} • \$${xaup}"
 
+          msg="${header}${lines}${bell}🔗 ${url}"
 
-          msg="${header}${lines}"
-          if [ -n "$bell" ]; then
-            msg="${msg}${bell}"
-          fi
-          msg="${msg}🔗 ${url}"
+          # @here csak belépő esetén (most mindig van, hisz gatingeltünk) – mégis szabályosan engedélyezzük:
+          payload=$(jq -n --arg content "@here ${msg}" \
+                     '{content:$content, allowed_mentions:{parse:["everyone"]}}')
+
+          curl -fsS -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL"
+
+          # duplikátum-szűréshez: belépők hash-e kerüljön a Pages-re
+          echo "$entries_hash" > public/.last_discord_hash
 
           
           # --- Üzenet összeállítva idáig: header, lines, bell, url ---
