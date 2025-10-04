@@ -1,468 +1,553 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-Trading.py — market-feed generator
+market-feed / Trading.py
+Egységes adatelőkészítő és jelzésképző script GitHub Pages publikáláshoz.
 
-- SOL: Coinbase (public REST)
-- NSDQ100 (QQQ) + GOLD_CFD (XAU/USD): TwelveData (API key szükséges)
-Kimenetek eszközönként: public/<ASSET>/
-  - spot.json (price_usd, source, ok, retrieved_at_utc)
-  - klines_5m.json, klines_1h.json, klines_4h.json
-  - signal.json (egyszerű EMA9/21 trend jelzés)
-Extra:
-  - public/all_<ASSET>.json (aggregált)
-  - public/analysis_summary.json + public/analysis.html
-Env: ASSET_ONLY = "SOL,GOLD_CFD" stb. a szűréshez.
+Eszközök:
+- SOL           (kripto, spot: coinbase→coingecko→kraken fallback; OHLC: TwelveData)
+- NSDQ100       (QQQ proxy; spot: Yahoo;       OHLC: TwelveData)
+- GOLD_CFD      (XAU/USD;   spot: TwelveData;  OHLC: TwelveData)
+
+Kimenetek (mindig a public/<ASSET>/ alatt):
+- spot.json
+- klines_5m.json
+- klines_1h.json
+- klines_4h.json
+- signal.json   (EMA9/EMA21 alapján, 5 bar következetességi feltétellel)
+
+Megjegyzés:
+- A Pages workflow most már egy külön lépésben MERGE-li a 3 eszköz signal.json-ját
+  analysis_summary.json-ná; ez a script NEM írja felül azt.
 """
 
-import os, json, time
+import os
+import json
+import time
+import math
 from datetime import datetime, timezone
-from typing import Dict, Any, List
+from typing import Any, Dict, List, Optional
 
 import requests
-import pandas as pd
-import numpy as np
 
-# ----------------- globális beállítások -----------------
+# ---- Konfiguráció / környezeti változók -------------------------------------
 
-OUT_DIR = "public"
+OUT_DIR = os.getenv("OUT_DIR", "public")
 
-TD_API_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
-TD_BASE = "https://api.twelvedata.com"
-TD_PAUSE = float(os.getenv("TD_PAUSE", "1.5"))  # sikeres kérés után extra szünet (kvóta-kímélés)
+# TwelveData
+TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
+TD_PAUSE = float(os.getenv("TD_PAUSE", "1.5"))  # kímélő késleltetés hívások közt (sec)
 
-CB_BASE = "https://api.exchange.coinbase.com"
+# OHLC frissítési életkor-minimumok (másodperc)
+TD_M5_MIN_AGE = int(os.getenv("TD_M5_MIN_AGE", "900"))     # 15 perc
+TD_H1_MIN_AGE = int(os.getenv("TD_H1_MIN_AGE", "3600"))    # 1 óra
+TD_H4_MIN_AGE = int(os.getenv("TD_H4_MIN_AGE", "14400"))   # 4 óra
 
-ASSETS = [
-    {"name": "SOL",      "source": "coinbase",   "cb_pair": "SOL-USD"},
-    {"name": "NSDQ100",  "source": "twelvedata", "td_symbol": "QQQ"},
-    {"name": "GOLD_CFD", "source": "twelvedata", "td_symbol": "XAU/USD"},
-]
+# Eszközszűkítés: pl. "SOL,NSDQ100" vagy "SOL,GOLD_CFD" vagy "NSDQ100"
+ASSET_ONLY = [a.strip() for a in os.getenv("ASSET_ONLY", "").split(",") if a.strip()]
 
-# Yahoo-fallback szimbólumok (spot árhoz)
-YAHOO_MAP = {
-    "NSDQ100": "QQQ",        # Invesco QQQ ETF
-    "GOLD_CFD": "XAUUSD=X",  # arany USD spot (Yahoo)
-}
-
-# --- env alapú szűrés ---
-_only = [x.strip().upper() for x in os.getenv("ASSET_ONLY", "").split(",") if x.strip()]
-if _only:
-    ASSETS = [a for a in ASSETS if a["name"].upper() in _only]
-
-# ----------------- segédek -----------------
-
-def nowiso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-# --- DEBUG log ---
+# Debug log
 DEBUG = os.getenv("DEBUG", "0") == "1"
+
+# Teszt: kényszerített SOL fallback (Coinbase->hibát szimulálunk)
+FORCE_SOL_FALLBACK = os.getenv("FORCE_SOL_FALLBACK", "0") == "1"
+
+
+# ---- Közművek ----------------------------------------------------------------
+
 def log(msg: str) -> None:
     if DEBUG:
-        print(f"[DEBUG] {datetime.now(timezone.utc).isoformat()} | {msg}", flush=True)
+        print(f"[{datetime.now(timezone.utc).isoformat()}] {msg}", flush=True)
 
-def ensure_dir(p: str) -> None:
-    os.makedirs(p, exist_ok=True)
 
-def save_json(path: str, obj: Dict[str, Any]) -> None:
-    """Biztonságos mentés: gyökérbe is tud írni, üres dir létrehozás nélkül."""
-    dirpath = os.path.dirname(path)
-    if dirpath:
-        os.makedirs(dirpath, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+def now_utc_str() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
-def read_json(path: str) -> Dict[str, Any]:
+
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def read_json(path: str) -> Optional[Dict[str, Any]]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {}
+        return None
 
-def with_status_ok(payload: Dict[str, Any], ok: bool, error: str | None = None) -> Dict[str, Any]:
-    payload = dict(payload) if payload else {}
-    payload.setdefault("retrieved_at_utc", nowiso())
-    payload["ok"] = bool(ok)
-    if not ok and error:
-        payload["error"] = error
-    return payload
 
-# --- időbélyeg/életkor segédek & stale-check ---
+def save_json(path: str, data: Dict[str, Any]) -> None:
+    ensure_dir(os.path.dirname(path))
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-def parse_iso(ts: str):
+
+def with_status_ok(payload: Dict[str, Any],
+                   ok: bool,
+                   error: Optional[str] = None) -> Dict[str, Any]:
+    out = dict(payload)
+    out["ok"] = bool(ok)
+    out["retrieved_at_utc"] = now_utc_str()
+    if error:
+        out["error"] = str(error)
+    return out
+
+
+def age_seconds(path: str) -> Optional[int]:
+    """Visszaadja, hogy a file mióta friss (sec)."""
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        st = os.stat(path)
+        return int(time.time() - st.st_mtime)
     except Exception:
         return None
 
-def file_age_sec(path: str) -> float | None:
-    j = read_json(path)
-    ts = j.get("retrieved_at_utc")
-    if not ts:
-        return None
-    dt = parse_iso(ts)
-    if not dt:
-        return None
-    return (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds()
 
-def should_refresh(path: str, min_age_sec: int) -> bool:
-    age = file_age_sec(path)
-    return (age is None) or (age >= min_age_sec)
+# ---- Külső API-k: Coinbase / CoinGecko / Kraken / Yahoo / TwelveData --------
 
-def save_series_with_guard(asset_dir: str, fname: str, data: dict) -> None:
+def coinbase_spot(product_id: str = "SOL-USD", timeout: int = 15) -> Dict[str, Any]:
     """
-    OHLC guard: ha a TwelveData válasz error/üres, nem írjuk felül a meglévő jó fájlt.
+    Coinbase Exchange public REST: snapshot ticker.
+    Doc: https://docs.cdp.coinbase.com/exchange/reference/exchangerestapi_getproductticker
     """
-    path = os.path.join(asset_dir, fname)
-    is_bad = False
-    if isinstance(data, dict):
-        if (data.get("status") == "error") or (data.get("ok") is False) or (not data.get("values")):
-            is_bad = True
-
-    if is_bad:
-        prev = read_json(path)
-        if prev.get("values"):
-            log(f"{asset_dir}/{fname}: BAD upstream (error/empty). Keeping existing file.")
-            return  # megtartjuk a korábbit
-
-    cnt = 0
-    if isinstance(data, dict):
-        vals = data.get("values") or []
-        cnt = len(vals)
-
-    save_json(path, data)
-    log(f"{asset_dir}/{fname}: wrote {cnt} rows.")
-
-# ----------------- Coinbase (SOL) -----------------
-
-def cb_get(path: str, params: dict | None = None, timeout: int = 15):
-    url = f"{CB_BASE}{path}"
-    r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "market-feed/1.0"})
-    r.raise_for_status()
-    return r.json()
-
-def coinbase_spot(pair: str) -> dict:
     try:
-        j = cb_get(f"/products/{pair}/ticker")
+        if FORCE_SOL_FALLBACK:
+            raise RuntimeError("FORCE_SOL_FALLBACK=1 (test) → skip coinbase")
+
+        url = f"https://api.exchange.coinbase.com/products/{product_id}/ticker"
+        r = requests.get(url, timeout=timeout, headers={"User-Agent": "market-feed/1.0"})
+        r.raise_for_status()
+        j = r.json()
+        # prefer "price" ha van, egyébként (bid+ask)/2
         price = None
-        if isinstance(j, dict):
-            if j.get("price") not in (None, "None"):
-                price = float(j["price"])
-            elif j.get("bid") and j.get("ask"):
-                price = (float(j["bid"]) + float(j["ask"])) / 2.0
-        return with_status_ok(
-            {"asset": "SOL", "price_usd": price, "source": "coinbase", "raw": j},
-            price is not None
-        )
-    except Exception as e:
-        return with_status_ok({"asset": "SOL", "source": "coinbase"}, False, f"spot error: {e}")
-
-# Coinbase candles: [ time, low, high, open, close, volume ] (max ~300), granu: 60/300/900/3600/21600/86400
-def coinbase_candles(pair: str, granularity_sec: int = 300,
-                     start_iso: str | None = None, end_iso: str | None = None) -> list:
-    params = {"granularity": granularity_sec}
-    if start_iso: params["start"] = start_iso
-    if end_iso:   params["end"] = end_iso
-    rows = cb_get(f"/products/{pair}/candles", params=params)
-    rows = sorted(rows, key=lambda x: x[0])
-    return rows
-
-def cb_rows_to_df(rows: list) -> pd.DataFrame:
-    idx = pd.to_datetime([int(r[0]) for r in rows], unit="s", utc=True).tz_convert(None)
-    return pd.DataFrame({
-        "open":  [float(r[3]) for r in rows],
-        "high":  [float(r[2]) for r in rows],
-        "low":   [float(r[1]) for r in rows],
-        "close": [float(r[4]) for r in rows],
-    }, index=idx)
-
-def df_to_values(df: pd.DataFrame) -> list[dict]:
-    out = []
-    for ts, row in df.iterrows():
-        out.append({
-            "datetime": ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "open":  f"{row['open']:.2f}",
-            "high":  f"{row['high']:.2f}",
-            "low":   f"{row['low']:.2f}",
-            "close": f"{row['close']:.2f}",
-        })
-    return out
-
-# ----------------- TwelveData (QQQ, GOLD_CFD) -----------------
-
-def td_get(endpoint: str, params: dict, timeout: int = 20, max_retries: int = 3):
-    if not TD_API_KEY:
-        raise RuntimeError("Missing TWELVEDATA_API_KEY")
-    url = f"{TD_BASE}/{endpoint}"
-    p = dict(params)
-    p["apikey"] = TD_API_KEY
-
-    backoff = 1.2  # kezdő várakozás (s), exponenciálisan nő
-    for attempt in range(max_retries):
-        try:
-            r = requests.get(url, params=p, timeout=timeout, headers={"User-Agent": "market-feed/1.0"})
-            # 429 – túl sok kérés: tiszteljük a Retry-After-t, különben backoff
-            if r.status_code == 429:
-                ra = r.headers.get("Retry-After")
-                try:
-                    wait = float(ra) if ra else backoff
-                except Exception:
-                    wait = backoff
-                log(f"TwelveData 429 on {endpoint} symbol={params.get('symbol')} interval={params.get('interval')} → wait {wait}s (attempt {attempt+1}/{max_retries})")
-                time.sleep(wait)
-                backoff *= 2
-                continue
-
-            r.raise_for_status()
-            data = r.json()
-            time.sleep(TD_PAUSE)  # kvóta kímélése siker esetén is
-            return data
-
-        except requests.exceptions.RequestException:
-            # utolsó próbálkozásnál dobjuk tovább, különben várunk és újrapróbáljuk
-            if attempt == max_retries - 1:
-                raise
-            time.sleep(backoff)
-            backoff *= 2
-
-def td_spot(symbol: str, asset_name: str) -> dict:
-    try:
-        j = td_get("price", {"symbol": symbol})
-        price = None
-        if isinstance(j, dict) and j.get("price") not in (None, "None"):
+        if "price" in j:
             try:
                 price = float(j["price"])
             except Exception:
                 price = None
-        if price is None and isinstance(j, dict) and j.get("status") == "error":
-            return with_status_ok({"asset": asset_name, "source": "twelvedata"}, False, f"spot: {j.get('message')}")
-        return with_status_ok(
-            {"asset": asset_name, "price_usd": price, "source": "twelvedata", "raw": j},
-            price is not None
-        )
-    except Exception as e:
-        return with_status_ok({"asset": asset_name, "source": "twelvedata"}, False, f"spot error: {e}")
-
-def td_series(symbol: str, interval: str, asset_name: str) -> dict:
-    try:
-        j = td_get("time_series", {
-            "symbol": symbol, "interval": interval, "outputsize": 300, "timezone": "UTC"
-        })
-        if isinstance(j, dict) and j.get("status") == "error":
-            return {
-                "ok": False, "status": "error",
-                "error": j.get("message"),
-                "meta": {"symbol": symbol, "interval": interval},
-                "values": [], "retrieved_at_utc": nowiso()
-            }
-        meta = j.get("meta", {}) if isinstance(j, dict) else {}
-        vals = list(reversed(j.get("values", []) or []))
-        return {
-            "ok": True, "status": "ok",
-            "meta": {
-                "symbol": meta.get("symbol", symbol), "interval": interval,
-                "currency": meta.get("currency"), "exchange": meta.get("exchange"),
-                "exchange_timezone": meta.get("exchange_timezone"), "type": meta.get("type"),
-                "source": "twelvedata"
-            },
-            "values": vals, "retrieved_at_utc": nowiso()
+        if price is None and "bid" in j and "ask" in j:
+            try:
+                price = (float(j["bid"]) + float(j["ask"])) / 2.0
+            except Exception:
+                price = None
+        payload = {
+            "asset": "SOL",
+            "source": "coinbase",
+            "price_usd": price,
+            "raw": j
         }
+        return with_status_ok(payload, price is not None)
     except Exception as e:
-        return {"ok": False, "status": "error",
-                "error": f"TwelveData {interval} fetch failed: {e}",
-                "meta": {"symbol": symbol, "interval": interval},
-                "values": [], "retrieved_at_utc": nowiso()}
+        return with_status_ok({"asset": "SOL", "source": "coinbase"}, False, f"spot error: {e}")
 
-# --- Yahoo spot fallback (NSDQ100, GOLD_CFD) ---
 
-def yahoo_spot(ysymbol: str, asset_name: str) -> dict:
+def coingecko_sol_spot(timeout: int = 15) -> Dict[str, Any]:
+    """
+    CoinGecko simple price (SOL→USD).
+    Doc: https://docs.coingecko.com/reference/simple-price
+    """
     try:
-        url = "https://query1.finance.yahoo.com/v7/finance/quote"
-        r = requests.get(url, params={"symbols": ysymbol}, timeout=15,
+        url = "https://api.coingecko.com/api/v3/simple/price"
+        params = {
+            "ids": "solana",
+            "vs_currencies": "usd",
+            "include_last_updated_at": "true"
+        }
+        r = requests.get(url, params=params, timeout=timeout,
+                         headers={"User-Agent": "market-feed/1.0"})
+        r.raise_for_status()
+        j = r.json()
+        price = j.get("solana", {}).get("usd")
+        payload = {
+            "asset": "SOL",
+            "source": "coingecko",
+            "price_usd": float(price) if price is not None else None,
+            "raw": j
+        }
+        return with_status_ok(payload, payload["price_usd"] is not None)
+    except Exception as e:
+        return with_status_ok({"asset": "SOL", "source": "coingecko"}, False, f"spot error: {e}")
+
+
+def kraken_sol_spot(timeout: int = 15) -> Dict[str, Any]:
+    """
+    Kraken public Ticker (SOLUSD).
+    Doc: https://docs.kraken.com/api/docs/rest-api/get-ticker-information/
+    """
+    try:
+        url = "https://api.kraken.com/0/public/Ticker"
+        r = requests.get(url, params={"pair": "SOLUSD"}, timeout=timeout,
                          headers={"User-Agent": "market-feed/1.0"})
         r.raise_for_status()
         data = r.json()
-        res = data.get("quoteResponse", {}).get("result", [])
+        res = data.get("result", {})
+        if not res:
+            return with_status_ok({"asset": "SOL", "source": "kraken"}, False, "no result")
+        pair = next(iter(res.keys()))
+        row = res[pair]
+        price = None
+        # last trade price: c[0]; ha az nincs, átlag ask/bid
+        if isinstance(row.get("c"), list) and row["c"]:
+            try:
+                price = float(row["c"][0])
+            except Exception:
+                price = None
+        if price is None:
+            try:
+                if isinstance(row.get("a"), list) and row["a"] and isinstance(row.get("b"), list) and row["b"]:
+                    price = (float(row["a"][0]) + float(row["b"][0])) / 2.0
+            except Exception:
+                price = None
+        payload = {
+            "asset": "SOL",
+            "source": "kraken",
+            "price_usd": price,
+            "raw": row
+        }
+        return with_status_ok(payload, price is not None)
+    except Exception as e:
+        return with_status_ok({"asset": "SOL", "source": "kraken"}, False, f"spot error: {e}")
+
+
+def yahoo_spot(symbol: str, timeout: int = 15) -> Dict[str, Any]:
+    """
+    Yahoo finance quick quote (pl. QQQ). Egyszerű JSON.
+    """
+    try:
+        url = "https://query1.finance.yahoo.com/v7/finance/quote"
+        r = requests.get(url, params={"symbols": symbol}, timeout=timeout,
+                         headers={"User-Agent": "market-feed/1.0"})
+        r.raise_for_status()
+        j = r.json()
+        res = j.get("quoteResponse", {}).get("result", [])
+        price = None
         if res:
             row = res[0]
-            price = row.get("regularMarketPrice") or row.get("postMarketPrice") or row.get("preMarketPrice")
-            if price is not None:
-                return with_status_ok(
-                    {"asset": asset_name, "price_usd": float(price), "source": "yahoo", "raw": row}, True
-                )
-        return with_status_ok({"asset": asset_name, "source": "yahoo"}, False, "no price in quote")
+            # prefer regularMarketPrice
+            for key in ("regularMarketPrice", "postMarketPrice", "preMarketPrice"):
+                v = row.get(key)
+                if isinstance(v, (int, float)):
+                    price = float(v)
+                    break
+        payload = {
+            "asset": symbol,
+            "source": "yahoo",
+            "price_usd": price,
+            "raw": j
+        }
+        return with_status_ok(payload, price is not None)
     except Exception as e:
-        return with_status_ok({"asset": asset_name, "source": "yahoo"}, False, f"spot error: {e}")
+        return with_status_ok({"asset": symbol, "source": "yahoo"}, False, f"spot error: {e}")
 
-# ----------------- jelzés (egyszerű EMA9/21) -----------------
 
-def simple_signal_from_df(df: pd.DataFrame) -> tuple[str, list[str]]:
-    if df is None or df.empty or len(df) < 30:
-        return "no entry", ["no signal"]
-    ema9 = df["close"].ewm(span=9, adjust=False).mean()
-    ema21 = df["close"].ewm(span=21, adjust=False).mean()
-    last, prev = -1, -5
-    if ema9.iloc[last] > ema21.iloc[last] and ema9.iloc[prev] > ema21.iloc[prev]:
-        return "uptrend", ["ema9 > ema21 (5 bars)"]
-    if ema9.iloc[last] < ema21.iloc[last] and ema9.iloc[prev] < ema21.iloc[prev]:
-        return "downtrend", ["ema9 < ema21 (5 bars)"]
-    return "no entry", ["no signal"]
+def twelvedata_ohlc(symbol: str, interval: str, timeout: int = 20, count: int = 400) -> Dict[str, Any]:
+    """
+    TwelveData time_series OHLC lekérés.
+    """
+    try:
+        if not TWELVEDATA_API_KEY:
+            raise RuntimeError("TWELVEDATA_API_KEY missing")
 
-def dump_signal(asset_dir: str, asset_name: str, df_for_signal: pd.DataFrame | None):
-    sig, reasons = simple_signal_from_df(df_for_signal)
-    save_json(os.path.join(asset_dir, "signal.json"),
-              {"asset": asset_name, "ok": True, "retrieved_at_utc": nowiso(), "signal": sig, "reasons": reasons})
+        url = "https://api.twelvedata.com/time_series"
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "outputsize": str(count),
+            "format": "JSON",
+            "timezone": "UTC",
+            "order": "asc",
+            "apikey": TWELVEDATA_API_KEY
+        }
+        r = requests.get(url, params=params, timeout=timeout,
+                         headers={"User-Agent": "market-feed/1.0"})
+        r.raise_for_status()
+        j = r.json()
+        if "values" not in j:
+            return with_status_ok({"asset": symbol, "interval": interval, "source": "twelvedata"}, False,
+                                  f"bad response: {j.get('message') or 'no values'}")
+        return with_status_ok({"asset": symbol, "interval": interval, "source": "twelvedata", "raw": j}, True)
+    except Exception as e:
+        return with_status_ok({"asset": symbol, "interval": interval, "source": "twelvedata"}, False, f"ohlc error: {e}")
 
-# ----------------- eszköz feldolgozók -----------------
 
-def process_SOL_coinbase(pair: str):
+# ---- Jelzésképzés (EMA-k) ----------------------------------------------------
+
+def compute_ema(series: List[float], period: int) -> List[Optional[float]]:
+    """
+    Egyszerű EMA  (nem pandas; GitHub runneren pandas nélküli fallback esetére is jó).
+    """
+    if not series or period <= 1:
+        return [None] * len(series)
+    k = 2.0 / (period + 1.0)
+    ema: List[Optional[float]] = []
+    prev: Optional[float] = None
+    for i, v in enumerate(series):
+        if v is None:
+            ema.append(prev)
+            continue
+        if prev is None:
+            prev = v  # seed
+        else:
+            prev = v * k + prev * (1.0 - k)
+        ema.append(prev)
+    return ema
+
+
+def last_n_consistent(cond: List[bool], n: int) -> bool:
+    """Igaz-e az utolsó n elem mindegyike? Ha nincs elég adat, False."""
+    if len(cond) < n:
+        return False
+    return all(cond[-n:])
+
+
+def klines_to_closes(raw: Dict[str, Any]) -> List[Optional[float]]:
+    """TwelveData JSON -> close lista (float v. None)."""
+    try:
+        vals = raw["raw"]["values"]
+        closes: List[Optional[float]] = []
+        for row in vals:
+            try:
+                closes.append(float(row["close"]))
+            except Exception:
+                closes.append(None)
+        return closes
+    except Exception:
+        return []
+
+
+def build_signal_from_ema(klines_5m: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Egyszerű trend-bias: EMA9 vs EMA21 az utolsó 5 gyertya alapján.
+    """
+    if not klines_5m or not klines_5m.get("ok"):
+        return {
+            "ok": False,
+            "signal": "no entry",
+            "reasons": ["missing 5m data"]
+        }
+
+    closes = klines_to_closes(klines_5m)
+    if not closes:
+        return {"ok": False, "signal": "no entry", "reasons": ["empty 5m data"]}
+
+    ema9 = compute_ema(closes, 9)
+    ema21 = compute_ema(closes, 21)
+    gt = [False if (a is None or b is None) else (a > b) for a, b in zip(ema9, ema21)]
+    lt = [False if (a is None or b is None) else (a < b) for a, b in zip(ema9, ema21)]
+
+    if last_n_consistent(gt, 5):
+        return {"ok": True, "signal": "uptrend", "reasons": ["ema9 > ema21 (5 bars)"]}
+    if last_n_consistent(lt, 5):
+        return {"ok": True, "signal": "downtrend", "reasons": ["ema9 < ema21 (5 bars)"]}
+    return {"ok": True, "signal": "no entry", "reasons": ["no consistent ema bias"]}
+
+
+# ---- Mentési segédek az OHLC-hez (életkor-gátlókkal) -------------------------
+
+def should_refresh(path: str, min_age_sec: int) -> bool:
+    a = age_seconds(path)
+    if a is None:
+        return True
+    return a >= min_age_sec
+
+
+def save_series_with_guard(path: str, payload: Dict[str, Any], ok: bool) -> None:
+    """
+    Csak akkor írjuk felül, ha OK az új adat, különben meghagyjuk a korábbit.
+    """
+    if ok:
+        save_json(path, payload)
+    else:
+        # ha nincs korábbi, akkor is érdemes lementeni a hibát diagnosztikának
+        if not os.path.exists(path):
+            save_json(path, payload)
+
+
+# ---- Eszköz-specifikus feldolgozók -------------------------------------------
+
+def process_SOL() -> None:
+    """
+    SOL spot: coinbase → coingecko → kraken → (utolsó jó)
+    OHLC: TwelveData (5m/1h/4h) életkor-gátlókkal.
+    Jelzés: EMA9/EMA21 (5 bar).
+    """
     asset = "SOL"
     adir = os.path.join(OUT_DIR, asset)
     ensure_dir(adir)
 
-    # SPOT
-    spot = coinbase_spot(pair)
-    save_json(os.path.join(adir, "spot.json"), spot)
-
-    # 5m
-    try:
-        k5_rows = coinbase_candles(pair, 300)
-        df5 = cb_rows_to_df(k5_rows)
-        save_json(os.path.join(adir, "klines_5m.json"),
-                  {"meta": {"symbol": pair.replace("-", "/"), "interval": "5min", "source": "coinbase"},
-                   "values": df_to_values(df5), "status": "ok", "ok": True, "retrieved_at_utc": nowiso()})
-    except Exception as e:
-        save_json(os.path.join(adir, "klines_5m.json"),
-                  with_status_ok({"meta": {"symbol": pair, "interval": "5min"}, "values": []}, False, str(e)))
-        df5 = None
-
-    # 1h
-    try:
-        k1_rows = coinbase_candles(pair, 3600)
-        df1 = cb_rows_to_df(k1_rows)
-        save_json(os.path.join(adir, "klines_1h.json"),
-                  {"meta": {"symbol": pair.replace("-", "/"), "interval": "1h", "source": "coinbase"},
-                   "values": df_to_values(df1), "status": "ok", "ok": True, "retrieved_at_utc": nowiso()})
-    except Exception as e:
-        save_json(os.path.join(adir, "klines_1h.json"),
-                  with_status_ok({"meta": {"symbol": pair, "interval": "1h"}, "values": []}, False, str(e)))
-        df1 = None
-
-    # 4h (1h->4h)
-    try:
-        if df1 is None:
-            k1_rows = coinbase_candles(pair, 3600)
-            df1 = cb_rows_to_df(k1_rows)
-        k4 = df1.resample("4H").agg({"open": "first", "high": "max", "low": "min", "close": "last"}).dropna()
-        save_json(os.path.join(adir, "klines_4h.json"),
-                  {"meta": {"symbol": pair.replace("-", "/"), "interval": "4h", "source": "coinbase (1h->4h)"},
-                   "values": df_to_values(k4), "status": "ok", "ok": True, "retrieved_at_utc": nowiso()})
-    except Exception as e:
-        save_json(os.path.join(adir, "klines_4h.json"),
-                  with_status_ok({"meta": {"symbol": pair, "interval": "4h"}, "values": []}, False, str(e)))
-
-    dump_signal(adir, asset, df1 if isinstance(df1, pd.DataFrame) else None)
-
-def process_TD_generic(asset_name: str, symbol: str):
-    adir = os.path.join(OUT_DIR, asset_name)
-    ensure_dir(adir)
-
-    # 1) SPOT: TwelveData -> ha hiba/None, Yahoo fallback -> ha az is hiba, marad a régi
-    spot = td_spot(symbol, asset_name)
+    # --- SPOT (fallback lánc)
+    spot = coinbase_spot("SOL-USD")
     if (not spot.get("ok")) or (spot.get("price_usd") is None):
-        ysym = YAHOO_MAP.get(asset_name)
-        if ysym:
-            y = yahoo_spot(ysym, asset_name)
-            if y.get("ok") and (y.get("price_usd") is not None):
-                spot = y
+        cg = coingecko_sol_spot()
+        if cg.get("ok") and (cg.get("price_usd") is not None):
+            spot = cg
+        else:
+            kk = kraken_sol_spot()
+            if kk.get("ok") and (kk.get("price_usd") is not None):
+                spot = kk
             else:
                 prev = read_json(os.path.join(adir, "spot.json"))
                 if prev:
-                    spot = prev
-    log(f"{asset_name} spot source={spot.get('source')} price={spot.get('price_usd')}")
+                    spot = prev  # utolsó jó megtartása
+    log(f"SOL spot source={spot.get('source')} price={spot.get('price_usd')}")
     save_json(os.path.join(adir, "spot.json"), spot)
 
-    # 2) OHLC – csak akkor frissítünk, ha a meglévő túl öreg (stale-check)
-    m5_min = int(os.getenv("TD_M5_MIN_AGE", "900"))     # 15 perc
-    h1_min = int(os.getenv("TD_H1_MIN_AGE", "3600"))    # 60 perc
-    h4_min = int(os.getenv("TD_H4_MIN_AGE", "14400"))   # 4 óra
+    # --- OHLC (5m/1h/4h) – csak ha elég régi a file
+    path_5m = os.path.join(adir, "klines_5m.json")
+    if should_refresh(path_5m, TD_M5_MIN_AGE):
+        time.sleep(TD_PAUSE)
+        k5 = twelvedata_ohlc("SOL/USD", "5min")
+        save_series_with_guard(path_5m, k5, k5.get("ok", False))
 
-    plan = [
-        ("5min", "klines_5m.json", m5_min),
-        ("1h",   "klines_1h.json", h1_min),
-        ("4h",   "klines_4h.json", h4_min),
-    ]
-    for interval, fname, min_age in plan:
-        fpath = os.path.join(adir, fname)
-        age = file_age_sec(fpath)
-        do_refresh = should_refresh(fpath, min_age)
-        log(f"{asset_name} {interval}: age={int(age) if age is not None else 'NA'}s min={min_age}s → {'REFRESH' if do_refresh else 'SKIP'}")
-        if do_refresh:
-            data = td_series(symbol, interval, asset_name)
-            save_series_with_guard(adir, fname, data)
-        # ha nem kell frissíteni, meghagyjuk a meglévőt
+    path_1h = os.path.join(adir, "klines_1h.json")
+    if should_refresh(path_1h, TD_H1_MIN_AGE):
+        time.sleep(TD_PAUSE)
+        k1 = twelvedata_ohlc("SOL/USD", "1h")
+        save_series_with_guard(path_1h, k1, k1.get("ok", False))
 
-    # 3) Jelzés 1h alapján
-    vals = read_json(os.path.join(adir, "klines_1h.json")).get("values", [])
-    df = None
-    if vals:
-        idx = pd.to_datetime([v["datetime"] for v in vals])
-        df = pd.DataFrame({
-            "open":  [float(v["open"]) for v in vals],
-            "high":  [float(v["high"]) for v in vals],
-            "low":   [float(v["low"]) for v in vals],
-            "close": [float(v["close"]) for v in vals],
-        }, index=idx)
-    dump_signal(adir, asset_name, df)
+    path_4h = os.path.join(adir, "klines_4h.json")
+    if should_refresh(path_4h, TD_H4_MIN_AGE):
+        time.sleep(TD_PAUSE)
+        k4 = twelvedata_ohlc("SOL/USD", "4h")
+        save_series_with_guard(path_4h, k4, k4.get("ok", False))
 
-# ----------------- aggregátorok -----------------
-
-def write_all_asset(asset: str):
-    adir = os.path.join(OUT_DIR, asset)
-    obj = {
+    # --- SIGNAL
+    k5m = read_json(path_5m)
+    sig = build_signal_from_ema(k5m)
+    sig_out = {
         "asset": asset,
-        "spot":   read_json(os.path.join(adir, "spot.json")),
-        "k5m":    read_json(os.path.join(adir, "klines_5m.json")),
-        "k1h":    read_json(os.path.join(adir, "klines_1h.json")),
-        "k4h":    read_json(os.path.join(adir, "klines_4h.json")),
-        "signal": read_json(os.path.join(adir, "signal.json")),
-        "retrieved_at_utc": nowiso(),
-        "ok": True,
+        "ok": bool(sig.get("ok")),
+        "retrieved_at_utc": now_utc_str(),
+        "signal": sig.get("signal", "no entry"),
+        "reasons": sig.get("reasons", [])
     }
-    save_json(os.path.join(OUT_DIR, f"all_{asset}.json"), obj)
-    # kompatibilitás – repo gyökérbe is
-    save_json(os.path.join(f"all_{asset}.json"), obj)
+    save_json(os.path.join(adir, "signal.json"), sig_out)
 
-def write_summary(assets: List[dict]):
-    summ = {"ok": True, "retrieved_at_utc": nowiso(), "assets": {}}
-    for a in assets:
-        name = a["name"]
-        spot = read_json(os.path.join(OUT_DIR, name, "spot.json"))
-        sig  = read_json(os.path.join(OUT_DIR, name, "signal.json"))
-        summ["assets"][name] = {"spot": spot, "signal": sig}
-    save_json(os.path.join(OUT_DIR, "analysis_summary.json"), summ)
-    html = (
-        "<!doctype html><meta charset='utf-8'><title>Analysis Summary</title>"
-        "<h1>Analysis Summary</h1><pre>" +
-        json.dumps(summ, ensure_ascii=False, indent=2) +
-        "</pre>"
-    )
-    with open(os.path.join(OUT_DIR, "analysis.html"), "w", encoding="utf-8") as f:
-        f.write(html)
 
-# ----------------- main -----------------
+def process_NSDQ100() -> None:
+    """
+    NSDQ100 (QQQ proxy)
+    Spot: Yahoo (QQQ)
+    OHLC: TwelveData (QQQ / NDQ100 index -> a projektben "NSDQ100" aliasra publikálunk)
+    """
+    asset = "NSDQ100"
+    adir = os.path.join(OUT_DIR, asset)
+    ensure_dir(adir)
 
-def main():
+    # --- SPOT (Yahoo: QQQ)
+    spot = yahoo_spot("QQQ")
+    log(f"NSDQ100 spot source={spot.get('source')} price={spot.get('price_usd')}")
+    save_json(os.path.join(adir, "spot.json"), spot)
+
+    # --- OHLC
+    # TwelveData szimbólum – ha az API kulcsod QQQ-ra ad idősort, használd QQQ-t.
+    # (Alternatíva: ^NDX, NDX100 - TwelveData támogatástól függ.)
+    path_5m = os.path.join(adir, "klines_5m.json")
+    if should_refresh(path_5m, TD_M5_MIN_AGE):
+        time.sleep(TD_PAUSE)
+        k5 = twelvedata_ohlc("QQQ", "5min")
+        save_series_with_guard(path_5m, k5, k5.get("ok", False))
+
+    path_1h = os.path.join(adir, "klines_1h.json")
+    if should_refresh(path_1h, TD_H1_MIN_AGE):
+        time.sleep(TD_PAUSE)
+        k1 = twelvedata_ohlc("QQQ", "1h")
+        save_series_with_guard(path_1h, k1, k1.get("ok", False))
+
+    path_4h = os.path.join(adir, "klines_4h.json")
+    if should_refresh(path_4h, TD_H4_MIN_AGE):
+        time.sleep(TD_PAUSE)
+        k4 = twelvedata_ohlc("QQQ", "4h")
+        save_series_with_guard(path_4h, k4, k4.get("ok", False))
+
+    # --- SIGNAL
+    k5m = read_json(path_5m)
+    sig = build_signal_from_ema(k5m)
+    sig_out = {
+        "asset": asset,
+        "ok": bool(sig.get("ok")),
+        "retrieved_at_utc": now_utc_str(),
+        "signal": sig.get("signal", "no entry"),
+        "reasons": sig.get("reasons", [])
+    }
+    save_json(os.path.join(adir, "signal.json"), sig_out)
+
+
+def process_GOLD_CFD() -> None:
+    """
+    GOLD_CFD (XAU/USD)
+    Spot: TwelveData (XAU/USD) – egyszerű és egységes
+    OHLC: TwelveData (5m/1h/4h)
+    """
+    asset = "GOLD_CFD"
+    adir = os.path.join(OUT_DIR, asset)
+    ensure_dir(adir)
+
+    # --- SPOT (TwelveData; ha kell, itt is tehetsz Yahoo fallbacket GC=F-re)
+    spot_td = twelvedata_ohlc("XAU/USD", "1min", count=2)  # proxy a legfrissebb zárásra
+    price = None
+    if spot_td.get("ok"):
+        try:
+            vals = spot_td["raw"]["values"]
+            if vals:
+                price = float(vals[-1]["close"])
+        except Exception:
+            price = None
+    spot = with_status_ok({"asset": asset, "source": "twelvedata", "price_usd": price, "raw": spot_td.get("raw")}, price is not None)
+    log(f"GOLD_CFD spot source={spot.get('source')} price={spot.get('price_usd')}")
+    save_json(os.path.join(adir, "spot.json"), spot)
+
+    # --- OHLC
+    path_5m = os.path.join(adir, "klines_5m.json")
+    if should_refresh(path_5m, TD_M5_MIN_AGE):
+        time.sleep(TD_PAUSE)
+        k5 = twelvedata_ohlc("XAU/USD", "5min")
+        save_series_with_guard(path_5m, k5, k5.get("ok", False))
+
+    path_1h = os.path.join(adir, "klines_1h.json")
+    if should_refresh(path_1h, TD_H1_MIN_AGE):
+        time.sleep(TD_PAUSE)
+        k1 = twelvedata_ohlc("XAU/USD", "1h")
+        save_series_with_guard(path_1h, k1, k1.get("ok", False))
+
+    path_4h = os.path.join(adir, "klines_4h.json")
+    if should_refresh(path_4h, TD_H4_MIN_AGE):
+        time.sleep(TD_PAUSE)
+        k4 = twelvedata_ohlc("XAU/USD", "4h")
+        save_series_with_guard(path_4h, k4, k4.get("ok", False))
+
+    # --- SIGNAL
+    k5m = read_json(path_5m)
+    sig = build_signal_from_ema(k5m)
+    sig_out = {
+        "asset": asset,
+        "ok": bool(sig.get("ok")),
+        "retrieved_at_utc": now_utc_str(),
+        "signal": sig.get("signal", "no entry"),
+        "reasons": sig.get("reasons", [])
+    }
+    save_json(os.path.join(adir, "signal.json"), sig_out)
+
+
+# ---- Belépési pont -----------------------------------------------------------
+
+def main() -> None:
     ensure_dir(OUT_DIR)
-    for a in ASSETS:
-        if a["source"] == "coinbase":
-            process_SOL_coinbase(a["cb_pair"])
-        elif a["source"] == "twelvedata":
-            process_TD_generic(a["name"], a["td_symbol"])
-    for a in ASSETS:
-        write_all_asset(a["name"])
-    write_summary(ASSETS)
+
+    want = {"SOL", "NSDQ100", "GOLD_CFD"}
+    if ASSET_ONLY:
+        want = {a for a in want if a in set(ASSET_ONLY)}
+
+    log(f"Start Trading.py (assets={','.join(sorted(want))})")
+
+    if "SOL" in want:
+        process_SOL()
+    if "NSDQ100" in want:
+        process_NSDQ100()
+    if "GOLD_CFD" in want:
+        process_GOLD_CFD()
+
+    log("Done Trading.py")
+
 
 if __name__ == "__main__":
     main()
