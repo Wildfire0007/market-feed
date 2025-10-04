@@ -14,9 +14,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  fetch:
+  fetch_and_analyze:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,34 +33,53 @@ jobs:
           UA="etoro-agent/1.0"
           HDR=(-H "Accept: application/json" -H "User-Agent: ${UA}")
           log() { echo "[$(date -u +%FT%TZ)] $*"; }
+          # kis jitter, hogy ne pont a generátor írásával ütközzünk
           sleep $((RANDOM%7+3))
 
           fetch_asset () { # $1 = ASSET
             ASSET="$1"
-            PRIMARY="https://market-feed-proxy.czipo-agnes.workers.dev/h/all?asset=${ASSET}&fields=spot,k1h"
+            PRIMARY="https://market-feed-proxy.czipo-agnes.workers.dev/h/all?asset=${ASSET}&fields=spot,k5m,k1h,k4h"
             log "PRIMARY  : $PRIMARY"
+
             if RESP="$(curl -fsS "${PRIMARY}" "${HDR[@]}" --retry 5 --retry-delay 3 --retry-all-errors)"; then
               log "OK       : /h/all JSON for ${ASSET}"
             else
               log "WARN     : /h/all failed → Worker single-file"
               SPOT_URL="https://market-feed-proxy.czipo-agnes.workers.dev/spot?asset=${ASSET}"
+              K5M_URL="https://market-feed-proxy.czipo-agnes.workers.dev/k5m?asset=${ASSET}"
               K1H_URL="https://market-feed-proxy.czipo-agnes.workers.dev/k1h?asset=${ASSET}"
+              K4H_URL="https://market-feed-proxy.czipo-agnes.workers.dev/k4h?asset=${ASSET}"
+
               SPOT="$(curl -fsS "${SPOT_URL}" "${HDR[@]}" --retry 5 --retry-delay 3 --retry-all-errors || true)"
+              K5M="$(curl -fsS  "${K5M_URL}" "${HDR[@]}" --retry 5 --retry-delay 3 --retry-all-errors || true)"
               K1H="$(curl -fsS  "${K1H_URL}" "${HDR[@]}" --retry 5 --retry-delay 3 --retry-all-errors || true)"
-              if [[ -z "${SPOT}" || -z "${K1H}" ]]; then
-                log "WARN     : single-file incomplete → RAW (cache-bypass)"
+              K4H="$(curl -fsS  "${K4H_URL}" "${HDR[@]" --retry 5 --retry-delay 3 --retry-all-errors || true)"
+
+              # ha single-file részben hiányos → RAW (cache-bypass)
+              NEED_RAW=false
+              [[ -z "${SPOT}" || -z "${K1H}" ]] && NEED_RAW=true
+              if $NEED_RAW; then
+                log "WARN     : single-file incomplete → RAW"
                 TS="$(date +%s)"
                 SPOT="$(curl -fsS "https://raw.githubusercontent.com/Wildfire0007/market-feed/main/${ASSET}/spot.json?ts=${TS}" || true)"
+                K5M="$(curl -fsS  "https://raw.githubusercontent.com/Wildfire0007/market-feed/main/${ASSET}/klines_5m.json?ts=${TS}" || true)"
                 K1H="$(curl -fsS  "https://raw.githubusercontent.com/Wildfire0007/market-feed/main/${ASSET}/klines_1h.json?ts=${TS}" || true)"
+                K4H="$(curl -fsS  "https://raw.githubusercontent.com/Wildfire0007/market-feed/main/${ASSET}/klines_4h.json?ts=${TS}" || true)"
               fi
-              RESP="$(jq -n --arg asset "${ASSET}" --argjson spot "${SPOT:-null}" --argjson k1h "${K1H:-null}" \
-                '{ok:true, asset:$asset, spot:$spot, k1h:$k1h}')"
+
+              RESP="$(jq -n --arg asset "${ASSET}" \
+                           --argjson spot "${SPOT:-null}" \
+                           --argjson k5m  "${K5M:-null}" \
+                           --argjson k1h  "${K1H:-null}" \
+                           --argjson k4h  "${K4H:-null}" \
+                           '{ok:true, asset:$asset, spot:$spot, k5m:$k5m, k1h:$k1h, k4h:$k4h, source:"fallback"}')"
             fi
 
+            # SOL freshness (age_sec > 1200 → ticker fallback log)
             if [[ "${ASSET}" == "SOL" ]]; then
               AGE="$(echo "${RESP}" | jq -r '.spot.age_sec // 0')"
               if [[ "${AGE}" == "null" || "${AGE}" -gt 1200 ]]; then
-                log "INFO     : SOL stale → ticker fallbacks (URL log)"
+                log "INFO     : SOL spot stale (${AGE}s) → ticker fallbacks"
                 CG_URL='https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd&include_last_updated_at=true'
                 if ! curl -fsS "${CG_URL}" -H "User-Agent: ${UA}" --retry 3 --retry-delay 2 --retry-all-errors >/dev/null; then
                   curl -fsS 'https://api.exchange.coinbase.com/products/SOL-USD/ticker' >/dev/null || true
@@ -79,11 +98,28 @@ jobs:
           fetch_asset NSDQ100
           fetch_asset GOLD_CFD
 
-      - name: Upload artifacts (JSON snapshots)
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install analysis deps
+        run: |
+          python -V
+          pip install --upgrade pip
+          pip install pandas numpy
+
+      - name: Run intraday analysis → report
+        run: |
+          python scripts/intraday_report.py
+
+      - name: Upload artifacts (JSON + Report)
         uses: actions/upload-artifact@v4
         with:
-          name: market-json
+          name: market-output
           path: |
             out_SOL.json
             out_NSDQ100.json
             out_GOLD_CFD.json
+            report/analysis_report.md
+            report/summary.csv
