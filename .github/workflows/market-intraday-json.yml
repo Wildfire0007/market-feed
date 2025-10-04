@@ -7,7 +7,7 @@ on:
     - cron: "*/30 * * * *"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: "market-intraday-json"
@@ -153,6 +153,33 @@ jobs:
       - name: Run intraday analysis → report
         run: |
           python scripts/intraday_report.py
+
+      - name: Commit reports to repo (reports/<TS> és reports/latest)
+        if: always()
+        run: |
+          TS=$(date -u +%Y%m%d_%H%M)
+          DEST="reports/${TS}"
+          mkdir -p "$DEST"
+          cp -v report/* "$DEST"/
+
+          # 'latest' frissítése (mappa újraírása)
+          rm -rf reports/latest
+          mkdir -p reports/latest
+          cp -v report/* reports/latest/
+
+          # index fájl opcionálisan
+          if [ ! -f reports/README.md ]; then
+            echo "# Intraday reports" > reports/README.md
+            echo "" >> reports/README.md
+            echo "- **latest/** – mindig a legutóbbi futás" >> reports/README.md
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A reports/
+          git commit -m "Add intraday report ${TS} (auto)" || echo "Nothing to commit"
+          git push
+
 
       - name: Highlight signals in job summary
         if: always()
