@@ -135,6 +135,24 @@ jobs:
             exit 0
           fi
 
+          # 0/b) Duplikátum-szűrés (ha nem változott semmi, skip)
+          mkdir -p tmp
+          # jelenlegi állapot lenyomata (hash): updated_utc + 3 signal + (opcionális) entries.json tartalom
+          base_hash=$(jq -r '[.updated_utc, .assets.SOL.signal, .assets.NSDQ100.signal, .assets.GOLD_CFD.signal] | join("|")' public/analysis_summary.json)
+          curl -fLsS -o tmp/report.md https://raw.githubusercontent.com/Wildfire0007/market-feed/main/reports/latest/analysis_report.md || true
+          # durva lenyomat a reportból (ha van)
+          rpt_hash=$(sha256sum tmp/report.md 2>/dev/null | cut -d' ' -f1 || echo "no-report")
+          new_hash=$(printf '%s|%s' "$base_hash" "$rpt_hash" | sha256sum | cut -d' ' -f1)
+
+          # előző hash letöltése a Pages-ről (ha már volt deploy)
+          curl -fLsS -o tmp/prev_hash.txt https://wildfire0007.github.io/market-feed/.last_discord_hash || true
+          prev_hash=$(cat tmp/prev_hash.txt 2>/dev/null || echo "")
+
+          if [ "$new_hash" = "$prev_hash" ]; then
+            echo "No change since last post → skip Discord post"
+            exit 0
+          fi
+
           # 1) Alap jelek
           sol=$(jq -r '.assets.SOL.signal' public/analysis_summary.json)
           ndx=$(jq -r '.assets.NSDQ100.signal' public/analysis_summary.json)
@@ -218,6 +236,9 @@ jobs:
           payload=$(jq -n --arg content "$msg" '{content:$content}')
           curl -fsS -H "Content-Type: application/json" \
                -d "$payload" "$DISCORD_WEBHOOK_URL"
+          # új hash elmentése a Pages-re (artifact része lesz)
+          echo "$new_hash" > public/.last_discord_hash
+
 
 
       - name: Ensure index.html
