@@ -242,13 +242,20 @@ jobs:
           msg="${msg}
           🔗 ${url}"
 
-          payload=$(jq -n --arg content "$msg" '{content:$content}')
-          curl -fsS -H "Content-Type: application/json" \
-               -d "$payload" "$DISCORD_WEBHOOK_URL"
-          # új hash elmentése a Pages-re (artifact része lesz)
-          echo "$new_hash" > public/.last_discord_hash
+          @here
+          mention=""
+          if [ -n "$bell" ]; then
+            mention="@here "
+          fi
 
+          if [ -n "$mention" ]; then
+            payload=$(jq -n --arg content "$mention$msg" \
+              '{content:$content, allowed_mentions:{parse:["everyone"]}}')
+          else
+            payload=$(jq -n --arg content "$msg" '{content:$content}')
+          fi
 
+          curl -fsS -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL"
 
       - name: Ensure index.html
         run: |
