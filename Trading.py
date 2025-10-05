@@ -69,8 +69,7 @@ def _label_from_res(res: str) -> str:
 def finnhub_forex_candles(symbol: str, res: str, bars: int = 400, timeout: int = 20) -> Dict[str, Any]:
     """
     Finnhub FOREX gyertyák (XAU/USD stb.) → TD-kompatibilis 'raw.values' szerkezet.
-    API: /forex/candles (symbol, resolution, from, to, token)
-    Docs: https://finnhub.io/docs/api/forex-candles
+    API: /forex/candle (symbol, resolution, from, to, token)
     """
     try:
         if not FINNHUB_API_KEY:
@@ -87,7 +86,6 @@ def finnhub_forex_candles(symbol: str, res: str, bars: int = 400, timeout: int =
         if j.get("s") != "ok" or not j.get("t") or not j.get("c"):
             return with_status_ok({"asset": symbol, "interval": _label_from_res(res), "source": "finnhub"}, False,
                                   f"bad response: {j.get('s')}")
-        # alakítsuk a TwelveData mintájára (raw.values[{close, time}])
         vals = []
         for ts, close in zip(j.get("t", []), j.get("c", [])):
             try:
@@ -97,10 +95,11 @@ def finnhub_forex_candles(symbol: str, res: str, bars: int = 400, timeout: int =
         payload = {"asset": symbol, "interval": _label_from_res(res), "source": "finnhub", "raw": {"values": vals}}
         return with_status_ok(payload, True)
     except Exception as e:
+        # ne szivárogjon token/URL a hibalogba
         msg = re.sub(r'(token=)[A-Za-z0-9_-]+', r'\1***', str(e))
         msg = re.sub(r'https?://\S+', '[redacted-url]', msg)
-        return with_status_ok({...}, False, f"ohlc error: {msg}")
-
+        safe_payload = {"asset": symbol, "interval": _label_from_res(res), "source": "finnhub"}
+        return with_status_ok(safe_payload, False, f"ohlc error: {msg}")
 
 def finnhub_fx_spot(symbol: str, timeout: int = 15) -> Dict[str, Any]:
     """
@@ -391,6 +390,22 @@ def twelvedata_last_close(symbol: str, interval: str = "5min", timeout: int = 15
     except Exception:
         return None
 
+def twelvedata_xauusd_spot(timeout: int = 15) -> Dict[str, Any]:
+    """
+    XAU/USD 'spot': az utolsó 1 perces gyertya záróára TwelveData time_series-ből.
+    Fallbacknek direkt a 1m utolsó zárót kérjük (outputsize=1).
+    """
+    try:
+        price = twelvedata_last_close("XAU/USD", "1min", timeout=timeout)
+        payload = {
+            "asset": "GOLD_CFD",
+            "source": "twelvedata:1min_close",
+            "price_usd": float(price) if price is not None else None,
+            "raw": {"note": "derived from time_series last close (1min)"}
+        }
+        return with_status_ok(payload, payload["price_usd"] is not None)
+    except Exception as e:
+        return with_status_ok({"asset": "GOLD_CFD", "source": "twelvedata:1min_close"}, False, f"spot error: {e}")
 
 
 # ---- Jelzésképzés (EMA-k) ----------------------------------------------------
@@ -708,6 +723,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
