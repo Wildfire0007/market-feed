@@ -25,6 +25,7 @@ import os
 import json
 import time
 import math
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -96,8 +97,10 @@ def finnhub_forex_candles(symbol: str, res: str, bars: int = 400, timeout: int =
         payload = {"asset": symbol, "interval": _label_from_res(res), "source": "finnhub", "raw": {"values": vals}}
         return with_status_ok(payload, True)
     except Exception as e:
-        return with_status_ok({"asset": symbol, "interval": _label_from_res(res), "source": "finnhub"}, False,
-                              f"ohlc error: {e}")
+        msg = re.sub(r'(token=)[A-Za-z0-9_-]+', r'\1***', str(e))
+        msg = re.sub(r'https?://\S+', '[redacted-url]', msg)
+        return with_status_ok({...}, False, f"ohlc error: {msg}")
+
 
 def finnhub_fx_spot(symbol: str, timeout: int = 15) -> Dict[str, Any]:
     """
@@ -630,44 +633,46 @@ def process_NSDQ100() -> None:
 def process_GOLD_CFD() -> None:
     """
     GOLD_CFD (XAU/USD)
-    Spot + OHLC: Finnhub FOREX candles (OANDA:XAU_USD) – levesszük a TwelveData perc-limites terhelést.
-    Ha Finnhub nem elérhető, megtartjuk az előző jó adatot (és opcionálisan TD-re esünk vissza).
+    Spot: TwelveData 1m close → Finnhub 1m candles fallback → előző érték
+    OHLC: TwelveData (5m / 1h / 4h) az eddigi életkor-gátlókkal
     """
     asset = "GOLD_CFD"
     adir = os.path.join(OUT_DIR, asset)
     ensure_dir(adir)
 
-    symbol = FINNHUB_XAU_SYMBOL  # pl. "OANDA:XAU_USD"
-
-    # 1) TwelveData spot (gyors és egységes)
-    spot = twelvedata_xauusd_spot()  # a mostani td-s logikád
-
-    # 2) Ha nincs ár (None) vagy TD hibázott → Finnhub 1m candle-ből pótoljuk
+    # --- SPOT (TD -> Finnhub fallback -> előző érték)
+    spot = twelvedata_xauusd_spot()
     if (not spot.get("ok")) or (spot.get("price_usd") is None):
-        fh = finnhub_fx_spot("OANDA:XAU_USD")
+        fh = finnhub_fx_spot(FINNHUB_XAU_SYMBOL)  # pl. "OANDA:XAU_USD"
         if fh.get("ok") and fh.get("price_usd") is not None:
             spot = fh
-
+        else:
+            prev = read_json(os.path.join(adir, "spot.json"))
+            if prev:
+                spot = prev
+    log(f"GOLD_CFD spot source={spot.get('source')} price={spot.get('price_usd')}")
     save_json(os.path.join(adir, "spot.json"), spot)
 
-
-    # --- OHLC (5m/1h/4h) – Finnhub
+    # --- OHLC (5m/1h/4h) – TwelveData
     path_5m = os.path.join(adir, "klines_5m.json")
     if should_refresh(path_5m, TD_M5_MIN_AGE):
-        k5 = finnhub_forex_candles(symbol, "5")
+        time.sleep(TD_PAUSE)
+        k5 = twelvedata_ohlc("XAU/USD", "5min")
         save_series_with_guard(path_5m, k5, k5.get("ok", False))
 
     path_1h = os.path.join(adir, "klines_1h.json")
     if should_refresh(path_1h, TD_H1_MIN_AGE):
-        k1 = finnhub_forex_candles(symbol, "60")
+        time.sleep(TD_PAUSE)
+        k1 = twelvedata_ohlc("XAU/USD", "1h")
         save_series_with_guard(path_1h, k1, k1.get("ok", False))
 
     path_4h = os.path.join(adir, "klines_4h.json")
     if should_refresh(path_4h, TD_H4_MIN_AGE):
-        k4 = finnhub_forex_candles(symbol, "240")
+        time.sleep(TD_PAUSE)
+        k4 = twelvedata_ohlc("XAU/USD", "4h")
         save_series_with_guard(path_4h, k4, k4.get("ok", False))
 
-    # --- SIGNAL (változatlan – a TD-mintára transzformált 'raw.values'-ból ugyanúgy dolgozik)
+    # --- SIGNAL (változatlan)
     k5m = read_json(path_5m)
     sig = build_signal_from_ema(k5m)
     sig_out = {
@@ -703,6 +708,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
