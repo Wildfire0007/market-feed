@@ -101,20 +101,34 @@ def finnhub_forex_candles(symbol: str, res: str, bars: int = 400, timeout: int =
 
 def finnhub_fx_spot(symbol: str, timeout: int = 15) -> Dict[str, Any]:
     """
-    'Spot' ár: az utolsó 1 perces gyertya záróára.
-    (Nincs külön REST 'last price' forexre, de a candles-ből korrektül kivehető.)
+    'Spot' = az utolsó 1 perces gyertya záróára a Finnhub /forex/candle végpontjáról.
+    Biztonság: a hibaszövegből elfedjük a tokeneket/URL-eket.
     """
     try:
-        k1 = finnhub_forex_candles(symbol, "1", bars=2, timeout=timeout)
+        k1 = finnhub_forex_candles(symbol, "1", bars=2, timeout=timeout)  # REST candles
         price = None
         if k1.get("ok"):
             values = k1.get("raw", {}).get("values", [])
             if values:
                 price = float(values[-1]["close"])
-        payload = {"asset": "GOLD_CFD", "source": "finnhub", "price_usd": price, "raw": k1.get("raw")}
+        payload = {
+            "asset": "GOLD_CFD",
+            "source": "finnhub",
+            "price_usd": price,
+            "raw": k1.get("raw")  # ez a valódi JSON, nem a hibaszöveg
+        }
         return with_status_ok(payload, price is not None)
     except Exception as e:
-        return with_status_ok({"asset": "GOLD_CFD", "source": "finnhub"}, False, f"spot error: {e}")
+        # ne szivárogjon API key / teljes URL
+        msg = str(e)
+        # nagyon egyszerű maszkolás: token param és query string kivágása
+        msg = re.sub(r'(token=)[A-Za-z0-9_-]+', r'\1***', msg)
+        msg = re.sub(r'https?://\S+', '[redacted-url]', msg)
+        return with_status_ok(
+            {"asset": "GOLD_CFD", "source": "finnhub"},
+            False,
+            f"spot error: {msg}"
+        )
 
 
 # ---- Közművek ----------------------------------------------------------------
@@ -625,15 +639,17 @@ def process_GOLD_CFD() -> None:
 
     symbol = FINNHUB_XAU_SYMBOL  # pl. "OANDA:XAU_USD"
 
-    # --- SPOT (Finnhub 1p záró)
-    spot = finnhub_fx_spot(symbol)
+    # 1) TwelveData spot (gyors és egységes)
+    spot = twelvedata_xauusd_spot()  # a mostani td-s logikád
+
+    # 2) Ha nincs ár (None) vagy TD hibázott → Finnhub 1m candle-ből pótoljuk
     if (not spot.get("ok")) or (spot.get("price_usd") is None):
-        # fallback: korábbi spot.json, hogy ne ürüljön ki
-        prev = read_json(os.path.join(adir, "spot.json"))
-        if prev:
-            spot = prev
-    log(f"GOLD_CFD spot source={spot.get('source')} price={spot.get('price_usd')}")
+        fh = finnhub_fx_spot("OANDA:XAU_USD")
+        if fh.get("ok") and fh.get("price_usd") is not None:
+            spot = fh
+
     save_json(os.path.join(adir, "spot.json"), spot)
+
 
     # --- OHLC (5m/1h/4h) – Finnhub
     path_5m = os.path.join(adir, "klines_5m.json")
@@ -687,5 +703,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
