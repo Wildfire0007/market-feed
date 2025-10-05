@@ -57,6 +57,70 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
+      # --- döntés: mely eszközök nyitottak most? (DST-safe, NY idő) ---
+      - name: Pick open assets (session-aware)
+        id: pick
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets=()
+          # Crypto 24/7
+          assets+=("SOL")
+
+          NY="America/New_York"
+          DOW=$(TZ=$NY date +%u)    # 1=Mon … 7=Sun
+          HM=$(TZ=$NY date +%H%M)   # HHMM, pl. 0935
+
+          # --- QQQ / NSDQ100: csak a rendes szakaszban 09:30–16:00 ET ---
+          if [ "$DOW" -le 5 ] && [ "$HM" -ge 0930 ] && [ "$HM" -le 1600 ]; then
+            assets+=("NSDQ100")
+          fi
+
+          # --- GOLD_CFD (XAU/USD): 24x5, napi 1h szünet 17:00–18:00 ET ---
+          gold_open=true
+          # napi szünet
+          if [ "$HM" -ge 1700 ] && [ "$HM" -lt 1800 ]; then gold_open=false; fi
+          # péntek 17:00 ET után zár
+          if [ "$DOW" -eq 5 ] && [ "$HM" -ge 1700 ]; then gold_open=false; fi
+          # szombat zárva
+          if [ "$DOW" -eq 6 ]; then gold_open=false; fi
+          # vasárnap csak 18:00 ET után nyit
+          if [ "$DOW" -eq 7 ] && [ "$HM" -lt 1800 ]; then gold_open=false; fi
+          if $gold_open; then assets+=("GOLD_CFD"); fi
+
+          # US tőzsdei ünnepnapok → QQQ tiltása (példa: néhány 2025-ös dátum)
+          HOLI_2025=("2025-01-01" "2025-01-20" "2025-02-17" "2025-04-18" "2025-05-26" "2025-06-19" "2025-07-04" "2025-09-01" "2025-11-27" "2025-12-25")
+          TODAY_NY=$(TZ=$NY date +%F)
+          for d in "${HOLI_2025[@]}"; do
+            if [ "$TODAY_NY" = "$d" ]; then
+              # szedd ki az NSDQ100-at az asset listából
+              assets=("${assets[@]/NSDQ100}")
+            fi
+          done
+
+          # kimenet a következő lépésnek
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "assets=" >> "$GITHUB_OUTPUT"
+          else
+            (IFS=,; echo "assets=${assets[*]}") >> "$GITHUB_OUTPUT"
+          fi
+
+      # --- csak ha van mit futtatni ---
+      - name: Generate feeds (only open assets)
+        if: ${{ steps.pick.outputs.assets != '' }}
+        env:
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          FINNHUB_API_KEY:    ${{ secrets.FINNHUB_API_KEY }}
+          TD_PAUSE: "2.0"
+          TD_M5_MIN_AGE: "900"
+          TD_H1_MIN_AGE: "3600"
+          TD_H4_MIN_AGE: "14400"
+          DEBUG: "1"
+          ASSET_ONLY: ${{ steps.pick.outputs.assets }}
+        run: |
+          echo "Running for assets: $ASSET_ONLY"
+          python Trading.py
+
       # <<< MINDHÁROM ESZKÖZ EGY FUTÁSBAN >>>
       - name: Generate feeds (SOL + NSDQ100 + GOLD_CFD)
         env:
