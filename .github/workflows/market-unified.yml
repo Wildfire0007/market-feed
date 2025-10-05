@@ -25,26 +25,29 @@ jobs:
 
       # H-P 08–22 (Europe/Budapest); hétvégén/éjjel skip
       - name: Gate by local time (Europe/Budapest)
+        id: gate
         shell: bash
         run: |
           TZ="Europe/Budapest"
           HOUR=$(TZ=$TZ date +%H)
-          DOW=$(TZ=$TZ date +%u)   # 1=hétfő … 7=vasárnap
+          DOW=$(TZ=$TZ date +%u)
+          run=1
           if [ "$DOW" -ge 6 ]; then
-            echo "Weekend → skip"
-            exit 0
+            echo "Weekend → skip"; run=0
+          elif [ "$HOUR" -lt 8 ] || [ "$HOUR" -gt 22 ]; then
+            echo "Outside 08–22 local → skip"; run=0
           fi
-          if [ "$HOUR" -lt 8 ] || [ "$HOUR" -gt 22 ]; then
-            echo "Outside 08–22 local → skip"
-            exit 0
-          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
 
       - name: Setup Python
+        if: ${{ steps.gate.outputs.run == '1' }}
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Cache pip
+        if: ${{ steps.gate.outputs.run == '1' }}
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
@@ -52,6 +55,7 @@ jobs:
           restore-keys: ${{ runner.os }}-pip-
 
       - name: Install deps
+        if: ${{ steps.gate.outputs.run == '1' }}
         run: |
           python -V
           pip install --upgrade pip
@@ -59,6 +63,7 @@ jobs:
 
       # --- döntés: mely eszközök nyitottak most? (DST-safe, NY idő) ---
       - name: Pick open assets (session-aware)
+        if: ${{ steps.gate.outputs.run == '1' }}
         id: pick
         shell: bash
         run: |
@@ -106,8 +111,8 @@ jobs:
           fi
 
       # --- csak ha van mit futtatni ---
-      - name: Generate feeds (only open assets)
-        if: ${{ steps.pick.outputs.assets != '' }}
+      - name: Generate feeds (only open assets) #----------------------------------!
+        if: ${{ steps.gate.outputs.run == '1' && steps.pick.outputs.assets != '' }}
         env:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           FINNHUB_API_KEY:    ${{ secrets.FINNHUB_API_KEY }}
@@ -121,31 +126,21 @@ jobs:
           echo "Running for assets: $ASSET_ONLY"
           python Trading.py
 
-      # <<< MINDHÁROM ESZKÖZ EGY FUTÁSBAN >>>
-      - name: Generate feeds (SOL + NSDQ100 + GOLD_CFD)
-        env:
-          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
-          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }} 
-          TD_PAUSE: "2.0"
-          ASSET_ONLY: "SOL,NSDQ100,GOLD_CFD"
-          TD_M5_MIN_AGE: "900"
-          TD_H1_MIN_AGE: "3600"
-          TD_H4_MIN_AGE: "14400"
-          DEBUG: "1"
-        run: python Trading.py
-
       - name: Ensure jq (for JSON merge)
+        if: ${{ steps.gate.outputs.run == '1' }}
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq
 
       # Régi (Trading.py által írt) summary törlése – mindig a merged legyen kint
       - name: Remove legacy summaries (from Trading.py)
+        if: ${{ steps.gate.outputs.run == '1' }}
         run: |
           rm -f public/analysis_summary.json public/analysis.html || true
 
       # A három signal.json-ból egységes summary
       - name: Build merged analysis_summary.json (3 asset)
+        if: ${{ steps.gate.outputs.run == '1' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -182,8 +177,8 @@ jobs:
           </script>
           HTML
 
-      - name: Post summary to Discord (only if there is an Entry)
-        if: ${{ success() }}
+      - name: Post summary to Discord (only if there is an Entry) #---------------------!
+        if: ${{ steps.gate.outputs.run == '1' && success() }}
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         shell: bash
@@ -306,6 +301,7 @@ jobs:
 
 
       - name: Ensure index.html
+        if: ${{ steps.gate.outputs.run == '1' }}
         run: |
           mkdir -p public
           printf '%s\n' \
@@ -319,13 +315,16 @@ jobs:
             '</ul>' > public/index.html
 
       - name: Configure Pages
+        if: ${{ steps.gate.outputs.run == '1' }}
         uses: actions/configure-pages@v5
 
       - name: Upload Pages artifact
+        if: ${{ steps.gate.outputs.run == '1' }}
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
 
       - name: Deploy to GitHub Pages
+        if: ${{ steps.gate.outputs.run == '1' }}
         id: deployment
         uses: actions/deploy-pages@v4
