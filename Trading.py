@@ -368,6 +368,30 @@ def twelvedata_quote(symbol: str, timeout: int = 15) -> Dict[str, Any]:
         return with_status_ok({"asset": symbol, "source": "twelvedata:quote"},
                               False, f"spot error: {e}")
 
+def twelvedata_xauusd_spot(timeout: int = 15) -> Dict[str, Any]:
+    """
+    XAU/USD 'spot' ár TwelveData-ból:
+    az utolsó 1 perces gyertya záróára (time_series, outputsize=1).
+
+    Visszatérés: with_status_ok-olva (ok, retrieved_at_utc, error),
+    egységes payload-dal (asset/source/price_usd/raw).
+    """
+    try:
+        price = twelvedata_last_close("XAU/USD", "1min", timeout=timeout)
+        payload = {
+            "asset": "GOLD_CFD",
+            "source": "twelvedata:1min_close",
+            "price_usd": float(price) if price is not None else None,
+            "raw": {"note": "derived from time_series last close (1min)"}
+        }
+        return with_status_ok(payload, payload["price_usd"] is not None)
+    except Exception as e:
+        return with_status_ok(
+            {"asset": "GOLD_CFD", "source": "twelvedata:1min_close"},
+            False,
+            f"spot error: {e}"
+        )
+
 
 def twelvedata_last_close(symbol: str, interval: str = "5min", timeout: int = 15) -> Optional[float]:
     """Utolsó záróár lehúzása 1 db gyertyából – fallback spothoz."""
@@ -722,4 +746,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
