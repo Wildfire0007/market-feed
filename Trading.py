@@ -52,6 +52,70 @@ DEBUG = os.getenv("DEBUG", "0") == "1"
 # Teszt: kényszerített SOL fallback (Coinbase->hibát szimulálunk)
 FORCE_SOL_FALLBACK = os.getenv("FORCE_SOL_FALLBACK", "0") == "1"
 
+# --- Finnhub ---------------------------------------------------------------
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
+# Forex szimbólum Finnhub-on (OANDA feeden: "OANDA:XAU_USD")
+FINNHUB_XAU_SYMBOL = os.getenv("FINNHUB_XAU_SYMBOL", "OANDA:XAU_USD")
+
+def _res_to_secs(res: str) -> int:
+    """Finnhub resolution -> másodperc."""
+    return {"1": 60, "5": 300, "15": 900, "30": 1800, "60": 3600,
+            "240": 14400, "D": 86400}.get(res, 60)
+
+def _label_from_res(res: str) -> str:
+    return {"1": "1min", "5": "5min", "60": "1h", "240": "4h"}.get(res, f"{res}")
+
+def finnhub_forex_candles(symbol: str, res: str, bars: int = 400, timeout: int = 20) -> Dict[str, Any]:
+    """
+    Finnhub FOREX gyertyák (XAU/USD stb.) → TD-kompatibilis 'raw.values' szerkezet.
+    API: /forex/candles (symbol, resolution, from, to, token)
+    Docs: https://finnhub.io/docs/api/forex-candles
+    """
+    try:
+        if not FINNHUB_API_KEY:
+            raise RuntimeError("FINNHUB_API_KEY missing")
+
+        now = int(time.time())
+        span = _res_to_secs(res) * bars + 60
+        frm = now - span
+        url = "https://finnhub.io/api/v1/forex/candle"
+        params = {"symbol": symbol, "resolution": res, "from": frm, "to": now, "token": FINNHUB_API_KEY}
+        r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "market-feed/1.0"})
+        r.raise_for_status()
+        j = r.json()
+        if j.get("s") != "ok" or not j.get("t") or not j.get("c"):
+            return with_status_ok({"asset": symbol, "interval": _label_from_res(res), "source": "finnhub"}, False,
+                                  f"bad response: {j.get('s')}")
+        # alakítsuk a TwelveData mintájára (raw.values[{close, time}])
+        vals = []
+        for ts, close in zip(j.get("t", []), j.get("c", [])):
+            try:
+                vals.append({"time": int(ts), "close": float(close)})
+            except Exception:
+                continue
+        payload = {"asset": symbol, "interval": _label_from_res(res), "source": "finnhub", "raw": {"values": vals}}
+        return with_status_ok(payload, True)
+    except Exception as e:
+        return with_status_ok({"asset": symbol, "interval": _label_from_res(res), "source": "finnhub"}, False,
+                              f"ohlc error: {e}")
+
+def finnhub_fx_spot(symbol: str, timeout: int = 15) -> Dict[str, Any]:
+    """
+    'Spot' ár: az utolsó 1 perces gyertya záróára.
+    (Nincs külön REST 'last price' forexre, de a candles-ből korrektül kivehető.)
+    """
+    try:
+        k1 = finnhub_forex_candles(symbol, "1", bars=2, timeout=timeout)
+        price = None
+        if k1.get("ok"):
+            values = k1.get("raw", {}).get("values", [])
+            if values:
+                price = float(values[-1]["close"])
+        payload = {"asset": "GOLD_CFD", "source": "finnhub", "price_usd": price, "raw": k1.get("raw")}
+        return with_status_ok(payload, price is not None)
+    except Exception as e:
+        return with_status_ok({"asset": "GOLD_CFD", "source": "finnhub"}, False, f"spot error: {e}")
+
 
 # ---- Közművek ----------------------------------------------------------------
 
@@ -552,47 +616,42 @@ def process_NSDQ100() -> None:
 def process_GOLD_CFD() -> None:
     """
     GOLD_CFD (XAU/USD)
-    Spot: TwelveData (XAU/USD) – egyszerű és egységes
-    OHLC: TwelveData (5m/1h/4h)
+    Spot + OHLC: Finnhub FOREX candles (OANDA:XAU_USD) – levesszük a TwelveData perc-limites terhelést.
+    Ha Finnhub nem elérhető, megtartjuk az előző jó adatot (és opcionálisan TD-re esünk vissza).
     """
     asset = "GOLD_CFD"
     adir = os.path.join(OUT_DIR, asset)
     ensure_dir(adir)
 
-    # --- SPOT (TwelveData; ha kell, itt is tehetsz Yahoo fallbacket GC=F-re)
-    spot_td = twelvedata_ohlc("XAU/USD", "1min", count=2)  # proxy a legfrissebb zárásra
-    price = None
-    if spot_td.get("ok"):
-        try:
-            vals = spot_td["raw"]["values"]
-            if vals:
-                price = float(vals[-1]["close"])
-        except Exception:
-            price = None
-    spot = with_status_ok({"asset": asset, "source": "twelvedata", "price_usd": price, "raw": spot_td.get("raw")}, price is not None)
+    symbol = FINNHUB_XAU_SYMBOL  # pl. "OANDA:XAU_USD"
+
+    # --- SPOT (Finnhub 1p záró)
+    spot = finnhub_fx_spot(symbol)
+    if (not spot.get("ok")) or (spot.get("price_usd") is None):
+        # fallback: korábbi spot.json, hogy ne ürüljön ki
+        prev = read_json(os.path.join(adir, "spot.json"))
+        if prev:
+            spot = prev
     log(f"GOLD_CFD spot source={spot.get('source')} price={spot.get('price_usd')}")
     save_json(os.path.join(adir, "spot.json"), spot)
 
-    # --- OHLC
+    # --- OHLC (5m/1h/4h) – Finnhub
     path_5m = os.path.join(adir, "klines_5m.json")
     if should_refresh(path_5m, TD_M5_MIN_AGE):
-        time.sleep(TD_PAUSE)
-        k5 = twelvedata_ohlc("XAU/USD", "5min")
+        k5 = finnhub_forex_candles(symbol, "5")
         save_series_with_guard(path_5m, k5, k5.get("ok", False))
 
     path_1h = os.path.join(adir, "klines_1h.json")
     if should_refresh(path_1h, TD_H1_MIN_AGE):
-        time.sleep(TD_PAUSE)
-        k1 = twelvedata_ohlc("XAU/USD", "1h")
+        k1 = finnhub_forex_candles(symbol, "60")
         save_series_with_guard(path_1h, k1, k1.get("ok", False))
 
     path_4h = os.path.join(adir, "klines_4h.json")
     if should_refresh(path_4h, TD_H4_MIN_AGE):
-        time.sleep(TD_PAUSE)
-        k4 = twelvedata_ohlc("XAU/USD", "4h")
+        k4 = finnhub_forex_candles(symbol, "240")
         save_series_with_guard(path_4h, k4, k4.get("ok", False))
 
-    # --- SIGNAL
+    # --- SIGNAL (változatlan – a TD-mintára transzformált 'raw.values'-ból ugyanúgy dolgozik)
     k5m = read_json(path_5m)
     sig = build_signal_from_ema(k5m)
     sig_out = {
@@ -628,4 +687,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
