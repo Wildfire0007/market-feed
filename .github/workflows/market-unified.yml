@@ -41,13 +41,11 @@ jobs:
 
 
       - name: Setup Python
-        if: ${{ steps.gate.outputs.run == '1' }}
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Cache pip
-        if: ${{ steps.gate.outputs.run == '1' }}
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
@@ -55,11 +53,25 @@ jobs:
           restore-keys: ${{ runner.os }}-pip-
 
       - name: Install deps
-        if: ${{ steps.gate.outputs.run == '1' }}
         run: |
           python -V
           pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Generate SOL (24/7)
+        env:
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          FINNHUB_API_KEY:    ${{ secrets.FINNHUB_API_KEY }}
+          TD_PAUSE: "2.0"
+          TD_M5_MIN_AGE: "900"
+          TD_H1_MIN_AGE: "3600"
+          TD_H4_MIN_AGE: "14400"
+          DEBUG: "1"
+          ASSET_ONLY: "SOL"
+        run: |
+          echo "Running for assets: $ASSET_ONLY"
+          python Trading.py
+
 
       # --- döntés: mely eszközök nyitottak most? (DST-safe, NY idő) ---
       - name: Pick open assets (session-aware)
@@ -127,20 +139,17 @@ jobs:
           python Trading.py
 
       - name: Ensure jq (for JSON merge)
-        if: ${{ steps.gate.outputs.run == '1' }}
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq
 
       # Régi (Trading.py által írt) summary törlése – mindig a merged legyen kint
       - name: Remove legacy summaries (from Trading.py)
-        if: ${{ steps.gate.outputs.run == '1' }}
         run: |
           rm -f public/analysis_summary.json public/analysis.html || true
 
       # A három signal.json-ból egységes summary
       - name: Build merged analysis_summary.json (3 asset)
-        if: ${{ steps.gate.outputs.run == '1' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -177,8 +186,8 @@ jobs:
           </script>
           HTML
 
-      - name: Post summary to Discord (only if there is an Entry) #---------------------!
-        if: ${{ steps.gate.outputs.run == '1' && success() }}
+      - name: Post summary to Discord (only if there is an Entry)
+        if: ${{ success() }}
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         shell: bash
@@ -301,7 +310,6 @@ jobs:
 
 
       - name: Ensure index.html
-        if: ${{ steps.gate.outputs.run == '1' }}
         run: |
           mkdir -p public
           printf '%s\n' \
@@ -315,16 +323,13 @@ jobs:
             '</ul>' > public/index.html
 
       - name: Configure Pages
-        if: ${{ steps.gate.outputs.run == '1' }}
         uses: actions/configure-pages@v5
 
       - name: Upload Pages artifact
-        if: ${{ steps.gate.outputs.run == '1' }}
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
 
       - name: Deploy to GitHub Pages
-        if: ${{ steps.gate.outputs.run == '1' }}
         id: deployment
         uses: actions/deploy-pages@v4
