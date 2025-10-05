@@ -2,7 +2,7 @@ name: market-unified
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # 5 percenként (UTC) – életkor-gátlókkal nem spamel
+    - cron: "*/5 * * * *"   # 5 percenként (UTC)
   workflow_dispatch:
 
 permissions:
@@ -23,7 +23,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # H-P 08–22 (Europe/Budapest); hétvégén/éjjel skip
+      # Csak NYITOTT PIACOS eszközök (NSDQ100, GOLD_CFD) időablakához kell gate.
+      # A SOL külön lépésben 24/7 fut, ezért itt csak egy flaget állítunk be.
       - name: Gate by local time (Europe/Budapest)
         id: gate
         shell: bash
@@ -33,12 +34,11 @@ jobs:
           DOW=$(TZ=$TZ date +%u)
           run=1
           if [ "$DOW" -ge 6 ]; then
-            echo "Weekend → skip"; run=0
+            echo "Weekend → skip (only for session-gated assets)"; run=0
           elif [ "$HOUR" -lt 8 ] || [ "$HOUR" -gt 22 ]; then
-            echo "Outside 08–22 local → skip"; run=0
+            echo "Outside 08–22 local → skip (only for session-gated assets)"; run=0
           fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
-
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -58,6 +58,7 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
+      # ---- SOL 24/7 külön, minden alkalommal fut ----
       - name: Generate SOL (24/7)
         env:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
@@ -72,8 +73,8 @@ jobs:
           echo "Running for assets: $ASSET_ONLY"
           python Trading.py
 
-
       # --- döntés: mely eszközök nyitottak most? (DST-safe, NY idő) ---
+      # FONTOS: itt NINCS SOL, mert azt 24/7 külön kezeljük fent.
       - name: Pick open assets (session-aware)
         if: ${{ steps.gate.outputs.run == '1' }}
         id: pick
@@ -81,14 +82,12 @@ jobs:
         run: |
           set -euo pipefail
           assets=()
-          # Crypto 24/7
-          assets+=("SOL")
 
           NY="America/New_York"
           DOW=$(TZ=$NY date +%u)    # 1=Mon … 7=Sun
           HM=$(TZ=$NY date +%H%M)   # HHMM, pl. 0935
 
-          # --- QQQ / NSDQ100: csak a rendes szakaszban 09:30–16:00 ET ---
+          # --- NSDQ100: csak a rendes szakaszban 09:30–16:00 ET ---
           if [ "$DOW" -le 5 ] && [ "$HM" -ge 0930 ] && [ "$HM" -le 1600 ]; then
             assets+=("NSDQ100")
           fi
@@ -105,12 +104,11 @@ jobs:
           if [ "$DOW" -eq 7 ] && [ "$HM" -lt 1800 ]; then gold_open=false; fi
           if $gold_open; then assets+=("GOLD_CFD"); fi
 
-          # US tőzsdei ünnepnapok → QQQ tiltása (példa: néhány 2025-ös dátum)
+          # US tőzsdei ünnepnapok → NSDQ100 tiltása
           HOLI_2025=("2025-01-01" "2025-01-20" "2025-02-17" "2025-04-18" "2025-05-26" "2025-06-19" "2025-07-04" "2025-09-01" "2025-11-27" "2025-12-25")
           TODAY_NY=$(TZ=$NY date +%F)
           for d in "${HOLI_2025[@]}"; do
             if [ "$TODAY_NY" = "$d" ]; then
-              # szedd ki az NSDQ100-at az asset listából
               assets=("${assets[@]/NSDQ100}")
             fi
           done
@@ -122,7 +120,7 @@ jobs:
             (IFS=,; echo "assets=${assets[*]}") >> "$GITHUB_OUTPUT"
           fi
 
-      # --- csak ha van mit futtatni ---
+      # --- csak ha van mit futtatni a session-gated eszközök közül ---
       - name: Generate feeds (only open assets)
         if: ${{ steps.gate.outputs.run == '1' && steps.pick.outputs.assets != '' }}
         env:
@@ -209,10 +207,10 @@ jobs:
           ndx=$(jq -r '.assets.NSDQ100.signal' public/analysis_summary.json)
           xau=$(jq -r '.assets.GOLD_CFD.signal' public/analysis_summary.json)
 
-          # 1/b) Spot árak (USD) – csak kiíráshoz
-          solp=$(jq -r '.price_usd // empty' public/SOL/spot.json)
-          ndxp=$(jq -r '.price_usd // empty' public/NSDQ100/spot.json)
-          xaup=$(jq -r '.price_usd // empty' public/GOLD_CFD/spot.json)
+          # 1/b) Spot árak (USD) – csak kiíráshoz (ha nincs file, legyen üres)
+          solp=$(jq -r '.price_usd // empty' public/SOL/spot.json 2>/dev/null || echo "")
+          ndxp=$(jq -r '.price_usd // empty' public/NSDQ100/spot.json 2>/dev/null || echo "")
+          xaup=$(jq -r '.price_usd // empty' public/GOLD_CFD/spot.json 2>/dev/null || echo "")
           fmt() { v="$1"; if [ -z "$v" ] || [ "$v" = "null" ]; then echo "?"; else printf '%.2f' "$v"; fi; }
           solp=$(fmt "$solp"); ndxp=$(fmt "$ndxp"); xaup=$(fmt "$xaup")
 
@@ -307,7 +305,6 @@ jobs:
 
           # duplikátum-szűréshez: belépők hash-e kerüljön a Pages-re
           echo "$entries_hash" > public/.last_discord_hash
-
 
       - name: Ensure index.html
         run: |
