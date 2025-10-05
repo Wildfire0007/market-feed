@@ -5,9 +5,9 @@ market-feed / Trading.py
 Egységes adatelőkészítő és jelzésképző script GitHub Pages publikáláshoz.
 
 Eszközök:
-- SOL           (kripto, spot: coinbase→coingecko→kraken fallback; OHLC: TwelveData)
-+ NSDQ100       (QQQ proxy; spot: TwelveData;  OHLC: TwelveData)
-- GOLD_CFD      (XAU/USD;   spot: TwelveData;  OHLC: TwelveData)
+- SOL           (kripto; spot: coinbase→coingecko→kraken; OHLC: TwelveData)
+- NSDQ100       (QQQ proxy; spot: TwelveData; OHLC: TwelveData)
+- GOLD_CFD      (XAU/USD;   spot: TwelveData→Finnhub fallback; OHLC: TwelveData)
 
 Kimenetek (mindig a public/<ASSET>/ alatt):
 - spot.json
@@ -24,7 +24,6 @@ Megjegyzés:
 import os
 import json
 import time
-import math
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -723,3 +722,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
