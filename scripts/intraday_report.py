@@ -317,53 +317,44 @@ def pl_at_100(entry: float, target: float, lev: float) -> float:
     return 100.0 * lev * pct_move(entry, target)
 
 def format_signal(sig: Signal) -> str:
-    def fmtf(x, fmt="{:.4f}"):
+    def fmtf(x, digits=4):
         try:
-            return fmt.format(float(x))
+            return ("{:." + str(digits) + "f}").format(float(x))
         except Exception:
             return "—"
 
     price_s = fmtf(sig.spot_price)
     utc_s = sig.spot_utc or "-"
     hdr = (
-        f"### {sig.asset}
-
-"
-        f"Spot (USD): **{price_s}** • UTC: `{utc_s}`
-"
-        f"Valószínűség: **P = {sig.probability}%**
-"
-        f"Forrás: Twelve Data (lokális JSON)
-
-"
-    )
+        "### {asset}\n\n"
+        "Spot (USD): **{price}** • UTC: `{utc}`\n"
+        "Valószínűség: **P = {p}%**\n"
+        "Forrás: Twelve Data (lokális JSON)\n\n"
+    ).format(asset=sig.asset, price=price_s, utc=utc_s, p=sig.probability)
 
     if sig.decision == "no entry":
-        return hdr + f"**Állapot:** no entry — {sig.reason}
-
-"
+        return hdr + "**Állapot:** no entry — {r}\n\n".format(r=sig.reason)
 
     e_s  = fmtf(sig.entry)
     sl_s = fmtf(sig.sl)
     t1_s = fmtf(sig.tp1)
     t2_s = fmtf(sig.tp2)
+    rr_s = str(sig.rr) if sig.rr is not None else "—"
 
     line = (
-        f"[{sig.decision} @ {e_s}; SL: {sl_s}; TP1: {t1_s}; TP2: {t2_s}; "
-        f"Ajánlott tőkeáttétel: {sig.leverage:.1f}×; R:R≈{sig.rr}]
-"
-    )
+        "[{dec} @ {e}; SL: {sl}; TP1: {t1}; TP2: {t2}; "
+        "Ajánlott tőkeáttétel: {lev:.1f}×; R:R≈{rr}]\n"
+    ).format(dec=sig.decision, e=e_s, sl=sl_s, t1=t1_s, t2=t2_s, lev=(sig.leverage or 0.0), rr=rr_s)
 
     pl1 = pl_at_100(sig.entry, sig.tp1, sig.leverage) if (sig.entry is not None and sig.tp1 is not None) else None
     pl2 = pl_at_100(sig.entry, sig.tp2, sig.leverage) if (sig.entry is not None and sig.tp2 is not None) else None
-    pls = f"P/L@$100 → TP1: {fmtf(pl1)} • TP2: {fmtf(pl2)}" if (pl1 is not None and pl2 is not None) else ""
+    pls = ""
+    if (pl1 is not None and pl2 is not None):
+        pls = "P/L@$100 → TP1: {p1} • TP2: {p2}\n".format(p1=fmtf(pl1,2), p2=fmtf(pl2,2))
 
-    return hdr + line + (pls + "
-" if pls else "") + f"Indoklás: {sig.reason}
+    return hdr + line + pls + "Indoklás: {r}\n\n".format(r=sig.reason)
 
-"
-
-def write_markdown(signals: List[Signal]):(signals: List[Signal]):
+def write_markdown(signals: List[Signal]):(signals: List[Signal]):(signals: List[Signal]):
     ensure_dir(REPORT_DIR)
     path = os.path.join(REPORT_DIR, "analysis_report.md")
     with open(path, "w", encoding="utf-8") as f:
