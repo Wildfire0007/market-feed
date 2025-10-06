@@ -22,7 +22,7 @@ PUBLIC_DIR = "public"
 
 LEVERAGE = {"SOL": 3.0, "NSDQ100": 3.0, "GOLD_CFD": 2.0}
 MAX_RISK_PCT = 1.8
-FIB_TOL = 0.02        # 79% ±2%
+FIB_TOL = 0.02        # (legacy) régi 79% tolerancia; most Fib-zónát használunk
 ATR_LOW_TH = 0.0008   # túl alacsony rel. vol → no-trade
 
 # -------------------------- segédek -----------------------------------
@@ -79,7 +79,7 @@ def as_df_klines(raw: Any) -> pd.DataFrame:
     df = pd.DataFrame(rows).sort_values("time").set_index("time")
     return df[["open","high","low","close"]]
 
-# --- TA: EMA/RSI/ATR, swingek, sweep, BOS, 79% fib ----------------------------
+# --- TA: EMA/RSI/ATR, swingek, sweep, BOS, Fib zóna ----------------------------
 
 def ema(s: pd.Series, n: int) -> pd.Series:
     return s.ewm(span=n, adjust=False).mean()
@@ -138,13 +138,30 @@ def detect_bos(df: pd.DataFrame, direction: str) -> bool:
         return sw["low"].iloc[-1] < lo
     return False
 
-def fib79_ok(move_hi: float, move_lo: float, price_now: float, tol: float = FIB_TOL) -> bool:
-    if move_hi is None or move_lo is None or move_hi == move_lo: return False
+def fib_zone_ok(move_hi, move_lo, price_now,
+                low=0.618, high=0.886,
+                tol_abs=0.0, tol_frac=0.02) -> bool:
+    """
+    Deep pullback zóna ellenőrzés:
+      long:  price ∈ [lo+low*L,  lo+high*L]
+      short: price ∈ [hi-high*L, hi-low*L]
+    ahol L = (hi - lo). Tűrés: ±max(tol_abs, tol_frac*L)
+    """
+    if move_hi is None or move_lo is None or move_hi == move_lo:
+        return False
     length = move_hi - move_lo
-    if length == 0: return False
-    level_long  = move_lo + 0.79 * length         # long retrace
-    level_short = move_hi - 0.79 * length         # short retrace
-    return (abs(price_now - level_long)/abs(length) <= tol) or (abs(price_now - level_short)/abs(length) <= tol)
+    if length == 0:
+        return False
+
+    z1_long  = move_lo + low  * length
+    z2_long  = move_lo + high * length
+    z1_short = move_hi - high * length
+    z2_short = move_hi - low  * length
+
+    tol = max(float(tol_abs), abs(length) * float(tol_frac))
+    in_long  = min(z1_long,  z2_long ) - tol <= price_now <= max(z1_long,  z2_long ) + tol
+    in_short = min(z1_short, z2_short) - tol <= price_now <= max(z1_short, z2_short) + tol
+    return in_long or in_short
 
 def bias_from_emas(df: pd.DataFrame) -> str:
     if df.empty: return "neutral"
@@ -212,25 +229,30 @@ def analyze(asset: str) -> Dict[str, Any]:
     rel_atr = float(atr5 / spot_price) if (atr5 and spot_price) else float("nan")
     atr_ok = not (np.isnan(rel_atr) or rel_atr < ATR_LOW_TH)
 
-    # 6) 79% Fib (1H swingek)
+    # 6) Fib zóna (0.618–0.886) 1H swingekre, ATR(1h) alapú tűréssel
     k1h_sw = find_swings(k1h, lb=2)
     move_hi, move_lo = last_swing_levels(k1h_sw)
-    fib_ok = fib79_ok(move_hi, move_lo, spot_price)
+    atr1h = float(atr(k1h).iloc[-1]) if not k1h.empty else 0.0
+    fib_ok = fib_zone_ok(move_hi, move_lo, spot_price,
+                         low=0.618, high=0.886,
+                         tol_abs=atr1h * 0.5,   # ±0.5×ATR(1h)
+                         tol_frac=0.02)         # vagy ±2% a range-ből
 
     # 7) P-score (egyszerű súlyozás)
     P, reasons = 20, []
     if trend_bias != "neutral": P += 20; reasons.append(f"Bias(4H→1H)={trend_bias}")
     if swept:                   P += 15; reasons.append("HTF sweep ok")
     if bos5m:                   P += 15; reasons.append("5M BOS trendirányba")
-    if fib_ok:                  P += 20; reasons.append("79% Fib konfluencia")
+    if fib_ok:                  P += 20; reasons.append("Fib zóna konfluencia (0.618–0.886)")
     if atr_ok:                  P += 10; reasons.append("ATR rendben")
     P = max(0, min(100, P))
 
-    # --- Kapuk összegyűjtése
+    # --- Kapuk összegyűjtése (liquidity = Fib zóna VAGY sweep)
+    liquidity_ok = bool(fib_ok or swept)
     conds = {
         "bias": trend_bias in ("long","short"),
         "bos5m": bool(bos5m),
-        "fib79": bool(fib_ok),
+        "liquidity": liquidity_ok,   # (fib_zóna | sweep)
         "atr": bool(atr_ok),
     }
     can_enter = (P >= 60) and all(conds.values())
@@ -281,7 +303,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": (round(rr,2) if rr else None),
         "leverage": lev,
         "gates": {
-            "required": ["bias", "bos5m", "fib79", "atr", "rr_math>=1.5"],
+            "required": ["bias", "bos5m", "liquidity(fib_zone|sweep)", "atr", "rr_math>=1.5"],
             "missing": missing,
         },
         "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else [])) or ["no signal"],
