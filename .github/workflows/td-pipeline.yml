@@ -18,26 +18,41 @@ jobs:
       TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install deps
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
+
       - name: Fetch data from Twelve Data
         run: python Trading.py
+
       - name: Build trade signals (TD-only)
         run: python analysis.py
+
       - name: Build intraday report
         run: python scripts/intraday_report.py
-        
-      - name: Preflight: list & peek
+
+      - name: Preflight:list & peek
+        if: always()
         run: |
           echo "== public tree =="
           ls -R public || true
 
-          # biztos ami biztos: jq legyen
+          # jq biztosan legyen
           if ! command -v jq >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y jq
           fi
@@ -64,13 +79,14 @@ jobs:
           else
             echo "missing: public/analysis_summary.json"
           fi
-          
+
       - name: Commit & push outputs
         run: |
           git config user.name "td-bot"
           git config user.email "td-bot@users.noreply.github.com"
-          git add public reports
+          git add public reports || true
           git commit -m "TD: data+signals+report" || echo "no changes"
           git push
+
       - name: Notify Discord
         run: python scripts/notify_discord.py
