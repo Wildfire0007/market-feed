@@ -317,21 +317,53 @@ def pl_at_100(entry: float, target: float, lev: float) -> float:
     return 100.0 * lev * pct_move(entry, target)
 
 def format_signal(sig: Signal) -> str:
-    hdr = f"### {sig.asset}\n\nSpot (USD): **{sig.spot_price:.4f}** • UTC: `{sig.spot_utc}`\nValószínűség: **P = {sig.probability}%**\nForrás: Twelve Data (lokális JSON)\n\n"
-    if sig.decision == "no entry":
-        return hdr + f"**Állapot:** no entry — {sig.reason}\n\n"
-    else:
-        pl1 = pl_at_100(sig.entry, sig.tp1, sig.leverage) if sig.entry and sig.tp1 else None
-        pl2 = pl_at_100(sig.entry, sig.tp2, sig.leverage) if sig.entry and sig.tp2 else None
-        pls = f"P/L@$100 → TP1: {pl1:.2f} • TP2: {pl2:.2f}" if (pl1 and pl2) else ""
-        line = (
-            f"[{sig.decision} @ {sig.entry:.4f}; SL: {sig.sl:.4f}; "
-            f"TP1: {sig.tp1:.4f}; TP2: {sig.tp2:.4f}; "
-            f"Ajánlott tőkeáttétel: {sig.leverage:.1f}×; R:R≈{sig.rr}]\n"
-        )
-        return hdr + line + f"{pls}\nIndoklás: {sig.reason}\n\n"
+    def fmtf(x, fmt="{:.4f}"):
+        try:
+            return fmt.format(float(x))
+        except Exception:
+            return "—"
 
-def write_markdown(signals: List[Signal]):
+    price_s = fmtf(sig.spot_price)
+    utc_s = sig.spot_utc or "-"
+    hdr = (
+        f"### {sig.asset}
+
+"
+        f"Spot (USD): **{price_s}** • UTC: `{utc_s}`
+"
+        f"Valószínűség: **P = {sig.probability}%**
+"
+        f"Forrás: Twelve Data (lokális JSON)
+
+"
+    )
+
+    if sig.decision == "no entry":
+        return hdr + f"**Állapot:** no entry — {sig.reason}
+
+"
+
+    e_s  = fmtf(sig.entry)
+    sl_s = fmtf(sig.sl)
+    t1_s = fmtf(sig.tp1)
+    t2_s = fmtf(sig.tp2)
+
+    line = (
+        f"[{sig.decision} @ {e_s}; SL: {sl_s}; TP1: {t1_s}; TP2: {t2_s}; "
+        f"Ajánlott tőkeáttétel: {sig.leverage:.1f}×; R:R≈{sig.rr}]
+"
+    )
+
+    pl1 = pl_at_100(sig.entry, sig.tp1, sig.leverage) if (sig.entry is not None and sig.tp1 is not None) else None
+    pl2 = pl_at_100(sig.entry, sig.tp2, sig.leverage) if (sig.entry is not None and sig.tp2 is not None) else None
+    pls = f"P/L@$100 → TP1: {fmtf(pl1)} • TP2: {fmtf(pl2)}" if (pl1 is not None and pl2 is not None) else ""
+
+    return hdr + line + (pls + "
+" if pls else "") + f"Indoklás: {sig.reason}
+
+"
+
+def write_markdown(signals: List[Signal]):(signals: List[Signal]):
     ensure_dir(REPORT_DIR)
     path = os.path.join(REPORT_DIR, "analysis_report.md")
     with open(path, "w", encoding="utf-8") as f:
