@@ -32,6 +32,39 @@ def spot_from_sig_or_file(asset: str, sig: dict):
 
     return price, utc
 
+# --- hiányzó feltételek kinyerése és formázása -------------------------------
+
+def extract_missing(sig: dict):
+    """Visszaadja a hiányzó kapukat listában.
+       Először gates.missing, ha nincs, akkor a reasons 'missing: ...' sort parsolja."""
+    if not isinstance(sig, dict):
+        return []
+    gates = sig.get("gates") or {}
+    missing = gates.get("missing") or []
+    if missing:
+        return [str(x).strip() for x in missing if str(x).strip()]
+
+    # fallback: reasons között keres 'missing: a, b, c' sort
+    for r in sig.get("reasons") or []:
+        if isinstance(r, str) and r.lower().startswith("missing:"):
+            rest = r.split(":", 1)[1]
+            return [p.strip() for p in rest.split(",") if p.strip()]
+    return []
+
+def pretty_missing(keys):
+    """Kulcsokból emberi olvasmányos címkék."""
+    labels = {
+        "bias": "Bias (4H→1H)",
+        "bos5m": "BOS (5m)",
+        "fib79": "Fib 79%",
+        "atr": "ATR",
+        "rr_math": "RR≥1.5",
+        "rr_math>=1.5": "RR≥1.5",
+    }
+    return ", ".join(labels.get(k, k) for k in keys)
+
+# --- Discord sor formázó ------------------------------------------------------
+
 def fmt_sig(asset: str, sig: dict):
     dec = (sig.get("signal") or "no entry").upper()
     p   = sig.get("probability", 0)
@@ -49,7 +82,14 @@ def fmt_sig(asset: str, sig: dict):
         return (base +
                 f" | @ {fmt_num(entry)} | SL {fmt_num(sl)} | "
                 f"TP1 {fmt_num(t1)} | TP2 {fmt_num(t2)} | RR≈{rr}")
+
+    # NO ENTRY eset: hiányzó feltételek kiírása
+    miss = extract_missing(sig)
+    if miss:
+        base += f" | Hiányzó: {pretty_missing(miss)}"
     return base
+
+# --- fő -----------------------------------------------------------------------
 
 def main():
     hook = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
@@ -57,7 +97,6 @@ def main():
         print("No DISCORD_WEBHOOK_URL, skipping notify.")
         return
 
-    # Összegyűjtjük assetenként a jelzéseket
     lines = []
     actionable = False
     for asset in ASSETS:
