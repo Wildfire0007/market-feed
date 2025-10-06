@@ -98,29 +98,51 @@ def bbands(series: pd.Series, period: int = 20, stds: float = 2.0) -> Tuple[pd.S
     return lower, ma, upper
 
 def as_df_klines(raw: Any) -> pd.DataFrame:
-    """várja: list[{'t','o','h','l','c','v'}], t ISO"""
+    """Elfogadja:
+       - list[{'t','o','h','l','c','v'}]
+       - {'values': [...]} (TD)
+       - {'raw': {'values': [...]} } (Trading.py mentése)
+       és a 'datetime/open/high/low/close/volume' kulcsokat is.
+    """
     if not raw:
         return pd.DataFrame()
-    arr = raw if isinstance(raw, list) else raw.get("values") or raw.get("data") or []
+
+    # 1) emeljük ki az 'arr' listát
+    arr = None
+    if isinstance(raw, list):
+        arr = raw
+    elif isinstance(raw, dict):
+        if "values" in raw and isinstance(raw["values"], list):
+            arr = raw["values"]
+        elif "raw" in raw and isinstance(raw["raw"], dict) and "values" in raw["raw"]:
+            arr = raw["raw"]["values"]
+        elif "data" in raw and isinstance(raw["data"], list):
+            arr = raw["data"]
     if not arr:
         return pd.DataFrame()
+
+    # 2) normalizálás -> egységes oszlopok
     rows = []
     for x in arr:
         try:
+            t = x.get("t") or x.get("datetime")
+            o = x.get("o") or x.get("open")
+            h = x.get("h") or x.get("high")
+            l = x.get("l") or x.get("low")
+            c = x.get("c") or x.get("close")
+            v = x.get("v") or x.get("volume") or 0.0
             rows.append({
-                "time": pd.to_datetime(x["t"], utc=True),
-                "open": float(x["o"]),
-                "high": float(x["h"]),
-                "low":  float(x["l"]),
-                "close":float(x["c"]),
-                "volume": float(x.get("v", 0.0) or 0.0),
+                "time":  pd.to_datetime(t, utc=True),
+                "open":  float(o), "high": float(h),
+                "low":   float(l), "close": float(c),
+                "volume": float(v),
             })
         except Exception:
             continue
+
     if not rows:
         return pd.DataFrame()
-    df = pd.DataFrame(rows).sort_values("time").set_index("time")
-    return df
+    return pd.DataFrame(rows).sort_values("time").set_index("time")
 
 # --- Struktúra / swing segédek -------------------------------------------------
 
@@ -230,7 +252,7 @@ class Signal:
 
 def build_signal(asset: str, spot: Dict[str, Any], k5m: pd.DataFrame, k1h: pd.DataFrame, k4h: pd.DataFrame) -> Signal:
     # Alapadatok
-    spot_price = float(spot.get("price", np.nan))
+    spot_price = float(spot.get("price") or spot.get("price_usd") or np.nan)
     spot_utc = spot.get("utc", "")
 
     # Bias
@@ -354,7 +376,7 @@ def format_signal(sig: Signal) -> str:
 
     return hdr + line + pls + "Indoklás: {r}\n\n".format(r=sig.reason)
 
-def write_markdown(signals: List[Signal]):(signals: List[Signal]):(signals: List[Signal]):
+def write_markdown(signals: List[Signal]):
     ensure_dir(REPORT_DIR)
     path = os.path.join(REPORT_DIR, "analysis_report.md")
     with open(path, "w", encoding="utf-8") as f:
