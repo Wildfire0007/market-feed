@@ -31,6 +31,40 @@ jobs:
         run: python analysis.py
       - name: Build intraday report
         run: python scripts/intraday_report.py
+        
+      - name: Preflight: list & peek
+        run: |
+          echo "== public tree =="
+          ls -R public || true
+
+          # biztos ami biztos: jq legyen
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
+
+          for a in SOL NSDQ100 GOLD_CFD; do
+            echo "---- $a spot.json ----"
+            if test -f public/$a/spot.json; then
+              jq -c '{price:(.price//.price_usd), utc:(.utc//.timestamp//.retrieved_at_utc//.retrieved_at)}' public/$a/spot.json
+            else
+              echo "missing: public/$a/spot.json"
+            fi
+
+            echo "---- $a signal.json ----"
+            if test -f public/$a/signal.json; then
+              jq -c '{signal, probability, entry, sl, tp1, tp2, rr, spot:.spot}' public/$a/signal.json
+            else
+              echo "missing: public/$a/signal.json"
+            fi
+          done
+
+          echo "---- summary ----"
+          if test -f public/analysis_summary.json; then
+            jq -c '.assets' public/analysis_summary.json | head -n 1
+          else
+            echo "missing: public/analysis_summary.json"
+          fi
+          
       - name: Commit & push outputs
         run: |
           git config user.name "td-bot"
