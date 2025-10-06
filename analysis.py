@@ -1,172 +1,268 @@
 # -*- coding: utf-8 -*-
 """
-analysis.py — Intraday jelzésképző script az Ekereskedő (eToro Ügynök) számára.
-Forrás: a CF Worker /h/all alias-szal szinkronban lévő, frissített adatokat használja.
+analysis.py — TD-only intraday jelzésképző (lokális JSON-okból).
+Forrás: Trading.py által generált fájlok a public/<ASSET>/ alatt.
 Kimenet:
-  public/<ASSET>/signal.json — a jelzés ("buy", "sell", "no entry") 
-                                és annak okai, minden eszközhöz
-  public/analysis_summary.json — összefoglaló minden eszközre
-  public/analysis.html       — egyszerű HTML index a jelentéshez
-Szabályok (példa): 4H→1H bias, 79% fib ("swing hi-lo"), 5M breakout, RR≥1.5, P≥60% → jelzés.
+  public/<ASSET>/signal.json      — "buy" / "sell" / "no entry" + okok
+  public/analysis_summary.json    — összesített státusz
+  public/analysis.html            — egyszerű HTML kivonat
 """
 
-import os, json, re, time, traceback
+import os, json, math, time
 from datetime import datetime, timezone
-import requests
+from typing import Any, Dict, List, Optional, Tuple
+
 import pandas as pd
 import numpy as np
 
 # --- Elemzendő eszközök ---
 ASSETS = ["SOL", "NSDQ100", "GOLD_CFD"]
 
-# Segédfüggvény a JSON fájlok mentéséhez
-def save_json(path: str, obj) -> None:
+PUBLIC_DIR = "public"
+
+LEVERAGE = {"SOL": 3.0, "NSDQ100": 3.0, "GOLD_CFD": 2.0}
+MAX_RISK_PCT = 1.8
+FIB_TOL = 0.02        # 79% ±2%
+ATR_LOW_TH = 0.0008   # túl alacsony rel. vol → no-trade
+
+# -------------------------- hasznos segédek -----------------------------------
+
+def nowiso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def save_json(path: str, obj: Any) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
-def nowiso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-# --- OHLC normalizáló (támogatja az ohlc_utc_ms listát) ---
-def df_from_ohlc_obj(obj) -> pd.DataFrame:
-    if not obj:
-        return pd.DataFrame(columns=["open","high","low","close"])
-    if "ohlc_utc_ms" in obj and isinstance(obj["ohlc_utc_ms"], list):
-        arr = obj["ohlc_utc_ms"]
-        if not arr:
-            return pd.DataFrame(columns=["open","high","low","close"])
-        idx = pd.to_datetime([x[0] for x in arr], unit="ms", utc=True)
-        df = pd.DataFrame({
-            "open":  [float(x[1]) for x in arr],
-            "high":  [float(x[2]) for x in arr],
-            "low":   [float(x[3]) for x in arr],
-            "close": [float(x[4]) for x in arr],
-        }, index=idx)
-        return df
-    if "ohlc" in obj and isinstance(obj["ohlc"], list):
-        # (Nem használt formátum itt, de támogatva van.)
-        data = obj["ohlc"]
-        df = pd.DataFrame(data)
-        df.index = pd.to_datetime(df["date"], utc=True)
-        return df[["open","high","low","close"]]
-    return pd.DataFrame(columns=["open","high","low","close"])
-
-# --- Kockázat-számító segédfüggvények (példák) ---
-def ema(series, period):
-    return series.ewm(span=period, adjust=False).mean()
-
-def rsi14(series):
-    delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -1*delta.clip(upper=0)
-    ma_up = up.ewm(com=13, adjust=False).mean()
-    ma_down = down.ewm(com=13, adjust=False).mean()
-    rs = ma_up/ma_down
-    rsi = 100 - (100/(1+rs))
-    return rsi
-
-def macd(series):
-    exp1 = series.ewm(span=12, adjust=False).mean()
-    exp2 = series.ewm(span=26, adjust=False).mean()
-    macd_line = exp1 - exp2
-    signal = macd_line.ewm(span=9, adjust=False).mean()
-    hist = macd_line - signal
-    return macd_line, signal, hist
-
-def bb(series, n=20):
-    m = series.rolling(n).mean()
-    s = series.rolling(n).std()
-    upper = m + 2*s
-    lower = m - 2*s
-    return m, upper, lower
-
-# --- fő függvény egy eszközre ---
-def analyze(asset: str) -> dict:
-    outdir = os.path.join("public", asset)
-    os.makedirs(outdir, exist_ok=True)
-    result = {"asset": asset, "ok": True, "retrieved_at_utc": nowiso(), "errors": []}
-
-    # 1) Lokális all_<asset>.json beolvasása
+def load_json(path: str) -> Optional[Any]:
     try:
-        with open(f"all_{asset}.json", "r", encoding="utf-8") as f:
-            all_json = json.load(f)
-    except Exception as e:
-        msg = {"asset": asset, "ok": False, "error": f"Nem sikerült beolvasni all_{asset}.json: {e}"}
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def as_df_klines(raw: Any) -> pd.DataFrame:
+    """
+    TD-formátum: list[{'t','o','h','l','c','v'}] időben növekvő sorrend.
+    """
+    if not raw:
+        return pd.DataFrame()
+    arr = raw if isinstance(raw, list) else raw.get("values") or []
+    rows = []
+    for x in arr:
+        try:
+            rows.append({
+                "time":  pd.to_datetime(x["t"], utc=True),
+                "open":  float(x["o"]),
+                "high":  float(x["h"]),
+                "low":   float(x["l"]),
+                "close": float(x["c"]),
+                "volume":float(x.get("v", 0.0) or 0.0),
+            })
+        except Exception:
+            continue
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values("time").set_index("time")
+
+# --- TA: EMA/RSI/ATR, swingek, sweep, BOS, 79% fib ----------------------------
+
+def ema(s: pd.Series, n: int) -> pd.Series:
+    return s.ewm(span=n, adjust=False).mean()
+
+def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    up = np.where(delta > 0, delta, 0.0)
+    down = np.where(delta < 0, -delta, 0.0)
+    roll_up = pd.Series(up, index=series.index).rolling(period).mean()
+    roll_down = pd.Series(down, index=series.index).rolling(period).mean()
+    rs = roll_up / (roll_down.replace(0, np.nan))
+    r = 100 - (100 / (1 + rs))
+    return r.fillna(method="bfill").fillna(50.0)
+
+def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    if df.empty: return pd.Series(dtype=float)
+    high, low, close = df["high"], df["low"], df["close"]
+    prev_close = close.shift(1)
+    tr = pd.concat([(high-low), (high-prev_close).abs(), (low-prev_close).abs()], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
+
+def find_swings(df: pd.DataFrame, lb: int = 2) -> pd.DataFrame:
+    if df.empty: return df
+    hi = df["high"]; lo = df["low"]
+    swing_hi = (hi.shift(lb) == hi.rolling(lb*2+1, center=True).max())
+    swing_lo = (lo.shift(lb) == lo.rolling(lb*2+1, center=True).min())
+    out = df.copy()
+    out["swing_hi"] = swing_hi.fillna(False)
+    out["swing_lo"] = swing_lo.fillna(False)
+    return out
+
+def last_swing_levels(df: pd.DataFrame) -> Tuple[Optional[float], Optional[float]]:
+    if df.empty or ("swing_hi" not in df.columns): return None, None
+    hi = df[df["swing_hi"]].tail(1)["high"].values
+    lo = df[df["swing_lo"]].tail(1)["low"].values
+    return (float(hi[0]) if len(hi) else None, float(lo[0]) if len(lo) else None)
+
+def detect_sweep(df: pd.DataFrame, lookback: int = 24) -> Dict[str, bool]:
+    out = {"sweep_high": False, "sweep_low": False}
+    if len(df) < lookback + 2: return out
+    ref = df.iloc[-(lookback+1):-1]
+    last = df.iloc[-1]
+    prev_max, prev_min = ref["high"].max(), ref["low"].min()
+    if last["high"] > prev_max and last["close"] < prev_max: out["sweep_high"] = True
+    if last["low"]  < prev_min and last["close"] > prev_min: out["sweep_low"]  = True
+    return out
+
+def detect_bos(df: pd.DataFrame, direction: str) -> bool:
+    sw = find_swings(df, lb=2)
+    hi, lo = last_swing_levels(sw.iloc[:-1])
+    if direction == "long" and hi is not None:
+        return sw["high"].iloc[-1] > hi
+    if direction == "short" and lo is not None:
+        return sw["low"].iloc[-1] < lo
+    return False
+
+def fib79_ok(move_hi: float, move_lo: float, price_now: float, tol: float = FIB_TOL) -> bool:
+    if move_hi is None or move_lo is None or move_hi == move_lo: return False
+    length = move_hi - move_lo
+    if length == 0: return False
+    # Long: low->high impulzus, 79% visszahúzódás lefelé
+    level_long = move_lo + 0.79 * length
+    # Short: high->low impulzus, 79% visszahúzódás felfelé
+    level_short = move_hi - 0.79 * length
+    return (abs(price_now - level_long)/abs(length) <= tol) or (abs(price_now - level_short)/abs(length) <= tol)
+
+def bias_from_emas(df: pd.DataFrame) -> str:
+    if df.empty: return "neutral"
+    c = df["close"]
+    e9, e21, e50, e200 = ema(c,9).iloc[-1], ema(c,21).iloc[-1], ema(c,50).iloc[-1], ema(c,200).iloc[-1]
+    last = c.iloc[-1]
+    if last > e200 and e50 > e200 and e9 > e21:  return "long"
+    if last < e200 and e50 < e200 and e9 < e21:  return "short"
+    return "neutral"
+
+# ------------------------------ elemzés egy eszközre ---------------------------
+
+def analyze(asset: str) -> Dict[str, Any]:
+    outdir = os.path.join(PUBLIC_DIR, asset)
+    os.makedirs(outdir, exist_ok=True)
+
+    # 1) Bemenetek (all.json ha van, külön fájlok ha nincs)
+    all_json = load_json(os.path.join(outdir, "all.json")) or {}
+    spot = all_json.get("spot") or load_json(os.path.join(outdir, "spot.json")) or {}
+    k5m_raw = all_json.get("k5m") or load_json(os.path.join(outdir, "klines_5m.json"))
+    k1h_raw = all_json.get("k1h") or load_json(os.path.join(outdir, "klines_1h.json"))
+    k4h_raw = all_json.get("k4h") or load_json(os.path.join(outdir, "klines_4h.json"))
+
+    k5m, k1h, k4h = as_df_klines(k5m_raw), as_df_klines(k1h_raw), as_df_klines(k4h_raw)
+
+    if not spot or k5m.empty or k1h.empty or k4h.empty:
+        msg = {
+            "asset": asset, "ok": False, "retrieved_at_utc": nowiso(),
+            "signal": "no entry", "reasons": ["Insufficient data (spot/k5m/k1h/k4h)"]
+        }
         save_json(os.path.join(outdir, "signal.json"), msg)
         return msg
 
-    # 2) Adatok előkészítése
-    spot_obj = all_json.get("spot") or {}
-    spot_price = spot_obj.get("price_usd")
-    # OHLC idősorok DataFrame-mé konvertálva
-    df5 = df_from_ohlc_obj(all_json.get("k5m"))
-    df1 = df_from_ohlc_obj(all_json.get("k1h"))
-    df4 = df_from_ohlc_obj(all_json.get("k4h"))
+    spot_price = float(spot.get("price") or spot.get("price_usd") or k1h["close"].iloc[-1])
+    spot_utc   = spot.get("utc") or spot.get("timestamp") or ""
 
-    # 3) Érvelés/indikátorok (példa: trend bias)
-    b4 = "bull" if not df4.empty and df4["close"].iloc[-1] >= df4["open"].iloc[-1] else "bear"
-    b1 = "bull" if not df1.empty and df1["close"].iloc[-1] >= df1["open"].iloc[-1] else "bear"
+    # 2) Bias 4H→1H
+    bias4h = bias_from_emas(k4h)
+    bias1h = bias_from_emas(k1h)
+    trend_bias = "long" if (bias4h=="long" and bias1h!="short") else ("short" if (bias4h=="short" and bias1h!="long") else "neutral")
 
-    # 4) 79% Fibonacci szintek kiszámítása (kötött fej-fej paraméterekkel példa)
-    near79 = False
-    fib_info = {}
-    if not df1.empty:
-        hi = df1["close"].max()
-        lo = df1["close"].min()
-        up79 = lo + 0.79 * (hi - lo)
-        dn79 = hi - 0.79 * (hi - lo)
-        last5 = df5["close"].iloc[-1] if not df5.empty else df1["close"].iloc[-1]
-        if abs(last5 - up79) < 0.0035 * last5 or abs(last5 - dn79) < 0.0035 * last5:
-            near79 = True
-        fib_info = {"swing_hi": hi, "swing_lo": lo, "up79": up79, "dn79": dn79, "last": float(last5)}
+    # 3) HTF sweep
+    sw1h = detect_sweep(k1h, 24); sw4h = detect_sweep(k4h, 24)
+    swept = sw1h["sweep_high"] or sw1h["sweep_low"] or sw4h["sweep_high"] or sw4h["sweep_low"]
 
-    # 5) MACD, RSI, Bollinger feltételek (példa)
+    # 4) 5M BOS a trend irányába
+    bos5m = detect_bos(k5m, "long" if trend_bias=="long" else "short")
+
+    # 5) ATR szűrő (relatív)
+    atr5 = atr(k5m).iloc[-1]
+    rel_atr = float(atr5 / spot_price) if (atr5 and spot_price) else float("nan")
+    atr_ok = not (np.isnan(rel_atr) or rel_atr < ATR_LOW_TH)
+
+    # 6) 79% Fib (1H swingek)
+    k1h_sw = find_swings(k1h, lb=2)
+    move_hi, move_lo = last_swing_levels(k1h_sw)
+    fib_ok = fib79_ok(move_hi, move_lo, spot_price)
+
+    # 7) P-score
+    P, reasons = 20, []
+    if trend_bias != "neutral": P += 20; reasons.append(f"Bias(4H→1H)={trend_bias}")
+    if swept:                   P += 15; reasons.append("HTF sweep ok")
+    if bos5m:                   P += 15; reasons.append("5M BOS trendirányba")
+    if fib_ok:                  P += 20; reasons.append("79% Fib konfluencia")
+    if atr_ok:                  P += 10; reasons.append("ATR rendben")
+    P = max(0, min(100, P))
+
+    # 8) Döntés + szintek
     decision = "no entry"
-    reasons = []
-    if not df1.empty:
-        closes = df1["close"]
-        ema20 = ema(closes, 20).iloc[-1]
-        ema50 = ema(closes, 50).iloc[-1]
-        rsi_val = rsi14(closes).iloc[-1]
-        macd_line, macd_signal, _ = macd(closes)
-        macd_val = macd_line.iloc[-1] - macd_signal.iloc[-1]
-        bb_mid, bb_up, bb_lo = bb(closes)
-        price = df1["close"].iloc[-1]
-        # Egyszerű példa szabályok:
-        if b4 == "bull" and b1 == "bull" and near79 and price > bb_mid.iloc[-1] and (price - ema20) > 0:
-            decision = "buy"
-            reasons.append("4H és 1H bull bias, közel 79% fib, fölötte a Bollinger középértéknek")
-        elif b4 == "bear" and b1 == "bear" and near79 and price < bb_mid.iloc[-1]:
-            decision = "sell"
-            reasons.append("4H és 1H bear bias, közel 79% fib, alatta a Bollinger középértéknek")
+    entry = sl = tp1 = tp2 = rr = None
+    lev = LEVERAGE.get(asset, 2.0)
 
-    # 6) Eredmény mentése JSON-ba
+    if P >= 60 and trend_bias in ("long","short") and bos5m and fib_ok and atr_ok:
+        decision = "buy" if trend_bias=="long" else "sell"
+        # SL: utolsó 5M swing +/- 0.2 ATR puffer
+        k5_sw = find_swings(k5m, lb=2)
+        hi5, lo5 = last_swing_levels(k5_sw)
+        atrbuf = float(atr5 or 0.0) * 0.2
+        if decision == "buy":
+            entry = spot_price
+            sl = (lo5 if lo5 is not None else (spot_price - atr5)) - atrbuf
+            risk = max(1e-6, entry - sl)
+            tp1 = entry + 1.0 * risk
+            tp2 = entry + 2.5 * risk
+            rr = (tp2 - entry) / risk
+        else:
+            entry = spot_price
+            sl = (hi5 if hi5 is not None else (spot_price + atr5)) + atrbuf
+            risk = max(1e-6, sl - entry)
+            tp1 = entry - 1.0 * risk
+            tp2 = entry - 2.5 * risk
+            rr = (entry - tp2) / risk
+
+        ok_math = ((decision=="buy"  and (sl < entry < tp1 <= tp2)) or
+                   (decision=="sell" and (tp2 <= tp1 < entry < sl)))
+        if (not ok_math) or (rr < 1.5):
+            decision = "no entry"
+
+    # 9) Mentés: signal.json
     decision_obj = {
         "asset": asset,
         "ok": True,
         "retrieved_at_utc": nowiso(),
+        "source": "Twelve Data (lokális JSON)",
+        "spot": {"price": spot_price, "utc": spot_utc},
         "signal": decision,
+        "probability": int(P),
+        "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": (round(rr,2) if rr else None),
+        "leverage": lev,
         "reasons": reasons or ["no signal"],
     }
     save_json(os.path.join(outdir, "signal.json"), decision_obj)
     return decision_obj
 
+# ------------------------------- főfolyamat ------------------------------------
+
 def main():
-    summary = {"ok": True, "assets": {}}
+    summary = {"ok": True, "generated_utc": nowiso(), "assets": {}}
     for asset in ASSETS:
         try:
             res = analyze(asset)
             summary["assets"][asset] = res
         except Exception as e:
             summary["assets"][asset] = {"asset": asset, "ok": False, "error": str(e)}
-    # Összefoglaló mentése és elemzési HTML generálása
-    save_json(os.path.join("public", "analysis_summary.json"), summary)
-    # Egyszerű HTML oldal (opcionális)
-    html = "<!doctype html><meta charset='utf-8'><title>Analysis Summary</title><h1>Analysis Summary</h1>"
+    save_json(os.path.join(PUBLIC_DIR, "analysis_summary.json"), summary)
+
+    # Egyszerű HTML kivonat
+    html = "<!doctype html><meta charset='utf-8'><title>Analysis Summary</title>"
+    html += "<h1>Analysis Summary (TD-only)</h1>"
     html += "<pre>" + json.dumps(summary, ensure_ascii=False, indent=2) + "</pre>"
-    save_json(os.path.join("public", "analysis.html"), {"html": html})
-    with open("public/analysis.html", "w", encoding="utf-8") as f:
+    with open(os.path.join(PUBLIC_DIR, "analysis.html"), "w", encoding="utf-8") as f:
         f.write(html)
 
 if __name__ == "__main__":
