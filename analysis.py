@@ -8,7 +8,7 @@ Kimenet:
   public/analysis.html            — egyszerű HTML kivonat
 """
 
-import os, json, math, time
+import os, json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -25,9 +25,10 @@ MAX_RISK_PCT = 1.8
 FIB_TOL = 0.02        # 79% ±2%
 ATR_LOW_TH = 0.0008   # túl alacsony rel. vol → no-trade
 
-# -------------------------- hasznos segédek -----------------------------------
+# -------------------------- segédek -----------------------------------
 
 def nowiso() -> str:
+    # ISO-8601 Z-suffix (UTC)
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def save_json(path: str, obj: Any) -> None:
@@ -44,27 +45,39 @@ def load_json(path: str) -> Optional[Any]:
 
 def as_df_klines(raw: Any) -> pd.DataFrame:
     """
-    TD-formátum: list[{'t','o','h','l','c','v'}] időben növekvő sorrend.
+    Twelve Data time_series formátum beolvasása:
+    - preferált: values[ {datetime, open, high, low, close, volume?} ]
+    - kompat.:   values[ {t, o, h, l, c, v?} ]
+    A kimenet indexe UTC datetime, oszlopok: open, high, low, close (float).
     """
     if not raw:
-        return pd.DataFrame()
-    arr = raw if isinstance(raw, list) else raw.get("values") or []
-    rows = []
+        return pd.DataFrame(columns=["open","high","low","close"])
+
+    arr = raw if isinstance(raw, list) else (raw.get("values") or [])
+    rows: List[Dict[str, Any]] = []
     for x in arr:
         try:
-            rows.append({
-                "time":  pd.to_datetime(x["t"], utc=True),
-                "open":  float(x["o"]),
-                "high":  float(x["h"]),
-                "low":   float(x["l"]),
-                "close": float(x["c"]),
-                "volume":float(x.get("v", 0.0) or 0.0),
-            })
+            # TD standard kulcsok
+            if "datetime" in x:
+                dt = pd.to_datetime(x["datetime"], utc=True)
+                o = float(x["open"]); h = float(x["high"]); l = float(x["low"]); c = float(x["close"])
+                v = float(x.get("volume", 0.0) or 0.0)
+            # régebbi rövid kulcsok (ha ilyet kapnánk)
+            elif "t" in x:
+                dt = pd.to_datetime(x["t"], utc=True)
+                o = float(x["o"]); h = float(x["h"]); l = float(x["l"]); c = float(x["c"])
+                v = float(x.get("v", 0.0) or 0.0)
+            else:
+                continue
+            rows.append({"time": dt, "open": o, "high": h, "low": l, "close": c, "volume": v})
         except Exception:
             continue
+
     if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values("time").set_index("time")
+        return pd.DataFrame(columns=["open","high","low","close"])
+
+    df = pd.DataFrame(rows).sort_values("time").set_index("time")
+    return df[["open","high","low","close"]]
 
 # --- TA: EMA/RSI/ATR, swingek, sweep, BOS, 79% fib ----------------------------
 
@@ -115,6 +128,8 @@ def detect_sweep(df: pd.DataFrame, lookback: int = 24) -> Dict[str, bool]:
     return out
 
 def detect_bos(df: pd.DataFrame, direction: str) -> bool:
+    if direction not in ("long", "short"):  # neutral → nincs BOS vizsgálat
+        return False
     sw = find_swings(df, lb=2)
     hi, lo = last_swing_levels(sw.iloc[:-1])
     if direction == "long" and hi is not None:
@@ -127,10 +142,8 @@ def fib79_ok(move_hi: float, move_lo: float, price_now: float, tol: float = FIB_
     if move_hi is None or move_lo is None or move_hi == move_lo: return False
     length = move_hi - move_lo
     if length == 0: return False
-    # Long: low->high impulzus, 79% visszahúzódás lefelé
-    level_long = move_lo + 0.79 * length
-    # Short: high->low impulzus, 79% visszahúzódás felfelé
-    level_short = move_hi - 0.79 * length
+    level_long  = move_lo + 0.79 * length         # long retrace
+    level_short = move_hi - 0.79 * length         # short retrace
     return (abs(price_now - level_long)/abs(length) <= tol) or (abs(price_now - level_short)/abs(length) <= tol)
 
 def bias_from_emas(df: pd.DataFrame) -> str:
@@ -148,25 +161,39 @@ def analyze(asset: str) -> Dict[str, Any]:
     outdir = os.path.join(PUBLIC_DIR, asset)
     os.makedirs(outdir, exist_ok=True)
 
-    # 1) Bemenetek (all.json ha van, külön fájlok ha nincs)
-    all_json = load_json(os.path.join(outdir, "all.json")) or {}
-    spot = all_json.get("spot") or load_json(os.path.join(outdir, "spot.json")) or {}
-    k5m_raw = all_json.get("k5m") or load_json(os.path.join(outdir, "klines_5m.json"))
-    k1h_raw = all_json.get("k1h") or load_json(os.path.join(outdir, "klines_1h.json"))
-    k4h_raw = all_json.get("k4h") or load_json(os.path.join(outdir, "klines_4h.json"))
+    # 1) Bemenetek
+    spot = load_json(os.path.join(outdir, "spot.json")) or {}
+    k5m_raw = load_json(os.path.join(outdir, "klines_5m.json"))
+    k1h_raw = load_json(os.path.join(outdir, "klines_1h.json"))
+    k4h_raw = load_json(os.path.join(outdir, "klines_4h.json"))
 
     k5m, k1h, k4h = as_df_klines(k5m_raw), as_df_klines(k1h_raw), as_df_klines(k4h_raw)
 
-    if not spot or k5m.empty or k1h.empty or k4h.empty:
+    spot_price = None
+    spot_utc = "-"
+    if spot:
+        spot_price = spot.get("price")
+        if spot_price is None:
+            spot_price = spot.get("price_usd")
+        spot_utc = spot.get("utc") or spot.get("timestamp") or "-"
+
+    if (spot_price is None) or k5m.empty or k1h.empty or k4h.empty:
         msg = {
-            "asset": asset, "ok": False, "retrieved_at_utc": nowiso(),
-            "signal": "no entry", "reasons": ["Insufficient data (spot/k5m/k1h/k4h)"]
+            "asset": asset,
+            "ok": False,
+            "retrieved_at_utc": nowiso(),
+            "source": "Twelve Data (lokális JSON)",
+            "spot": {"price": spot_price, "utc": spot_utc},
+            "signal": "no entry",
+            "probability": 0,
+            "entry": None, "sl": None, "tp1": None, "tp2": None, "rr": None,
+            "leverage": LEVERAGE.get(asset, 2.0),
+            "reasons": ["Insufficient data (spot/k5m/k1h/k4h)"],
         }
         save_json(os.path.join(outdir, "signal.json"), msg)
         return msg
 
-    spot_price = float(spot.get("price") or spot.get("price_usd") or k1h["close"].iloc[-1])
-    spot_utc   = spot.get("utc") or spot.get("timestamp") or ""
+    spot_price = float(spot_price)
 
     # 2) Bias 4H→1H
     bias4h = bias_from_emas(k4h)
@@ -177,8 +204,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     sw1h = detect_sweep(k1h, 24); sw4h = detect_sweep(k4h, 24)
     swept = sw1h["sweep_high"] or sw1h["sweep_low"] or sw4h["sweep_high"] or sw4h["sweep_low"]
 
-    # 4) 5M BOS a trend irányába
-    bos5m = detect_bos(k5m, "long" if trend_bias=="long" else "short")
+    # 4) 5M BOS a trend irányába (csak ha nem neutral)
+    bos5m = detect_bos(k5m, "long" if trend_bias=="long" else ("short" if trend_bias=="short" else "neutral"))
 
     # 5) ATR szűrő (relatív)
     atr5 = atr(k5m).iloc[-1]
@@ -190,7 +217,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     move_hi, move_lo = last_swing_levels(k1h_sw)
     fib_ok = fib79_ok(move_hi, move_lo, spot_price)
 
-    # 7) P-score
+    # 7) P-score (egyszerű súlyozás)
     P, reasons = 20, []
     if trend_bias != "neutral": P += 20; reasons.append(f"Bias(4H→1H)={trend_bias}")
     if swept:                   P += 15; reasons.append("HTF sweep ok")
@@ -227,8 +254,9 @@ def analyze(asset: str) -> Dict[str, Any]:
 
         ok_math = ((decision=="buy"  and (sl < entry < tp1 <= tp2)) or
                    (decision=="sell" and (tp2 <= tp1 < entry < sl)))
-        if (not ok_math) or (rr < 1.5):
+        if (not ok_math) or (rr is None) or (rr < 1.5):
             decision = "no entry"
+            entry = sl = tp1 = tp2 = rr = None
 
     # 9) Mentés: signal.json
     decision_obj = {
