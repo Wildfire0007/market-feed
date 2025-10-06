@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os, json, requests, pathlib
+import os, json, requests
 
 PUBLIC_DIR = "public"
+ASSETS = ["SOL", "NSDQ100", "GOLD_CFD"]
 
 def load(path):
     try:
@@ -11,15 +12,44 @@ def load(path):
     except Exception:
         return None
 
-def fmt_sig(sig):
-    dec = sig.get("signal","no entry").upper()
-    p   = sig.get("probability")
-    rr  = sig.get("rr")
-    e   = sig.get("entry"); sl = sig.get("sl"); t1 = sig.get("tp1"); t2 = sig.get("tp2")
-    if dec == "NO ENTRY":
-        return f"• {sig['asset']}: no entry (P={p}%)"
-    return (f"• {sig['asset']}: {dec} @ {e:.4f} | SL {sl:.4f} | "
-            f"TP1 {t1:.4f} | TP2 {t2:.4f} | P={p}% | RR≈{rr}")
+def fmt_num(x, digits=4):
+    try:
+        return f"{float(x):.{digits}f}"
+    except Exception:
+        return "—"
+
+def spot_from_sig_or_file(asset: str, sig: dict):
+    # 1) signal.json-ból próbáljuk
+    spot = (sig or {}).get("spot") or {}
+    price = spot.get("price") or spot.get("price_usd")
+    utc = spot.get("utc") or spot.get("timestamp")
+
+    # 2) ha nincs, olvassuk a public/<ASSET>/spot.json-t
+    if price is None:
+        js = load(f"{PUBLIC_DIR}/{asset}/spot.json") or {}
+        price = js.get("price") or js.get("price_usd")
+        utc = utc or js.get("utc") or js.get("timestamp")
+
+    return price, utc
+
+def fmt_sig(asset: str, sig: dict):
+    dec = (sig.get("signal") or "no entry").upper()
+    p   = sig.get("probability", 0)
+    entry = sig.get("entry"); sl = sig.get("sl"); t1 = sig.get("tp1"); t2 = sig.get("tp2")
+    rr = sig.get("rr")
+
+    price, utc = spot_from_sig_or_file(asset, sig)
+    spot_s = fmt_num(price)
+    utc_s  = utc or "-"
+
+    # Mindig legyen Spot + P%, még no entry esetén is
+    base = f"• {asset}: {dec} | Spot: {spot_s} | P={p}% | UTC: {utc_s}"
+
+    if dec in ("BUY", "SELL") and all(v is not None for v in (entry, sl, t1, t2)):
+        return (base +
+                f" | @ {fmt_num(entry)} | SL {fmt_num(sl)} | "
+                f"TP1 {fmt_num(t1)} | TP2 {fmt_num(t2)} | RR≈{rr}")
+    return base
 
 def main():
     hook = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
@@ -27,27 +57,27 @@ def main():
         print("No DISCORD_WEBHOOK_URL, skipping notify.")
         return
 
-    summ = load(f"{PUBLIC_DIR}/analysis_summary.json") or {}
-    assets = summ.get("assets", {})
+    # Összegyűjtjük assetenként a jelzéseket
     lines = []
     actionable = False
-
-    # Elsődlegesen az assetenkénti signal.json-ból olvassunk (részletesebb lehet)
-    for asset in ["SOL","NSDQ100","GOLD_CFD"]:
+    for asset in ASSETS:
         sig = load(f"{PUBLIC_DIR}/{asset}/signal.json")
+        # Ha nincs külön signal.json, próbáljuk a summary-t
         if not sig:
-            sig = assets.get(asset) or {"asset":asset, "signal":"no entry", "probability":0}
-        lines.append(fmt_sig(sig))
-        if sig.get("signal") in ("buy","sell"):
+            summ = load(f"{PUBLIC_DIR}/analysis_summary.json") or {}
+            sig = (summ.get("assets") or {}).get(asset)
+        if not sig:
+            sig = {"asset": asset, "signal": "no entry", "probability": 0}
+
+        lines.append(fmt_sig(asset, sig))
+        if (sig.get("signal") or "").lower() in ("buy", "sell"):
             actionable = True
 
     title = "📣 TD Jelentés — Automatikus Discord értesítés"
-    if actionable:
-        header = f"{title}\nAktív jelzés(ek) találhatók:\n"
-    else:
-        header = f"{title}\nNincs aktív jelzés (összefoglaló):\n"
-
+    header = (f"{title}\nAktív jelzés(ek) találhatók:\n"
+              if actionable else f"{title}\nÖsszefoglaló (no entry / várakozás):\n")
     content = header + "\n".join(lines)
+
     # Discord 2000 karakter limit
     if len(content) > 1900:
         content = content[:1900] + "\n…"
