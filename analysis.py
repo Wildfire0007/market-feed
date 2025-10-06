@@ -62,7 +62,7 @@ def as_df_klines(raw: Any) -> pd.DataFrame:
                 dt = pd.to_datetime(x["datetime"], utc=True)
                 o = float(x["open"]); h = float(x["high"]); l = float(x["low"]); c = float(x["close"])
                 v = float(x.get("volume", 0.0) or 0.0)
-            # régebbi rövid kulcsok (ha ilyet kapnánk)
+            # rövid kulcsok (kompatibilitás)
             elif "t" in x:
                 dt = pd.to_datetime(x["t"], utc=True)
                 o = float(x["o"]); h = float(x["h"]); l = float(x["l"]); c = float(x["c"])
@@ -226,12 +226,22 @@ def analyze(asset: str) -> Dict[str, Any]:
     if atr_ok:                  P += 10; reasons.append("ATR rendben")
     P = max(0, min(100, P))
 
+    # --- Kapuk összegyűjtése
+    conds = {
+        "bias": trend_bias in ("long","short"),
+        "bos5m": bool(bos5m),
+        "fib79": bool(fib_ok),
+        "atr": bool(atr_ok),
+    }
+    can_enter = (P >= 60) and all(conds.values())
+    missing = [k for k, v in conds.items() if not v]
+
     # 8) Döntés + szintek
     decision = "no entry"
     entry = sl = tp1 = tp2 = rr = None
     lev = LEVERAGE.get(asset, 2.0)
 
-    if P >= 60 and trend_bias in ("long","short") and bos5m and fib_ok and atr_ok:
+    if can_enter:
         decision = "buy" if trend_bias=="long" else "sell"
         # SL: utolsó 5M swing +/- 0.2 ATR puffer
         k5_sw = find_swings(k5m, lb=2)
@@ -255,6 +265,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         ok_math = ((decision=="buy"  and (sl < entry < tp1 <= tp2)) or
                    (decision=="sell" and (tp2 <= tp1 < entry < sl)))
         if (not ok_math) or (rr is None) or (rr < 1.5):
+            missing.append("rr_math")
             decision = "no entry"
             entry = sl = tp1 = tp2 = rr = None
 
@@ -269,7 +280,11 @@ def analyze(asset: str) -> Dict[str, Any]:
         "probability": int(P),
         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": (round(rr,2) if rr else None),
         "leverage": lev,
-        "reasons": reasons or ["no signal"],
+        "gates": {
+            "required": ["bias", "bos5m", "fib79", "atr", "rr_math>=1.5"],
+            "missing": missing,
+        },
+        "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else [])) or ["no signal"],
     }
     save_json(os.path.join(outdir, "signal.json"), decision_obj)
     return decision_obj
