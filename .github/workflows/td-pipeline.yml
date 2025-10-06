@@ -1,0 +1,33 @@
+name: TD Pipeline
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"   # 5 percenként, 0-24
+
+concurrency:
+  group: td-pipeline
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    env:
+      TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+      - name: Fetch data from Twelve Data
+        run: python Trading.py
+      - name: Build intraday report
+        run: python scripts/intraday_report.py
+      - name: Commit & push outputs
+        run: |
+          git config user.name "td-bot"
+          git config user.email "td-bot@users.noreply.github.com"
+          git add public reports
+          git commit -m "TD: update data + report" || echo "no changes"
+          git push
