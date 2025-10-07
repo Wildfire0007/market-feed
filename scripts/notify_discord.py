@@ -167,7 +167,7 @@ def main():
 
     save_state(state)
 
-    title = "📣 TD Jelentés — Automatikus Discord értesítés"
+    title = "📣 eToro-Riasztás"
     header = "Aktív jelzés(ek) találhatók:" if actionable else "Összefoglaló (no entry / várakozás):"
     content = f"**{title}**\n{header}"
 
