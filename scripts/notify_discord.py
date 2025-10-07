@@ -6,10 +6,25 @@ from datetime import datetime, timezone
 PUBLIC_DIR = "public"
 ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "GER40"]
 
-# ---- Debounce/stabilitás beállítások ----
+# ---- Debounce/stabilitás ----
 STATE_PATH = f"{PUBLIC_DIR}/_notify_state.json"
-STABILITY_RUNS = 2    # ennyi egymás utáni körben legyen BUY/SELL, hogy "aktívnak" számítson
-COOLDOWN_MIN   = 0    # ha akarsz, tegyél ide pl. 10-15-öt (perc), hogy ritkábban értesítsen
+STABILITY_RUNS = 2     # ennyi körben legyen BUY/SELL, hogy "aktívnak" számítson
+COOLDOWN_MIN   = 0     # (ha kell, tegyél ide 10–15-öt)
+
+# ---- Megjelenés / emoji / színek ----
+EMOJI = {
+    "SOL": "🟧",
+    "NSDQ100": "📈",
+    "GOLD_CFD": "🪙",
+    "BNB": "🟡",
+    "GER40": "🇩🇪",
+}
+COLOR = {
+    "BUY":  0x2ecc71,  # zöld
+    "SELL": 0x2ecc71,  # zöld (ha külön akarod: 0x00b894)
+    "NO":   0xe74c3c,  # piros
+    "WAIT": 0xf1c40f,  # sárga (stabilizálás)
+}
 
 def utcnow_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -54,25 +69,29 @@ def missing_from_sig(sig: dict):
     miss = gates.get("missing") or []
     if not miss:
         return ""
-    # kedvesebb megjelenítés
     pretty = {
         "bos5m": "BOS (5m)",
-        "fib79": "Fib",
         "atr": "ATR",
         "bias": "Bias",
-        "rr_math": "RR≥1.5",
         "liquidity": "liquidity",
         "tp_min_profit": "tp_min_profit",
+        "RR≥1.5": "RR≥1.5",
+        "rr_math>=2.0": "RR≥2.0",
     }
-    names = []
+    out = []
     for k in miss:
-        key = k.replace("rr_math", "RR≥1.5")
-        names.append(pretty.get(k, key))
-    return ", ".join(names)
+        key = "RR≥2.0" if k.startswith("rr_math") else k
+        out.append(pretty.get(k, key))
+    return ", ".join(out)
 
-def fmt_sig(asset: str, sig: dict):
-    dec = (sig.get("signal") or "no entry").upper()
-    p   = sig.get("probability", 0)
+def build_embed_for_asset(asset: str, sig: dict, is_stable: bool):
+    emoji = EMOJI.get(asset, "📊")
+    dec_raw = (sig.get("signal") or "no entry").upper()
+    dec = dec_raw
+    if dec not in ("BUY", "SELL"):
+        dec = "NO ENTRY"
+
+    p   = int(sig.get("probability", 0) or 0)
     entry = sig.get("entry"); sl = sig.get("sl"); t1 = sig.get("tp1"); t2 = sig.get("tp2")
     rr = sig.get("rr")
 
@@ -80,16 +99,32 @@ def fmt_sig(asset: str, sig: dict):
     spot_s = fmt_num(price)
     utc_s  = utc or "-"
 
-    base = f"• {asset}: {dec} | Spot: {spot_s} | P={p}% | UTC: {utc_s}"
+    # státusz sor (színezett jelöléssel)
+    status_emoji = "🟢" if dec in ("BUY","SELL") else "🔴"
+    status_bold  = f"{status_emoji} **{dec}**"
 
-    if dec in ("BUY", "SELL") and all(v is not None for v in (entry, sl, t1, t2)):
-        base += (f" | @ {fmt_num(entry)} | SL {fmt_num(sl)} | "
-                 f"TP1 {fmt_num(t1)} | TP2 {fmt_num(t2)} | RR≈{rr}")
+    lines = [
+        f"{status_bold} • P={p}%",
+        f"Spot: `{spot_s}` • UTC: `{utc_s}`",
+    ]
 
-    miss = missing_from_sig(sig)
-    if (dec not in ("BUY", "SELL")) and miss:
-        base += f" | Hiányzó: {miss}"
-    return base
+    if dec in ("BUY", "SELL") and all(v is not None for v in (entry, sl, t1, t2, rr)):
+        lines.append(f"@ `{fmt_num(entry)}` • SL `{fmt_num(sl)}` • TP1 `{fmt_num(t1)}` • TP2 `{fmt_num(t2)}` • RR≈`{rr}`")
+        if not is_stable:
+            lines.append("⏳ Állapot: *stabilizálás alatt*")
+
+    if dec == "NO ENTRY":
+        miss = missing_from_sig(sig)
+        if miss:
+            lines.append(f"Hiányzó: *{miss}*")
+
+    color = COLOR["WAIT"] if (dec in ("BUY","SELL") and not is_stable) else (COLOR["BUY"] if dec in ("BUY","SELL") else COLOR["NO"])
+
+    return {
+        "title": f"{emoji} **{asset}**",
+        "description": "\n".join(lines),
+        "color": color,
+    }
 
 def main():
     hook = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
@@ -98,9 +133,9 @@ def main():
         return
 
     state = load_state()
-
-    lines = []
+    embeds = []
     actionable = False
+
     for asset in ASSETS:
         sig = load(f"{PUBLIC_DIR}/{asset}/signal.json")
         if not sig:
@@ -109,7 +144,7 @@ def main():
         if not sig:
             sig = {"asset": asset, "signal": "no entry", "probability": 0}
 
-        # Stabilitás-számláló frissítése
+        # Stabilitás számláló
         key = asset
         prev = state.get(key, {"last": None, "count": 0, "last_sent": None})
 
@@ -124,29 +159,21 @@ def main():
 
         state[key] = prev
 
-        # Stabil BUY/SELL-e?
         is_stable_actionable = (curr_effective in ("buy","sell") and prev["count"] >= STABILITY_RUNS)
         if is_stable_actionable:
             actionable = True
 
-        # Sor render
-        line = fmt_sig(asset, sig)
-        if curr in ("buy","sell") and not is_stable_actionable:
-            line += " | Állapot: stabilizálás alatt"
-        lines.append(line)
+        embeds.append(build_embed_for_asset(asset, sig, is_stable_actionable))
 
     save_state(state)
 
     title = "📣 TD Jelentés — Automatikus Discord értesítés"
-    header = (f"{title}\nAktív jelzés(ek) találhatók:\n"
-              if actionable else f"{title}\nÖsszefoglaló (no entry / várakozás):\n")
-    content = header + "\n".join(lines)
+    header = "Aktív jelzés(ek) találhatók:" if actionable else "Összefoglaló (no entry / várakozás):"
+    content = f"**{title}**\n{header}"
 
-    if len(content) > 1900:
-        content = content[:1900] + "\n…"
-
+    # Webhook küldés (content + embeds)
     try:
-        r = requests.post(hook, json={"content": content}, timeout=20)
+        r = requests.post(hook, json={"content": content, "embeds": embeds[:10]}, timeout=20)
         r.raise_for_status()
         print("Discord notify OK.")
     except Exception as e:
