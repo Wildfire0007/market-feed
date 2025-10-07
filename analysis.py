@@ -39,10 +39,42 @@ MOMENTUM_BARS    = 8             # 5m EMA9–EMA21 legalább 8 bar
 MOMENTUM_ATR_REL = 0.0012        # >= 0.12%
 MOMENTUM_BOS_LB  = 15            # szerkezeti töréshez nézett ablak (bar)
 
+# --- Rezsim és session beállítások ---
+EMA_SLOPE_PERIOD   = 21          # 1h EMA21
+EMA_SLOPE_LOOKBACK = 3           # hány baron mérjük a változást
+EMA_SLOPE_TH       = 0.0012      # ~0.12% relatív elmozdulás (abs) a lookback alatt
+
+# UTC idősávok: [(start_h, start_m, end_h, end_m), ...]; None = mindig
+SESSIONS_UTC: Dict[str, Optional[List[Tuple[int,int,int,int]]]] = {
+    "SOL": None,
+    "BNB": None,
+    "NSDQ100": [(13,30, 20,0)],   # US cash
+    "GER40":  [(7,0,   16,30)],   # DE cash (egyszerűsítve, UTC)
+    "GOLD_CFD": None,             # gyakorlatilag egész nap
+}
+
 # -------------------------- segédek -----------------------------------
 
 def nowiso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def now_utctime_hm() -> Tuple[int,int]:
+    t = datetime.now(timezone.utc)
+    return t.hour, t.minute
+
+def in_any_window_utc(windows: Optional[List[Tuple[int,int,int,int]]], h: int, m: int) -> bool:
+    if not windows:
+        return True
+    minutes = h*60 + m
+    for sh, sm, eh, em in windows:
+        s = sh*60 + sm
+        e = eh*60 + em
+        if s <= minutes <= e:
+            return True
+    return False
+
+def session_ok(asset: str) -> bool:
+    return in_any_window_utc(SESSIONS_UTC.get(asset), *now_utctime_hm())
 
 def save_json(path: str, obj: Any) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -178,6 +210,21 @@ def bias_from_emas(df: pd.DataFrame) -> str:
     if last < e200 and e50 < e200 and e9 < e21:  return "short"
     return "neutral"
 
+def ema_slope_ok(df_1h: pd.DataFrame,
+                 period: int = EMA_SLOPE_PERIOD,
+                 lookback: int = EMA_SLOPE_LOOKBACK,
+                 th: float = EMA_SLOPE_TH) -> Tuple[bool, float]:
+    """EMA21 relatív meredekség 1h-n: abs(ema_now - ema_prev)/price_now >= th"""
+    if df_1h.empty or len(df_1h) < period + lookback + 1:
+        return False, 0.0
+    c = df_1h["close"]
+    e = ema(c, period)
+    ema_now = float(e.iloc[-1])
+    ema_prev = float(e.iloc[-1 - lookback])
+    price_now = float(c.iloc[-1])
+    rel = abs(ema_now - ema_prev) / max(1e-9, price_now)
+    return (rel >= th), rel
+
 # ------------------------------ elemzés egy eszközre ---------------------------
 
 def analyze(asset: str) -> Dict[str, Any]:
@@ -214,32 +261,39 @@ def analyze(asset: str) -> Dict[str, Any]:
         save_json(os.path.join(outdir, "signal.json"), msg)
         return msg
 
-    # --- Kijelzett vs. számításhoz használt ár ---
-    display_spot   = float(spot_price)
-    last5_close    = float(k5m["close"].iloc[-1])   # stabil, lezárt 5m
+    # --- ZÁRT gyertyák + kijelzett vs. számításhoz használt ár ---
+    display_spot = float(spot_price)                                # kijelzés
+    k5m_closed = k5m.iloc[:-1] if len(k5m) > 1 else k5m.copy()
+    k1h_closed = k1h.iloc[:-1] if len(k1h) > 1 else k1h.copy()
+    k4h_closed = k4h.iloc[:-1] if len(k4h) > 1 else k4h.copy()
+
+    last5_close    = float(k5m_closed["close"].iloc[-1])            # stabil, lezárt 5m
     price_for_calc = last5_close
 
-    # 2) Bias 4H→1H
-    bias4h = bias_from_emas(k4h)
-    bias1h = bias_from_emas(k1h)
+    # 2) Bias 4H→1H (zárt 1h/4h)
+    bias4h = bias_from_emas(k4h_closed)
+    bias1h = bias_from_emas(k1h_closed)
     trend_bias = "long" if (bias4h=="long" and bias1h!="short") else ("short" if (bias4h=="short" and bias1h!="long") else "neutral")
 
-    # 3) HTF sweep
-    sw1h = detect_sweep(k1h, 24); sw4h = detect_sweep(k4h, 24)
+    # 2/b Rezsim (EMA21 meredekség 1h)
+    regime_ok, regime_val = ema_slope_ok(k1h_closed, EMA_SLOPE_PERIOD, EMA_SLOPE_LOOKBACK, EMA_SLOPE_TH)
+
+    # 3) HTF sweep (zárt 1h/4h)
+    sw1h = detect_sweep(k1h_closed, 24); sw4h = detect_sweep(k4h_closed, 24)
     swept = sw1h["sweep_high"] or sw1h["sweep_low"] or sw4h["sweep_high"] or sw4h["sweep_low"]
 
-    # 4) 5M BOS a trend irányába (core mód)
-    bos5m = detect_bos(k5m, "long" if trend_bias=="long" else ("short" if trend_bias=="short" else "neutral"))
+    # 4) 5M BOS a trend irányába (zárt 5m)
+    bos5m = detect_bos(k5m_closed, "long" if trend_bias=="long" else ("short" if trend_bias=="short" else "neutral"))
 
-    # 5) ATR szűrő (relatív) — a stabil árhoz viszonyítjuk
-    atr5 = atr(k5m).iloc[-1]
+    # 5) ATR szűrő (relatív) — a stabil árhoz viszonyítjuk (zárt 5m)
+    atr5 = atr(k5m_closed).iloc[-1]
     rel_atr = float(atr5 / price_for_calc) if (atr5 and price_for_calc) else float("nan")
     atr_ok = not (np.isnan(rel_atr) or rel_atr < ATR_LOW_TH)
 
-    # 6) Fib zóna (0.618–0.886) 1H swingekre, ATR(1h) alapú tűréssel — stabil árral
-    k1h_sw = find_swings(k1h, lb=2)
+    # 6) Fib zóna (0.618–0.886) 1H swingekre, ATR(1h) alapú tűréssel — zárt 1h
+    k1h_sw = find_swings(k1h_closed, lb=2)
     move_hi, move_lo = last_swing_levels(k1h_sw)
-    atr1h = float(atr(k1h).iloc[-1]) if not k1h.empty else 0.0
+    atr1h = float(atr(k1h_closed).iloc[-1]) if not k1h_closed.empty else 0.0
     fib_ok = fib_zone_ok(
         move_hi, move_lo, price_for_calc,
         low=0.618, high=0.886,
@@ -250,47 +304,54 @@ def analyze(asset: str) -> Dict[str, Any]:
     # 7) P-score (egyszerű súlyozás)
     P, reasons = 20, []
     if trend_bias != "neutral": P += 20; reasons.append(f"Bias(4H→1H)={trend_bias}")
+    if regime_ok:               P += 10; reasons.append("Regime ok (EMA21 slope)")
     if swept:                   P += 15; reasons.append("HTF sweep ok")
     if bos5m:                   P += 15; reasons.append("5M BOS trendirányba")
     if fib_ok:                  P += 20; reasons.append("Fib zóna konfluencia (0.618–0.886)")
     if atr_ok:                  P += 10; reasons.append("ATR rendben")
     P = max(0, min(100, P))
 
-    # --- Core kapuk (liquidity = Fib zóna VAGY sweep)
+    # --- Kapuk (liquidity = Fib zóna VAGY sweep) + session + regime ---
     liquidity_ok = bool(fib_ok or swept)
+    session_ok_flag = session_ok(asset)
+
     conds_core = {
-        "bias": trend_bias in ("long","short"),
-        "bos5m": bool(bos5m),
+        "session": bool(session_ok_flag),
+        "regime":  bool(regime_ok),
+        "bias":    trend_bias in ("long","short"),
+        "bos5m":   bool(bos5m),
         "liquidity": liquidity_ok,
-        "atr": bool(atr_ok),
+        "atr":     bool(atr_ok),
     }
     can_enter_core = (P >= 60) and all(conds_core.values())
     missing_core = [k for k, v in conds_core.items() if not v]
 
-    # --- Momentum feltételek (override) — kriptókra
+    # --- Momentum feltételek (override) — kriptókra (zárt 5m-ből) ---
     momentum_used = False
     mom_dir: Optional[str] = None
-    mom_required = ["momentum(ema9x21)", "bos5m|struct_break", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
+    mom_required = ["session", "momentum(ema9x21)", "bos5m|struct_break", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
     missing_mom: List[str] = []
 
     if asset in ENABLE_MOMENTUM_ASSETS:
-        e9_5 = ema(k5m["close"], 9)
-        e21_5 = ema(k5m["close"], 21)
+        e9_5 = ema(k5m_closed["close"], 9)
+        e21_5 = ema(k5m_closed["close"], 21)
         bear = (e9_5 < e21_5).tail(MOMENTUM_BARS).all()
         bull = (e9_5 > e21_5).tail(MOMENTUM_BARS).all()
-        bos_struct_short = broke_structure(k5m, "short", MOMENTUM_BOS_LB)
-        bos_struct_long  = broke_structure(k5m, "long",  MOMENTUM_BOS_LB)
+        bos_struct_short = broke_structure(k5m_closed, "short", MOMENTUM_BOS_LB)
+        bos_struct_long  = broke_structure(k5m_closed, "long",  MOMENTUM_BOS_LB)
         bos_any_short = bool(bos5m or bos_struct_short)
         bos_any_long  = bool(bos5m or bos_struct_long)
         mom_atr_ok = not np.isnan(rel_atr) and (rel_atr >= MOMENTUM_ATR_REL)
 
-        if bear and bos_any_short and mom_atr_ok:
-            mom_dir = "sell"
-        elif bull and bos_any_long and mom_atr_ok:
-            mom_dir = "buy"
+        if session_ok_flag:
+            if bear and bos_any_short and mom_atr_ok:
+                mom_dir = "sell"
+            elif bull and bos_any_long and mom_atr_ok:
+                mom_dir = "buy"
 
         if mom_dir is None:
-            if not (bear or bull): missing_mom.append("momentum(ema9x21)")
+            if not session_ok_flag: missing_mom.append("session")
+            if not (bear or bull):  missing_mom.append("momentum(ema9x21)")
             if not (bos_any_short if bear else bos_any_long): missing_mom.append("bos5m|struct_break")
             if not mom_atr_ok: missing_mom.append("atr")
 
@@ -307,7 +368,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         atr1h_val = float(atr1h or 0.0)
         risk_min = max(0.6 * atr5_val, 0.0035 * price_for_calc, 0.50)
         buf      = max(0.3 * atr5_val, 0.1 * atr1h_val)
-        k5_sw = find_swings(k5m, lb=2)
+        k5_sw = find_swings(k5m_closed, lb=2)
         hi5, lo5 = last_swing_levels(k5_sw)
         entry = price_for_calc
         if decision_side == "buy":
@@ -371,9 +432,9 @@ def analyze(asset: str) -> Dict[str, Any]:
         "gates": {
             "mode": mode,
             "required": (
-                ["bias", "bos5m", "liquidity(fib_zone|sweep)", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
+                ["session", "regime", "bias", "bos5m", "liquidity(fib_zone|sweep)", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
                 if mode == "core" else
-                ["momentum(ema9x21)", "bos5m|struct_break", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
+                ["session", "momentum(ema9x21)", "bos5m|struct_break", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
             ),
             "missing": missing,
         },
