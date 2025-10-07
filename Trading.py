@@ -23,21 +23,25 @@ from typing import Any, Dict, Optional, List, Tuple
 
 import requests
 
-OUT_DIR = os.getenv("OUT_DIR", "public")
-API_KEY = os.environ["TWELVEDATA_API_KEY"].strip()
-TD_BASE = "https://api.twelvedata.com"
+OUT_DIR  = os.getenv("OUT_DIR", "public")
+API_KEY  = os.environ["TWELVEDATA_API_KEY"].strip()
+TD_BASE  = "https://api.twelvedata.com"
 TD_PAUSE = float(os.getenv("TD_PAUSE", "0.3"))
 
 ASSETS = {
     "SOL":      {"symbol": "SOL/USD",  "exchange": "Binance"},
-    "NSDQ100":  {"symbol": "QQQ",      "exchange": None},       
-    "GOLD_CFD": {"symbol": "XAU/USD",  "exchange": None},       
+    "NSDQ100":  {"symbol": "QQQ",      "exchange": None},
+    "GOLD_CFD": {"symbol": "XAU/USD",  "exchange": None},
 
-    "BNB":      {"symbol": os.getenv("BNB_SYMBOL", "BNB/USD"),
-                 "exchange": os.getenv("BNB_EXCHANGE", "Binance")},
+    # ÚJAK
+    "BNB":      {"symbol": "BNB/USD",  "exchange": "Binance"},
 
-    "GER40":    {"symbol": os.getenv("GER40_SYMBOL", "DE40/EUR"),
-                 "exchange": os.getenv("GER40_EXCHANGE", None)},
+    # GER40 – több lehetséges ticker, próbáljuk sorban
+    "GER40": {
+        "symbol": "DE40/EUR",      # első próbálkozás
+        "exchange": None,
+        "alt": ["DAX", "GER40"]    # fallback jelölések
+    },
 }
 
 # ---------- segédek ----------
@@ -65,35 +69,33 @@ def td_get(path: str, **params) -> Dict[str, Any]:
     )
     r.raise_for_status()
     data = r.json()
-    # TD hibaformátum: {"status":"error","message":...}
     if isinstance(data, dict) and data.get("status") == "error":
+        # a hívó oldalon hibatűrően kezeljük
         raise RuntimeError(data.get("message", "TD error"))
     return data
 
 def _iso_from_td_ts(ts: Any) -> Optional[str]:
-    """Twelve Data időbélyeg ISO-UTC-re. Kezeli a 'YYYY-MM-DD HH:MM:SS' és unix epoch (sec) formátumot is."""
+    """TD időbélyeg ISO-UTC-re (kezeli a 'YYYY-MM-DD HH:MM:SS' és epoch sec formátumot)."""
     if ts is None:
         return None
-    # unix epoch (int / str int)
     try:
         if isinstance(ts, (int, float)) or (isinstance(ts, str) and ts.isdigit()):
             dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
             return dt.isoformat()
     except Exception:
         pass
-    # 'YYYY-MM-DD HH:MM:SS'
     if isinstance(ts, str):
         try:
             dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
             return dt.isoformat()
         except Exception:
-            # ha már ISO, visszaadjuk
             if "T" in ts:
                 return ts
     return None
 
 def td_time_series(symbol: str, interval: str, outputsize: int = 500,
                    exchange: Optional[str] = None, order: str = "desc") -> Dict[str, Any]:
+    """Hibatűrő time_series (hiba esetén ok:false + üres values)."""
     params = {
         "symbol": symbol,
         "interval": interval,
@@ -104,16 +106,29 @@ def td_time_series(symbol: str, interval: str, outputsize: int = 500,
     }
     if exchange:
         params["exchange"] = exchange
-    j = td_get("time_series", **params)
-    ok = bool(j.get("values"))
-    return {
-        "asset": symbol,
-        "interval": interval,
-        "source": "twelvedata:time_series",
-        "ok": ok,
-        "retrieved_at_utc": now_utc(),
-        "raw": j if ok else {"values": []},
-    }
+    try:
+        j = td_get("time_series", **params)
+        ok = bool(j.get("values"))
+        return {
+            "used_symbol": symbol,
+            "asset": symbol,
+            "interval": interval,
+            "source": "twelvedata:time_series",
+            "ok": ok,
+            "retrieved_at_utc": now_utc(),
+            "raw": j if ok else {"values": []},
+        }
+    except Exception as e:
+        return {
+            "used_symbol": symbol,
+            "asset": symbol,
+            "interval": interval,
+            "source": "twelvedata:time_series",
+            "ok": False,
+            "retrieved_at_utc": now_utc(),
+            "error": str(e),
+            "raw": {"values": []},
+        }
 
 def td_quote(symbol: str) -> Dict[str, Any]:
     j = td_get("quote", symbol=symbol)
@@ -154,17 +169,14 @@ def td_last_close(symbol: str, interval: str = "5min", exchange: Optional[str] =
     return px, ts_iso
 
 def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Spot ár: először quote, ha nincs ár → time_series utolsó 5min close.
-    Mindig ad 'price', 'price_usd', 'utc' és 'retrieved_at_utc' mezőt.
-    """
+    """Spot ár: quote → ha nincs, 5m utolsó close (time_series) fallback."""
     try:
         q = td_quote(symbol)
     except Exception as e:
         q = {"ok": False, "error": str(e)}
 
     price = q.get("price") if isinstance(q, dict) else None
-    utc = q.get("utc") if isinstance(q, dict) else None
+    utc   = q.get("utc") if isinstance(q, dict) else None
 
     if price is None:
         try:
@@ -172,8 +184,7 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
         except Exception as e:
             px, ts = None, None
             q["error_fallback"] = str(e)
-        price = px
-        utc = ts
+        price, utc = px, ts
 
     return {
         "asset": symbol,
@@ -184,6 +195,22 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
         "price_usd": price,
         "utc": utc or now_utc(),
     }
+
+# ---------- több-szimbólumos fallback ----------
+
+def try_symbols(symbols: List[str], fetch_fn):
+    """Próbálkozik több tickerrel sorban; az első ok:true visszatér. Máskülönben az utolsó eredményt adja."""
+    last = None
+    for s in symbols:
+        try:
+            r = fetch_fn(s)
+            last = r
+            if isinstance(r, dict) and r.get("ok"):
+                return r
+        except Exception as e:
+            last = {"ok": False, "error": str(e)}
+        time.sleep(TD_PAUSE * 0.5)
+    return last or {"ok": False}
 
 # ---------- jelzés: 5m EMA9–EMA21 (5 bar) ----------
 
@@ -239,33 +266,32 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     adir = os.path.join(OUT_DIR, asset)
     ensure_dir(adir)
 
-    symbol = cfg["symbol"]
+    symbols = [cfg["symbol"]] + list(cfg.get("alt", []))
     exch = cfg.get("exchange")
 
-    # 1) Spot: quote → time_series(5min) fallback
-    try:
-        spot = td_spot_with_fallback(symbol, exch)
-    except Exception as e:
-        spot = {
-            "asset": asset,
-            "source": "twelvedata",
-            "ok": False,
-            "retrieved_at_utc": now_utc(),
-            "error": str(e),
-            "price": None,
-            "price_usd": None,
-            "utc": now_utc(),
-        }
+    # 1) Spot (quote → 5m close fallback), több tickerrel
+    spot = try_symbols(symbols, lambda s: td_spot_with_fallback(s, exch))
     save_json(os.path.join(adir, "spot.json"), spot)
     time.sleep(TD_PAUSE)
 
-    # 2) OHLC (5m / 1h / 4h) – RAW mentés (csak a TD válasz)
-    k5  = td_time_series(symbol, "5min", 500, exch, "desc");  save_json(os.path.join(adir, "klines_5m.json"), k5["raw"]);  time.sleep(TD_PAUSE)
-    k1  = td_time_series(symbol, "1h",   500, exch, "desc");  save_json(os.path.join(adir, "klines_1h.json"),  k1["raw"]); time.sleep(TD_PAUSE)
-    k4  = td_time_series(symbol, "4h",   500, exch, "desc");  save_json(os.path.join(adir, "klines_4h.json"),  k4["raw"]); time.sleep(TD_PAUSE)
+    # 2) OHLC (5m / 1h / 4h) – az első sikeres tickerrel
+    def ts(s: str, iv: str):
+        return td_time_series(s, iv, 500, exch, "desc")
 
-    # 3) 5m előzetes jelzés (az analysis.py később felülírhatja a végleges stratégia szerint)
-    sig = signal_from_5m(k5)
+    k5 = try_symbols(symbols, lambda s: ts(s, "5min"))
+    save_json(os.path.join(adir, "klines_5m.json"), k5.get("raw", {"values": []}))
+    time.sleep(TD_PAUSE)
+
+    k1 = try_symbols(symbols, lambda s: ts(s, "1h"))
+    save_json(os.path.join(adir, "klines_1h.json"), k1.get("raw", {"values": []}))
+    time.sleep(TD_PAUSE)
+
+    k4 = try_symbols(symbols, lambda s: ts(s, "4h"))
+    save_json(os.path.join(adir, "klines_4h.json"), k4.get("raw", {"values": []}))
+    time.sleep(TD_PAUSE)
+
+    # 3) 5m előzetes jelzés (analysis.py később felülírhatja)
+    sig = signal_from_5m(k5 if isinstance(k5, dict) else {"ok": False})
     save_json(
         os.path.join(adir, "signal.json"),
         {
@@ -284,8 +310,21 @@ def main():
         raise SystemExit("TWELVEDATA_API_KEY hiányzik (GitHub Secret).")
     ensure_dir(OUT_DIR)
     for a, cfg in ASSETS.items():
-        process_asset(a, cfg)
+        try:
+            process_asset(a, cfg)
+        except Exception as e:
+            # Ne álljon meg a pipeline – írjunk minimális signal/spot-ot.
+            adir = os.path.join(OUT_DIR, a)
+            ensure_dir(adir)
+            now = now_utc()
+            save_json(os.path.join(adir, "spot.json"), {
+                "asset": a, "ok": False, "retrieved_at_utc": now, "price": None, "price_usd": None, "utc": now
+            })
+            save_json(os.path.join(adir, "signal.json"), {
+                "asset": a, "ok": False, "retrieved_at_utc": now,
+                "signal": "no entry", "probability": 0, "reasons": [f"fetch error: {e}"],
+                "spot": {"price": None, "utc": now}
+            })
 
 if __name__ == "__main__":
     main()
-
