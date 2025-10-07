@@ -25,6 +25,14 @@ MAX_RISK_PCT = 1.8
 FIB_TOL = 0.02        # (legacy) régi 79% tolerancia; most Fib-zónát használunk
 ATR_LOW_TH = 0.0008   # túl alacsony rel. vol → no-trade
 
+# --- Kereskedési/egz. küszöbök a kivitelezhetőséghez (úJ) ---
+MIN_R            = 2.0   # kötelező minimális RR
+TP1_R            = 2.0   # TP1 = 2R
+TP2_R            = 3.0   # TP2 = 3R
+MIN_TP_PCT       = 0.006 # TP1 min. távolság: 0.6% az árhoz képest
+MIN_TP_ABS       = 0.80  # és/vagy fix $0.8 (SOL-ra hasznos)
+COST_ROUND_PCT   = 0.003 # várható round-trip költség (jutalék+slippage) ~0.3%
+
 # -------------------------- segédek -----------------------------------
 
 def nowiso() -> str:
@@ -258,36 +266,55 @@ def analyze(asset: str) -> Dict[str, Any]:
     can_enter = (P >= 60) and all(conds.values())
     missing = [k for k, v in conds.items() if not v]
 
-    # 8) Döntés + szintek
+    # 8) Döntés + szintek (szigorított RR és min. TP)
     decision = "no entry"
     entry = sl = tp1 = tp2 = rr = None
     lev = LEVERAGE.get(asset, 2.0)
 
     if can_enter:
         decision = "buy" if trend_bias=="long" else "sell"
-        # SL: utolsó 5M swing +/- 0.2 ATR puffer
+
+        # Vol alapú minimum kockázat + puffer
+        atr5_val  = float(atr5 or 0.0)
+        atr1h_val = float(atr1h or 0.0)
+
+        risk_min = max(0.6 * atr5_val, 0.0035 * spot_price, 0.50)   # >= 0.35% vagy $0.5 vagy 0.6×ATR(5m)
+        buf      = max(0.3 * atr5_val, 0.1 * atr1h_val)             # struktúra puffer
+
         k5_sw = find_swings(k5m, lb=2)
         hi5, lo5 = last_swing_levels(k5_sw)
-        atrbuf = float(atr5 or 0.0) * 0.2
+
+        entry = spot_price
         if decision == "buy":
-            entry = spot_price
-            sl = (lo5 if lo5 is not None else (spot_price - atr5)) - atrbuf
+            sl = (lo5 if lo5 is not None else (entry - atr5_val)) - buf
+            if (entry - sl) < risk_min:
+                sl = entry - risk_min
             risk = max(1e-6, entry - sl)
-            tp1 = entry + 1.0 * risk
-            tp2 = entry + 2.5 * risk
-            rr = (tp2 - entry) / risk
+            tp1 = entry + TP1_R * risk
+            tp2 = entry + TP2_R * risk
+            rr  = (tp2 - entry) / risk
+            tp1_dist = tp1 - entry
         else:
-            entry = spot_price
-            sl = (hi5 if hi5 is not None else (spot_price + atr5)) + atrbuf
+            sl = (hi5 if hi5 is not None else (entry + atr5_val)) + buf
+            if (sl - entry) < risk_min:
+                sl = entry + risk_min
             risk = max(1e-6, sl - entry)
-            tp1 = entry - 1.0 * risk
-            tp2 = entry - 2.5 * risk
-            rr = (entry - tp2) / risk
+            tp1 = entry - TP1_R * risk
+            tp2 = entry - TP2_R * risk
+            rr  = (entry - tp2) / risk
+            tp1_dist = entry - tp1
+
+        # Min. elvárt profit (TP1 távolság) – költségpufferrel
+        min_profit_abs = max(MIN_TP_ABS, MIN_TP_PCT * entry, 3 * COST_ROUND_PCT * entry)
 
         ok_math = ((decision=="buy"  and (sl < entry < tp1 <= tp2)) or
                    (decision=="sell" and (tp2 <= tp1 < entry < sl)))
-        if (not ok_math) or (rr is None) or (rr < 1.5):
-            missing.append("rr_math")
+
+        if (not ok_math) or (rr is None) or (rr < MIN_R) or (tp1_dist < min_profit_abs):
+            if rr is None or rr < MIN_R:
+                missing.append(f"rr_math>={MIN_R}")
+            if tp1_dist < min_profit_abs:
+                missing.append("tp_min_profit")
             decision = "no entry"
             entry = sl = tp1 = tp2 = rr = None
 
@@ -303,7 +330,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": (round(rr,2) if rr else None),
         "leverage": lev,
         "gates": {
-            "required": ["bias", "bos5m", "liquidity(fib_zone|sweep)", "atr", "rr_math>=1.5"],
+            "required": ["bias", "bos5m", "liquidity(fib_zone|sweep)", "atr", f"rr_math>={MIN_R}", "tp_min_profit"],
             "missing": missing,
         },
         "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else [])) or ["no signal"],
