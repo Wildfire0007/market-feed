@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*- 
 """
 analysis.py — TD-only intraday jelzésképző (lokális JSON-okból).
 Forrás: Trading.py által generált fájlok a public/<ASSET>/ alatt.
@@ -25,7 +25,7 @@ MAX_RISK_PCT = 1.8
 FIB_TOL = 0.02        # (legacy) régi 79% tolerancia; most Fib-zónát használunk
 ATR_LOW_TH = 0.0008   # túl alacsony rel. vol → no-trade
 
-# --- Kereskedési/egz. küszöbök a kivitelezhetőséghez (úJ) ---
+# --- Kereskedési/egz. küszöbök a kivitelezhetőséghez ---
 MIN_R            = 2.0   # kötelező minimális RR
 TP1_R            = 2.0   # TP1 = 2R
 TP2_R            = 3.0   # TP2 = 3R
@@ -218,7 +218,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         save_json(os.path.join(outdir, "signal.json"), msg)
         return msg
 
-    spot_price = float(spot_price)
+    # --- FONTOS: különválasztjuk a kijelzett SPOT-ot és a számításhoz használt árat ---
+    display_spot  = float(spot_price)           # ezt írjuk a signalba kijelzésre
+    last5_close   = float(k5m["close"].iloc[-1])# legutóbb LEZÁRT 5m close (stabil)
+    price_for_calc = last5_close                # minden kapu/SL/TP/RR ehhez viszonyít
 
     # 2) Bias 4H→1H
     bias4h = bias_from_emas(k4h)
@@ -232,16 +235,16 @@ def analyze(asset: str) -> Dict[str, Any]:
     # 4) 5M BOS a trend irányába (csak ha nem neutral)
     bos5m = detect_bos(k5m, "long" if trend_bias=="long" else ("short" if trend_bias=="short" else "neutral"))
 
-    # 5) ATR szűrő (relatív)
+    # 5) ATR szűrő (relatív) — a stabil árhoz viszonyítjuk
     atr5 = atr(k5m).iloc[-1]
-    rel_atr = float(atr5 / spot_price) if (atr5 and spot_price) else float("nan")
+    rel_atr = float(atr5 / price_for_calc) if (atr5 and price_for_calc) else float("nan")
     atr_ok = not (np.isnan(rel_atr) or rel_atr < ATR_LOW_TH)
 
-    # 6) Fib zóna (0.618–0.886) 1H swingekre, ATR(1h) alapú tűréssel
+    # 6) Fib zóna (0.618–0.886) 1H swingekre, ATR(1h) alapú tűréssel — stabil árral
     k1h_sw = find_swings(k1h, lb=2)
     move_hi, move_lo = last_swing_levels(k1h_sw)
     atr1h = float(atr(k1h).iloc[-1]) if not k1h.empty else 0.0
-    fib_ok = fib_zone_ok(move_hi, move_lo, spot_price,
+    fib_ok = fib_zone_ok(move_hi, move_lo, price_for_calc,
                          low=0.618, high=0.886,
                          tol_abs=atr1h * 0.5,   # ±0.5×ATR(1h)
                          tol_frac=0.02)         # vagy ±2% a range-ből
@@ -266,7 +269,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     can_enter = (P >= 60) and all(conds.values())
     missing = [k for k, v in conds.items() if not v]
 
-    # 8) Döntés + szintek (szigorított RR és min. TP)
+    # 8) Döntés + szintek (szigorított RR és min. TP) — stabil ár alapján
     decision = "no entry"
     entry = sl = tp1 = tp2 = rr = None
     lev = LEVERAGE.get(asset, 2.0)
@@ -278,13 +281,13 @@ def analyze(asset: str) -> Dict[str, Any]:
         atr5_val  = float(atr5 or 0.0)
         atr1h_val = float(atr1h or 0.0)
 
-        risk_min = max(0.6 * atr5_val, 0.0035 * spot_price, 0.50)   # >= 0.35% vagy $0.5 vagy 0.6×ATR(5m)
-        buf      = max(0.3 * atr5_val, 0.1 * atr1h_val)             # struktúra puffer
+        risk_min = max(0.6 * atr5_val, 0.0035 * price_for_calc, 0.50)   # >= 0.35% vagy $0.5 vagy 0.6×ATR(5m)
+        buf      = max(0.3 * atr5_val, 0.1 * atr1h_val)                 # struktúra puffer
 
         k5_sw = find_swings(k5m, lb=2)
         hi5, lo5 = last_swing_levels(k5_sw)
 
-        entry = spot_price
+        entry = price_for_calc
         if decision == "buy":
             sl = (lo5 if lo5 is not None else (entry - atr5_val)) - buf
             if (entry - sl) < risk_min:
@@ -324,7 +327,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "ok": True,
         "retrieved_at_utc": nowiso(),
         "source": "Twelve Data (lokális JSON)",
-        "spot": {"price": spot_price, "utc": spot_utc},
+        "spot": {"price": display_spot, "utc": spot_utc},  # kijelzésre a friss SPOT marad
         "signal": decision,
         "probability": int(P),
         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": (round(rr,2) if rr else None),
