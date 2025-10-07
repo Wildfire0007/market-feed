@@ -1,10 +1,10 @@
 # Intraday riport (Twelve Data-only)
 
-Generálva (UTC): `2025-10-07T07:29:44Z`
+Generálva (UTC): `2025-10-07T07:37:18Z`
 
 ### SOL
 
-Spot (USD): **230.8900** • UTC: `2025-10-07T07:25:00+00:00`
+Spot (USD): **230.7600** • UTC: `2025-10-07T07:30:00+00:00`
 Valószínűség: **P = 65%**
 Forrás: Twelve Data (lokális JSON)
 
@@ -20,11 +20,11 @@ Forrás: Twelve Data (lokális JSON)
 
 ### GOLD_CFD
 
-Spot (USD): **3960.1800** • UTC: `2025-10-07T07:25:00+00:00`
-Valószínűség: **P = 40%**
+Spot (USD): **3967.0300** • UTC: `2025-10-07T07:35:00+00:00`
+Valószínűség: **P = 55%**
 Forrás: Twelve Data (lokális JSON)
 
-**Állapot:** no entry — Bias(4H→1H)=long
+**Állapot:** no entry — Bias(4H→1H)=long; 5M BOS trendirányba
 
 #### Elemzés & döntés checklist
 - 4H→1H trend bias
