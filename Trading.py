@@ -29,10 +29,15 @@ TD_BASE = "https://api.twelvedata.com"
 TD_PAUSE = float(os.getenv("TD_PAUSE", "0.3"))
 
 ASSETS = {
-    # exchange nem kötelező; SOL-nál tipikusan van Binance feed is
     "SOL":      {"symbol": "SOL/USD",  "exchange": "Binance"},
-    "NSDQ100":  {"symbol": "QQQ",      "exchange": None},       # ETF proxy
-    "GOLD_CFD": {"symbol": "XAU/USD",  "exchange": None},       # XAU/USD proxy
+    "NSDQ100":  {"symbol": "QQQ",      "exchange": None},       
+    "GOLD_CFD": {"symbol": "XAU/USD",  "exchange": None},       
+
+    "BNB":      {"symbol": os.getenv("BNB_SYMBOL", "BNB/USD"),
+                 "exchange": os.getenv("BNB_EXCHANGE", "Binance")},
+
+    "GER40":    {"symbol": os.getenv("GER40_SYMBOL", "DE40/EUR"),
+                 "exchange": os.getenv("GER40_EXCHANGE", None)},
 }
 
 # ---------- segédek ----------
@@ -283,3 +288,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
