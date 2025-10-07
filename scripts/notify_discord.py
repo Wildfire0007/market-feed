@@ -4,7 +4,7 @@ import os, json, requests
 from datetime import datetime, timezone
 
 PUBLIC_DIR = "public"
-ASSETS = ["SOL", "NSDQ100", "GOLD_CFD"]
+ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "GER40"]
 
 # ---- Debounce/stabilitás beállítások ----
 STATE_PATH = f"{PUBLIC_DIR}/_notify_state.json"
