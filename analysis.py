@@ -22,21 +22,26 @@ PUBLIC_DIR = "public"
 
 LEVERAGE = {"SOL": 3.0, "NSDQ100": 3.0, "GOLD_CFD": 2.0, "BNB": 3.0, "GER40": 2.0}
 MAX_RISK_PCT = 1.8
-FIB_TOL = 0.02        # (legacy) régi 79% tolerancia; most Fib-zónát használunk
-ATR_LOW_TH = 0.0008   # túl alacsony rel. vol → no-trade
+FIB_TOL = 0.02
+ATR_LOW_TH = 0.0008   # 0.08%
 
-# --- Kereskedési/egz. küszöbök a kivitelezhetőséghez ---
-MIN_R            = 2.0   # kötelező minimális RR
-TP1_R            = 2.0   # TP1 = 2R
-TP2_R            = 3.0   # TP2 = 3R
-MIN_TP_PCT       = 0.006 # TP1 min. távolság: 0.6% az árhoz képest
-MIN_TP_ABS       = 0.80  # és/vagy fix $0.8 (SOL-ra hasznos)
-COST_ROUND_PCT   = 0.003 # várható round-trip költség (jutalék+slippage) ~0.3%
+# --- Kereskedési/egz. küszöbök ---
+MIN_R            = 2.0
+TP1_R            = 2.0
+TP2_R            = 3.0
+MIN_TP_PCT       = 0.006
+MIN_TP_ABS       = 0.80
+COST_ROUND_PCT   = 0.003
+
+# --- Momentum override csak kriptókra (SOL, BNB) ---
+ENABLE_MOMENTUM_ASSETS = {"SOL", "BNB"}
+MOMENTUM_BARS    = 8             # 5m EMA9–EMA21 legalább 8 bar
+MOMENTUM_ATR_REL = 0.0012        # >= 0.12%
+MOMENTUM_BOS_LB  = 15            # szerkezeti töréshez nézett ablak (bar)
 
 # -------------------------- segédek -----------------------------------
 
 def nowiso() -> str:
-    # ISO-8601 Z-suffix (UTC)
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def save_json(path: str, obj: Any) -> None:
@@ -52,25 +57,16 @@ def load_json(path: str) -> Optional[Any]:
         return None
 
 def as_df_klines(raw: Any) -> pd.DataFrame:
-    """
-    Twelve Data time_series formátum beolvasása:
-    - preferált: values[ {datetime, open, high, low, close, volume?} ]
-    - kompat.:   values[ {t, o, h, l, c, v?} ]
-    A kimenet indexe UTC datetime, oszlopok: open, high, low, close (float).
-    """
     if not raw:
         return pd.DataFrame(columns=["open","high","low","close"])
-
     arr = raw if isinstance(raw, list) else (raw.get("values") or [])
     rows: List[Dict[str, Any]] = []
     for x in arr:
         try:
-            # TD standard kulcsok
             if "datetime" in x:
                 dt = pd.to_datetime(x["datetime"], utc=True)
                 o = float(x["open"]); h = float(x["high"]); l = float(x["low"]); c = float(x["close"])
                 v = float(x.get("volume", 0.0) or 0.0)
-            # rövid kulcsok (kompatibilitás)
             elif "t" in x:
                 dt = pd.to_datetime(x["t"], utc=True)
                 o = float(x["o"]); h = float(x["h"]); l = float(x["l"]); c = float(x["c"])
@@ -80,10 +76,8 @@ def as_df_klines(raw: Any) -> pd.DataFrame:
             rows.append({"time": dt, "open": o, "high": h, "low": l, "close": c, "volume": v})
         except Exception:
             continue
-
     if not rows:
         return pd.DataFrame(columns=["open","high","low","close"])
-
     df = pd.DataFrame(rows).sort_values("time").set_index("time")
     return df[["open","high","low","close"]]
 
@@ -136,7 +130,7 @@ def detect_sweep(df: pd.DataFrame, lookback: int = 24) -> Dict[str, bool]:
     return out
 
 def detect_bos(df: pd.DataFrame, direction: str) -> bool:
-    if direction not in ("long", "short"):  # neutral → nincs BOS vizsgálat
+    if direction not in ("long", "short"):
         return False
     sw = find_swings(df, lb=2)
     hi, lo = last_swing_levels(sw.iloc[:-1])
@@ -146,26 +140,30 @@ def detect_bos(df: pd.DataFrame, direction: str) -> bool:
         return sw["low"].iloc[-1] < lo
     return False
 
+def broke_structure(df: pd.DataFrame, direction: str, lookback: int = MOMENTUM_BOS_LB) -> bool:
+    """Egyszerű szerkezeti törés: utolsó high/low áttöri az előző N bar csúcsát/alját."""
+    if df.empty or len(df) < lookback + 2: 
+        return False
+    ref = df.iloc[-(lookback+1):-1]
+    last = df.iloc[-1]
+    if direction == "long":
+        return last["high"] > ref["high"].max()
+    if direction == "short":
+        return last["low"] < ref["low"].min()
+    return False
+
 def fib_zone_ok(move_hi, move_lo, price_now,
                 low=0.618, high=0.886,
                 tol_abs=0.0, tol_frac=0.02) -> bool:
-    """
-    Deep pullback zóna ellenőrzés:
-      long:  price ∈ [lo+low*L,  lo+high*L]
-      short: price ∈ [hi-high*L, hi-low*L]
-    ahol L = (hi - lo). Tűrés: ±max(tol_abs, tol_frac*L)
-    """
     if move_hi is None or move_lo is None or move_hi == move_lo:
         return False
     length = move_hi - move_lo
     if length == 0:
         return False
-
     z1_long  = move_lo + low  * length
     z2_long  = move_lo + high * length
     z1_short = move_hi - high * length
     z2_short = move_hi - low  * length
-
     tol = max(float(tol_abs), abs(length) * float(tol_frac))
     in_long  = min(z1_long,  z2_long ) - tol <= price_now <= max(z1_long,  z2_long ) + tol
     in_short = min(z1_short, z2_short) - tol <= price_now <= max(z1_short, z2_short) + tol
@@ -197,9 +195,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     spot_price = None
     spot_utc = "-"
     if spot:
-        spot_price = spot.get("price")
-        if spot_price is None:
-            spot_price = spot.get("price_usd")
+        spot_price = spot.get("price") if spot.get("price") is not None else spot.get("price_usd")
         spot_utc = spot.get("utc") or spot.get("timestamp") or "-"
 
     if (spot_price is None) or k5m.empty or k1h.empty or k4h.empty:
@@ -218,10 +214,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         save_json(os.path.join(outdir, "signal.json"), msg)
         return msg
 
-    # --- FONTOS: különválasztjuk a kijelzett SPOT-ot és a számításhoz használt árat ---
-    display_spot  = float(spot_price)           # ezt írjuk a signalba kijelzésre
-    last5_close   = float(k5m["close"].iloc[-1])# legutóbb LEZÁRT 5m close (stabil)
-    price_for_calc = last5_close                # minden kapu/SL/TP/RR ehhez viszonyít
+    # --- Kijelzett vs. számításhoz használt ár ---
+    display_spot   = float(spot_price)
+    last5_close    = float(k5m["close"].iloc[-1])   # stabil, lezárt 5m
+    price_for_calc = last5_close
 
     # 2) Bias 4H→1H
     bias4h = bias_from_emas(k4h)
@@ -232,7 +228,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     sw1h = detect_sweep(k1h, 24); sw4h = detect_sweep(k4h, 24)
     swept = sw1h["sweep_high"] or sw1h["sweep_low"] or sw4h["sweep_high"] or sw4h["sweep_low"]
 
-    # 4) 5M BOS a trend irányába (csak ha nem neutral)
+    # 4) 5M BOS a trend irányába (core mód)
     bos5m = detect_bos(k5m, "long" if trend_bias=="long" else ("short" if trend_bias=="short" else "neutral"))
 
     # 5) ATR szűrő (relatív) — a stabil árhoz viszonyítjuk
@@ -244,10 +240,12 @@ def analyze(asset: str) -> Dict[str, Any]:
     k1h_sw = find_swings(k1h, lb=2)
     move_hi, move_lo = last_swing_levels(k1h_sw)
     atr1h = float(atr(k1h).iloc[-1]) if not k1h.empty else 0.0
-    fib_ok = fib_zone_ok(move_hi, move_lo, price_for_calc,
-                         low=0.618, high=0.886,
-                         tol_abs=atr1h * 0.5,   # ±0.5×ATR(1h)
-                         tol_frac=0.02)         # vagy ±2% a range-ből
+    fib_ok = fib_zone_ok(
+        move_hi, move_lo, price_for_calc,
+        low=0.618, high=0.886,
+        tol_abs=atr1h * 0.75,   # SZÉLESÍTVE: ±0.75×ATR(1h)
+        tol_frac=0.02
+    )
 
     # 7) P-score (egyszerű súlyozás)
     P, reasons = 20, []
@@ -258,68 +256,106 @@ def analyze(asset: str) -> Dict[str, Any]:
     if atr_ok:                  P += 10; reasons.append("ATR rendben")
     P = max(0, min(100, P))
 
-    # --- Kapuk összegyűjtése (liquidity = Fib zóna VAGY sweep)
+    # --- Core kapuk (liquidity = Fib zóna VAGY sweep)
     liquidity_ok = bool(fib_ok or swept)
-    conds = {
+    conds_core = {
         "bias": trend_bias in ("long","short"),
         "bos5m": bool(bos5m),
-        "liquidity": liquidity_ok,   # (fib_zóna | sweep)
+        "liquidity": liquidity_ok,
         "atr": bool(atr_ok),
     }
-    can_enter = (P >= 60) and all(conds.values())
-    missing = [k for k, v in conds.items() if not v]
+    can_enter_core = (P >= 60) and all(conds_core.values())
+    missing_core = [k for k, v in conds_core.items() if not v]
 
-    # 8) Döntés + szintek (szigorított RR és min. TP) — stabil ár alapján
+    # --- Momentum feltételek (override) — kriptókra
+    momentum_used = False
+    mom_dir: Optional[str] = None
+    mom_required = ["momentum(ema9x21)", "bos5m|struct_break", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
+    missing_mom: List[str] = []
+
+    if asset in ENABLE_MOMENTUM_ASSETS:
+        e9_5 = ema(k5m["close"], 9)
+        e21_5 = ema(k5m["close"], 21)
+        bear = (e9_5 < e21_5).tail(MOMENTUM_BARS).all()
+        bull = (e9_5 > e21_5).tail(MOMENTUM_BARS).all()
+        bos_struct_short = broke_structure(k5m, "short", MOMENTUM_BOS_LB)
+        bos_struct_long  = broke_structure(k5m, "long",  MOMENTUM_BOS_LB)
+        bos_any_short = bool(bos5m or bos_struct_short)
+        bos_any_long  = bool(bos5m or bos_struct_long)
+        mom_atr_ok = not np.isnan(rel_atr) and (rel_atr >= MOMENTUM_ATR_REL)
+
+        if bear and bos_any_short and mom_atr_ok:
+            mom_dir = "sell"
+        elif bull and bos_any_long and mom_atr_ok:
+            mom_dir = "buy"
+
+        if mom_dir is None:
+            if not (bear or bull): missing_mom.append("momentum(ema9x21)")
+            if not (bos_any_short if bear else bos_any_long): missing_mom.append("bos5m|struct_break")
+            if not mom_atr_ok: missing_mom.append("atr")
+
+    # 8) Döntés + szintek (RR/TP matek) — core vagy momentum
     decision = "no entry"
     entry = sl = tp1 = tp2 = rr = None
     lev = LEVERAGE.get(asset, 2.0)
+    mode = "core"
+    missing = list(missing_core)
 
-    if can_enter:
-        decision = "buy" if trend_bias=="long" else "sell"
-
-        # Vol alapú minimum kockázat + puffer
+    def compute_levels(decision_side: str):
+        nonlocal entry, sl, tp1, tp2, rr, missing
         atr5_val  = float(atr5 or 0.0)
         atr1h_val = float(atr1h or 0.0)
-
-        risk_min = max(0.6 * atr5_val, 0.0035 * price_for_calc, 0.50)   # >= 0.35% vagy $0.5 vagy 0.6×ATR(5m)
-        buf      = max(0.3 * atr5_val, 0.1 * atr1h_val)                 # struktúra puffer
-
+        risk_min = max(0.6 * atr5_val, 0.0035 * price_for_calc, 0.50)
+        buf      = max(0.3 * atr5_val, 0.1 * atr1h_val)
         k5_sw = find_swings(k5m, lb=2)
         hi5, lo5 = last_swing_levels(k5_sw)
-
         entry = price_for_calc
-        if decision == "buy":
+        if decision_side == "buy":
             sl = (lo5 if lo5 is not None else (entry - atr5_val)) - buf
-            if (entry - sl) < risk_min:
-                sl = entry - risk_min
+            if (entry - sl) < risk_min: sl = entry - risk_min
             risk = max(1e-6, entry - sl)
             tp1 = entry + TP1_R * risk
             tp2 = entry + TP2_R * risk
             rr  = (tp2 - entry) / risk
             tp1_dist = tp1 - entry
+            ok_math = (sl < entry < tp1 <= tp2)
         else:
             sl = (hi5 if hi5 is not None else (entry + atr5_val)) + buf
-            if (sl - entry) < risk_min:
-                sl = entry + risk_min
+            if (sl - entry) < risk_min: sl = entry + risk_min
             risk = max(1e-6, sl - entry)
             tp1 = entry - TP1_R * risk
             tp2 = entry - TP2_R * risk
             rr  = (entry - tp2) / risk
             tp1_dist = entry - tp1
-
-        # Min. elvárt profit (TP1 távolság) – költségpufferrel
+            ok_math = (tp2 <= tp1 < entry < sl)
         min_profit_abs = max(MIN_TP_ABS, MIN_TP_PCT * entry, 3 * COST_ROUND_PCT * entry)
-
-        ok_math = ((decision=="buy"  and (sl < entry < tp1 <= tp2)) or
-                   (decision=="sell" and (tp2 <= tp1 < entry < sl)))
-
         if (not ok_math) or (rr is None) or (rr < MIN_R) or (tp1_dist < min_profit_abs):
-            if rr is None or rr < MIN_R:
-                missing.append(f"rr_math>={MIN_R}")
-            if tp1_dist < min_profit_abs:
-                missing.append("tp_min_profit")
+            if rr is None or rr < MIN_R: missing.append(f"rr_math>={MIN_R}")
+            if tp1_dist < min_profit_abs: missing.append("tp_min_profit")
+            return False
+        return True
+
+    if can_enter_core:
+        decision = "buy" if trend_bias=="long" else "sell"
+        mode = "core"
+        if not compute_levels(decision):
             decision = "no entry"
-            entry = sl = tp1 = tp2 = rr = None
+    else:
+        if mom_dir is not None:
+            # momentum kapuk teljesültek, próbáljuk a matekot
+            mode = "momentum"
+            missing = []
+            momentum_used = True
+            decision = mom_dir
+            if not compute_levels(decision):
+                decision = "no entry"
+            else:
+                reasons.append("Momentum override (5m EMA + ATR + BOS)")
+                P = max(P, 75)  # minimum 75% momentum esetben
+        elif asset in ENABLE_MOMENTUM_ASSETS and missing_mom:
+            # információs célból mutassuk, mi hiányzik momentum módhoz
+            mode = "momentum"
+            missing = list(dict.fromkeys(missing_mom))  # uniq
 
     # 9) Mentés: signal.json
     decision_obj = {
@@ -327,13 +363,18 @@ def analyze(asset: str) -> Dict[str, Any]:
         "ok": True,
         "retrieved_at_utc": nowiso(),
         "source": "Twelve Data (lokális JSON)",
-        "spot": {"price": display_spot, "utc": spot_utc},  # kijelzésre a friss SPOT marad
+        "spot": {"price": display_spot, "utc": spot_utc},
         "signal": decision,
         "probability": int(P),
         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": (round(rr,2) if rr else None),
         "leverage": lev,
         "gates": {
-            "required": ["bias", "bos5m", "liquidity(fib_zone|sweep)", "atr", f"rr_math>={MIN_R}", "tp_min_profit"],
+            "mode": mode,
+            "required": (
+                ["bias", "bos5m", "liquidity(fib_zone|sweep)", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
+                if mode == "core" else
+                ["momentum(ema9x21)", "bos5m|struct_break", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
+            ),
             "missing": missing,
         },
         "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else [])) or ["no signal"],
@@ -353,7 +394,6 @@ def main():
             summary["assets"][asset] = {"asset": asset, "ok": False, "error": str(e)}
     save_json(os.path.join(PUBLIC_DIR, "analysis_summary.json"), summary)
 
-    # Egyszerű HTML kivonat
     html = "<!doctype html><meta charset='utf-8'><title>Analysis Summary</title>"
     html += "<h1>Analysis Summary (TD-only)</h1>"
     html += "<pre>" + json.dumps(summary, ensure_ascii=False, indent=2) + "</pre>"
@@ -362,4 +402,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
