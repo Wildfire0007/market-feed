@@ -13,10 +13,10 @@ COOLDOWN_MIN   = 0     # (ha kell, tegyél ide 10–15-öt)
 
 # ---- Megjelenés / emoji / színek ----
 EMOJI = {
-    "SOL": "🟧",
+    "SOL": "💵",
     "NSDQ100": "📈",
-    "GOLD_CFD": "🪙",
-    "BNB": "🟡",
+    "GOLD_CFD": "💰",
+    "BNB": "🪙",
     "GER40": "🇩🇪",
 }
 COLOR = {
