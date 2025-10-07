@@ -16,11 +16,11 @@ import pandas as pd
 import numpy as np
 
 # --- Elemzendő eszközök ---
-ASSETS = ["SOL", "NSDQ100", "GOLD_CFD"]
+ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "GER40"]
 
 PUBLIC_DIR = "public"
 
-LEVERAGE = {"SOL": 3.0, "NSDQ100": 3.0, "GOLD_CFD": 2.0}
+LEVERAGE = {"SOL": 3.0, "NSDQ100": 3.0, "GOLD_CFD": 2.0, "BNB": 3.0, "GER40": 2.0}
 MAX_RISK_PCT = 1.8
 FIB_TOL = 0.02        # (legacy) régi 79% tolerancia; most Fib-zónát használunk
 ATR_LOW_TH = 0.0008   # túl alacsony rel. vol → no-trade
@@ -362,3 +362,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
