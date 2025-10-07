@@ -6,10 +6,10 @@ from datetime import datetime, timezone
 PUBLIC_DIR = "public"
 ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "GER40"]
 
-# ---- Debounce/stabilitás ----
+# ---- Debounce / stabilitás / cooldown ----
 STATE_PATH = f"{PUBLIC_DIR}/_notify_state.json"
-STABILITY_RUNS = 2     # ennyi körben legyen BUY/SELL, hogy "aktívnak" számítson
-COOLDOWN_MIN   = 0     # (ha kell, tegyél ide 10–15-öt)
+STABILITY_RUNS = 2          # ennyi egymás utáni körben legyen BUY/SELL/NO ENTRY, hogy "stabil"
+COOLDOWN_MIN   = int(os.getenv("DISCORD_COOLDOWN_MIN", "10"))  # perc; 0 = kikapcsolva
 
 # ---- Megjelenés / emoji / színek ----
 EMOJI = {
@@ -20,14 +20,26 @@ EMOJI = {
     "GER40": "🇩🇪",
 }
 COLOR = {
-    "BUY":  0x2ecc71,  # zöld
-    "SELL": 0x2ecc71,  # zöld (ha külön akarod: 0x00b894)
-    "NO":   0xe74c3c,  # piros
-    "WAIT": 0xf1c40f,  # sárga (stabilizálás)
+    "BUY":   0x2ecc71,  # zöld
+    "SELL":  0x2ecc71,  # zöld (külön akarod? pl. 0x00b894)
+    "NO":    0xe74c3c,  # piros (no entry / invalid)
+    "WAIT":  0xf1c40f,  # sárga (stabilizálás)
+    "FLIP":  0x3498db,  # kék (ellenirányú flip)
 }
+
+# ---------------- util ----------------
 
 def utcnow_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def utcnow_epoch():
+    return int(datetime.now(timezone.utc).timestamp())
+
+def iso_to_epoch(s: str) -> int:
+    try:
+        return int(datetime.fromisoformat(s.replace("Z","+00:00")).timestamp())
+    except Exception:
+        return 0
 
 def load(path):
     try:
@@ -70,47 +82,66 @@ def missing_from_sig(sig: dict):
     if not miss:
         return ""
     pretty = {
-        "bos5m": "BOS (5m)",
-        "atr": "ATR",
+        "session": "Session",
+        "regime": "Regime",
         "bias": "Bias",
-        "liquidity": "liquidity",
-        "tp_min_profit": "tp_min_profit",
+        "bos5m": "BOS (5m)",
+        "liquidity": "Liquidity",
+        "liquidity(fib_zone|sweep)": "Liquidity",
+        "atr": "ATR",
+        "tp_min_profit": "TP min. profit",
         "RR≥1.5": "RR≥1.5",
         "rr_math>=2.0": "RR≥2.0",
+        # momentum
+        "momentum(ema9x21)": "Momentum (EMA9×21)",
+        "bos5m|struct_break": "BOS/Structure",
     }
     out = []
     for k in miss:
         key = "RR≥2.0" if k.startswith("rr_math") else k
         out.append(pretty.get(k, key))
-    return ", ".join(out)
+    # uniq + csinos
+    return ", ".join(dict.fromkeys(out).keys())
 
-def build_embed_for_asset(asset: str, sig: dict, is_stable: bool):
+def gates_mode(sig: dict) -> str:
+    return ((sig or {}).get("gates") or {}).get("mode") or "-"
+
+def decision_of(sig: dict) -> str:
+    d = (sig or {}).get("signal", "no entry")
+    d = (d or "").lower()
+    if d not in ("buy","sell"):
+        return "no entry"
+    return d
+
+# ------------- embed-renderek -------------
+
+def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "normal", prev_decision: str = None):
+    """
+    kind: "normal" | "invalidate" | "flip"
+    """
     emoji = EMOJI.get(asset, "📊")
     dec_raw = (sig.get("signal") or "no entry").upper()
-    dec = dec_raw
-    if dec not in ("BUY", "SELL"):
-        dec = "NO ENTRY"
+    dec = dec_raw if dec_raw in ("BUY","SELL") else "NO ENTRY"
 
     p   = int(sig.get("probability", 0) or 0)
     entry = sig.get("entry"); sl = sig.get("sl"); t1 = sig.get("tp1"); t2 = sig.get("tp2")
     rr = sig.get("rr")
+    mode = gates_mode(sig)
 
     price, utc = spot_from_sig_or_file(asset, sig)
     spot_s = fmt_num(price)
     utc_s  = utc or "-"
 
-    # státusz sor (színezett jelöléssel)
+    # status jelölés
     status_emoji = "🟢" if dec in ("BUY","SELL") else "🔴"
     status_bold  = f"{status_emoji} **{dec}**"
 
-    lines = [
-        f"{status_bold} • P={p}%",
-        f"Spot: `{spot_s}` • UTC: `{utc_s}`",
-    ]
+    lines = [f"{status_bold} • P={p}% • mód: `{mode}`",
+             f"Spot: `{spot_s}` • UTC: `{utc_s}`"]
 
     if dec in ("BUY", "SELL") and all(v is not None for v in (entry, sl, t1, t2, rr)):
         lines.append(f"@ `{fmt_num(entry)}` • SL `{fmt_num(sl)}` • TP1 `{fmt_num(t1)}` • TP2 `{fmt_num(t2)}` • RR≈`{rr}`")
-        if not is_stable:
+        if not is_stable and kind == "normal":
             lines.append("⏳ Állapot: *stabilizálás alatt*")
 
     if dec == "NO ENTRY":
@@ -118,13 +149,25 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool):
         if miss:
             lines.append(f"Hiányzó: *{miss}*")
 
-    color = COLOR["WAIT"] if (dec in ("BUY","SELL") and not is_stable) else (COLOR["BUY"] if dec in ("BUY","SELL") else COLOR["NO"])
+    # cím + szín kiválasztás
+    title = f"{emoji} **{asset}**"
+    if kind == "invalidate":
+        title += " • ❌ Invalidate"
+        color = COLOR["NO"]
+    elif kind == "flip":
+        arrow = "→"
+        title += f" • 🔁 Flip ({(prev_decision or '').upper()} {arrow} {dec})"
+        color = COLOR["FLIP"]
+    else:
+        color = COLOR["WAIT"] if (dec in ("BUY","SELL") and not is_stable) else (COLOR["BUY"] if dec in ("BUY","SELL") else COLOR["NO"])
 
     return {
-        "title": f"{emoji} **{asset}**",
+        "title": title,
         "description": "\n".join(lines),
         "color": color,
     }
+
+# ---------------- főlogika ----------------
 
 def main():
     hook = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
@@ -134,7 +177,9 @@ def main():
 
     state = load_state()
     embeds = []
-    actionable = False
+    actionable_any = False
+    now_iso = utcnow_iso()
+    now_ep  = utcnow_epoch()
 
     for asset in ASSETS:
         sig = load(f"{PUBLIC_DIR}/{asset}/signal.json")
@@ -144,34 +189,92 @@ def main():
         if not sig:
             sig = {"asset": asset, "signal": "no entry", "probability": 0}
 
-        # Stabilitás számláló
-        key = asset
-        prev = state.get(key, {"last": None, "count": 0, "last_sent": None})
+        # --- stabilitás számítása (buy/sell/no entry effektív) ---
+        eff = decision_of(sig)  # 'buy' | 'sell' | 'no entry'
 
-        curr = (sig.get("signal") or "no entry").lower()
-        curr_effective = curr if curr in ("buy", "sell") else "no entry"
+        # per-asset state init
+        st = state.get(asset, {
+            "last": None, "count": 0,
+            "last_sent": None,               # ISO
+            "last_sent_decision": None,      # 'buy'|'sell'|'no entry'
+            "last_sent_mode": None,          # 'core'|'momentum'|None
+            "cooldown_until": None,          # ISO
+        })
 
-        if curr_effective == prev.get("last"):
-            prev["count"] = int(prev.get("count", 0)) + 1
+        # stabil számláló
+        if eff == st.get("last"):
+            st["count"] = int(st.get("count", 0)) + 1
         else:
-            prev["last"] = curr_effective
-            prev["count"] = 1
+            st["last"]  = eff
+            st["count"] = 1
 
-        state[key] = prev
+        # flags
+        is_stable = st["count"] >= STABILITY_RUNS
+        is_actionable_now = (eff in ("buy","sell")) and is_stable
+        actionable_any = actionable_any or is_actionable_now
 
-        is_stable_actionable = (curr_effective in ("buy","sell") and prev["count"] >= STABILITY_RUNS)
-        if is_stable_actionable:
-            actionable = True
+        cooldown_until_iso = st.get("cooldown_until")
+        cooldown_active = False
+        if COOLDOWN_MIN > 0 and cooldown_until_iso:
+            cooldown_active = now_ep < iso_to_epoch(cooldown_until_iso)
 
-        embeds.append(build_embed_for_asset(asset, sig, is_stable_actionable))
+        prev_sent_decision = st.get("last_sent_decision")
+
+        # --- küldési döntés ---
+        send_kind = None  # None | "normal" | "invalidate" | "flip"
+
+        if is_actionable_now:
+            if prev_sent_decision in ("buy","sell"):
+                if eff != prev_sent_decision:
+                    # Ellenirányú stabil jelzés — FLIP mindig mehet
+                    send_kind = "flip"
+                else:
+                    # ugyanaz az irány stabilan — cooldown védi a spammelt
+                    if not cooldown_active:
+                        send_kind = "normal"
+            else:
+                # először lesz stabilan actionable
+                if not cooldown_active:
+                    send_kind = "normal"
+        else:
+            # Nem actionable: ha korábban actionable-t küldtünk, és most stabil "no entry", INVALIDATE
+            if prev_sent_decision in ("buy","sell") and eff == "no entry" and is_stable:
+                send_kind = "invalidate"
+
+        # --- embed felépítés + állapot frissítés ---
+        if send_kind:
+            embeds.append(build_embed_for_asset(asset, sig, is_stable, kind=send_kind, prev_decision=prev_sent_decision))
+            if send_kind in ("normal","flip"):
+                # új akció bejelentve → cooldown indítás / frissítés
+                if COOLDOWN_MIN > 0:
+                    st["cooldown_until"] = datetime.fromtimestamp(now_ep + COOLDOWN_MIN*60, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                st["last_sent"] = now_iso
+                st["last_sent_decision"] = eff
+                st["last_sent_mode"] = gates_mode(sig)
+            elif send_kind == "invalidate":
+                # érvénytelenítettük a korábbi jelet
+                st["last_sent"] = now_iso
+                st["last_sent_decision"] = "no entry"
+                st["last_sent_mode"] = None
+                # cooldownt nem piszkáljuk, hadd fusson le
+        else:
+            # akkor is mutassuk az összefoglaló embedet (szebb feed), ha nem küldünk külön eventet?
+            # Itt NEM pusholunk extra embedet; a fejléc + konkrét eventek elegendők.
+            pass
+
+        state[asset] = st
 
     save_state(state)
 
+    if not embeds:
+        # nincs semmi külön esemény — csak összefoglaló fejlécet küldeni felesleges
+        print("Discord notify: nothing to send (no embeds after cooldown/invalidate logic).")
+        return
+
     title = "📣 eToro-Riasztás"
-    header = "Aktív jelzés(ek) találhatók:" if actionable else "Összefoglaló (no entry / várakozás):"
+    header = "Aktív jelzés(ek):" if actionable_any else "Változás / érvénytelenítés:"
     content = f"**{title}**\n{header}"
 
-    # Webhook küldés (content + embeds)
     try:
         r = requests.post(hook, json={"content": content, "embeds": embeds[:10]}, timeout=20)
         r.raise_for_status()
