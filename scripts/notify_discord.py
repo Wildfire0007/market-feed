@@ -3,36 +3,40 @@
 """
 notify_discord.py — Esemény-alapú Discord riasztó + óránkénti összefoglaló (per-eszköz panelek)
 
-Mikor küld üzenetet?
-- STABIL (>= STABILITY_RUNS) BUY/SELL jelzésnél                 ➜ "normal"
-- Ellenirányú stabil jel flipnél                                 ➜ "flip"
-- Ha a korábban küldött BUY/SELL stabilan NO ENTRY-be fordul     ➜ "invalidate"
-- ÓRÁNKÉNTI HEARTBEAT 07–23 (Budapest), akkor is, ha nincs riasztás
-  (ha adott órában már ment bármilyen riasztás/invalidate/flip, külön heartbeat nem megy ki)
+Stílus:
+- Külön embed minden eszköznek, saját emojival.
+- Félkövér eszköznév a címben. A leírás elején 🟢/🔴 ikon.
+- BUY/SELL = zöld sáv, NO ENTRY = piros sáv, stabilizálás alatt = sárga sáv.
+- RR/TP/SL/Entry számok backtick-ben.
+
+Küldés:
+- STABIL (>= STABILITY_RUNS) BUY/SELL ➜ "normal"
+- Ellenirányú stabil jel flip ➜ "flip"
+- Korábban küldött BUY/SELL stabilan NO ENTRY ➜ "invalidate"
+- ÓRÁNKÉNTI HEARTBEAT 07–23 (Budapest), akkor is, ha nincs riasztás.
+  Ha adott órában már ment event (normal/flip/invalidate), külön heartbeat nem megy ki.
 
 ENV:
-- DISCORD_WEBHOOK_URL          — webhook
-- DISCORD_COOLDOWN_MIN (int)   — spam védelem riasztásoknál (perc, default 10)
+- DISCORD_WEBHOOK_URL
+- DISCORD_COOLDOWN_MIN (perc, default 10)
 """
 
 import os, json, requests
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo  # Python 3.9+
+from zoneinfo import ZoneInfo  # Py3.9+
 
 PUBLIC_DIR = "public"
-
-# --- VÉGSŐ ASSET LISTA (GER40 -> USOIL) ---
-ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "USOIL"]
+ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "USOIL"]  # GER40 -> USOIL
 
 # ---- Debounce / stabilitás / cooldown ----
 STATE_PATH = f"{PUBLIC_DIR}/_notify_state.json"
-STABILITY_RUNS = 2                                   # ennyi egymás utáni körben legyen BUY/SELL/NO ENTRY, hogy "stabil"
-COOLDOWN_MIN   = int(os.getenv("DISCORD_COOLDOWN_MIN", "10"))  # perc; 0 = kikapcsolva
+STABILITY_RUNS = 2
+COOLDOWN_MIN   = int(os.getenv("DISCORD_COOLDOWN_MIN", "10"))  # perc; 0 = off
 
-# ---- Heartbeat időablak (Budapest, zóna: Europe/Budapest) ----
+# ---- Heartbeat időablak (Budapest) ----
 HB_TZ   = ZoneInfo("Europe/Budapest")
-HB_FROM = 7   # 07:00-tól
-HB_TO   = 23  # 23:59-ig
+HB_FROM = 7
+HB_TO   = 23
 
 # ---- Megjelenés / emoji / színek ----
 EMOJI = {
@@ -44,11 +48,11 @@ EMOJI = {
 }
 COLOR = {
     "BUY":   0x2ecc71,  # zöld
-    "SELL":  0x2ecc71,  # zöld (külön akarod: 0x00b894)
-    "NO":    0xe74c3c,  # piros (no entry / invalid)
-    "WAIT":  0xf1c40f,  # sárga (stabilizálás)
-    "FLIP":  0x3498db,  # kék (ellenirányú flip)
-    "INFO":  0x95a5a6,  # semleges összefoglaló
+    "SELL":  0x2ecc71,  # zöld (igény szerint eltérőre cserélhető)
+    "NO":    0xe74c3c,  # piros
+    "WAIT":  0xf1c40f,  # sárga
+    "FLIP":  0x3498db,  # kék
+    "INFO":  0x95a5a6,  # semleges (nem használjuk aktívan)
 }
 
 # ---------------- util ----------------
@@ -57,12 +61,10 @@ def bud_now():
     return datetime.now(HB_TZ)
 
 def bud_hh_key(dt=None) -> str:
-    """Óránkénti kulcs Budapest szerint: 'YYYYMMDDHH'."""
     dt = dt or bud_now()
     return dt.strftime("%Y%m%d%H")
 
 def bud_time_str(dt=None) -> str:
-    """Szépített Budapest-idő a fejlécbe."""
     dt = dt or bud_now()
     return dt.strftime("%Y-%m-%d %H:%M ") + (dt.tzname() or "CET")
 
@@ -151,6 +153,15 @@ def decision_of(sig: dict) -> str:
 
 # ------------- embed-renderek -------------
 
+def card_color(dec: str, is_stable: bool, kind: str) -> int:
+    if kind == "flip":
+        return COLOR["FLIP"]
+    if kind == "invalidate":
+        return COLOR["NO"]
+    if dec in ("BUY","SELL"):
+        return COLOR["BUY"] if is_stable else COLOR["WAIT"]
+    return COLOR["NO"]
+
 def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "normal", prev_decision: str = None):
     """
     kind: "normal" | "invalidate" | "flip" | "heartbeat"
@@ -172,33 +183,34 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     status_emoji = "🟢" if dec in ("BUY","SELL") else "🔴"
     status_bold  = f"{status_emoji} **{dec}**"
 
-    lines = [f"{status_bold} • P={p}% • mód: `{mode}`",
-             f"Spot: `{spot_s}` • UTC: `{utc_s}`"]
+    lines = [
+        f"{status_bold} • P={p}% • mód: `{mode}`",
+        f"Spot: `{spot_s}` • UTC: `{utc_s}`",
+    ]
 
-    if kind != "heartbeat":
-        if dec in ("BUY", "SELL") and all(v is not None for v in (entry, sl, t1, t2, rr)):
-            lines.append(f"@ `{fmt_num(entry)}` • SL `{fmt_num(sl)}` • TP1 `{fmt_num(t1)}` • TP2 `{fmt_num(t2)}` • RR≈`{rr}`")
-            if not is_stable and kind == "normal":
-                lines.append("⏳ Állapot: *stabilizálás alatt*")
-        if dec == "NO ENTRY":
-            miss = missing_from_sig(sig)
-            if miss:
-                lines.append(f"Hiányzó: *{miss}*")
+    # RR/TP/SL sor (ha minden adat megvan)
+    if dec in ("BUY", "SELL") and all(v is not None for v in (entry, sl, t1, t2, rr)):
+        lines.append(f"@ `{fmt_num(entry)}` • SL `{fmt_num(sl)}` • TP1 `{fmt_num(t1)}` • TP2 `{fmt_num(t2)}` • RR≈`{rr}`")
+    # Stabilizálás információ
+    if dec in ("BUY","SELL") and not is_stable and kind in ("normal","heartbeat"):
+        lines.append("⏳ Állapot: *stabilizálás alatt*")
+
+    # Hiányzó feltételek — ha vannak, mindig mutatjuk
+    miss = missing_from_sig(sig)
+    if miss:
+        lines.append(f"Hiányzó: *{miss}*")
 
     # cím + szín
     title = f"{emoji} **{asset}**"
     if kind == "invalidate":
         title += " • ❌ Invalidate"
-        color = COLOR["NO"]
     elif kind == "flip":
         arrow = "→"
         title += f" • 🔁 Flip ({(prev_decision or '').upper()} {arrow} {dec})"
-        color = COLOR["FLIP"]
     elif kind == "heartbeat":
         title += " • ℹ️ Állapot"
-        color = COLOR["BUY"] if dec in ("BUY","SELL") else COLOR["INFO"]
-    else:
-        color = COLOR["WAIT"] if (dec in ("BUY","SELL") and not is_stable) else (COLOR["BUY"] if dec in ("BUY","SELL") else COLOR["NO"])
+
+    color = card_color(dec, is_stable, kind)
 
     return {
         "title": title,
@@ -225,6 +237,7 @@ def main():
     in_hb_window = HB_FROM <= bud_dt.hour <= HB_TO
 
     per_asset_sigs = {}
+    per_asset_is_stable = {}
 
     for asset in ASSETS:
         sig = load(f"{PUBLIC_DIR}/{asset}/signal.json")
@@ -235,27 +248,26 @@ def main():
             sig = {"asset": asset, "signal": "no entry", "probability": 0}
         per_asset_sigs[asset] = sig
 
-        # --- stabilitás számítása (buy/sell/no entry effektív) ---
+        # --- stabilitás számítása ---
         eff = decision_of(sig)  # 'buy' | 'sell' | 'no entry'
 
-        # per-asset state init
         st = state.get(asset, {
             "last": None, "count": 0,
-            "last_sent": None,               # ISO
-            "last_sent_decision": None,      # 'buy'|'sell'|'no entry'
-            "last_sent_mode": None,          # 'core'|'momentum'|None
-            "cooldown_until": None,          # ISO
+            "last_sent": None,
+            "last_sent_decision": None,
+            "last_sent_mode": None,
+            "cooldown_until": None,
         })
 
-        # stabil számláló
         if eff == st.get("last"):
             st["count"] = int(st.get("count", 0)) + 1
         else:
             st["last"]  = eff
             st["count"] = 1
 
-        # flags
         is_stable = st["count"] >= STABILITY_RUNS
+        per_asset_is_stable[asset] = is_stable
+
         is_actionable_now = (eff in ("buy","sell")) and is_stable
         actionable_any = actionable_any or is_actionable_now
 
@@ -272,15 +284,14 @@ def main():
         if is_actionable_now:
             if prev_sent_decision in ("buy","sell"):
                 if eff != prev_sent_decision:
-                    send_kind = "flip"        # ellenirány – mindig mehet
+                    send_kind = "flip"
                 else:
-                    if not cooldown_active:   # ugyanaz az irány – cooldown védelem
+                    if not cooldown_active:
                         send_kind = "normal"
             else:
-                if not cooldown_active:       # első stabil actionable
+                if not cooldown_active:
                     send_kind = "normal"
         else:
-            # ha volt actionable és most stabil no entry -> invalidate
             if prev_sent_decision in ("buy","sell") and eff == "no entry" and is_stable:
                 send_kind = "invalidate"
 
@@ -295,36 +306,35 @@ def main():
                 st["last_sent"] = now_iso
                 st["last_sent_decision"] = eff
                 st["last_sent_mode"] = gates_mode(sig)
-                meta["last_heartbeat_key"] = bud_key  # órát kiszolgáltuk
+                meta["last_heartbeat_key"] = bud_key
             elif send_kind == "invalidate":
                 st["last_sent"] = now_iso
                 st["last_sent_decision"] = "no entry"
                 st["last_sent_mode"] = None
-                meta["last_heartbeat_key"] = bud_key  # ez is aktivitás
+                meta["last_heartbeat_key"] = bud_key
 
         state[asset] = st
 
-    # --- ha nincs esemény embed és 07–23 között vagyunk, küldjünk per-eszköz panelekből álló heartbeatet ---
+    # --- Heartbeat 07–23, ha az órában még nem volt event ---
     last_hb_key = meta.get("last_heartbeat_key")
     if not embeds and in_hb_window and last_hb_key != bud_key:
         for asset in ASSETS:
             sig = per_asset_sigs.get(asset) or {"asset": asset, "signal": "no entry", "probability": 0}
-            # heartbeat: kompakt, per-panel; nincs hiányzó-kapu lista
-            embeds.append(build_embed_for_asset(asset, sig, is_stable=True, kind="heartbeat"))
+            is_stable = per_asset_is_stable.get(asset, True)
+            embeds.append(build_embed_for_asset(asset, sig, is_stable=is_stable, kind="heartbeat"))
         meta["last_heartbeat_key"] = bud_key
 
     state["_meta"] = meta
     save_state(state)
 
     if not embeds:
-        print("Discord notify: nothing to send (no embeds after cooldown/invalidate logic and heartbeat window check).")
+        print("Discord notify: nothing to send.")
         return
 
     # Fejléc: Budapest-idővel
     bud_str = bud_time_str(bud_dt)
     title  = f"📣 eToro-Riasztás • Budapest: {bud_str}"
     header = "Aktív jelzés(ek):" if actionable_any else "Összefoglaló / változás:"
-
     content = f"**{title}**\n{header}"
 
     try:
