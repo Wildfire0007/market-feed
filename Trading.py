@@ -28,23 +28,24 @@ API_KEY  = os.environ["TWELVEDATA_API_KEY"].strip()
 TD_BASE  = "https://api.twelvedata.com"
 TD_PAUSE = float(os.getenv("TD_PAUSE", "0.3"))
 
+# ───────────────────────────────── ASSETS ────────────────────────────────
+# GER40 helyett USOIL. A fő ticker a WTI/USD, de adunk több fallbackot.
 ASSETS = {
     "SOL":      {"symbol": "SOL/USD",  "exchange": "Binance"},
     "NSDQ100":  {"symbol": "QQQ",      "exchange": None},
     "GOLD_CFD": {"symbol": "XAU/USD",  "exchange": None},
-
-    # ÚJAK
     "BNB":      {"symbol": "BNB/USD",  "exchange": "Binance"},
 
-    # GER40 – több lehetséges ticker, próbáljuk sorban
-    "GER40": {
-        "symbol": "DE40/EUR",      # első próbálkozás
+    # ÚJ: WTI kőolaj. A Twelve Data-n a hivatalos jelölés: WTI/USD.
+    # Biztonság kedvéért próbálunk alternatív jelöléseket is.
+    "USOIL": {
+        "symbol": "WTI/USD",
         "exchange": None,
-        "alt": ["DAX", "GER40"]    # fallback jelölések
+        "alt": ["USOIL", "WTICOUSD", "WTIUSD"]  # ha a fő nem menne, próbáljuk ezeket
     },
 }
 
-# ---------- segédek ----------
+# ─────────────────────────────── Segédek ─────────────────────────────────
 
 def now_utc() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -196,7 +197,7 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
         "utc": utc or now_utc(),
     }
 
-# ---------- több-szimbólumos fallback ----------
+# ─────────────────────── több-szimbólumos fallback ───────────────────────
 
 def try_symbols(symbols: List[str], fetch_fn):
     """Próbálkozik több tickerrel sorban; az első ok:true visszatér. Máskülönben az utolsó eredményt adja."""
@@ -212,7 +213,7 @@ def try_symbols(symbols: List[str], fetch_fn):
         time.sleep(TD_PAUSE * 0.5)
     return last or {"ok": False}
 
-# ---------- jelzés: 5m EMA9–EMA21 (5 bar) ----------
+# ───────────────────── 5m EMA9–EMA21 (előzetes jelzés) ───────────────────
 
 def ema(series: List[Optional[float]], period: int) -> List[Optional[float]]:
     if not series or period <= 1:
@@ -260,7 +261,7 @@ def signal_from_5m(klines_5m: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": True, "signal": "downtrend", "reasons": ["ema9 < ema21 (5 bars)"]}
     return {"ok": True, "signal": "no entry", "reasons": ["no consistent ema bias"]}
 
-# ---------- egy eszköz feldolgozása ----------
+# ─────────────────────────── Egy eszköz feldolgozása ──────────────────────
 
 def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     adir = os.path.join(OUT_DIR, asset)
@@ -304,6 +305,8 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
             "spot": {"price": spot.get("price"), "utc": spot.get("utc")},
         },
     )
+
+# ─────────────────────────────── main ─────────────────────────────────────
 
 def main():
     if not API_KEY:
