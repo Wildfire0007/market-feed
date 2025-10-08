@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-notify_discord.py — Esemény-alapú Discord riasztó
+notify_discord.py — Esemény-alapú Discord riasztó + óránkénti összefoglaló
 
 Mikor küld üzenetet?
-- STABIL (>= STABILITY_RUNS) BUY/SELL jelzésnél  ➜ "normal"
-- Ellenirányú stabil jel flipnél                 ➜ "flip"
-- Ha a korábban küldött BUY/SELL stabilan NO ENTRY-be fordul ➜ "invalidate"
-- COOLDOWN_MIN perc védi a spammelt (ENV: DISCORD_COOLDOWN_MIN)
+- STABIL (>= STABILITY_RUNS) BUY/SELL jelzésnél                 ➜ "normal"
+- Ellenirányú stabil jel flipnél                                 ➜ "flip"
+- Ha a korábban küldött BUY/SELL stabilan NO ENTRY-be fordul     ➜ "invalidate"
+- ÓRÁNKÉNTI HEARTBEAT 07–23 (Budapest), akkor is, ha nincs riasztás
+  (ha adott órában már ment bármilyen riasztás, külön heartbeat nem megy ki)
 
-Kimenet: színes embedek, asset-enként külön kártya, emoji + félkövér cím,
-hiányzó kapuk szépen formázva.
+ENV:
+- DISCORD_WEBHOOK_URL          — webhook
+- DISCORD_COOLDOWN_MIN (int)   — spam védelem riasztásoknál (perc, default 10)
 """
 
 import os, json, requests
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo  # Python 3.9+
 
 PUBLIC_DIR = "public"
 
@@ -26,6 +29,11 @@ STATE_PATH = f"{PUBLIC_DIR}/_notify_state.json"
 STABILITY_RUNS = 2                                   # ennyi egymás utáni körben legyen BUY/SELL/NO ENTRY, hogy "stabil"
 COOLDOWN_MIN   = int(os.getenv("DISCORD_COOLDOWN_MIN", "10"))  # perc; 0 = kikapcsolva
 
+# ---- Heartbeat időablak (Budapest, zóna: Europe/Budapest) ----
+HB_TZ   = ZoneInfo("Europe/Budapest")
+HB_FROM = 7   # 07:00-tól
+HB_TO   = 23  # 23:59-ig (óra szerint: 23)
+
 # ---- Megjelenés / emoji / színek ----
 EMOJI = {
     "SOL": "💵",
@@ -36,13 +44,28 @@ EMOJI = {
 }
 COLOR = {
     "BUY":   0x2ecc71,  # zöld
-    "SELL":  0x2ecc71,  # zöld (ha külön akarod: 0x00b894)
+    "SELL":  0x2ecc71,  # zöld (külön akarod: 0x00b894)
     "NO":    0xe74c3c,  # piros (no entry / invalid)
     "WAIT":  0xf1c40f,  # sárga (stabilizálás)
     "FLIP":  0x3498db,  # kék (ellenirányú flip)
+    "INFO":  0x95a5a6,  # semleges összefoglaló
 }
 
 # ---------------- util ----------------
+
+def bud_now():
+    return datetime.now(HB_TZ)
+
+def bud_hh_key(dt=None) -> str:
+    """Óránkénti kulcs Budapest szerint: 'YYYYMMDDHH'."""
+    dt = dt or bud_now()
+    return dt.strftime("%Y%m%d%H")
+
+def bud_time_str(dt=None) -> str:
+    """Szépített Budapest-idő a fejlécbe."""
+    dt = dt or bud_now()
+    # pl. 2025-10-08 19:05 CEST
+    return dt.strftime("%Y-%m-%d %H:%M ") + (dt.tzname() or "CET")
 
 def utcnow_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -182,6 +205,28 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
         "color": color,
     }
 
+def build_summary_embed(per_asset: list) -> dict:
+    """Egyetlen, tömör összefoglaló embed az összes eszközről."""
+    lines = []
+    for item in per_asset:
+        asset = item["asset"]
+        sig   = item["sig"] or {}
+        emoji = EMOJI.get(asset, "📊")
+        dec   = (sig.get("signal") or "no entry").upper()
+        dec   = dec if dec in ("BUY","SELL") else "NO ENTRY"
+        p     = int(sig.get("probability", 0) or 0)
+        mode  = gates_mode(sig)
+        status = "🟢" if dec in ("BUY","SELL") else "🔴"
+        price, utc = spot_from_sig_or_file(asset, sig)
+        spot_s = fmt_num(price)
+        utc_s  = utc or "-"
+        lines.append(f"{emoji} **{asset}** — {status} **{dec}** • P={p}% • mód: `{mode}` • spot `{spot_s}` ({utc_s})")
+    return {
+        "title": "ℹ️ Állapot-összefoglaló",
+        "description": "\n".join(lines) if lines else "Nincs adat.",
+        "color": COLOR["INFO"],
+    }
+
 # ---------------- főlogika ----------------
 
 def main():
@@ -191,10 +236,16 @@ def main():
         return
 
     state = load_state()
+    meta  = state.get("_meta", {})
     embeds = []
     actionable_any = False
     now_iso = utcnow_iso()
     now_ep  = utcnow_epoch()
+    bud_dt  = bud_now()
+    bud_key = bud_hh_key(bud_dt)
+    in_hb_window = HB_FROM <= bud_dt.hour <= HB_TO
+
+    per_asset_for_summary = []
 
     for asset in ASSETS:
         sig = load(f"{PUBLIC_DIR}/{asset}/signal.json")
@@ -203,6 +254,8 @@ def main():
             sig = (summ.get("assets") or {}).get(asset)
         if not sig:
             sig = {"asset": asset, "signal": "no entry", "probability": 0}
+
+        per_asset_for_summary.append({"asset": asset, "sig": sig})
 
         # --- stabilitás számítása (buy/sell/no entry effektív) ---
         eff = decision_of(sig)  # 'buy' | 'sell' | 'no entry'
@@ -268,22 +321,35 @@ def main():
                 st["last_sent"] = now_iso
                 st["last_sent_decision"] = eff
                 st["last_sent_mode"] = gates_mode(sig)
+                # ezt az órát "kiszolgáltuk" heartbeat szempontból is
+                meta["last_heartbeat_key"] = bud_key
             elif send_kind == "invalidate":
-                # érvénytelenítettük a korábbi jelet
                 st["last_sent"] = now_iso
                 st["last_sent_decision"] = "no entry"
                 st["last_sent_mode"] = None
-                # cooldownt nem piszkáljuk
+                # invalidate is számít aktivitásnak az órára
+                meta["last_heartbeat_key"] = bud_key
+
         state[asset] = st
 
+    # --- ha nincs esemény embed és benne vagyunk a 07–23 sávban, óránkénti összefoglaló ---
+    last_hb_key = meta.get("last_heartbeat_key")
+    if not embeds and in_hb_window and last_hb_key != bud_key:
+        embeds.append(build_summary_embed(per_asset_for_summary))
+        meta["last_heartbeat_key"] = bud_key
+
+    state["_meta"] = meta
     save_state(state)
 
     if not embeds:
-        print("Discord notify: nothing to send (no embeds after cooldown/invalidate logic).")
+        print("Discord notify: nothing to send (no embeds after cooldown/invalidate logic and heartbeat window check).")
         return
 
-    title = "📣 eToro-Riasztás"
-    header = "Aktív jelzés(ek):" if actionable_any else "Változás / érvénytelenítés:"
+    # Fejléc: Budapest-idővel
+    bud_str = bud_time_str(bud_dt)
+    title  = f"📣 eToro-Riasztás • Budapest: {bud_str}"
+    header = "Aktív jelzés(ek):" if actionable_any else "Összefoglaló / változás:"
+
     content = f"**{title}**\n{header}"
 
     try:
