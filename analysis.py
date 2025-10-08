@@ -32,13 +32,39 @@ MAX_RISK_PCT = 1.8
 FIB_TOL = 0.02
 ATR_LOW_TH = 0.0008   # 0.08%
 
-# --- Kereskedési/egz. küszöbök ---
-MIN_R            = 2.0
-TP1_R            = 2.0
-TP2_R            = 3.0
-MIN_TP_PCT       = 0.006
-MIN_TP_ABS       = 0.80
-COST_ROUND_PCT   = 0.003
+# --- Kereskedési/egz. küszöbök (RR/TP) ---
+MIN_R   = 2.0
+TP1_R   = 2.0
+TP2_R   = 3.0
+
+# --- Per-asset TP minimumok és round-trip költség + ATR alapú elvárás ---
+# Ezek határozzák meg a TP1 minimális távolságát az entrytől.
+TP_MIN_PCT = {        # min. TP1 távolság %-ban (entry-hez képest)
+    "default": 0.0030,  # 0.30%
+    "GOLD_CFD": 0.0015, # 0.15%  (arany)
+    "USOIL":    0.0020, # 0.20%
+    "NSDQ100":  0.0020, # 0.20%
+    "SOL":      0.0040, # 0.40%
+    "BNB":      0.0040, # 0.40%
+}
+TP_MIN_ABS = {        # min. TP1 távolság abszolútban (tick/árjegyzés miatt)
+    "default": 0.50,
+    "GOLD_CFD": 3.0,   # arany ~3 pont
+    "USOIL":    0.08,  # olaj ~0.08
+    "NSDQ100":  0.80,
+    "SOL":      0.80,
+    "BNB":      0.50,
+}
+COST_ROUND_PCT_ASSET = {  # várható round-trip költség (spread+jutalék+slip) %
+    "default": 0.0015,  # 0.15%
+    "GOLD_CFD": 0.0008, # 0.08%
+    "USOIL":    0.0010, # 0.10%
+    "NSDQ100":  0.0007, # 0.07%
+    "SOL":      0.0020, # 0.20%
+    "BNB":      0.0020, # 0.20%
+}
+COST_MULT      = 2.0     # min. profit >= 2× költség (eddig 3× volt)
+ATR5_MIN_MULT  = 0.5     # min. profit >= 0.5× ATR(5m)
 
 # --- Momentum override csak kriptókra (SOL, BNB) ---
 ENABLE_MOMENTUM_ASSETS = {"SOL", "BNB"}
@@ -373,10 +399,14 @@ def analyze(asset: str) -> Dict[str, Any]:
         nonlocal entry, sl, tp1, tp2, rr, missing
         atr5_val  = float(atr5 or 0.0)
         atr1h_val = float(atr1h or 0.0)
+
+        # vol/költség alapú minimum kockázat és puffer
         risk_min = max(0.6 * atr5_val, 0.0035 * price_for_calc, 0.50)
         buf      = max(0.3 * atr5_val, 0.1 * atr1h_val)
+
         k5_sw = find_swings(k5m_closed, lb=2)
         hi5, lo5 = last_swing_levels(k5_sw)
+
         entry = price_for_calc
         if decision_side == "buy":
             sl = (lo5 if lo5 is not None else (entry - atr5_val)) - buf
@@ -396,7 +426,15 @@ def analyze(asset: str) -> Dict[str, Any]:
             rr  = (entry - tp2) / risk
             tp1_dist = entry - tp1
             ok_math = (tp2 <= tp1 < entry < sl)
-        min_profit_abs = max(MIN_TP_ABS, MIN_TP_PCT * entry, 3 * COST_ROUND_PCT * entry)
+
+        # --- ÚJ: per-asset TP minimum + költségbuffer + ATR(5m) minimum
+        min_profit_abs = max(
+            TP_MIN_ABS.get(asset, TP_MIN_ABS["default"]),
+            TP_MIN_PCT.get(asset, TP_MIN_PCT["default"]) * entry,
+            COST_MULT * COST_ROUND_PCT_ASSET.get(asset, COST_ROUND_PCT_ASSET["default"]) * entry,
+            ATR5_MIN_MULT * atr5_val
+        )
+
         if (not ok_math) or (rr is None) or (rr < MIN_R) or (tp1_dist < min_profit_abs):
             if rr is None or rr < MIN_R: missing.append(f"rr_math>={MIN_R}")
             if tp1_dist < min_profit_abs: missing.append("tp_min_profit")
