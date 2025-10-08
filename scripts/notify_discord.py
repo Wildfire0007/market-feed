@@ -1,14 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+notify_discord.py — Esemény-alapú Discord riasztó
+
+Mikor küld üzenetet?
+- STABIL (>= STABILITY_RUNS) BUY/SELL jelzésnél  ➜ "normal"
+- Ellenirányú stabil jel flipnél                 ➜ "flip"
+- Ha a korábban küldött BUY/SELL stabilan NO ENTRY-be fordul ➜ "invalidate"
+- COOLDOWN_MIN perc védi a spammelt (ENV: DISCORD_COOLDOWN_MIN)
+
+Kimenet: színes embedek, asset-enként külön kártya, emoji + félkövér cím,
+hiányzó kapuk szépen formázva.
+"""
+
 import os, json, requests
 from datetime import datetime, timezone
 
 PUBLIC_DIR = "public"
-ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "GER40"]
+
+# --- VÉGSŐ ASSET LISTA (GER40 -> USOIL) ---
+ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "USOIL"]
 
 # ---- Debounce / stabilitás / cooldown ----
 STATE_PATH = f"{PUBLIC_DIR}/_notify_state.json"
-STABILITY_RUNS = 2          # ennyi egymás utáni körben legyen BUY/SELL/NO ENTRY, hogy "stabil"
+STABILITY_RUNS = 2                                   # ennyi egymás utáni körben legyen BUY/SELL/NO ENTRY, hogy "stabil"
 COOLDOWN_MIN   = int(os.getenv("DISCORD_COOLDOWN_MIN", "10"))  # perc; 0 = kikapcsolva
 
 # ---- Megjelenés / emoji / színek ----
@@ -17,11 +32,11 @@ EMOJI = {
     "NSDQ100": "📈",
     "GOLD_CFD": "💰",
     "BNB": "🪙",
-    "GER40": "🇩🇪",
+    "USOIL": "🛢️",
 }
 COLOR = {
     "BUY":   0x2ecc71,  # zöld
-    "SELL":  0x2ecc71,  # zöld (külön akarod? pl. 0x00b894)
+    "SELL":  0x2ecc71,  # zöld (ha külön akarod: 0x00b894)
     "NO":    0xe74c3c,  # piros (no entry / invalid)
     "WAIT":  0xf1c40f,  # sárga (stabilizálás)
     "FLIP":  0x3498db,  # kék (ellenirányú flip)
@@ -100,7 +115,7 @@ def missing_from_sig(sig: dict):
     for k in miss:
         key = "RR≥2.0" if k.startswith("rr_math") else k
         out.append(pretty.get(k, key))
-    # uniq + csinos
+    # uniq + formázott
     return ", ".join(dict.fromkeys(out).keys())
 
 def gates_mode(sig: dict) -> str:
@@ -132,7 +147,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     spot_s = fmt_num(price)
     utc_s  = utc or "-"
 
-    # status jelölés
+    # státusz
     status_emoji = "🟢" if dec in ("BUY","SELL") else "🔴"
     status_bold  = f"{status_emoji} **{dec}**"
 
@@ -149,7 +164,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
         if miss:
             lines.append(f"Hiányzó: *{miss}*")
 
-    # cím + szín kiválasztás
+    # cím + szín
     title = f"{emoji} **{asset}**"
     if kind == "invalidate":
         title += " • ❌ Invalidate"
@@ -229,11 +244,11 @@ def main():
                     # Ellenirányú stabil jelzés — FLIP mindig mehet
                     send_kind = "flip"
                 else:
-                    # ugyanaz az irány stabilan — cooldown védi a spammelt
+                    # Ugyanaz az irány stabilan — cooldown védi a spammelt
                     if not cooldown_active:
                         send_kind = "normal"
             else:
-                # először lesz stabilan actionable
+                # Először lesz stabilan actionable
                 if not cooldown_active:
                     send_kind = "normal"
         else:
@@ -241,13 +256,15 @@ def main():
             if prev_sent_decision in ("buy","sell") and eff == "no entry" and is_stable:
                 send_kind = "invalidate"
 
-        # --- embed felépítés + állapot frissítés ---
+        # --- embed + állapot frissítés ---
         if send_kind:
             embeds.append(build_embed_for_asset(asset, sig, is_stable, kind=send_kind, prev_decision=prev_sent_decision))
             if send_kind in ("normal","flip"):
                 # új akció bejelentve → cooldown indítás / frissítés
                 if COOLDOWN_MIN > 0:
-                    st["cooldown_until"] = datetime.fromtimestamp(now_ep + COOLDOWN_MIN*60, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    st["cooldown_until"] = datetime.fromtimestamp(
+                        now_ep + COOLDOWN_MIN*60, tz=timezone.utc
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
                 st["last_sent"] = now_iso
                 st["last_sent_decision"] = eff
                 st["last_sent_mode"] = gates_mode(sig)
@@ -256,18 +273,12 @@ def main():
                 st["last_sent"] = now_iso
                 st["last_sent_decision"] = "no entry"
                 st["last_sent_mode"] = None
-                # cooldownt nem piszkáljuk, hadd fusson le
-        else:
-            # akkor is mutassuk az összefoglaló embedet (szebb feed), ha nem küldünk külön eventet?
-            # Itt NEM pusholunk extra embedet; a fejléc + konkrét eventek elegendők.
-            pass
-
+                # cooldownt nem piszkáljuk
         state[asset] = st
 
     save_state(state)
 
     if not embeds:
-        # nincs semmi külön esemény — csak összefoglaló fejlécet küldeni felesleges
         print("Discord notify: nothing to send (no embeds after cooldown/invalidate logic).")
         return
 
