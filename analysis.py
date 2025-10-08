@@ -15,12 +15,19 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import numpy as np
 
-# --- Elemzendő eszközök ---
-ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "GER40"]
+# --- Elemzendő eszközök (GER40 -> USOIL) ---
+ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "USOIL"]
 
 PUBLIC_DIR = "public"
 
-LEVERAGE = {"SOL": 3.0, "NSDQ100": 3.0, "GOLD_CFD": 2.0, "BNB": 3.0, "GER40": 2.0}
+LEVERAGE = {
+    "SOL": 3.0,
+    "NSDQ100": 3.0,
+    "GOLD_CFD": 2.0,
+    "BNB": 3.0,
+    "USOIL": 2.0,   # WTI olaj
+}
+
 MAX_RISK_PCT = 1.8
 FIB_TOL = 0.02
 ATR_LOW_TH = 0.0008   # 0.08%
@@ -36,7 +43,7 @@ COST_ROUND_PCT   = 0.003
 # --- Momentum override csak kriptókra (SOL, BNB) ---
 ENABLE_MOMENTUM_ASSETS = {"SOL", "BNB"}
 MOMENTUM_BARS    = 8             # 5m EMA9–EMA21 legalább 8 bar
-MOMENTUM_ATR_REL = 0.0012        # >= 0.12%
+MOMENTUM_ATR_REL = 0.0012        # >= 0.12% 5m relatív ATR
 MOMENTUM_BOS_LB  = 15            # szerkezeti töréshez nézett ablak (bar)
 
 # --- Rezsim és session beállítások ---
@@ -49,8 +56,8 @@ SESSIONS_UTC: Dict[str, Optional[List[Tuple[int,int,int,int]]]] = {
     "SOL": None,
     "BNB": None,
     "NSDQ100": [(13,30, 20,0)],   # US cash
-    "GER40":  [(7,0,   16,30)],   # DE cash (egyszerűsítve, UTC)
     "GOLD_CFD": None,             # gyakorlatilag egész nap
+    "USOIL": None,                # WTI szinte 23h/nap — nem korlátozzuk
 }
 
 # -------------------------- segédek -----------------------------------
@@ -403,7 +410,6 @@ def analyze(asset: str) -> Dict[str, Any]:
             decision = "no entry"
     else:
         if mom_dir is not None:
-            # momentum kapuk teljesültek, próbáljuk a matekot
             mode = "momentum"
             missing = []
             momentum_used = True
@@ -412,9 +418,8 @@ def analyze(asset: str) -> Dict[str, Any]:
                 decision = "no entry"
             else:
                 reasons.append("Momentum override (5m EMA + ATR + BOS)")
-                P = max(P, 75)  # minimum 75% momentum esetben
+                P = max(P, 75)
         elif asset in ENABLE_MOMENTUM_ASSETS and missing_mom:
-            # információs célból mutassuk, mi hiányzik momentum módhoz
             mode = "momentum"
             missing = list(dict.fromkeys(missing_mom))  # uniq
 
