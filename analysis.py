@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*- 
+# -*- coding: utf-8 -*-
 """
 analysis.py — TD-only intraday jelzésképző (lokális JSON-okból).
 Forrás: Trading.py által generált fájlok a public/<ASSET>/ alatt.
@@ -8,12 +8,14 @@ Kimenet:
   public/analysis.html            — egyszerű HTML kivonat
 
 FRISSÍTÉSEK (2025-10-09):
-- ATR_LOW_TH asset-függővé téve (SOL/BNB 0.08%, mások 0.07%).
-- EMA_SLOPE_TH 0.12% -> 0.10% (érzékenyebb rezsimszűrés).
-- Momentum mód: 8 -> 7 bar, ATR_rel 0.12% -> 0.10%; BOS-ellenőrzés irányhelyesen.
-- P-score súlyok: regime +8, BOS +18, ATR +9.
-- TP1-minimum: adaptív költségpuffer magas volnál (ATR5/entry ≥ 0.20% → COST_MULT 1.7, különben 2.0).
-- NSDQ100: cash órákban (13:30–20:00 UTC) TP_MIN_PCT 0.10% (külsőben a táblázat szerinti érték marad).
+- ATR_LOW_TH asset-függő (SOL/BNB 0.08%, mások 0.07%).
+- EMA_SLOPE_TH 0.12% -> 0.10% (alap), GOLD_CFD/USOIL: 0.08%.
+- Momentum: 7 bar, ATR_rel 0.10%; NSDQ100-ra csak 13:30–14:00 UTC közt.
+- Core BOS kapu: BOS **vagy** 15-baros struktúratörés is elfogadott.
+- Fib tolerancia: ±2.5% és 1.0×ATR(1h).
+- P-score súlyok változatlanok, de BOS pont a BOS|struct esetén is jár.
+- TP1-minimum: adaptív költségpuffer magas volnál (1.7×), különben 2.0×.
+- NSDQ100 cash órákban TP_MIN_PCT 0.10% (min).
 """
 
 import os, json
@@ -23,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import numpy as np
 
-# --- Elemzendő eszközök (GER40 -> USOIL) ---
+# --- Elemzendő eszközök ---
 ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "USOIL"]
 
 PUBLIC_DIR = "public"
@@ -33,14 +35,16 @@ LEVERAGE = {
     "NSDQ100": 3.0,
     "GOLD_CFD": 2.0,
     "BNB": 3.0,
-    "USOIL": 2.0,   # WTI olaj
+    "USOIL": 2.0,
 }
 
 MAX_RISK_PCT = 1.8
-FIB_TOL = 0.02
 
-# --- ATR küszöbök (REL) — FINOMHANGOLT: asset-függő ---
-# Ajánlás szerint kriptókra szigorúbb (0.08%), többire enyhébb (0.07%)
+# --- Fib toleranciák (ÚJ, enyhítve) ---
+FIB_TOL_FRAC = 0.025              # ±2.5%
+FIB_TOL_ABS_ATR1H_MULT = 1.0      # ±1.0 × ATR(1h)
+
+# --- ATR küszöbök (REL) — asset-függő ---
 ATR_LOW_TH_ASSET = {
     "default": 0.0007,  # 0.07%
     "SOL":     0.0008,  # 0.08%
@@ -49,7 +53,6 @@ ATR_LOW_TH_ASSET = {
     "GOLD_CFD":0.0007,  # 0.07%
     "USOIL":   0.0007,  # 0.07%
 }
-
 def atr_threshold(asset: str) -> float:
     return ATR_LOW_TH_ASSET.get(asset, ATR_LOW_TH_ASSET["default"])
 
@@ -58,25 +61,24 @@ MIN_R   = 2.0
 TP1_R   = 2.0
 TP2_R   = 3.0
 
-# --- Per-asset TP minimumok és round-trip költség + ATR alapú elvárás ---
-# Ezek határozzák meg a TP1 minimális távolságát az entrytől.
-TP_MIN_PCT = {        # min. TP1 távolság %-ban (entry-hez képest)
+# --- TP1 minimumok és költségpuffer ---
+TP_MIN_PCT = {
     "default": 0.0030,  # 0.30%
-    "GOLD_CFD": 0.0015, # 0.15%  (arany)
+    "GOLD_CFD": 0.0015, # 0.15%
     "USOIL":    0.0020, # 0.20%
-    "NSDQ100":  0.0020, # 0.20% (cash órákban külön szabály lejjebb)
+    "NSDQ100":  0.0020, # 0.20% (cash órákban 0.10%)
     "SOL":      0.0040, # 0.40%
     "BNB":      0.0040, # 0.40%
 }
-TP_MIN_ABS = {        # min. TP1 távolság abszolútban (tick/árjegyzés miatt)
+TP_MIN_ABS = {
     "default": 0.50,
-    "GOLD_CFD": 3.0,   # arany ~3 pont
-    "USOIL":    0.08,  # olaj ~0.08
+    "GOLD_CFD": 3.0,
+    "USOIL":    0.08,
     "NSDQ100":  0.80,
     "SOL":      0.80,
     "BNB":      0.50,
 }
-COST_ROUND_PCT_ASSET = {  # várható round-trip költség (spread+jutalék+slip) %
+COST_ROUND_PCT_ASSET = {
     "default": 0.0015,  # 0.15%
     "GOLD_CFD": 0.0008, # 0.08%
     "USOIL":    0.0010, # 0.10%
@@ -84,50 +86,62 @@ COST_ROUND_PCT_ASSET = {  # várható round-trip költség (spread+jutalék+slip
     "SOL":      0.0020, # 0.20%
     "BNB":      0.0020, # 0.20%
 }
-# DINAMIKUS lesz számításkor: magas volnál 1.7, különben 2.0
 COST_MULT_BASE      = 2.0
 COST_MULT_HIGH_VOL  = 1.7
-HIGH_VOL_TH         = 0.0020   # 0.20%  (ATR5/entry relatív küszöb)
+HIGH_VOL_TH         = 0.0020   # 0.20%  (ATR5/entry)
 ATR5_MIN_MULT       = 0.5      # min. profit >= 0.5× ATR(5m)
 
-# --- Momentum override csak kriptókra (SOL, BNB) ---
-ENABLE_MOMENTUM_ASSETS = {"SOL", "BNB"}
-MOMENTUM_BARS    = 7             # FINOMHANGOLT: 5m EMA9–EMA21 legalább 7 bar
-MOMENTUM_ATR_REL = 0.0010        # FINOMHANGOLT: >= 0.10% 5m relatív ATR
-MOMENTUM_BOS_LB  = 15            # szerkezeti töréshez nézett ablak (bar)
+# --- Momentum override eszközök + idősáv NSDQ100-ra (ÚJ) ---
+ENABLE_MOMENTUM_ASSETS = {"SOL", "BNB", "NSDQ100"}
+MOMENTUM_BARS    = 7
+MOMENTUM_ATR_REL = 0.0010
+MOMENTUM_BOS_LB  = 15
 
-# --- Rezsim és session beállítások ---
-EMA_SLOPE_PERIOD   = 21          # 1h EMA21
-EMA_SLOPE_LOOKBACK = 3           # hány baron mérjük a változást
-EMA_SLOPE_TH       = 0.0010      # FINOMHANGOLT: ~0.10% relatív elmozdulás (abs) a lookback alatt
+def momentum_time_ok(asset: str, now_utc: Optional[datetime] = None) -> bool:
+    """Kriptók: mindig. NSDQ100: csak 13:30–14:00 UTC között."""
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    if asset in {"SOL", "BNB"}:
+        return True
+    if asset == "NSDQ100":
+        hm = now_utc.strftime("%H:%M")
+        return "13:30" <= hm < "14:00"
+    return False
 
-# UTC idősávok: [(start_h, start_m, end_h, end_m), ...]; None = mindig
+# --- Rezsim és session ---
+EMA_SLOPE_PERIOD   = 21
+EMA_SLOPE_LOOKBACK = 3
+# Eszköz-specifikus EMA-slope küszöb (ÚJ)
+EMA_SLOPE_TH_ASSET = {
+    "default": 0.0010,   # 0.10%
+    "GOLD_CFD": 0.0008,  # 0.08%
+    "USOIL":    0.0008,  # 0.08%
+}
+def ema_slope_threshold(asset: str) -> float:
+    return EMA_SLOPE_TH_ASSET.get(asset, EMA_SLOPE_TH_ASSET["default"])
+
+# UTC idősávok
 SESSIONS_UTC: Dict[str, Optional[List[Tuple[int,int,int,int]]]] = {
     "SOL": None,
     "BNB": None,
-    "NSDQ100": [(13,30, 20,0)],   # US cash
-    "GOLD_CFD": None,             # gyakorlatilag egész nap
-    "USOIL": None,                # WTI szinte 23h/nap — nem korlátozzuk
+    "NSDQ100": [(13,30, 20,0)],
+    "GOLD_CFD": None,
+    "USOIL": None,
 }
 
 # -------------------------- segédek -----------------------------------
-
 def nowiso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def now_utctime_hm() -> Tuple[int,int]:
-    t = datetime.now(timezone.utc)
-    return t.hour, t.minute
+    t = datetime.now(timezone.utc); return t.hour, t.minute
 
 def in_any_window_utc(windows: Optional[List[Tuple[int,int,int,int]]], h: int, m: int) -> bool:
-    if not windows:
-        return True
+    if not windows: return True
     minutes = h*60 + m
     for sh, sm, eh, em in windows:
-        s = sh*60 + sm
-        e = eh*60 + em
-        if s <= minutes <= e:
-            return True
+        s = sh*60 + sm; e = eh*60 + em
+        if s <= minutes <= e: return True
     return False
 
 def session_ok(asset: str) -> bool:
@@ -171,7 +185,6 @@ def as_df_klines(raw: Any) -> pd.DataFrame:
     return df[["open","high","low","close"]]
 
 # --- TA: EMA/RSI/ATR, swingek, sweep, BOS, Fib zóna ----------------------------
-
 def ema(s: pd.Series, n: int) -> pd.Series:
     return s.ewm(span=n, adjust=False).mean()
 
@@ -219,8 +232,7 @@ def detect_sweep(df: pd.DataFrame, lookback: int = 24) -> Dict[str, bool]:
     return out
 
 def detect_bos(df: pd.DataFrame, direction: str) -> bool:
-    if direction not in ("long", "short"):
-        return False
+    if direction not in ("long", "short"): return False
     sw = find_swings(df, lb=2)
     hi, lo = last_swing_levels(sw.iloc[:-1])
     if direction == "long" and hi is not None:
@@ -230,9 +242,8 @@ def detect_bos(df: pd.DataFrame, direction: str) -> bool:
     return False
 
 def broke_structure(df: pd.DataFrame, direction: str, lookback: int = MOMENTUM_BOS_LB) -> bool:
-    """Egyszerű szerkezeti törés: utolsó high/low áttöri az előző N bar csúcsát/alját."""
-    if df.empty or len(df) < lookback + 2: 
-        return False
+    """Egyszerű struktúratörés: az utolsó gyertya áttöri az előző N bar csúcsát/alját."""
+    if df.empty or len(df) < lookback + 2: return False
     ref = df.iloc[-(lookback+1):-1]
     last = df.iloc[-1]
     if direction == "long":
@@ -244,11 +255,9 @@ def broke_structure(df: pd.DataFrame, direction: str, lookback: int = MOMENTUM_B
 def fib_zone_ok(move_hi, move_lo, price_now,
                 low=0.618, high=0.886,
                 tol_abs=0.0, tol_frac=0.02) -> bool:
-    if move_hi is None or move_lo is None or move_hi == move_lo:
-        return False
+    if move_hi is None or move_lo is None or move_hi == move_lo: return False
     length = move_hi - move_lo
-    if length == 0:
-        return False
+    if length == 0: return False
     z1_long  = move_lo + low  * length
     z2_long  = move_lo + high * length
     z1_short = move_hi - high * length
@@ -270,20 +279,15 @@ def bias_from_emas(df: pd.DataFrame) -> str:
 def ema_slope_ok(df_1h: pd.DataFrame,
                  period: int = EMA_SLOPE_PERIOD,
                  lookback: int = EMA_SLOPE_LOOKBACK,
-                 th: float = EMA_SLOPE_TH) -> Tuple[bool, float]:
+                 th: float = 0.0010) -> Tuple[bool, float]:
     """EMA21 relatív meredekség 1h-n: abs(ema_now - ema_prev)/price_now >= th"""
-    if df_1h.empty or len(df_1h) < period + lookback + 1:
-        return False, 0.0
-    c = df_1h["close"]
-    e = ema(c, period)
-    ema_now = float(e.iloc[-1])
-    ema_prev = float(e.iloc[-1 - lookback])
-    price_now = float(c.iloc[-1])
+    if df_1h.empty or len(df_1h) < period + lookback + 1: return False, 0.0
+    c = df_1h["close"]; e = ema(c, period)
+    ema_now = float(e.iloc[-1]); ema_prev = float(e.iloc[-1 - lookback]); price_now = float(c.iloc[-1])
     rel = abs(ema_now - ema_prev) / max(1e-9, price_now)
     return (rel >= th), rel
 
 # ------------------------------ elemzés egy eszközre ---------------------------
-
 def analyze(asset: str) -> Dict[str, Any]:
     outdir = os.path.join(PUBLIC_DIR, asset)
     os.makedirs(outdir, exist_ok=True)
@@ -296,21 +300,17 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     k5m, k1h, k4h = as_df_klines(k5m_raw), as_df_klines(k1h_raw), as_df_klines(k4h_raw)
 
-    spot_price = None
-    spot_utc = "-"
+    spot_price = None; spot_utc = "-"
     if spot:
         spot_price = spot.get("price") if spot.get("price") is not None else spot.get("price_usd")
         spot_utc = spot.get("utc") or spot.get("timestamp") or "-"
 
     if (spot_price is None) or k5m.empty or k1h.empty or k4h.empty:
         msg = {
-            "asset": asset,
-            "ok": False,
-            "retrieved_at_utc": nowiso(),
+            "asset": asset, "ok": False, "retrieved_at_utc": nowiso(),
             "source": "Twelve Data (lokális JSON)",
             "spot": {"price": spot_price, "utc": spot_utc},
-            "signal": "no entry",
-            "probability": 0,
+            "signal": "no entry", "probability": 0,
             "entry": None, "sl": None, "tp1": None, "tp2": None, "rr": None,
             "leverage": LEVERAGE.get(asset, 2.0),
             "reasons": ["Insufficient data (spot/k5m/k1h/k4h)"],
@@ -318,104 +318,108 @@ def analyze(asset: str) -> Dict[str, Any]:
         save_json(os.path.join(outdir, "signal.json"), msg)
         return msg
 
-    # --- ZÁRT gyertyák + kijelzett vs. számításhoz használt ár ---
-    display_spot = float(spot_price)                                # kijelzés
+    # --- ZÁRT gyertyák + számítási ár ---
+    display_spot = float(spot_price)
     k5m_closed = k5m.iloc[:-1] if len(k5m) > 1 else k5m.copy()
     k1h_closed = k1h.iloc[:-1] if len(k1h) > 1 else k1h.copy()
     k4h_closed = k4h.iloc[:-1] if len(k4h) > 1 else k4h.copy()
-
-    last5_close    = float(k5m_closed["close"].iloc[-1])            # stabil, lezárt 5m
+    last5_close    = float(k5m_closed["close"].iloc[-1])
     price_for_calc = last5_close
 
-    # 2) Bias 4H→1H (zárt 1h/4h)
-    bias4h = bias_from_emas(k4h_closed)
-    bias1h = bias_from_emas(k1h_closed)
+    # 2) Bias 4H→1H
+    bias4h = bias_from_emas(k4h_closed); bias1h = bias_from_emas(k1h_closed)
     trend_bias = "long" if (bias4h=="long" and bias1h!="short") else ("short" if (bias4h=="short" and bias1h!="long") else "neutral")
 
-    # 2/b Rezsim (EMA21 meredekség 1h)
-    regime_ok, regime_val = ema_slope_ok(k1h_closed, EMA_SLOPE_PERIOD, EMA_SLOPE_LOOKBACK, EMA_SLOPE_TH)
+    # 2/b Rezsim (EMA21 meredekség 1h) — eszközfüggő küszöb (ÚJ)
+    regime_ok, regime_val = ema_slope_ok(k1h_closed, EMA_SLOPE_PERIOD, EMA_SLOPE_LOOKBACK, ema_slope_threshold(asset))
 
-    # 3) HTF sweep (zárt 1h/4h)
+    # 3) HTF sweep
     sw1h = detect_sweep(k1h_closed, 24); sw4h = detect_sweep(k4h_closed, 24)
     swept = sw1h["sweep_high"] or sw1h["sweep_low"] or sw4h["sweep_high"] or sw4h["sweep_low"]
 
-    # 4) 5M BOS a trend irányába (zárt 5m)
-    bos5m = detect_bos(k5m_closed, "long" if trend_bias=="long" else ("short" if trend_bias=="short" else "neutral"))
+    # 4) Core BOS kapu: BOS **vagy** 15-baros struktúratörés (ÚJ)
+    bos5m_long  = detect_bos(k5m_closed, "long")
+    bos5m_short = detect_bos(k5m_closed, "short")
+    bos_struct_long  = broke_structure(k5m_closed, "long",  MOMENTUM_BOS_LB)
+    bos_struct_short = broke_structure(k5m_closed, "short", MOMENTUM_BOS_LB)
+    if trend_bias == "long":
+        bos_core = bool(bos5m_long or bos_struct_long)
+    elif trend_bias == "short":
+        bos_core = bool(bos5m_short or bos_struct_short)
+    else:
+        bos_core = False
 
-    # 5) ATR szűrő (relatív) — a stabil árhoz viszonyítjuk (zárt 5m)
+    # 5) ATR szűrő (relatív) — zárt 5m
     atr5 = atr(k5m_closed).iloc[-1]
     rel_atr = float(atr5 / price_for_calc) if (atr5 and price_for_calc) else float("nan")
     atr_ok = not (np.isnan(rel_atr) or rel_atr < atr_threshold(asset))
 
-    # 6) Fib zóna (0.618–0.886) 1H swingekre, ATR(1h) alapú tűréssel — zárt 1h
+    # 6) Fib zóna (0.618–0.886) 1H swingekre, ENYHÍTETT toleranciával (ÚJ)
     k1h_sw = find_swings(k1h_closed, lb=2)
     move_hi, move_lo = last_swing_levels(k1h_sw)
     atr1h = float(atr(k1h_closed).iloc[-1]) if not k1h_closed.empty else 0.0
     fib_ok = fib_zone_ok(
         move_hi, move_lo, price_for_calc,
         low=0.618, high=0.886,
-        tol_abs=atr1h * 0.75,   # szélesített tolerancia: ±0.75×ATR(1h)
-        tol_frac=0.02
+        tol_abs=atr1h * FIB_TOL_ABS_ATR1H_MULT,
+        tol_frac=FIB_TOL_FRAC
     )
 
-    # 7) P-score (FINOMHANGOLT súlyozás)
+    # 7) P-score
     P, reasons = 20, []
     if trend_bias != "neutral": P += 20; reasons.append(f"Bias(4H→1H)={trend_bias}")
     if regime_ok:               P += 8;  reasons.append("Regime ok (EMA21 slope)")
     if swept:                   P += 15; reasons.append("HTF sweep ok")
-    if bos5m:                   P += 18; reasons.append("5M BOS trendirányba")
+    if bos_core:
+        P += 18
+        if (trend_bias=="long" and not bos5m_long) or (trend_bias=="short" and not bos5m_short):
+            reasons.append("5M struktúratörés (15-bar) a BOS helyett (core)")
+        else:
+            reasons.append("5M BOS trendirányba")
     if fib_ok:                  P += 20; reasons.append("Fib zóna konfluencia (0.618–0.886)")
     if atr_ok:                  P += 9;  reasons.append("ATR rendben")
     P = max(0, min(100, P))
 
-    # --- Kapuk (liquidity = Fib zóna VAGY sweep) + session + regime ---
+    # --- Kapuk
     liquidity_ok = bool(fib_ok or swept)
     session_ok_flag = session_ok(asset)
-
     conds_core = {
         "session": bool(session_ok_flag),
         "regime":  bool(regime_ok),
         "bias":    trend_bias in ("long","short"),
-        "bos5m":   bool(bos5m),
-        "liquidity": liquidity_ok,
+        "bos5m|struct_break":   bool(bos_core),   # ÚJ megnevezés
+        "liquidity(fib_zone|sweep)": liquidity_ok,
         "atr":     bool(atr_ok),
     }
     can_enter_core = (P >= 60) and all(conds_core.values())
     missing_core = [k for k, v in conds_core.items() if not v]
 
-    # --- Momentum feltételek (override) — kriptókra (zárt 5m-ből) ---
+    # --- Momentum feltételek (override)
     momentum_used = False
     mom_dir: Optional[str] = None
-    mom_required = ["session", "momentum(ema9x21)", "bos5m|struct_break", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
     missing_mom: List[str] = []
 
-    if asset in ENABLE_MOMENTUM_ASSETS:
-        e9_5 = ema(k5m_closed["close"], 9)
-        e21_5 = ema(k5m_closed["close"], 21)
+    if (asset in ENABLE_MOMENTUM_ASSETS) and momentum_time_ok(asset):
+        e9_5 = ema(k5m_closed["close"], 9); e21_5 = ema(k5m_closed["close"], 21)
         bear = (e9_5 < e21_5).tail(MOMENTUM_BARS).all()
         bull = (e9_5 > e21_5).tail(MOMENTUM_BARS).all()
-        # Irányhelyes BOS/structure (NE a trend_bias-ra támaszkodjunk)
-        bos5m_long  = detect_bos(k5m_closed, "long")
-        bos5m_short = detect_bos(k5m_closed, "short")
-        bos_struct_short = broke_structure(k5m_closed, "short", MOMENTUM_BOS_LB)
-        bos_struct_long  = broke_structure(k5m_closed, "long",  MOMENTUM_BOS_LB)
-        bos_any_short = bool(bos5m_short or bos_struct_short)
-        bos_any_long  = bool(bos5m_long  or bos_struct_long)
+        bos_any_short = bool(detect_bos(k5m_closed, "short") or broke_structure(k5m_closed, "short", MOMENTUM_BOS_LB))
+        bos_any_long  = bool(detect_bos(k5m_closed, "long")  or broke_structure(k5m_closed, "long",  MOMENTUM_BOS_LB))
         mom_atr_ok = not np.isnan(rel_atr) and (rel_atr >= MOMENTUM_ATR_REL)
 
         if session_ok_flag:
-            if bear and bos_any_short and mom_atr_ok:
-                mom_dir = "sell"
-            elif bull and bos_any_long and mom_atr_ok:
-                mom_dir = "buy"
+            if bear and bos_any_short and mom_atr_ok: mom_dir = "sell"
+            elif bull and bos_any_long and mom_atr_ok: mom_dir = "buy"
 
         if mom_dir is None:
             if not session_ok_flag: missing_mom.append("session")
             if not (bear or bull):  missing_mom.append("momentum(ema9x21)")
             if not (bos_any_short if bear else bos_any_long): missing_mom.append("bos5m|struct_break")
             if not mom_atr_ok: missing_mom.append("atr")
+    elif asset in ENABLE_MOMENTUM_ASSETS and asset == "NSDQ100":
+        missing_mom.append("momentum_window(13:30–14:00Z)")
 
-    # 8) Döntés + szintek (RR/TP matek) — core vagy momentum
+    # 8) Döntés + szintek
     decision = "no entry"
     entry = sl = tp1 = tp2 = rr = None
     lev = LEVERAGE.get(asset, 2.0)
@@ -423,7 +427,6 @@ def analyze(asset: str) -> Dict[str, Any]:
     missing = list(missing_core)
 
     def nsdq_cash_session_now() -> bool:
-        # felhasználja a SESSIONS_UTC táblát (NSDQ100-ra beállítva)
         return asset == "NSDQ100" and session_ok("NSDQ100")
 
     def compute_levels(decision_side: str):
@@ -431,7 +434,6 @@ def analyze(asset: str) -> Dict[str, Any]:
         atr5_val  = float(atr5 or 0.0)
         atr1h_val = float(atr1h or 0.0)
 
-        # vol/költség alapú minimum kockázat és puffer
         risk_min = max(0.6 * atr5_val, 0.0035 * price_for_calc, 0.50)
         buf      = max(0.3 * atr5_val, 0.1 * atr1h_val)
 
@@ -443,8 +445,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             sl = (lo5 if lo5 is not None else (entry - atr5_val)) - buf
             if (entry - sl) < risk_min: sl = entry - risk_min
             risk = max(1e-6, entry - sl)
-            tp1 = entry + TP1_R * risk
-            tp2 = entry + TP2_R * risk
+            tp1 = entry + TP1_R * risk; tp2 = entry + TP2_R * risk
             rr  = (tp2 - entry) / risk
             tp1_dist = tp1 - entry
             ok_math = (sl < entry < tp1 <= tp2)
@@ -452,22 +453,18 @@ def analyze(asset: str) -> Dict[str, Any]:
             sl = (hi5 if hi5 is not None else (entry + atr5_val)) + buf
             if (sl - entry) < risk_min: sl = entry + risk_min
             risk = max(1e-6, sl - entry)
-            tp1 = entry - TP1_R * risk
-            tp2 = entry - TP2_R * risk
+            tp1 = entry - TP1_R * risk; tp2 = entry - TP2_R * risk
             rr  = (entry - tp2) / risk
             tp1_dist = entry - tp1
             ok_math = (tp2 <= tp1 < entry < sl)
 
-        # --- ÚJ: adaptív COST_MULT magas volnál ---
         rel_atr_local = float(atr5_val / entry) if entry else 0.0
         cost_mult = COST_MULT_HIGH_VOL if rel_atr_local >= HIGH_VOL_TH else COST_MULT_BASE
 
-        # --- ÚJ: NSDQ100 cash órákban alacsonyabb TP_MIN_PCT (0.10%) ---
         tp_min_pct_asset = TP_MIN_PCT.get(asset, TP_MIN_PCT["default"])
         if asset == "NSDQ100" and nsdq_cash_session_now():
             tp_min_pct_asset = min(tp_min_pct_asset, 0.0010)  # 0.10%
 
-        # --- per-asset TP minimum + költségbuffer + ATR(5m) minimum ---
         min_profit_abs = max(
             TP_MIN_ABS.get(asset, TP_MIN_ABS["default"]),
             tp_min_pct_asset * entry,
@@ -484,38 +481,31 @@ def analyze(asset: str) -> Dict[str, Any]:
     if can_enter_core:
         decision = "buy" if trend_bias=="long" else "sell"
         mode = "core"
-        if not compute_levels(decision):
-            decision = "no entry"
+        if not compute_levels(decision): decision = "no entry"
     else:
         if mom_dir is not None:
-            mode = "momentum"
-            missing = []
-            momentum_used = True
+            mode = "momentum"; missing = []; momentum_used = True
             decision = mom_dir
             if not compute_levels(decision):
                 decision = "no entry"
             else:
                 reasons.append("Momentum override (5m EMA + ATR + BOS/struct)")
                 P = max(P, 75)
-        elif asset in ENABLE_MOMENTUM_ASSETS and missing_mom:
-            mode = "momentum"
-            missing = list(dict.fromkeys(missing_mom))  # uniq
+        elif (asset in ENABLE_MOMENTUM_ASSETS) and missing_mom:
+            mode = "momentum"; missing = list(dict.fromkeys(missing_mom))
 
-    # 9) Mentés: signal.json
+    # 9) Mentés
     decision_obj = {
-        "asset": asset,
-        "ok": True,
-        "retrieved_at_utc": nowiso(),
+        "asset": asset, "ok": True, "retrieved_at_utc": nowiso(),
         "source": "Twelve Data (lokális JSON)",
         "spot": {"price": display_spot, "utc": spot_utc},
-        "signal": decision,
-        "probability": int(P),
+        "signal": decision, "probability": int(P),
         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": (round(rr,2) if rr else None),
         "leverage": lev,
         "gates": {
             "mode": mode,
             "required": (
-                ["session", "regime", "bias", "bos5m", "liquidity(fib_zone|sweep)", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
+                ["session", "regime", "bias", "bos5m|struct_break", "liquidity(fib_zone|sweep)", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
                 if mode == "core" else
                 ["session", "momentum(ema9x21)", "bos5m|struct_break", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
             ),
@@ -527,7 +517,6 @@ def analyze(asset: str) -> Dict[str, Any]:
     return decision_obj
 
 # ------------------------------- főfolyamat ------------------------------------
-
 def main():
     summary = {"ok": True, "generated_utc": nowiso(), "assets": {}}
     for asset in ASSETS:
