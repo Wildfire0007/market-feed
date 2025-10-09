@@ -3,9 +3,8 @@ name: TD Pipeline (5m)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"   # 5 percenként
+    - cron: "*/5 * * * *"   # 5 percenként (UTC)
 
-# A Pages-deploy-hoz ezek szükségesek (a run job külön kap contents: write-ot a commit miatt)
 permissions:
   contents: read
   pages: write
@@ -18,7 +17,8 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    # Commit+push miatt kell a write jogosultság erre a jobra
+    timeout-minutes: 15
+    # Commit+push miatt kell write
     permissions:
       contents: write
     env:
@@ -43,27 +43,28 @@ jobs:
 
       - name: Install deps
         run: pip install -r requirements.txt
+        timeout-minutes: 3
 
       - name: Fetch data from Twelve Data (stale-guarded)
         run: python Trading.py
+        timeout-minutes: 5
 
       - name: Build trade signals (TD-only)
         run: python analysis.py
+        timeout-minutes: 3
 
       - name: Build intraday report
         run: python scripts/intraday_report.py
+        timeout-minutes: 3
 
       - name: Preflight:list & peek
         if: always()
         run: |
           echo "== public tree =="
           ls -R public || true
-
-          # jq biztosan legyen
           if ! command -v jq >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y jq
           fi
-
           for a in SOL NSDQ100 GOLD_CFD BNB USOIL; do
             echo "---- $a spot.json ----"
             if test -f public/$a/spot.json; then
@@ -71,7 +72,6 @@ jobs:
             else
               echo "missing: public/$a/spot.json"
             fi
-
             echo "---- $a signal.json ----"
             if test -f public/$a/signal.json; then
               jq -c '{signal, probability, entry, sl, tp1, tp2, rr, spot:.spot}' public/$a/signal.json
@@ -79,23 +79,23 @@ jobs:
               echo "missing: public/$a/signal.json"
             fi
           done
-
           echo "---- status.json (rövid) ----"
           if test -f public/status.json; then
-            jq -c '{generated_utc, assets:(.assets|to_entries|map({k:.key, ok:(.value.ok), k5m_ok:(.value.ok.k5m), k1h_ok:(.value.ok.k1h), k4h_ok:(.value.ok.k4h)}) )}' public/status.json | head -n 1
+            jq -c '{generated_utc, assets:(.assets|to_entries|map({k:.key, oks:.value.ok}) )}' public/status.json | head -n 1
           else
             echo "missing: public/status.json"
           fi
-
           echo "---- analysis_summary.json ----"
           if test -f public/analysis_summary.json; then
             jq -c '.assets' public/analysis_summary.json | head -n 1
           else
             echo "missing: public/analysis_summary.json"
           fi
+        timeout-minutes: 3
 
       - name: TD live probe (compare with local files)
         run: python scripts/td_verify.py
+        timeout-minutes: 3
 
       - name: Commit & push outputs (history)
         run: |
@@ -104,6 +104,11 @@ jobs:
           git add public reports || true
           git commit -m "TD: data+signals+report" || echo "no changes"
           git push || true
+        timeout-minutes: 2
+
+      # GitHub Pages – hivatalos lépések
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
 
       - name: Upload Pages artifact (public/)
         uses: actions/upload-pages-artifact@v3
@@ -111,15 +116,15 @@ jobs:
           path: public
 
       - name: Notify Discord
+        if: ${{ secrets.DISCORD_WEBHOOK_URL != '' }}
         run: python scripts/notify_discord.py
+        timeout-minutes: 2
 
   deploy:
-    # A Pages-deploy külön jobban történik; a run után jön
     needs: run
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
