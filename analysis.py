@@ -16,6 +16,9 @@ FRISSÍTÉSEK (2025-10-09):
 - P-score súlyok változatlanok, de BOS pont a BOS|struct esetén is jár.
 - TP1-minimum: adaptív költségpuffer magas volnál (1.7×), különben 2.0×.
 - NSDQ100 cash órákban TP_MIN_PCT 0.10% (min).
+
+Robusztussági fixek:
+- ATR(1h) és ATR(5m) NaN-védelem (fib tolerancia és SL/TP pufferek számításánál).
 """
 
 import os, json
@@ -349,15 +352,20 @@ def analyze(asset: str) -> Dict[str, Any]:
     else:
         bos_core = False
 
-    # 5) ATR szűrő (relatív) — zárt 5m
-    atr5 = atr(k5m_closed).iloc[-1]
-    rel_atr = float(atr5 / price_for_calc) if (atr5 and price_for_calc) else float("nan")
+    # 5) ATR szűrő (relatív) — zárt 5m (NaN-védett)
+    atr5_series = atr(k5m_closed)
+    atr5 = float(atr5_series.iloc[-1]) if len(atr5_series) else float("nan")
+    rel_atr = (atr5 / price_for_calc) if (np.isfinite(atr5) and price_for_calc) else float("nan")
     atr_ok = not (np.isnan(rel_atr) or rel_atr < atr_threshold(asset))
 
-    # 6) Fib zóna (0.618–0.886) 1H swingekre, ENYHÍTETT toleranciával (ÚJ)
+    # 6) Fib zóna (0.618–0.886) 1H swingekre, ENYHÍTETT toleranciával (ÚJ, NaN-védett ATR1h)
     k1h_sw = find_swings(k1h_closed, lb=2)
     move_hi, move_lo = last_swing_levels(k1h_sw)
-    atr1h = float(atr(k1h_closed).iloc[-1]) if not k1h_closed.empty else 0.0
+    atr1h_series = atr(k1h_closed)
+    atr1h = float(atr1h_series.iloc[-1]) if len(atr1h_series) else 0.0
+    if not np.isfinite(atr1h):
+        atr1h = 0.0
+
     fib_ok = fib_zone_ok(
         move_hi, move_lo, price_for_calc,
         low=0.618, high=0.886,
@@ -431,8 +439,9 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     def compute_levels(decision_side: str):
         nonlocal entry, sl, tp1, tp2, rr, missing
-        atr5_val  = float(atr5 or 0.0)
-        atr1h_val = float(atr1h or 0.0)
+        # NaN-biztos ATR értékek
+        atr5_val  = float(atr5)  if np.isfinite(atr5)  else 0.0
+        atr1h_val = float(atr1h) if np.isfinite(atr1h) else 0.0
 
         risk_min = max(0.6 * atr5_val, 0.0035 * price_for_calc, 0.50)
         buf      = max(0.3 * atr5_val, 0.1 * atr1h_val)
