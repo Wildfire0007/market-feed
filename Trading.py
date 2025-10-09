@@ -31,7 +31,7 @@ from typing import Any, Dict, Optional, List, Tuple
 import requests
 
 OUT_DIR  = os.getenv("OUT_DIR", "public")
-API_KEY  = os.environ["TWELVEDATA_API_KEY"].strip()
+API_KEY  = (os.getenv("TWELVEDATA_API_KEY") or "").strip()
 TD_BASE  = "https://api.twelvedata.com"
 TD_PAUSE = float(os.getenv("TD_PAUSE", "0.3"))
 
