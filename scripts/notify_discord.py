@@ -13,7 +13,7 @@ Küldés:
 - STABIL (>= STABILITY_RUNS) BUY/SELL ➜ "normal"
 - Ellenirányú stabil jel flip ➜ "flip"
 - Korábban küldött BUY/SELL stabilan NO ENTRY ➜ "invalidate"
-- ÓRÁNKÉNTI HEARTBEAT 07–23 (Budapest), akkor is, ha nincs riasztás.
+- ÓRÁNKÉNTI HEARTBEAT (minden órában), akkor is, ha nincs riasztás.
   Ha adott órában már ment event (normal/flip/invalidate), külön heartbeat nem megy ki.
 
 ENV:
@@ -33,10 +33,8 @@ STATE_PATH = f"{PUBLIC_DIR}/_notify_state.json"
 STABILITY_RUNS = 2
 COOLDOWN_MIN   = int(os.getenv("DISCORD_COOLDOWN_MIN", "10"))  # perc; 0 = off
 
-# ---- Heartbeat időablak (Budapest) ----
+# ---- Időzóna a fejlécben / órakulcshoz ----
 HB_TZ   = ZoneInfo("Europe/Budapest")
-HB_FROM = 7
-HB_TO   = 23
 
 # ---- Megjelenés / emoji / színek ----
 EMOJI = {
@@ -48,11 +46,11 @@ EMOJI = {
 }
 COLOR = {
     "BUY":   0x2ecc71,  # zöld
-    "SELL":  0x2ecc71,  # zöld (igény szerint eltérőre cserélhető)
+    "SELL":  0x2ecc71,  # zöld
     "NO":    0xe74c3c,  # piros
     "WAIT":  0xf1c40f,  # sárga
     "FLIP":  0x3498db,  # kék
-    "INFO":  0x95a5a6,  # semleges (nem használjuk aktívan)
+    "INFO":  0x95a5a6,  # semleges
 }
 
 # ---------------- util ----------------
@@ -234,7 +232,6 @@ def main():
     now_ep  = utcnow_epoch()
     bud_dt  = bud_now()
     bud_key = bud_hh_key(bud_dt)
-    in_hb_window = HB_FROM <= bud_dt.hour <= HB_TO
 
     per_asset_sigs = {}
     per_asset_is_stable = {}
@@ -315,9 +312,9 @@ def main():
 
         state[asset] = st
 
-    # --- Heartbeat 07–23, ha az órában még nem volt event ---
+    # --- Heartbeat: MINDEN órában, ha az órában még nem ment ki event ---
     last_hb_key = meta.get("last_heartbeat_key")
-    if not embeds and in_hb_window and last_hb_key != bud_key:
+    if not embeds and last_hb_key != bud_key:
         for asset in ASSETS:
             sig = per_asset_sigs.get(asset) or {"asset": asset, "signal": "no entry", "probability": 0}
             is_stable = per_asset_is_stable.get(asset, True)
