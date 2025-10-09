@@ -19,6 +19,7 @@ FRISSÍTÉSEK (2025-10-09):
 
 Robusztussági fixek:
 - ATR(1h) és ATR(5m) NaN-védelem (fib tolerancia és SL/TP pufferek számításánál).
+- ÚJ: “félkész” 5m bar szűrése — ha az utolsó 5m gyertya kora < UNFINISHED_5M_AGE_SEC, zártnak tekintjük a megelőzőt (levágjuk az utolsót).
 """
 
 import os, json
@@ -42,6 +43,9 @@ LEVERAGE = {
 }
 
 MAX_RISK_PCT = 1.8
+
+# --- “félkész” 5m bar szűrés (mp) ---
+UNFINISHED_5M_AGE_SEC = int(os.getenv("UNFINISHED_5M_AGE_SEC", "240"))
 
 # --- Fib toleranciák (ÚJ, enyhítve) ---
 FIB_TOL_FRAC = 0.025              # ±2.5%
@@ -290,6 +294,24 @@ def ema_slope_ok(df_1h: pd.DataFrame,
     rel = abs(ema_now - ema_prev) / max(1e-9, price_now)
     return (rel >= th), rel
 
+# --- ÚJ: záratlan 5m bar szűrés a DataFrame-eken -----------------------
+def _last_index_age_seconds(df: pd.DataFrame) -> Optional[float]:
+    if df is None or df.empty:
+        return None
+    last_dt = df.index[-1].to_pydatetime()
+    if last_dt.tzinfo is None:
+        last_dt = last_dt.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    return (now - last_dt).total_seconds()
+
+def drop_unfinished_last_5m(df: pd.DataFrame, min_age_sec: int = UNFINISHED_5M_AGE_SEC) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    age = _last_index_age_seconds(df)
+    if age is not None and age < min_age_sec and len(df) >= 2:
+        return df.iloc[:-1].copy()
+    return df.copy()
+
 # ------------------------------ elemzés egy eszközre ---------------------------
 def analyze(asset: str) -> Dict[str, Any]:
     outdir = os.path.join(PUBLIC_DIR, asset)
@@ -322,10 +344,24 @@ def analyze(asset: str) -> Dict[str, Any]:
         return msg
 
     # --- ZÁRT gyertyák + számítási ár ---
+    # 5m: csak akkor vágjuk le az utolsót, ha túl friss (félkész)
+    k5m_closed = drop_unfinished_last_5m(k5m, UNFINISHED_5M_AGE_SEC)
+    # 1h/4h: konzervatívan mindig zárt gyertyákkal dolgozunk
+    k1h_closed = k1h.iloc[:-1].copy() if len(k1h) > 1 else k1h.copy()
+    k4h_closed = k4h.iloc[:-1].copy() if len(k4h) > 1 else k4h.copy()
+
+    if k5m_closed.empty or k1h_closed.empty or k4h_closed.empty:
+        msg = {
+            "asset": asset, "ok": False, "retrieved_at_utc": nowiso(),
+            "source": "Twelve Data (lokális JSON)",
+            "spot": {"price": float(spot_price), "utc": spot_utc},
+            "signal": "no entry", "probability": 0,
+            "reasons": ["Insufficient closed bars after unfinished-5m filter"],
+        }
+        save_json(os.path.join(outdir, "signal.json"), msg)
+        return msg
+
     display_spot = float(spot_price)
-    k5m_closed = k5m.iloc[:-1] if len(k5m) > 1 else k5m.copy()
-    k1h_closed = k1h.iloc[:-1] if len(k1h) > 1 else k1h.copy()
-    k4h_closed = k4h.iloc[:-1] if len(k4h) > 1 else k4h.copy()
     last5_close    = float(k5m_closed["close"].iloc[-1])
     price_for_calc = last5_close
 
@@ -395,7 +431,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "session": bool(session_ok_flag),
         "regime":  bool(regime_ok),
         "bias":    trend_bias in ("long","short"),
-        "bos5m|struct_break":   bool(bos_core),   # ÚJ megnevezés
+        "bos5m|struct_break":   bool(bos_core),
         "liquidity(fib_zone|sweep)": liquidity_ok,
         "atr":     bool(atr_ok),
     }
@@ -521,6 +557,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             "missing": missing,
         },
         "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else [])) or ["no signal"],
+        "notes": {
+            "unfinished_5m_age_sec": UNFINISHED_5M_AGE_SEC
+        }
     }
     save_json(os.path.join(outdir, "signal.json"), decision_obj)
     return decision_obj
