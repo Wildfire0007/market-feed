@@ -13,7 +13,7 @@ Kimenetek (guard-olt mentés):
   public/status.json           (összefoglaló: ok/age/refresh/saved per asset)
 
 Stale-check (kor-alapú frissítés; csak ha elég régi a lokális fájl):
-  5m:   ≥ 900 s
+  5m:   ≥ 300 s   # 900 -> 300
   1h:   ≥ 3600 s
   4h:   ≥ 14400 s
   spot: ≥ 120 s
@@ -52,9 +52,21 @@ ASSETS = {
 
 # ─────────────────────────────── Stale policy ────────────────────────────
 STALE_SPOT = 120        # sec
-STALE_5M   = 900        # sec
+STALE_5M   = 300        # sec   # 900 -> 300 (GYORSÍTOTT)
 STALE_1H   = 3600       # sec
 STALE_4H   = 14400      # sec
+
+# ── Spot-drift trigger (ÚJ): nagy spot elmozdulás kényszeríti a 15p várakozást megkerülő 5m frissítést
+SPOT_DRIFT_TRIG_REL = {  # abs(spot - last_5m_close) / spot
+    "default": 0.004,    # 0.40%
+    "NSDQ100": 0.002,    # 0.20% (nyitás körül érzékenyebb)
+    "GOLD_CFD": 0.003,   # 0.30%
+    "USOIL":   0.003,    # 0.30%
+    "SOL":     0.005,    # 0.50%
+    "BNB":     0.005,
+}
+def drift_threshold(asset: str) -> float:
+    return SPOT_DRIFT_TRIG_REL.get(asset, SPOT_DRIFT_TRIG_REL["default"])
 
 # ─────────────────────────────── Segédek ─────────────────────────────────
 def now_utc() -> str:
@@ -351,7 +363,8 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
         status_entry["saved"]["spot"] = False
 
     spot_now = load_json(spot_path) or {}
-    status_entry["ok"]["spot"] = bool(spot_now.get("price") is not None)
+    spot_price = spot_now.get("price")
+    status_entry["ok"]["spot"] = bool(spot_price is not None)
     time.sleep(TD_PAUSE)
 
     # ── 2) KLINES 5m / 1h / 4h  (csak ha elég régi a fájl) ────────────────
@@ -362,6 +375,29 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     k5_path = os.path.join(adir, "klines_5m.json")
     status_entry["ages_sec"]["k5m"] = file_age_seconds(k5_path)
     need_k5 = should_refresh(k5_path, STALE_5M)
+
+    # ÚJ: spot-drift alapú kényszerített 5m refresh (akkor is, ha a 300 mp nem telt le)
+    last_5m_close = None
+    try:
+        k5_curr = load_json(k5_path) or {}
+        if values_ok(k5_curr):
+            vals = k5_curr["values"]
+            last_5m_close = float(vals[-1]["close"])
+    except Exception:
+        last_5m_close = None
+
+    if (not need_k5) and (spot_price is not None) and (last_5m_close is not None):
+        rel_drift = abs(spot_price - last_5m_close) / max(abs(spot_price), 1e-9)
+        if rel_drift >= drift_threshold(asset):
+            print(f"[{asset}] 5m refresh forced by spot drift: {rel_drift:.4%} >= {drift_threshold(asset):.2%}")
+            need_k5 = True
+            status_entry.setdefault("notes", {})["forced_k5m_by_spot_drift"] = {
+                "rel_drift": rel_drift,
+                "threshold": drift_threshold(asset),
+                "spot": spot_price,
+                "last_5m_close": last_5m_close,
+            }
+
     if need_k5:
         r5 = fetch_ts("5min")
         status_entry["refreshed"]["k5m"] = True
@@ -369,6 +405,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     else:
         status_entry["refreshed"]["k5m"] = False
         status_entry["saved"]["k5m"] = False
+
     k5_raw = load_json(k5_path) or {"values": []}
     status_entry["ok"]["k5m"] = values_ok(k5_raw)
     time.sleep(TD_PAUSE)
@@ -414,7 +451,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
             "signal": pre.get("signal", "no entry"),
             "reasons": pre.get("reasons", []),
             "probability": 0,   # előzetes; a véglegeset az analysis.py adja
-            "spot": {"price": spot_now.get("price"), "utc": spot_now.get("utc")},
+            "spot": {"price": spot_price, "utc": spot_now.get("utc")},
         })
         status_entry["saved"]["signal"] = True
     else:
@@ -446,6 +483,7 @@ def main():
             "stale_policy_sec": {"spot": STALE_SPOT, "k5m": STALE_5M, "k1h": STALE_1H, "k4h": STALE_4H},
             "guard": "no overwrite on error/empty values",
             "pre_signal_rule": "5m ema9×ema21 7 bars",
+            "spot_drift_trigger": SPOT_DRIFT_TRIG_REL,
         }
     }
 
