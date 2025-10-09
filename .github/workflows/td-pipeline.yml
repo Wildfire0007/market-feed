@@ -3,12 +3,7 @@ name: TD Pipeline (5m)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"   # 5 percenként (UTC)
-
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+    - cron: "*/5 * * * *"   # 5 percenként
 
 concurrency:
   group: td-pipeline
@@ -17,16 +12,12 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     permissions:
       contents: write
     env:
       TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
     steps:
-      - name: Runner ping
-        run: echo "Runner alive @ $(date -u)"
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -45,35 +36,35 @@ jobs:
 
       - name: Install deps
         run: pip install -r requirements.txt
-        timeout-minutes: 3
 
-      - name: Fetch data from Twelve Data (stale-guarded)
+      - name: Fetch data from Twelve Data
         run: python Trading.py
-        timeout-minutes: 5
 
       - name: Build trade signals (TD-only)
         run: python analysis.py
-        timeout-minutes: 3
 
       - name: Build intraday report
         run: python scripts/intraday_report.py
-        timeout-minutes: 3
 
       - name: Preflight:list & peek
         if: always()
         run: |
           echo "== public tree =="
           ls -R public || true
+
+          # jq biztosan legyen
           if ! command -v jq >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y jq
           fi
-          for a in SOL NSDQ100 GOLD_CFD BNB USOIL; do
+
+          for a in SOL NSDQ100 GOLD_CFD; do
             echo "---- $a spot.json ----"
             if test -f public/$a/spot.json; then
               jq -c '{price:(.price//.price_usd), utc:(.utc//.timestamp//.retrieved_at_utc//.retrieved_at)}' public/$a/spot.json
             else
               echo "missing: public/$a/spot.json"
             fi
+
             echo "---- $a signal.json ----"
             if test -f public/$a/signal.json; then
               jq -c '{signal, probability, entry, sl, tp1, tp2, rr, spot:.spot}' public/$a/signal.json
@@ -81,51 +72,24 @@ jobs:
               echo "missing: public/$a/signal.json"
             fi
           done
-          echo "---- status.json (rövid) ----"
-          if test -f public/status.json; then
-            jq -c '{generated_utc, assets:(.assets|to_entries|map({k:.key, oks:.value.ok}) )}' public/status.json | head -n 1
-          else
-            echo "missing: public/status.json"
-          fi
-          echo "---- analysis_summary.json ----"
+
+          echo "---- summary ----"
           if test -f public/analysis_summary.json; then
             jq -c '.assets' public/analysis_summary.json | head -n 1
           else
             echo "missing: public/analysis_summary.json"
           fi
-        timeout-minutes: 3
-
+          
       - name: TD live probe (compare with local files)
         run: python scripts/td_verify.py
-        timeout-minutes: 3
 
-      - name: Commit & push outputs (history)
+      - name: Commit & push outputs
         run: |
           git config user.name "td-bot"
           git config user.email "td-bot@users.noreply.github.com"
           git add public reports || true
           git commit -m "TD: data+signals+report" || echo "no changes"
-          git push || true
-        timeout-minutes: 2
-
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload Pages artifact (public/)
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: public
+          git push
 
       - name: Notify Discord
-        if: ${{ secrets.DISCORD_WEBHOOK_URL != '' }}
         run: python scripts/notify_discord.py
-        timeout-minutes: 2
-
-  deploy:
-    needs: run
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
