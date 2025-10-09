@@ -56,6 +56,9 @@ STALE_5M   = 300        # sec   # 900 -> 300 (GYORSÍTOTT)
 STALE_1H   = 3600       # sec
 STALE_4H   = 14400      # sec
 
+# Utolsó 5m gyertya akkor tekinthető ZÁRTnak, ha legalább ennyi mp telt el
+UNFINISHED_5M_AGE_SEC = int(os.getenv("UNFINISHED_5M_AGE_SEC", "240"))
+
 # ── Spot-drift trigger (ÚJ): nagy spot elmozdulás kényszeríti a 15p várakozást megkerülő 5m frissítést
 SPOT_DRIFT_TRIG_REL = {  # abs(spot - last_5m_close) / spot
     "default": 0.004,    # 0.40%
@@ -217,6 +220,49 @@ def _sorted_closes_asc(raw: Dict[str, Any]) -> List[Optional[float]]:
             out.append(None)
     return out
 
+# ───────────────────── záratlan 5m bar szűrés (új segédek) ────────────────
+def _last_bar_dt(raw: Dict[str, Any]) -> Optional[datetime]:
+    vals = (raw or {}).get("values") or []
+    latest_dt = None
+    for row in vals:
+        dt = _parse_dt_any(row.get("datetime") or row.get("t"))
+        if dt and (latest_dt is None or dt > latest_dt):
+            latest_dt = dt
+    return latest_dt
+
+def _is_last_bar_unclosed(raw: Dict[str, Any], min_age_sec: int = UNFINISHED_5M_AGE_SEC) -> bool:
+    dt = _last_bar_dt(raw)
+    if not dt:
+        return False
+    return (datetime.now(timezone.utc) - dt).total_seconds() < min_age_sec
+
+def _sorted_closes_asc_exclude_unclosed(raw: Dict[str, Any], min_age_sec: int = UNFINISHED_5M_AGE_SEC) -> List[Optional[float]]:
+    closes = _sorted_closes_asc(raw)
+    if closes and _is_last_bar_unclosed(raw, min_age_sec):
+        closes = closes[:-1]  # vágd le a félkész utolsó 5m gyertyát
+    return closes
+
+def _latest_closed_close_from_raw(raw: Dict[str, Any], min_age_sec: int = UNFINISHED_5M_AGE_SEC) -> Optional[float]:
+    """Visszaadja az utolsó ZÁRT 5m gyertya close értékét."""
+    vals = (raw or {}).get("values") or []
+    vals_sorted = sorted(
+        vals,
+        key=lambda r: _parse_dt_any(r.get("datetime") or r.get("t")) or datetime.min.replace(tzinfo=timezone.utc)
+    )
+    nowdt = datetime.now(timezone.utc)
+    for row in reversed(vals_sorted):
+        dt = _parse_dt_any(row.get("datetime") or row.get("t"))
+        try:
+            c = float(row.get("close"))
+        except Exception:
+            c = None
+        if (dt is None) or (c is None):
+            continue
+        if (nowdt - dt).total_seconds() >= min_age_sec:
+            return c
+    return None
+
+# ───────────────────────── Twelve Data hívók ─────────────────────────────
 def td_time_series(symbol: str, interval: str, outputsize: int = 500,
                    exchange: Optional[str] = None, order: str = "desc") -> Dict[str, Any]:
     """Hibatűrő time_series (hiba esetén ok:false + üres values)."""
@@ -370,7 +416,7 @@ def closes_from_ts(payload_raw: Dict[str, Any]) -> List[Optional[float]]:
 
 def pre_signal_from_k5m(raw_5m: Dict[str, Any]) -> Dict[str, Any]:
     # Csak akkor hívjuk, ha a raw_5m nem üres.
-    closes = _sorted_closes_asc(raw_5m)   # ← RENDEZETT (ASC) a helyes EMA-hez
+    closes = _sorted_closes_asc_exclude_unclosed(raw_5m)  # záratlan utolsó 5m gyertya kihagyva
     if not closes or len([x for x in closes if x is not None]) < 21:
         return {"ok": False, "signal": "no entry", "reasons": ["insufficient 5m bars (<21)"]}
     e9 = ema(closes, 9)
@@ -437,7 +483,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     try:
         k5_curr = load_json(k5_path) or {}
         if values_ok(k5_curr):
-            last_5m_close = _latest_close_from_raw(k5_curr)  # ← LEGFIRISSEBB ZÁRT 5m close
+            last_5m_close = _latest_closed_close_from_raw(k5_curr)  # ← LEGFIRISSEBB ZÁRT 5m close
     except Exception:
         last_5m_close = None
 
@@ -543,9 +589,10 @@ def main():
         "notes": {
             "stale_policy_sec": {"spot": STALE_SPOT, "k5m": STALE_5M, "k1h": STALE_1H, "k4h": STALE_4H},
             "guard": "no overwrite on error/empty values",
-            "pre_signal_rule": "5m ema9×ema21 7 bars (ASC rendezett)",
+            "pre_signal_rule": "5m ema9×ema21 7 bars (ASC rendezett, utolsó félkész 5m kihagyva)",
             "spot_drift_trigger": SPOT_DRIFT_TRIG_REL,
             "force_k5m_cooldown_sec": FORCE_K5M_COOLDOWN_SEC,
+            "unfinished_5m_age_sec": UNFINISHED_5M_AGE_SEC,
         }
     }
 
