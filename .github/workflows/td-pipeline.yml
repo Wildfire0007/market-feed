@@ -5,6 +5,12 @@ on:
   schedule:
     - cron: "*/5 * * * *"   # 5 percenként
 
+# A Pages-deploy-hoz ezek szükségesek (a run job külön kap contents: write-ot a commit miatt)
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
 concurrency:
   group: td-pipeline
   cancel-in-progress: true
@@ -12,6 +18,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
+    # Commit+push miatt kell a write jogosultság erre a jobra
     permissions:
       contents: write
     env:
@@ -37,7 +44,7 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Fetch data from Twelve Data
+      - name: Fetch data from Twelve Data (stale-guarded)
         run: python Trading.py
 
       - name: Build trade signals (TD-only)
@@ -57,7 +64,7 @@ jobs:
             sudo apt-get update && sudo apt-get install -y jq
           fi
 
-          for a in SOL NSDQ100 GOLD_CFD; do
+          for a in SOL NSDQ100 GOLD_CFD BNB USOIL; do
             echo "---- $a spot.json ----"
             if test -f public/$a/spot.json; then
               jq -c '{price:(.price//.price_usd), utc:(.utc//.timestamp//.retrieved_at_utc//.retrieved_at)}' public/$a/spot.json
@@ -73,23 +80,46 @@ jobs:
             fi
           done
 
-          echo "---- summary ----"
+          echo "---- status.json (rövid) ----"
+          if test -f public/status.json; then
+            jq -c '{generated_utc, assets:(.assets|to_entries|map({k:.key, ok:(.value.ok), k5m_ok:(.value.ok.k5m), k1h_ok:(.value.ok.k1h), k4h_ok:(.value.ok.k4h)}) )}' public/status.json | head -n 1
+          else
+            echo "missing: public/status.json"
+          fi
+
+          echo "---- analysis_summary.json ----"
           if test -f public/analysis_summary.json; then
             jq -c '.assets' public/analysis_summary.json | head -n 1
           else
             echo "missing: public/analysis_summary.json"
           fi
-          
+
       - name: TD live probe (compare with local files)
         run: python scripts/td_verify.py
 
-      - name: Commit & push outputs
+      - name: Commit & push outputs (history)
         run: |
           git config user.name "td-bot"
           git config user.email "td-bot@users.noreply.github.com"
           git add public reports || true
           git commit -m "TD: data+signals+report" || echo "no changes"
-          git push
+          git push || true
+
+      - name: Upload Pages artifact (public/)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
 
       - name: Notify Discord
         run: python scripts/notify_discord.py
+
+  deploy:
+    # A Pages-deploy külön jobban történik; a run után jön
+    needs: run
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
