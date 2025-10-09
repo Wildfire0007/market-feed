@@ -393,4 +393,19 @@ def analyze(asset: str) -> Dict[str, Any]:
         "source": "Twelve Data (lokális JSON)",
         "spot": {"price": display_spot, "utc": spot_utc},
         "signal": decision, "probability": int(P),
-        "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": (round(rr,2)
+        "rr": (round(float(rr), 2) if rr is not None else None),
+        "leverage": lev,
+        "gates": {
+            "mode": mode,
+            "required": (
+              ["session", "regime", "bias", "bos5m|struct_break", "liquidity(fib_zone|sweep)", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
+              if mode == "core" else
+              ["session", "momentum(ema9x21)", "bos5m|struct_break", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
+            ),
+            "missing": missing,
+        },
+        "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else [])) or ["no signal"],
+        "notes": {"unfinished_5m_age_sec": UNFINISHED_5M_AGE_SEC}
+    }
+
+
