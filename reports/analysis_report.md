@@ -1,6 +1,6 @@
 # Intraday riport (Twelve Data-only)
 
-Generálva (UTC): `2025-10-09T19:46:00Z`
+Generálva (UTC): `2025-10-09T19:49:25Z`
 
 ### SOL
 
