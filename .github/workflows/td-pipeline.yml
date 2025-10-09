@@ -18,13 +18,15 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Commit+push miatt kell write
     permissions:
       contents: write
     env:
       TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
     steps:
+      - name: Runner ping
+        run: echo "Runner alive @ $(date -u)"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -106,7 +108,6 @@ jobs:
           git push || true
         timeout-minutes: 2
 
-      # GitHub Pages – hivatalos lépések
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
