@@ -68,6 +68,10 @@ SPOT_DRIFT_TRIG_REL = {  # abs(spot - last_5m_close) / spot
 def drift_threshold(asset: str) -> float:
     return SPOT_DRIFT_TRIG_REL.get(asset, SPOT_DRIFT_TRIG_REL["default"])
 
+# ── Drift-frissítés túlterhelés védelme (opcionális, engedélyezve)
+FORCE_K5M_COOLDOWN_SEC = 120
+_last_forced_k5m: Dict[str, float] = {}
+
 # ─────────────────────────────── Segédek ─────────────────────────────────
 def now_utc() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -128,7 +132,7 @@ def guard_write_spot(path: str, spot_obj: Dict[str, Any]) -> bool:
     save_json_atomic(path, spot_obj)
     return True
 
-# ───────────────────────────── Twelve Data hívók ─────────────────────────
+# ───────────────────────────── TD / időbélyeg segédek ────────────────────
 def td_get(path: str, **params) -> Dict[str, Any]:
     params["apikey"] = API_KEY
     r = requests.get(
@@ -161,6 +165,57 @@ def _iso_from_td_ts(ts: Any) -> Optional[str]:
             if "T" in ts:
                 return ts
     return None
+
+def _parse_dt_any(ts: Any) -> Optional[datetime]:
+    if ts is None:
+        return None
+    try:
+        if isinstance(ts, (int, float)) or (isinstance(ts, str) and ts.isdigit()):
+            return datetime.fromtimestamp(int(ts), tz=timezone.utc)
+    except Exception:
+        pass
+    if isinstance(ts, str):
+        # TD klasszikus formátum
+        try:
+            return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+        # ISO fallback (pl. "2025-10-09T13:45:00Z")
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except Exception:
+            return None
+    return None
+
+def _latest_close_from_raw(raw: Dict[str, Any]) -> Optional[float]:
+    vals = (raw or {}).get("values") or []
+    best_dt = None
+    best_close = None
+    for row in vals:
+        dt = _parse_dt_any(row.get("datetime") or row.get("t"))
+        try:
+            c = float(row.get("close"))
+        except Exception:
+            c = None
+        if (dt is not None) and (c is not None):
+            if (best_dt is None) or (dt > best_dt):
+                best_dt = dt
+                best_close = c
+    return best_close
+
+def _sorted_closes_asc(raw: Dict[str, Any]) -> List[Optional[float]]:
+    vals = (raw or {}).get("values") or []
+    vals_sorted = sorted(
+        vals,
+        key=lambda r: _parse_dt_any(r.get("datetime") or r.get("t")) or datetime.min.replace(tzinfo=timezone.utc)
+    )
+    out: List[Optional[float]] = []
+    for row in vals_sorted:
+        try:
+            out.append(float(row["close"]))
+        except Exception:
+            out.append(None)
+    return out
 
 def td_time_series(symbol: str, interval: str, outputsize: int = 500,
                    exchange: Optional[str] = None, order: str = "desc") -> Dict[str, Any]:
@@ -300,6 +355,7 @@ def last_n_true(flags: List[bool], n: int) -> bool:
     return len(flags) >= n and all(flags[-n:])
 
 def closes_from_ts(payload_raw: Dict[str, Any]) -> List[Optional[float]]:
+    # (Régi segéd — már nem használjuk a pre-signalhoz; megmarad kompatibilitásból.)
     try:
         vals = payload_raw["values"]
         out: List[Optional[float]] = []
@@ -314,14 +370,14 @@ def closes_from_ts(payload_raw: Dict[str, Any]) -> List[Optional[float]]:
 
 def pre_signal_from_k5m(raw_5m: Dict[str, Any]) -> Dict[str, Any]:
     # Csak akkor hívjuk, ha a raw_5m nem üres.
-    closes = closes_from_ts(raw_5m)
-    if not closes:
-        return {"ok": False, "signal": "no entry", "reasons": ["empty 5m data"]}
+    closes = _sorted_closes_asc(raw_5m)   # ← RENDEZETT (ASC) a helyes EMA-hez
+    if not closes or len([x for x in closes if x is not None]) < 21:
+        return {"ok": False, "signal": "no entry", "reasons": ["insufficient 5m bars (<21)"]}
     e9 = ema(closes, 9)
     e21 = ema(closes, 21)
     gt = [False if (a is None or b is None) else (a > b) for a, b in zip(e9, e21)]
     lt = [False if (a is None or b is None) else (a < b) for a, b in zip(e9, e21)]
-    # Momentum új szabály: 7 bar
+    # Momentum szabály: 7 bar
     if last_n_true(gt, 7):
         return {"ok": True, "signal": "uptrend", "reasons": ["ema9 > ema21 (7 bars)"]}
     if last_n_true(lt, 7):
@@ -381,22 +437,27 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     try:
         k5_curr = load_json(k5_path) or {}
         if values_ok(k5_curr):
-            vals = k5_curr["values"]
-            last_5m_close = float(vals[-1]["close"])
+            last_5m_close = _latest_close_from_raw(k5_curr)  # ← LEGFIRISSEBB ZÁRT 5m close
     except Exception:
         last_5m_close = None
 
     if (not need_k5) and (spot_price is not None) and (last_5m_close is not None):
         rel_drift = abs(spot_price - last_5m_close) / max(abs(spot_price), 1e-9)
         if rel_drift >= drift_threshold(asset):
-            print(f"[{asset}] 5m refresh forced by spot drift: {rel_drift:.4%} >= {drift_threshold(asset):.2%}")
-            need_k5 = True
-            status_entry.setdefault("notes", {})["forced_k5m_by_spot_drift"] = {
-                "rel_drift": rel_drift,
-                "threshold": drift_threshold(asset),
-                "spot": spot_price,
-                "last_5m_close": last_5m_close,
-            }
+            # cooldown védelem
+            now_ts = time.time()
+            last_forced = _last_forced_k5m.get(asset, 0.0)
+            if (now_ts - last_forced) >= FORCE_K5M_COOLDOWN_SEC:
+                print(f"[{asset}] 5m refresh forced by spot drift: {rel_drift:.4%} >= {drift_threshold(asset):.2%}")
+                need_k5 = True
+                _last_forced_k5m[asset] = now_ts
+                status_entry.setdefault("notes", {})["forced_k5m_by_spot_drift"] = {
+                    "rel_drift": rel_drift,
+                    "threshold": drift_threshold(asset),
+                    "spot": spot_price,
+                    "last_5m_close": last_5m_close,
+                    "cooldown_sec": FORCE_K5M_COOLDOWN_SEC,
+                }
 
     if need_k5:
         r5 = fetch_ts("5min")
@@ -451,7 +512,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
             "signal": pre.get("signal", "no entry"),
             "reasons": pre.get("reasons", []),
             "probability": 0,   # előzetes; a véglegeset az analysis.py adja
-            "spot": {"price": spot_price, "utc": spot_now.get("utc")},
+            "spot": {"price": spot_price, "utc": (spot_now.get("utc") if isinstance(spot_now, dict) else None)},
         })
         status_entry["saved"]["signal"] = True
     else:
@@ -482,8 +543,9 @@ def main():
         "notes": {
             "stale_policy_sec": {"spot": STALE_SPOT, "k5m": STALE_5M, "k1h": STALE_1H, "k4h": STALE_4H},
             "guard": "no overwrite on error/empty values",
-            "pre_signal_rule": "5m ema9×ema21 7 bars",
+            "pre_signal_rule": "5m ema9×ema21 7 bars (ASC rendezett)",
             "spot_drift_trigger": SPOT_DRIFT_TRIG_REL,
+            "force_k5m_cooldown_sec": FORCE_K5M_COOLDOWN_SEC,
         }
     }
 
