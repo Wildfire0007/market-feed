@@ -6,6 +6,7 @@ Minden adat CSAK a Twelve Data REST API-ból jön.
 
 Kimenetek:
   public/<ASSET>/spot.json
+  public/<ASSET>/klines_1m.json
   public/<ASSET>/klines_5m.json
   public/<ASSET>/klines_1h.json
   public/<ASSET>/klines_4h.json
@@ -275,9 +276,13 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     save_json(os.path.join(adir, "spot.json"), spot)
     time.sleep(TD_PAUSE)
 
-    # 2) OHLC (5m / 1h / 4h) – az első sikeres tickerrel
+    # 2) OHLC (1m / 5m / 1h / 4h) – az első sikeres tickerrel
     def ts(s: str, iv: str):
         return td_time_series(s, iv, 500, exch, "desc")
+
+    k1m = try_symbols(symbols, lambda s: ts(s, "1min"))
+    save_json(os.path.join(adir, "klines_1m.json"), k1m.get("raw", {"values": []}))
+    time.sleep(TD_PAUSE)
 
     k5 = try_symbols(symbols, lambda s: ts(s, "5min"))
     save_json(os.path.join(adir, "klines_5m.json"), k5.get("raw", {"values": []}))
@@ -331,3 +336,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
