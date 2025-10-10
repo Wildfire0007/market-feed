@@ -20,6 +20,7 @@ FRISSÍTÉSEK (2025-10-09):
 Robusztussági fixek:
 - ATR(1h) és ATR(5m) NaN-védelem (fib tolerancia és SL/TP pufferek számításánál).
 - ÚJ: “félkész” 5m bar szűrése — ha az utolsó 5m gyertya kora < UNFINISHED_5M_AGE_SEC, zártnak tekintjük a megelőzőt (levágjuk az utolsót).
+- ÚJ: spot időbélyeg kijelzés — ha a szolgáltatói `utc` láthatóan régi, a `retrieved_at_utc` kerül kijelzésre.
 """
 
 import os, json
@@ -306,6 +307,14 @@ def drop_unfinished_last_5m(df: pd.DataFrame, min_age_sec: int = UNFINISHED_5M_A
     return df.copy()
 
 # ------------------------------ elemzés egy eszközre ---------------------------
+def _parse_iso(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
 def analyze(asset: str) -> Dict[str, Any]:
     outdir = os.path.join(PUBLIC_DIR, asset)
     os.makedirs(outdir, exist_ok=True)
@@ -318,10 +327,19 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     k5m, k1h, k4h = as_df_klines(k5m_raw), as_df_klines(k1h_raw), as_df_klines(k4h_raw)
 
-    spot_price = None; spot_utc = "-"
+    # --- Spot ár + időbélyeg (kijelzés-fix) ---
+    spot_price = None
+    spot_utc = "-"
     if spot:
         spot_price = spot.get("price") if spot.get("price") is not None else spot.get("price_usd")
-        spot_utc = spot.get("utc") or spot.get("timestamp") or "-"
+        spot_ts   = spot.get("utc") or spot.get("timestamp")
+        spot_retr = spot.get("retrieved_at_utc")
+        spot_utc  = spot_ts or spot_retr or "-"
+        dt_ts   = _parse_iso(spot_ts) if spot_ts else None
+        dt_retr = _parse_iso(spot_retr) if spot_retr else None
+        # ha a szolgáltatói time-stamp láthatóan régi, válts a lekérés idejére
+        if dt_ts and dt_retr and (dt_retr - dt_ts).total_seconds() > 1800:  # >30 perc
+            spot_utc = spot_retr
 
     if (spot_price is None) or k5m.empty or k1h.empty or k4h.empty:
         msg = {
@@ -418,7 +436,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     P = max(0, min(100, P))
 
     # --- Kapuk
-    liquidity_ok = bool(fib_ok or swept)
+    liquidity_ok = bool(fib_ok vagy swept)
     session_ok_flag = session_ok(asset)
     conds_core = {
         "session": bool(session_ok_flag),
