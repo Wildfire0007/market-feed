@@ -13,7 +13,7 @@ Kimenetek (guard-olt mentés):
   public/status.json           (összefoglaló: ok/age/refresh/saved per asset)
 
 Stale-check (kor-alapú frissítés; csak ha elég régi a lokális fájl):
-  5m:   ≥ 300 s   # 900 -> 300
+  5m:   ≥ 900 s
   1h:   ≥ 3600 s
   4h:   ≥ 14400 s
   spot: ≥ 120 s
@@ -31,7 +31,7 @@ from typing import Any, Dict, Optional, List, Tuple
 import requests
 
 OUT_DIR  = os.getenv("OUT_DIR", "public")
-API_KEY  = (os.getenv("TWELVEDATA_API_KEY") or "").strip()
+API_KEY  = os.environ["TWELVEDATA_API_KEY"].strip()
 TD_BASE  = "https://api.twelvedata.com"
 TD_PAUSE = float(os.getenv("TD_PAUSE", "0.3"))
 
@@ -41,6 +41,8 @@ ASSETS = {
     "NSDQ100":  {"symbol": "QQQ",      "exchange": None},
     "GOLD_CFD": {"symbol": "XAU/USD",  "exchange": None},
     "BNB":      {"symbol": "BNB/USD",  "exchange": "Binance"},
+
+    # WTI (USOIL) — több alternatív tickerrel
     "USOIL": {
         "symbol": "WTI/USD",
         "exchange": None,
@@ -50,31 +52,9 @@ ASSETS = {
 
 # ─────────────────────────────── Stale policy ────────────────────────────
 STALE_SPOT = 120        # sec
-STALE_5M   = 300        # sec
+STALE_5M   = 900        # sec
 STALE_1H   = 3600       # sec
 STALE_4H   = 14400      # sec
-
-# Utolsó 5m gyertya akkor tekinthető ZÁRTnak, ha legalább ennyi mp telt el
-UNFINISHED_5M_AGE_SEC = int(os.getenv("UNFINISHED_5M_AGE_SEC", "240"))
-
-# QUOTE frissességi limit — ha ennél régebbi, time_series fallback
-SPOT_QUOTE_MAX_AGE_SEC = int(os.getenv("SPOT_QUOTE_MAX_AGE_SEC", "600"))
-
-# ── Spot-drift trigger: nagy spot elmozdulás kényszeríti a 5m frissítést
-SPOT_DRIFT_TRIG_REL = {  # abs(spot - last_5m_close) / spot
-    "default": 0.004,    # 0.40%
-    "NSDQ100": 0.002,    # 0.20%
-    "GOLD_CFD": 0.003,   # 0.30%
-    "USOIL":   0.003,    # 0.30%
-    "SOL":     0.005,    # 0.50%
-    "BNB":     0.005,
-}
-def drift_threshold(asset: str) -> float:
-    return SPOT_DRIFT_TRIG_REL.get(asset, SPOT_DRIFT_TRIG_REL["default"])
-
-# Drift-frissítés túlterhelés védelme
-FORCE_K5M_COOLDOWN_SEC = 120
-_last_forced_k5m: Dict[str, float] = {}
 
 # ─────────────────────────────── Segédek ─────────────────────────────────
 def now_utc() -> str:
@@ -116,6 +96,10 @@ def values_ok(raw: Dict[str, Any]) -> bool:
         return False
 
 def guard_write_timeseries(path: str, td_payload: Dict[str, Any]) -> bool:
+    """
+    Csak akkor írjuk felül a klines fájlt, ha a TD válaszban van legalább 1 value.
+    Visszatérés: True ha írtunk, False ha nem.
+    """
     raw = td_payload.get("raw") if isinstance(td_payload, dict) else None
     if not isinstance(raw, dict) or not values_ok(raw):
         return False
@@ -123,13 +107,16 @@ def guard_write_timeseries(path: str, td_payload: Dict[str, Any]) -> bool:
     return True
 
 def guard_write_spot(path: str, spot_obj: Dict[str, Any]) -> bool:
+    """
+    Csak akkor írjuk felül a spot fájlt, ha van price (nem None).
+    """
     price = spot_obj.get("price")
     if price is None:
         return False
     save_json_atomic(path, spot_obj)
     return True
 
-# ───────────────────────────── TD / időbélyeg segédek ────────────────────
+# ───────────────────────────── Twelve Data hívók ─────────────────────────
 def td_get(path: str, **params) -> Dict[str, Any]:
     params["apikey"] = API_KEY
     r = requests.get(
@@ -145,6 +132,7 @@ def td_get(path: str, **params) -> Dict[str, Any]:
     return data
 
 def _iso_from_td_ts(ts: Any) -> Optional[str]:
+    """TD időbélyeg ISO-UTC-re (kezeli a 'YYYY-MM-DD HH:MM:SS' és epoch sec formátumot)."""
     if ts is None:
         return None
     try:
@@ -162,103 +150,9 @@ def _iso_from_td_ts(ts: Any) -> Optional[str]:
                 return ts
     return None
 
-def _parse_dt_any(ts: Any) -> Optional[datetime]:
-    if ts is None:
-        return None
-    try:
-        if isinstance(ts, (int, float)) or (isinstance(ts, str) and ts.isdigit()):
-            return datetime.fromtimestamp(int(ts), tz=timezone.utc)
-    except Exception:
-        pass
-    if isinstance(ts, str):
-        try:
-            return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        except Exception:
-            pass
-        try:
-            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        except Exception:
-            return None
-    return None
-
-def _latest_close_from_raw(raw: Dict[str, Any]) -> Optional[float]:
-    vals = (raw or {}).get("values") or []
-    best_dt = None
-    best_close = None
-    for row in vals:
-        dt = _parse_dt_any(row.get("datetime") or row.get("t"))
-        try:
-            c = float(row.get("close"))
-        except Exception:
-            c = None
-        if (dt is not None) and (c is not None):
-            if (best_dt is None) or (dt > best_dt):
-                best_dt = dt
-                best_close = c
-    return best_close
-
-def _sorted_closes_asc(raw: Dict[str, Any]) -> List[Optional[float]]:
-    vals = (raw or {}).get("values") or []
-    vals_sorted = sorted(
-        vals,
-        key=lambda r: _parse_dt_any(r.get("datetime") or r.get("t")) or datetime.min.replace(tzinfo=timezone.utc)
-    )
-    out: List[Optional[float]] = []
-    for row in vals_sorted:
-        try:
-            out.append(float(row["close"]))
-        except Exception:
-            out.append(None)
-    return out
-
-# ───────────────────── záratlan 5m bar szűrés ────────────────────────────
-def _last_bar_dt(raw: Dict[str, Any]) -> Optional[datetime]:
-    vals = (raw or {}).get("values") or []
-    latest_dt = None
-    for row in vals:
-        dt = _parse_dt_any(row.get("datetime") or row.get("t"))
-        if dt and (latest_dt is None or dt > latest_dt):
-            latest_dt = dt
-    return latest_dt
-
-def _is_last_bar_unclosed(raw: Dict[str, Any], min_age_sec: int = UNFINISHED_5M_AGE_SEC) -> bool:
-    dt = _last_bar_dt(raw)
-    if not dt:
-        return False
-    return (datetime.now(timezone.utc) - dt).total_seconds() < min_age_sec
-
-def _sorted_closes_asc_exclude_unclosed(raw: Dict[str, Any], min_age_sec: int = UNFINISHED_5M_AGE_SEC) -> List[Optional[float]]:
-    closes = _sorted_closes_asc(raw)
-    if closes and _is_last_bar_unclosed(raw, min_age_sec):
-        closes = closes[:-1]
-    return closes
-
-def _latest_closed_dt_and_close(raw: Dict[str, Any], min_age_sec: int = UNFINISHED_5M_AGE_SEC) -> Tuple[Optional[datetime], Optional[float]]:
-    vals = (raw or {}).get("values") or []
-    vals_sorted = sorted(
-        vals,
-        key=lambda r: _parse_dt_any(r.get("datetime") or r.get("t")) or datetime.min.replace(tzinfo=timezone.utc)
-    )
-    nowdt = datetime.now(timezone.utc)
-    for row in reversed(vals_sorted):
-        dt = _parse_dt_any(row.get("datetime") or row.get("t"))
-        try:
-            c = float(row.get("close"))
-        except Exception:
-            c = None
-        if (dt is None) or (c is None):
-            continue
-        if (nowdt - dt).total_seconds() >= min_age_sec:
-            return dt, c
-    return None, None
-
-def _latest_closed_close_from_raw(raw: Dict[str, Any], min_age_sec: int = UNFINISHED_5M_AGE_SEC) -> Optional[float]:
-    dt, c = _latest_closed_dt_and_close(raw, min_age_sec)
-    return c
-
-# ───────────────────────── Twelve Data hívók ─────────────────────────────
 def td_time_series(symbol: str, interval: str, outputsize: int = 500,
                    exchange: Optional[str] = None, order: str = "desc") -> Dict[str, Any]:
+    """Hibatűrő time_series (hiba esetén ok:false + üres values)."""
     params = {
         "symbol": symbol,
         "interval": interval,
@@ -311,6 +205,7 @@ def td_quote(symbol: str) -> Dict[str, Any]:
     }
 
 def td_last_close(symbol: str, interval: str = "5min", exchange: Optional[str] = None) -> Tuple[Optional[float], Optional[str]]:
+    """Idősorból az utolsó gyertya close + időpont (UTC ISO)."""
     params = {
         "symbol": symbol,
         "interval": interval,
@@ -330,20 +225,8 @@ def td_last_close(symbol: str, interval: str = "5min", exchange: Optional[str] =
     ts_iso = _iso_from_td_ts(v0.get("datetime")) or now_utc()
     return px, ts_iso
 
-def td_last_close_multi(symbol: str, exchange: Optional[str] = None,
-                        intervals: Tuple[str, ...] = ("1min", "5min")) -> Tuple[Optional[float], Optional[str]]:
-    for iv in intervals:
-        try:
-            px, ts = td_last_close(symbol, iv, exchange)
-            if px is not None and ts is not None:
-                return px, ts
-        except Exception:
-            pass
-    return None, None
-
 def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[str, Any]:
-    """Spot ár: quote → ha price None VAGY a quote túl régi, akkor 1m→5m time_series fallback."""
-    q: Dict[str, Any]
+    """Spot ár: quote → ha nincs, 5m utolsó close (time_series) fallback."""
     try:
         q = td_quote(symbol)
     except Exception as e:
@@ -352,25 +235,18 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
     price = q.get("price") if isinstance(q, dict) else None
     utc   = q.get("utc") if isinstance(q, dict) else None
 
-    quote_age_ok = True
-    if utc:
-        dt = _parse_dt_any(utc)
-        if dt is not None:
-            quote_age_ok = (datetime.now(timezone.utc) - dt).total_seconds() <= SPOT_QUOTE_MAX_AGE_SEC
-
-    if (price is None) or (not quote_age_ok):
-        px, ts = td_last_close_multi(symbol, exchange, ("1min", "5min"))
-        if px is not None and ts is not None:
-            price, utc = px, ts
-            source = "twelvedata:series_fallback"
-        else:
-            source = "twelvedata:quote"
-    else:
-        source = "twelvedata:quote"
+    if price is None:
+        try:
+            px, ts = td_last_close(symbol, "5min", exchange)
+        except Exception as e:
+            px, ts = None, None
+            if isinstance(q, dict):
+                q["error_fallback"] = str(e)
+        price, utc = px, ts
 
     return {
         "asset": symbol,
-        "source": source,
+        "source": "twelvedata:quote+series_fallback",
         "ok": price is not None,
         "retrieved_at_utc": now_utc(),
         "price": price,
@@ -380,6 +256,7 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
 
 # ─────────────────────── több-szimbólumos fallback ───────────────────────
 def try_symbols(symbols: List[str], fetch_fn):
+    """Próbálkozik több tickerrel sorban; az első ok:true visszatér. Máskülönben az utolsó eredményt adja."""
     last = None
     for s in symbols:
         try:
@@ -424,13 +301,15 @@ def closes_from_ts(payload_raw: Dict[str, Any]) -> List[Optional[float]]:
         return []
 
 def pre_signal_from_k5m(raw_5m: Dict[str, Any]) -> Dict[str, Any]:
-    closes = _sorted_closes_asc_exclude_unclosed(raw_5m)
-    if not closes or len([x for x in closes if x is not None]) < 21:
-        return {"ok": False, "signal": "no entry", "reasons": ["insufficient 5m bars (<21)"]}
+    # Csak akkor hívjuk, ha a raw_5m nem üres.
+    closes = closes_from_ts(raw_5m)
+    if not closes:
+        return {"ok": False, "signal": "no entry", "reasons": ["empty 5m data"]}
     e9 = ema(closes, 9)
     e21 = ema(closes, 21)
     gt = [False if (a is None or b is None) else (a > b) for a, b in zip(e9, e21)]
     lt = [False if (a is None or b is None) else (a < b) for a, b in zip(e9, e21)]
+    # Momentum új szabály: 7 bar
     if last_n_true(gt, 7):
         return {"ok": True, "signal": "uptrend", "reasons": ["ema9 > ema21 (7 bars)"]}
     if last_n_true(lt, 7):
@@ -472,12 +351,10 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
         status_entry["saved"]["spot"] = False
 
     spot_now = load_json(spot_path) or {}
-    spot_price = spot_now.get("price")
-    spot_utc = spot_now.get("utc")
-    status_entry["ok"]["spot"] = bool(spot_price is not None)
+    status_entry["ok"]["spot"] = bool(spot_now.get("price") is not None)
     time.sleep(TD_PAUSE)
 
-    # ── 2) KLINES 5m / 1h / 4h ────────────────────────────────────────────
+    # ── 2) KLINES 5m / 1h / 4h  (csak ha elég régi a fájl) ────────────────
     def fetch_ts(iv: str) -> Dict[str, Any]:
         return try_symbols(symbols, lambda s: td_time_series(s, iv, 500, exch, "desc"))
 
@@ -485,33 +362,6 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     k5_path = os.path.join(adir, "klines_5m.json")
     status_entry["ages_sec"]["k5m"] = file_age_seconds(k5_path)
     need_k5 = should_refresh(k5_path, STALE_5M)
-
-    # spot-drift alapú kényszerített 5m refresh
-    last_5m_close = None
-    try:
-        k5_curr = load_json(k5_path) or {}
-        if values_ok(k5_curr):
-            last_5m_close = _latest_closed_close_from_raw(k5_curr)  # zárt 5m close
-    except Exception:
-        last_5m_close = None
-
-    if (not need_k5) and (spot_price is not None) and (last_5m_close is not None):
-        rel_drift = abs(spot_price - last_5m_close) / max(abs(spot_price), 1e-9)
-        if rel_drift >= drift_threshold(asset):
-            now_ts = time.time()
-            last_forced = _last_forced_k5m.get(asset, 0.0)
-            if (now_ts - last_forced) >= FORCE_K5M_COOLDOWN_SEC:
-                print(f"[{asset}] 5m refresh forced by spot drift: {rel_drift:.4%} >= {drift_threshold(asset):.2%}")
-                need_k5 = True
-                _last_forced_k5m[asset] = now_ts
-                status_entry.setdefault("notes", {})["forced_k5m_by_spot_drift"] = {
-                    "rel_drift": rel_drift,
-                    "threshold": drift_threshold(asset),
-                    "spot": spot_price,
-                    "last_5m_close": last_5m_close,
-                    "cooldown_sec": FORCE_K5M_COOLDOWN_SEC,
-                }
-
     if need_k5:
         r5 = fetch_ts("5min")
         status_entry["refreshed"]["k5m"] = True
@@ -519,7 +369,6 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     else:
         status_entry["refreshed"]["k5m"] = False
         status_entry["saved"]["k5m"] = False
-
     k5_raw = load_json(k5_path) or {"values": []}
     status_entry["ok"]["k5m"] = values_ok(k5_raw)
     time.sleep(TD_PAUSE)
@@ -554,28 +403,6 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     status_entry["ok"]["k4h"] = values_ok(k4_raw)
     time.sleep(TD_PAUSE)
 
-    # ── 2/b) Spot szinkronizálása a legutóbbi ZÁRT 5m gyertyához (ha a spot régebbi)
-    if status_entry["ok"]["k5m"]:
-        k5_dt, k5_close = _latest_closed_dt_and_close(k5_raw, UNFINISHED_5M_AGE_SEC)
-        if k5_dt is not None and k5_close is not None:
-            spot_dt = _parse_dt_any(spot_utc) if isinstance(spot_utc, str) else None
-            if (spot_dt is None) or (spot_dt < k5_dt):
-                synced_spot = {
-                    "asset": status_entry.get("used_symbol") or cfg["symbol"],
-                    "source": "twelvedata:series_sync(k5m)",
-                    "ok": True,
-                    "retrieved_at_utc": now_utc(),
-                    "price": float(k5_close),
-                    "price_usd": float(k5_close),
-                    "utc": k5_dt.replace(microsecond=0).isoformat(),
-                }
-                if guard_write_spot(spot_path, synced_spot):
-                    status_entry.setdefault("notes", {})["spot_synced_to_k5m"] = True
-                    # friss cache a további lépésekhez
-                    spot_now = synced_spot
-                    spot_price = synced_spot["price"]
-                    spot_utc = synced_spot["utc"]
-
     # ── 3) Előzetes 5m EMA jelzés (csak ha k5m OK) ────────────────────────
     sig_path = os.path.join(adir, "signal.json")
     if status_entry["ok"]["k5m"]:
@@ -586,13 +413,15 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
             "retrieved_at_utc": now_utc(),
             "signal": pre.get("signal", "no entry"),
             "reasons": pre.get("reasons", []),
-            "probability": 0,
-            "spot": {"price": spot_price, "utc": (spot_now.get("utc") if isinstance(spot_now, dict) else None)},
+            "probability": 0,   # előzetes; a véglegeset az analysis.py adja
+            "spot": {"price": spot_now.get("price"), "utc": spot_now.get("utc")},
         })
         status_entry["saved"]["signal"] = True
     else:
+        # nem nyúlunk a meglévő signal.json-hoz (guard)
         status_entry["saved"]["signal"] = False
 
+    # fájl elérési utak a státuszba
     status_entry["paths"] = {
         "spot":   os.path.relpath(spot_path, OUT_DIR),
         "k5m":    os.path.relpath(k5_path, OUT_DIR),
@@ -616,11 +445,7 @@ def main():
         "notes": {
             "stale_policy_sec": {"spot": STALE_SPOT, "k5m": STALE_5M, "k1h": STALE_1H, "k4h": STALE_4H},
             "guard": "no overwrite on error/empty values",
-            "pre_signal_rule": "5m ema9×ema21 7 bars (ASC, utolsó félkész 5m kihagyva)",
-            "spot_drift_trigger": SPOT_DRIFT_TRIG_REL,
-            "force_k5m_cooldown_sec": FORCE_K5M_COOLDOWN_SEC,
-            "unfinished_5m_age_sec": UNFINISHED_5M_AGE_SEC,
-            "spot_quote_max_age_sec": SPOT_QUOTE_MAX_AGE_SEC,
+            "pre_signal_rule": "5m ema9×ema21 7 bars",
         }
     }
 
@@ -634,8 +459,11 @@ def main():
                 "error": str(e),
                 "run_utc": now_utc(),
             }
+            # Guard: hiba esetén sem írunk üres fájlokat.
 
+    # status.json mentése
     save_json_atomic(os.path.join(OUT_DIR, "status.json"), status)
 
 if __name__ == "__main__":
     main()
+
