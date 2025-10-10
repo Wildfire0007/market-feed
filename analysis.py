@@ -52,7 +52,7 @@ TP_MIN_PCT = {        # min. TP1 távolság %-ban (entry-hez képest)
     "default": 0.0030,  # 0.30%
     "GOLD_CFD": 0.0015, # 0.15%  (arany)
     "USOIL":    0.0020, # 0.20%
-    "NSDQ100":  0.0020, # 0.20%
+    "NSDQ100":  0.0012, # 0.12% alap; cash+magas vol esetén enged 0.10%-ig
     "SOL":      0.0040, # 0.40%
     "BNB":      0.0040, # 0.40%
 }
@@ -634,4 +634,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
