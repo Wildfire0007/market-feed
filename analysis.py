@@ -86,7 +86,7 @@ MOMENTUM_BOS_LB  = 15            # szerkezeti töréshez nézett ablak (bar)␊
 # --- Rezsim és session beállítások ---
 EMA_SLOPE_PERIOD   = 21          # 1h EMA21
 EMA_SLOPE_LOOKBACK = 3           # hány baron mérjük a változást
-EMA_SLOPE_TH       = 0.0010      # ~0.10% relatív elmozdulás (abs) a lookback alatt
+EMA_SLOPE_TH       = 0.0007      # ~0.10% relatív elmozdulás (abs) a lookback alatt
 
 # UTC idősávok: [(start_h, start_m, end_h, end_m), ...]; None = mindig
 SESSIONS_UTC: Dict[str, Optional[List[Tuple[int,int,int,int]]]] = {
@@ -423,6 +423,17 @@ def analyze(asset: str) -> Dict[str, Any]:
         tol_frac=0.02
     )
 
+    # 6/b) Kiegészítő likviditás kontextus (1h EMA21 közelség + szerkezeti retest)
+    ema21_1h = float(ema(k1h_closed["close"], 21).iloc[-1]) if not k1h_closed.empty else float("nan")
+    ema21_dist_ok = (
+        np.isfinite(ema21_1h)
+        and not np.isnan(atr1h)
+        and abs(price_for_calc - ema21_1h) <= max(atr1h, 0.0008 * price_for_calc)
+    )
+
+    struct_retest_long  = structure_break_with_retest(k5m_closed, "long", MOMENTUM_BOS_LB)
+    struct_retest_short = structure_break_with_retest(k5m_closed, "short", MOMENTUM_BOS_LB)
+
     micro_bos = False
     if trend_bias in ("long", "short"):
         if micro_bos_with_retest(k1m_closed, k5m_closed, "long" if trend_bias == "long" else "short"):
@@ -439,14 +450,22 @@ def analyze(asset: str) -> Dict[str, Any]:
     if swept:
         P += 15
         reasons.append("HTF sweep ok")
+    struct_retest_active = ((trend_bias == "long" and struct_retest_long) or
+                            (trend_bias == "short" and struct_retest_short))
     if bos5m:
         P += 18
         reasons.append("5M BOS trendirányba")
+    elif struct_retest_active:
+        P += 12
+        reasons.append("5m szerkezeti törés + retest a trend irányába")
     elif micro_bos:
         reasons.append("1m BOS + 5m retest — várjuk a 5m megerősítést")
     if fib_ok:
         P += 20
         reasons.append("Fib zóna konfluencia (0.618–0.886)")
+    elif ema21_dist_ok:
+        P += 12
+        reasons.append("Ár 1h EMA21 zónában (ATR tolerancia)")
     if atr_ok:
         P += 9
         reasons.append("ATR rendben")
@@ -458,20 +477,26 @@ def analyze(asset: str) -> Dict[str, Any]:
     P = max(0, min(100, P))
 
     # --- Kapuk (liquidity = Fib zóna VAGY sweep) + session + regime ---
-    liquidity_ok = bool(fib_ok or swept)
+    liquidity_ok = bool(
+        fib_ok
+        or swept
+        or ema21_dist_ok
+        or (trend_bias == "long" and struct_retest_long)
+        or (trend_bias == "short" and struct_retest_short)
+    )
     session_ok_flag = session_ok(asset)
 
     conds_core = {
         "session": bool(session_ok_flag),
         "regime":  bool(regime_ok),
         "bias":    trend_bias in ("long","short"),
-        "bos5m":   bool(bos5m),
+        "bos5m":   bool(bos5m or (trend_bias == "long" and struct_retest_long) or (trend_bias == "short" and struct_retest_short)),
         "liquidity": liquidity_ok,
         "atr":     bool(atr_ok),
     }
     base_core_ok = all(v for k, v in conds_core.items() if k != "bos5m")
     bos_gate_ok = conds_core["bos5m"] or micro_bos
-    can_enter_core = (P >= 60) and base_core_ok and bos_gate_ok
+    can_enter_core = (P >= 55) and base_core_ok and bos_gate_ok
     missing_core = [k for k, v in conds_core.items() if not v]
     if micro_bos and not conds_core["bos5m"]:
         if "bos5m" not in missing_core:
@@ -488,8 +513,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         e21_5 = ema(k5m_closed["close"], 21)
         bear = (e9_5 < e21_5).tail(MOMENTUM_BARS).all()
         bull = (e9_5 > e21_5).tail(MOMENTUM_BARS).all()
-        bos_struct_short = structure_break_with_retest(k5m_closed, "short", MOMENTUM_BOS_LB)
-        bos_struct_long  = structure_break_with_retest(k5m_closed, "long",  MOMENTUM_BOS_LB)
+        bos_struct_short = struct_retest_short
+        bos_struct_long  = struct_retest_long
         bos_any_short = bool(bos5m_short or bos_struct_short)
         bos_any_long  = bool(bos5m_long or bos_struct_long)
         mom_atr_ok = not np.isnan(rel_atr) and (rel_atr >= MOMENTUM_ATR_REL)
@@ -503,7 +528,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         if mom_dir is None:
             if not session_ok_flag: missing_mom.append("session")
             if not (bear or bull):  missing_mom.append("momentum(ema9x21)")
-            if not (bos_any_short if bear else bos_any_long): missing_mom.append("bos5m|struct_break")
+            if bear and not bos_any_short:
+                missing_mom.append("bos5m|struct_break")
+            if bull and not bos_any_long:
+                missing_mom.append("bos5m|struct_break")
             if not mom_atr_ok: missing_mom.append("atr")
 
     # 8) Döntés + szintek (RR/TP matek) — core vagy momentum
@@ -603,7 +631,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "gates": {
             "mode": mode,
             "required": (
-                ["session", "regime", "bias", "bos5m", "liquidity(fib_zone|sweep)", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
+                ["session", "regime", "bias", "bos5m", "liquidity(fib|sweep|ema21|retest)", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
                 if mode == "core" else
                 ["session", "momentum(ema9x21)", "bos5m|struct_break", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
             ),
@@ -634,5 +662,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
