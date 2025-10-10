@@ -32,6 +32,7 @@ ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "USOIL"]  # GER40 -> USOIL
 STATE_PATH = f"{PUBLIC_DIR}/_notify_state.json"
 STABILITY_RUNS = 2
 COOLDOWN_MIN   = int(os.getenv("DISCORD_COOLDOWN_MIN", "10"))  # perc; 0 = off
+MOMENTUM_COOLDOWN_MIN = int(os.getenv("DISCORD_COOLDOWN_MOMENTUM_MIN", "8"))
 
 # ---- Időzóna a fejlécben / órakulcshoz ----
 HB_TZ   = ZoneInfo("Europe/Budapest")
@@ -137,7 +138,8 @@ def missing_from_sig(sig: dict):
     for k in miss:
         key = "RR≥2.0" if k.startswith("rr_math") else k
         out.append(pretty.get(k, key))
-    return ", ".join(dict.fromkeys(out).keys())
+    uniq = list(dict.fromkeys(out))
+    return ", ".join(uniq)
 
 def gates_mode(sig: dict) -> str:
     return ((sig or {}).get("gates") or {}).get("mode") or "-"
@@ -172,13 +174,18 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     entry = sig.get("entry"); sl = sig.get("sl"); t1 = sig.get("tp1"); t2 = sig.get("tp2")
     rr = sig.get("rr")
     mode = gates_mode(sig)
+    missing_list = ((sig.get("gates") or {}).get("missing") or [])
+    core_bos_pending = (mode == "core") and ("bos5m" in missing_list)
 
     price, utc = spot_from_sig_or_file(asset, sig)
     spot_s = fmt_num(price)
     utc_s  = utc or "-"
 
     # státusz
-    status_emoji = "🟢" if dec in ("BUY","SELL") else "🔴"
+    if core_bos_pending and dec in ("BUY","SELL"):
+        status_emoji = "🟡"
+    else:
+        status_emoji = "🟢" if dec in ("BUY","SELL") else "🔴"
     status_bold  = f"{status_emoji} **{dec}**"
 
     lines = [
@@ -190,8 +197,11 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     if dec in ("BUY", "SELL") and all(v is not None for v in (entry, sl, t1, t2, rr)):
         lines.append(f"@ `{fmt_num(entry)}` • SL `{fmt_num(sl)}` • TP1 `{fmt_num(t1)}` • TP2 `{fmt_num(t2)}` • RR≈`{rr}`")
     # Stabilizálás információ
-    if dec in ("BUY","SELL") and not is_stable and kind in ("normal","heartbeat"):
-        lines.append("⏳ Állapot: *stabilizálás alatt*")
+    if dec in ("BUY","SELL") and kind in ("normal","heartbeat"):
+        if core_bos_pending:
+            lines.append("⏳ Állapot: *stabilizálás alatt (5m BOS megerősítésre várunk)*")
+        elif not is_stable:
+            lines.append("⏳ Állapot: *stabilizálás alatt*")
 
     # Hiányzó feltételek — ha vannak, mindig mutatjuk
     miss = missing_from_sig(sig)
@@ -246,6 +256,7 @@ def main():
         per_asset_sigs[asset] = sig
 
         # --- stabilitás számítása ---
+        mode_current = gates_mode(sig)
         eff = decision_of(sig)  # 'buy' | 'sell' | 'no entry'
 
         st = state.get(asset, {
@@ -262,10 +273,13 @@ def main():
             st["last"]  = eff
             st["count"] = 1
 
-        is_stable = st["count"] >= STABILITY_RUNS
-        per_asset_is_stable[asset] = is_stable
+        missing_list = ((sig.get("gates") or {}).get("missing") or [])
+        core_bos_pending = (mode_current == "core") and ("bos5m" in missing_list)
 
-        is_actionable_now = (eff in ("buy","sell")) and is_stable
+        is_stable = st["count"] >= STABILITY_RUNS
+        display_stable = is_stable and not core_bos_pending
+        per_asset_is_stable[asset] = display_stable
+        is_actionable_now = (eff in ("buy","sell")) and is_stable and not core_bos_pending
         actionable_any = actionable_any or is_actionable_now
 
         cooldown_until_iso = st.get("cooldown_until")
@@ -294,15 +308,20 @@ def main():
 
         # --- embed + állapot frissítés ---
         if send_kind:
-            embeds.append(build_embed_for_asset(asset, sig, is_stable, kind=send_kind, prev_decision=prev_sent_decision))
+            embeds.append(build_embed_for_asset(asset, sig, display_stable, kind=send_kind, prev_decision=prev_sent_decision))
             if send_kind in ("normal","flip"):
-                if COOLDOWN_MIN > 0:
+                cooldown_minutes = COOLDOWN_MIN
+                if COOLDOWN_MIN > 0 and mode_current == "momentum":
+                    cooldown_minutes = MOMENTUM_COOLDOWN_MIN
+                if cooldown_minutes > 0:
                     st["cooldown_until"] = datetime.fromtimestamp(
-                        now_ep + COOLDOWN_MIN*60, tz=timezone.utc
+                        now_ep + cooldown_minutes*60, tz=timezone.utc
                     ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                else:
+                    st["cooldown_until"] = None
                 st["last_sent"] = now_iso
                 st["last_sent_decision"] = eff
-                st["last_sent_mode"] = gates_mode(sig)
+                st["last_sent_mode"] = mode_current
                 meta["last_heartbeat_key"] = bud_key
             elif send_kind == "invalidate":
                 st["last_sent"] = now_iso
