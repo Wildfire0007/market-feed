@@ -52,7 +52,7 @@ ASSETS = {
 
 # ─────────────────────────────── Stale policy ────────────────────────────
 STALE_SPOT = 120        # sec
-STALE_5M   = 300        # sec
+STALE_5M   = 900        # sec
 STALE_1H   = 3600       # sec
 STALE_4H   = 14400      # sec
 
@@ -466,5 +466,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
