@@ -91,7 +91,7 @@ HIGH_VOL_TH         = 0.0020   # 0.20%  (ATR5/entry relatív küszöb)
 ATR5_MIN_MULT       = 0.5      # min. profit >= 0.5× ATR(5m)
 
 # --- Momentum override csak kriptókra (SOL, BNB) ---
-ENABLE_MOMENTUM_ASSETS = {"SOL", "BNB", "NSDQ100"}
+ENABLE_MOMENTUM_ASSETS = {"SOL", "BNB"}
 MOMENTUM_BARS    = 7             # FINOMHANGOLT: 5m EMA9–EMA21 legalább 7 bar
 MOMENTUM_ATR_REL = 0.0010        # FINOMHANGOLT: >= 0.10% 5m relatív ATR
 MOMENTUM_BOS_LB  = 15            # szerkezeti töréshez nézett ablak (bar)
@@ -99,22 +99,13 @@ MOMENTUM_BOS_LB  = 15            # szerkezeti töréshez nézett ablak (bar)
 # --- Rezsim és session beállítások ---
 EMA_SLOPE_PERIOD   = 21          # 1h EMA21
 EMA_SLOPE_LOOKBACK = 3           # hány baron mérjük a változást
-
-
-EMA_SLOPE_TH_ASSET = {
-    "default": 0.0010,
-    "GOLD_CFD": 0.0008,  # GOLD_CFD esetén 0.08%
-    "USOIL": 0.0008,     # USOIL esetén 0.08%
-}
-
-def ema_slope_threshold(asset: str) -> float:
-    return EMA_SLOPE_TH_ASSET.get(asset, EMA_SLOPE_TH_ASSET["default"])
+EMA_SLOPE_TH       = 0.0010      # FINOMHANGOLT: ~0.10% relatív elmozdulás (abs) a lookback alatt
 
 # UTC idősávok: [(start_h, start_m, end_h, end_m), ...]; None = mindig
 SESSIONS_UTC: Dict[str, Optional[List[Tuple[int,int,int,int]]]] = {
     "SOL": None,
     "BNB": None,
-    "NSDQ100": [(13, 30, 14, 0)]   # US cash
+    "NSDQ100": [(13,30, 20,0)],   # US cash
     "GOLD_CFD": None,             # gyakorlatilag egész nap
     "USOIL": None,                # WTI szinte 23h/nap — nem korlátozzuk
 }
@@ -233,9 +224,9 @@ def detect_bos(df: pd.DataFrame, direction: str) -> bool:
     sw = find_swings(df, lb=2)
     hi, lo = last_swing_levels(sw.iloc[:-1])
     if direction == "long" and hi is not None:
-        return sw["high"].iloc[-1] > hi or broke_structure(df, "long")
+        return sw["high"].iloc[-1] > hi
     if direction == "short" and lo is not None:
-        return sw["low"].iloc[-1] < lo or broke_structure(df, "short")
+        return sw["low"].iloc[-1] < lo
     return False
 
 def broke_structure(df: pd.DataFrame, direction: str, lookback: int = MOMENTUM_BOS_LB) -> bool:
@@ -252,7 +243,7 @@ def broke_structure(df: pd.DataFrame, direction: str, lookback: int = MOMENTUM_B
 
 def fib_zone_ok(move_hi, move_lo, price_now,
                 low=0.618, high=0.886,
-                tol_abs=atr1h * 1.0, tol_frac=0.025) -> bool:
+                tol_abs=0.0, tol_frac=0.02) -> bool:
     if move_hi is None or move_lo is None or move_hi == move_lo:
         return False
     length = move_hi - move_lo
@@ -289,7 +280,7 @@ def ema_slope_ok(df_1h: pd.DataFrame,
     ema_prev = float(e.iloc[-1 - lookback])
     price_now = float(c.iloc[-1])
     rel = abs(ema_now - ema_prev) / max(1e-9, price_now)
-    return (rel >= ema_slope_threshold(asset)), rel
+    return (rel >= th), rel
 
 # ------------------------------ elemzés egy eszközre ---------------------------
 
@@ -555,5 +546,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
