@@ -355,9 +355,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         return msg
 
     # --- ZÁRT gyertyák + számítási ár ---
-    # 5m: csak akkor vágjuk le az utolsót, ha túl friss (félkész)
     k5m_closed = drop_unfinished_last_5m(k5m, UNFINISHED_5M_AGE_SEC)
-    # 1h/4h: konzervatívan mindig zárt gyertyákkal dolgozunk
     k1h_closed = k1h.iloc[:-1].copy() if len(k1h) > 1 else k1h.copy()
     k4h_closed = k4h.iloc[:-1].copy() if len(k4h) > 1 else k4h.copy()
 
@@ -405,7 +403,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     rel_atr = (atr5 / price_for_calc) if (np.isfinite(atr5) and price_for_calc) else float("nan")
     atr_ok = not (np.isnan(rel_atr) or rel_atr < atr_threshold(asset))
 
-    # 6) Fib zóna (0.618–0.886) 1H swingekre, ENYHÍTETT toleranciával (ÚJ, NaN-védett ATR1h)
+    # 6) Fib zóna (0.618–0.886) 1H swingekre, ENYHÍTETT toleranciával
     k1h_sw = find_swings(k1h_closed, lb=2)
     move_hi, move_lo = last_swing_levels(k1h_sw)
     atr1h_series = atr(k1h_closed)
@@ -436,7 +434,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     P = max(0, min(100, P))
 
     # --- Kapuk
-    liquidity_ok = bool(fib_ok vagy swept)
+    liquidity_ok = bool(fib_ok or swept)  # <— FIX: 'or' (nem 'vagy')
     session_ok_flag = session_ok(asset)
     conds_core = {
         "session": bool(session_ok_flag),
@@ -484,7 +482,6 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     def compute_levels(decision_side: str):
         nonlocal entry, sl, tp1, tp2, rr, missing
-        # NaN-biztos ATR értékek
         atr5_val  = float(atr5)  if np.isfinite(atr5)  else 0.0
         atr1h_val = float(atr1h) if np.isfinite(atr1h) else 0.0
 
