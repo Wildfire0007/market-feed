@@ -9,7 +9,7 @@ Kimenetek:
   public/<ASSET>/klines_5m.json
   public/<ASSET>/klines_1h.json
   public/<ASSET>/klines_4h.json
-  public/<ASSET>/signal.json  (5m EMA9–EMA21 5 bar szabály – előzetes jelzés)
+  public/<ASSET>/signal.json  (5m EMA9–EMA21 7 bar szabály – előzetes jelzés)
 
 Környezeti változók:
   TWELVEDATA_API_KEY = "<api key>"
@@ -24,9 +24,15 @@ from typing import Any, Dict, Optional, List, Tuple
 import requests
 
 OUT_DIR  = os.getenv("OUT_DIR", "public")
-API_KEY  = os.environ["TWELVEDATA_API_KEY"].strip()
+API_KEY  = (os.getenv("TWELVEDATA_API_KEY") or "").strip()
 TD_BASE  = "https://api.twelvedata.com"
 TD_PAUSE = float(os.getenv("TD_PAUSE", "0.3"))
+
+# Csak akkor hívunk API-t, ha a lokális fájl elég régi
+STALE_SPOT = 120        
+STALE_5M   = 300        
+STALE_1H   = 3600       
+STALE_4H   = 14400    
 
 # ───────────────────────────────── ASSETS ────────────────────────────────
 # GER40 helyett USOIL. A fő ticker a WTI/USD, de adunk több fallbackot.
@@ -59,6 +65,35 @@ def save_json(path: str, obj: Dict[str, Any]) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+
+def file_age_seconds(path: str) -> Optional[int]:
+    try:
+        return int(max(0, time.time() - os.path.getmtime(path)))
+    except FileNotFoundError:
+        return None
+
+def should_refresh(path: str, min_age_sec: int) -> bool:
+    age = file_age_seconds(path)
+    return (age is None) or (age >= min_age_sec)
+
+def values_ok(raw: Dict[str, Any]) -> bool:
+    vals = (raw or {}).get("values") or []
+    return isinstance(vals, list) and len(vals) > 0
+
+def guard_write_timeseries(path: str, td_payload: Dict[str, Any]) -> bool:
+    """Csak nem üres time_series választ írunk ki."""
+    raw = td_payload.get("raw") if isinstance(td_payload, dict) else None
+    if not isinstance(raw, dict) or not values_ok(raw):
+        return False
+    save_json(path, raw);  return True
+
+def guard_write_spot(path: str, spot_obj: Dict[str, Any]) -> bool:
+    """Csak akkor írjuk a spotot, ha van érvényes ár."""
+    price = spot_obj.get("price")
+    if price is None:
+        return False
+    save_json(path, spot_obj);  return True
+
 
 def td_get(path: str, **params) -> Dict[str, Any]:
     params["apikey"] = API_KEY
@@ -255,9 +290,9 @@ def signal_from_5m(klines_5m: Dict[str, Any]) -> Dict[str, Any]:
     e21 = ema(closes, 21)
     gt = [False if (a is None or b is None) else (a > b) for a, b in zip(e9, e21)]
     lt = [False if (a is None or b is None) else (a < b) for a, b in zip(e9, e21)]
-    if last_n_true(gt, 5):
+    if last_n_true(gt, 7):
         return {"ok": True, "signal": "uptrend", "reasons": ["ema9 > ema21 (5 bars)"]}
-    if last_n_true(lt, 5):
+    if last_n_true(lt, 7):
         return {"ok": True, "signal": "downtrend", "reasons": ["ema9 < ema21 (5 bars)"]}
     return {"ok": True, "signal": "no entry", "reasons": ["no consistent ema bias"]}
 
@@ -270,41 +305,55 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     symbols = [cfg["symbol"]] + list(cfg.get("alt", []))
     exch = cfg.get("exchange")
 
-    # 1) Spot (quote → 5m close fallback), több tickerrel
-    spot = try_symbols(symbols, lambda s: td_spot_with_fallback(s, exch))
-    save_json(os.path.join(adir, "spot.json"), spot)
-    time.sleep(TD_PAUSE)
+    # --- elérési utak
+    spot_path = os.path.join(adir, "spot.json")
+    k5_path   = os.path.join(adir, "klines_5m.json")
+    k1_path   = os.path.join(adir, "klines_1h.json")
+    k4_path   = os.path.join(adir, "klines_4h.json")
 
-    # 2) OHLC (5m / 1h / 4h) – az első sikeres tickerrel
+    # 1) SPOT (quote → 5m close fallback) — csak ha elég régi
+    if should_refresh(spot_path, STALE_SPOT):
+        spot = try_symbols(symbols, lambda s: td_spot_with_fallback(s, exch))
+        guard_write_spot(spot_path, spot if isinstance(spot, dict) else {"ok": False})
+        time.sleep(TD_PAUSE)
+
+    # 2) OHLC: 5m / 1h / 4h — stale + guard
     def ts(s: str, iv: str):
         return td_time_series(s, iv, 500, exch, "desc")
 
-    k5 = try_symbols(symbols, lambda s: ts(s, "5min"))
-    save_json(os.path.join(adir, "klines_5m.json"), k5.get("raw", {"values": []}))
-    time.sleep(TD_PAUSE)
+    if should_refresh(k5_path, STALE_5M):
+        k5 = try_symbols(symbols, lambda s: ts(s, "5min"))
+        guard_write_timeseries(k5_path, k5)
+        time.sleep(TD_PAUSE)
 
-    k1 = try_symbols(symbols, lambda s: ts(s, "1h"))
-    save_json(os.path.join(adir, "klines_1h.json"), k1.get("raw", {"values": []}))
-    time.sleep(TD_PAUSE)
+    if should_refresh(k1_path, STALE_1H):
+        k1 = try_symbols(symbols, lambda s: ts(s, "1h"))
+        guard_write_timeseries(k1_path, k1)
+        time.sleep(TD_PAUSE)
 
-    k4 = try_symbols(symbols, lambda s: ts(s, "4h"))
-    save_json(os.path.join(adir, "klines_4h.json"), k4.get("raw", {"values": []}))
-    time.sleep(TD_PAUSE)
+    if should_refresh(k4_path, STALE_4H):
+        k4 = try_symbols(symbols, lambda s: ts(s, "4h"))
+        guard_write_timeseries(k4_path, k4)
+        time.sleep(TD_PAUSE)
 
-    # 3) 5m előzetes jelzés (analysis.py később felülírhatja)
-    sig = signal_from_5m(k5 if isinstance(k5, dict) else {"ok": False})
-    save_json(
-        os.path.join(adir, "signal.json"),
-        {
-            "asset": asset,
-            "ok": bool(sig.get("ok")),
-            "retrieved_at_utc": now_utc(),
-            "signal": sig.get("signal", "no entry"),
-            "reasons": sig.get("reasons", []),
-            "probability": 0,   # előzetes; a véglegeset az analysis.py adja
-            "spot": {"price": spot.get("price"), "utc": spot.get("utc")},
-        },
-    )
+    # 3) 5m előzetes jelzés – csak akkor írjuk, ha van 5m adat
+    k5_raw = (json.load(open(k5_path, "r", encoding="utf-8")) if os.path.exists(k5_path) else {"values": []})
+    if values_ok(k5_raw):
+        # Készítünk egy "ál-payloadot", hogy a meglévő signal_from_5m() fel tudja dolgozni
+        sig = signal_from_5m({"ok": True, "raw": k5_raw})
+        spot_now = json.load(open(spot_path, "r", encoding="utf-8")) if os.path.exists(spot_path) else {}
+        save_json(
+            os.path.join(adir, "signal.json"),
+            {
+                "asset": asset,
+                "ok": bool(sig.get("ok")),
+                "retrieved_at_utc": now_utc(),
+                "signal": sig.get("signal", "no entry"),
+                "reasons": sig.get("reasons", []),
+                "probability": 0,  # előzetes; a véglegeset az analysis.py adja
+                "spot": {"price": spot_now.get("price"), "utc": spot_now.get("utc")},
+            },
+        )
 
 # ─────────────────────────────── main ─────────────────────────────────────
 
@@ -331,3 +380,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
