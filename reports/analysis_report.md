@@ -1,10 +1,10 @@
 # Intraday riport (Twelve Data-only)
 
-Generálva (UTC): `2025-10-11T10:17:59Z`
+Generálva (UTC): `2025-10-11T10:34:05Z`
 
 ### SOL
 
-Spot (USD): **185.2800** • UTC: `2025-10-11T10:15:00+00:00`
+Spot (USD): **185.0000** • UTC: `2025-10-11T10:30:00+00:00`
 Valószínűség: **P = 57%**
 Forrás: Twelve Data (lokális JSON)
 
@@ -27,7 +27,7 @@ Indoklás:
 
 ### GOLD_CFD
 
-Spot (USD): **3995.3400** • UTC: `2025-10-11T10:15:00+00:00`
+Spot (USD): **3999.0300** • UTC: `2025-10-11T10:30:00+00:00`
 Valószínűség: **P = 40%**
 Forrás: Twelve Data (lokális JSON)
 
@@ -36,17 +36,18 @@ Hiányzó kapuk: Regime (EMA21 slope), Bias, 5m BOS, ATR
 
 ### BNB
 
-Spot (USD): **1130.8100** • UTC: `2025-10-11T10:15:00+00:00`
+Spot (USD): **1136.3600** • UTC: `2025-10-11T10:30:00+00:00`
 Valószínűség: **P = 75%**
 Forrás: Twelve Data (lokális JSON)
 
-[BUY @ 1130.4300; SL: 1121.5726; TP1: 1148.1449; TP2: 1157.0023; mód: momentum; Ajánlott tőkeáttétel: 3.0×; RR≈3.00]
+[BUY @ 1139.3000; SL: 1128.0433; TP1: 1161.8134; TP2: 1173.0701; mód: momentum; Ajánlott tőkeáttétel: 3.0×; RR≈3.00]
 Indoklás:
 - Regime ok (EMA21 slope)
 - Fib zóna konfluencia (0.618–0.886)
 - ATR rendben
 - Momentum override (5m EMA + ATR + BOS)
 - Momentum: rész-realizálás javasolt 2.5R-n
+- Momentum: micro BOS elfogadva (1m szerkezet)
 
 ### USOIL
 
