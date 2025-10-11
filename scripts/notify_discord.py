@@ -31,8 +31,22 @@ ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "USOIL"]  # GER40 -> USOIL
 # ---- Debounce / stabilitás / cooldown ----
 STATE_PATH = f"{PUBLIC_DIR}/_notify_state.json"
 STABILITY_RUNS = 2
-COOLDOWN_MIN   = int(os.getenv("DISCORD_COOLDOWN_MIN", "10"))  # perc; 0 = off
-MOMENTUM_COOLDOWN_MIN = int(os.getenv("DISCORD_COOLDOWN_MOMENTUM_MIN", "8"))
+def int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(
+            f"WARN: {name}='{raw}' nem értelmezhető egész számként, {default}-ot használunk.",
+            file=sys.stderr,
+        )
+        return default
+
+
+COOLDOWN_MIN   = int_env("DISCORD_COOLDOWN_MIN", 10)  # perc; 0 = off
+MOMENTUM_COOLDOWN_MIN = int_env("DISCORD_COOLDOWN_MOMENTUM_MIN", 8)
 
 # ---- Időzóna a fejlécben / órakulcshoz ----
 try:
