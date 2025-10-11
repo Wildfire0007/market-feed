@@ -1,40 +1,101 @@
 {
   "asset": "SOL",
   "ok": true,
-  "retrieved_at_utc": "2025-10-11T14:01:34Z",
+  "retrieved_at_utc": "2025-10-11T14:22:08Z",
   "source": "Twelve Data (lokális JSON)",
   "spot": {
-    "price": 184.26,
-    "utc": "2025-10-11T13:55:00+00:00",
-    "retrieved_at_utc": "2025-10-11T14:01:17+00:00"
+    "price": 183.87,
+    "utc": "2025-10-11T14:20:00+00:00",
+    "retrieved_at_utc": "2025-10-11T14:21:49+00:00"
   },
-  "signal": "no entry",
-  "probability": 77,
-  "entry": null,
-  "sl": null,
-  "tp1": null,
-  "tp2": null,
-  "rr": null,
+  "signal": "sell",
+  "probability": 95,
+  "entry": 184.05,
+  "sl": 184.72328571428574,
+  "tp1": 182.70342857142856,
+  "tp2": 182.03014285714283,
+  "rr": 3.0,
   "leverage": 3.0,
   "gates": {
-    "mode": "momentum",
+    "mode": "core",
     "required": [
       "session",
-      "momentum(ema9x21)",
-      "bos5m|struct_break",
+      "regime",
+      "bias",
+      "bos5m",
+      "liquidity(fib|sweep|ema21|retest)",
       "atr",
-      "rr_math>=1.6",
+      "rr_math>=2.0",
       "tp_min_profit"
     ],
-    "missing": [
-      "bos5m|struct_break"
+    "missing": []
+  },
+  "session_info": {
+    "open": true,
+    "within_window": true,
+    "weekday_ok": true,
+    "now_utc": "2025-10-11T14:22:08.277769+00:00",
+    "windows_utc": null,
+    "status": "open",
+    "status_note": "Piac nyitva"
+  },
+  "diagnostics": {
+    "timeframes": {
+      "k1m": {
+        "last_raw_utc": "2025-10-11T14:20:00Z",
+        "last_closed_utc": "2025-10-11T14:19:00Z",
+        "latency_seconds": 188,
+        "expected_max_delay_seconds": 60,
+        "source_mtime_utc": "2025-10-11T14:21:50Z"
+      },
+      "k5m": {
+        "last_raw_utc": "2025-10-11T14:20:00Z",
+        "last_closed_utc": "2025-10-11T14:15:00Z",
+        "latency_seconds": 428,
+        "expected_max_delay_seconds": 300,
+        "source_mtime_utc": "2025-10-11T14:21:50Z"
+      },
+      "k1h": {
+        "last_raw_utc": "2025-10-11T14:00:00Z",
+        "last_closed_utc": "2025-10-11T13:00:00Z",
+        "latency_seconds": 4928,
+        "expected_max_delay_seconds": 3600,
+        "source_mtime_utc": "2025-10-11T14:21:51Z"
+      },
+      "k4h": {
+        "last_raw_utc": "2025-10-11T12:00:00Z",
+        "last_closed_utc": "2025-10-11T08:00:00Z",
+        "latency_seconds": 22928,
+        "expected_max_delay_seconds": 14400,
+        "source_mtime_utc": "2025-10-11T14:21:51Z"
+      }
+    },
+    "source_files": {
+      "spot.json": "2025-10-11T14:21:49Z",
+      "klines_1m.json": "2025-10-11T14:21:50Z",
+      "klines_5m.json": "2025-10-11T14:21:50Z",
+      "klines_1h.json": "2025-10-11T14:21:51Z",
+      "klines_4h.json": "2025-10-11T14:21:51Z"
+    },
+    "latency_flags": [
+      "k1h: utolsó zárt gyertya 82 perc késésben van",
+      "k4h: utolsó zárt gyertya 382 perc késésben van"
+    ],
+    "refresh_tips": [
+      "Az analysis.py mindig a legutóbbi ZÁRT gyertyával számol (5m: max. ~5 perc késés).",
+      "CI/CD-ben kösd össze a Trading és Analysis futást: az analysis job csak a trading után induljon (needs: trading).",
+      "A kliens kéréséhez adj cache-busting query paramot (pl. ?v=<timestamp>) és no-store cache-control fejlécet.",
+      "Cloudflare Worker stale policy: 5m feedre állítsd 120s-re, hogy hamar átjöjjön az új jel.",
+      "A dashboard stabilizáló (2 azonos jel + 10 perc cooldown) lassíthatja a kártya frissítését — lazítsd, ha realtime kell."
     ]
   },
   "reasons": [
     "Bias(4H→1H)=short",
     "Regime ok (EMA21 slope)",
+    "5M BOS trendirányba",
     "Fib zóna konfluencia (0.618–0.886)",
     "ATR rendben",
-    "missing: bos5m|struct_break"
+    "Diagnosztika: k1h: utolsó zárt gyertya 82 perc késésben van",
+    "Diagnosztika: k4h: utolsó zárt gyertya 382 perc késésben van"
   ]
 }
