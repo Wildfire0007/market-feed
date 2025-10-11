@@ -1,14 +1,14 @@
 # Intraday riport (Twelve Data-only)
 
-Generálva (UTC): `2025-10-11T09:38:10Z`
+Generálva (UTC): `2025-10-11T09:47:16Z`
 
 ### SOL
 
-Spot (USD): **186.2400** • UTC: `2025-10-11T09:35:00+00:00`
+Spot (USD): **186.2200** • UTC: `2025-10-11T09:45:00+00:00`
 Valószínűség: **P = 95%**
 Forrás: Twelve Data (lokális JSON)
 
-[SELL @ 186.3700; SL: 188.3903; TP1: 182.3294; TP2: 180.3091; mód: core; Ajánlott tőkeáttétel: 3.0×; RR≈3.00]
+[SELL @ 186.4300; SL: 187.9394; TP1: 183.4111; TP2: 181.9017; mód: core; Ajánlott tőkeáttétel: 3.0×; RR≈3.00]
 Indoklás:
 - Bias override: 1h trend short + momentum támogatás
 - Regime ok (EMA21 slope)
@@ -32,7 +32,7 @@ Indoklás:
 
 ### GOLD_CFD
 
-Spot (USD): **3995.9000** • UTC: `2025-10-11T09:35:00+00:00`
+Spot (USD): **3996.1700** • UTC: `2025-10-11T09:45:00+00:00`
 Valószínűség: **P = 49%**
 Forrás: Twelve Data (lokális JSON)
 
@@ -41,7 +41,7 @@ Hiányzó kapuk: Regime (EMA21 slope), Bias, 5m BOS
 
 ### BNB
 
-Spot (USD): **1124.4900** • UTC: `2025-10-11T09:35:00+00:00`
+Spot (USD): **1126.8400** • UTC: `2025-10-11T09:45:00+00:00`
 Valószínűség: **P = 57%**
 Forrás: Twelve Data (lokális JSON)
 
