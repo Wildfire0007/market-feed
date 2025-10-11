@@ -1,22 +1,22 @@
 # Intraday riport (Twelve Data-only)
 
-Generálva (UTC): `2025-10-11T14:22:10Z`
+Generálva (UTC): `2025-10-11T14:32:18Z`
 
 ### SOL
 
-Spot (USD): **183.8700** • UTC: `2025-10-11T14:20:00+00:00`
+Spot (USD): **182.1900** • UTC: `2025-10-11T14:30:00+00:00`
 Valószínűség: **P = 95%**
 Forrás: Twelve Data (lokális JSON)
 
-[SELL @ 184.0500; SL: 184.7233; TP1: 182.7034; TP2: 182.0301; mód: core; Ajánlott tőkeáttétel: 3.0×; RR≈3.00]
+[SELL @ 182.0700; SL: 184.3271; TP1: 177.5557; TP2: 175.2986; mód: core; Ajánlott tőkeáttétel: 3.0×; RR≈3.00]
 Indoklás:
 - Bias(4H→1H)=short
 - Regime ok (EMA21 slope)
 - 5M BOS trendirányba
 - Fib zóna konfluencia (0.618–0.886)
 - ATR rendben
-- Diagnosztika: k1h: utolsó zárt gyertya 82 perc késésben van
-- Diagnosztika: k4h: utolsó zárt gyertya 382 perc késésben van
+- Diagnosztika: k1h: utolsó zárt gyertya 92 perc késésben van
+- Diagnosztika: k4h: utolsó zárt gyertya 392 perc késésben van
 
 ### NSDQ100
 
@@ -24,7 +24,7 @@ Spot (USD): **589.4800** • UTC: `2025-10-10T19:55:00+00:00`
 Valószínűség: **P = 0%**
 Forrás: Twelve Data (lokális JSON)
 
-**Állapot:** no entry — Piac zárva (hétvége); Bias(4H→1H)=long; Regime ok (EMA21 slope); HTF sweep ok; 5M BOS trendirányba; ATR rendben; Diagnosztika: k1m: utolsó zárt gyertya 1104 perc késésben van; Diagnosztika: k5m: utolsó zárt gyertya 1112 perc késésben van; Diagnosztika: k1h: utolsó zárt gyertya 1192 perc késésben van; Diagnosztika: k4h: utolsó zárt gyertya 1492 perc késésben van; missing: session
+**Állapot:** no entry — Piac zárva (hétvége); Bias(4H→1H)=long; Regime ok (EMA21 slope); HTF sweep ok; 5M BOS trendirányba; ATR rendben; Diagnosztika: k1m: utolsó zárt gyertya 1114 perc késésben van; Diagnosztika: k5m: utolsó zárt gyertya 1122 perc késésben van; Diagnosztika: k1h: utolsó zárt gyertya 1202 perc késésben van; Diagnosztika: k4h: utolsó zárt gyertya 1502 perc késésben van; missing: session
 Hiányzó kapuk: Session
 
 ### GOLD_CFD
@@ -33,25 +33,24 @@ Spot (USD): **3997.5200** • UTC: `2025-10-11T12:55:00+00:00`
 Valószínűség: **P = 0%**
 Forrás: Twelve Data (lokális JSON)
 
-**Állapot:** no entry — Piac zárva (hétvége); Fib zóna konfluencia (0.618–0.886); Diagnosztika: k1m: utolsó zárt gyertya 84 perc késésben van; Diagnosztika: k5m: utolsó zárt gyertya 92 perc késésben van; Diagnosztika: k1h: utolsó zárt gyertya 202 perc késésben van; Diagnosztika: k4h: utolsó zárt gyertya 382 perc késésben van; missing: session, regime, bias, bos5m, atr
+**Állapot:** no entry — Piac zárva (hétvége); Fib zóna konfluencia (0.618–0.886); Diagnosztika: k1m: utolsó zárt gyertya 94 perc késésben van; Diagnosztika: k5m: utolsó zárt gyertya 102 perc késésben van; Diagnosztika: k1h: utolsó zárt gyertya 212 perc késésben van; Diagnosztika: k4h: utolsó zárt gyertya 392 perc késésben van; missing: session, regime, bias, bos5m, atr
 Hiányzó kapuk: Session, Regime (EMA21 slope), Bias, 5m BOS, ATR
 
 ### BNB
 
-Spot (USD): **1136.1700** • UTC: `2025-10-11T14:20:00+00:00`
-Valószínűség: **P = 75%**
+Spot (USD): **1130.1000** • UTC: `2025-10-11T14:30:00+00:00`
+Valószínűség: **P = 95%**
 Forrás: Twelve Data (lokális JSON)
 
-[BUY @ 1136.6300; SL: 1130.7053; TP1: 1148.4794; TP2: 1154.4041; mód: momentum; Ajánlott tőkeáttétel: 3.0×; RR≈3.00]
+[SELL @ 1131.8900; SL: 1135.8516; TP1: 1123.9668; TP2: 1120.0052; mód: core; Ajánlott tőkeáttétel: 3.0×; RR≈3.00]
 Indoklás:
+- Bias override: 1h trend short + momentum támogatás
 - Regime ok (EMA21 slope)
+- 5M BOS trendirányba
 - Fib zóna konfluencia (0.618–0.886)
 - ATR rendben
-- Momentum override (5m EMA + ATR + BOS)
-- Momentum: rész-realizálás javasolt 2.5R-n
-- Momentum: micro BOS elfogadva (1m szerkezet)
-- Diagnosztika: k1h: utolsó zárt gyertya 82 perc késésben van
-- Diagnosztika: k4h: utolsó zárt gyertya 382 perc késésben van
+- Diagnosztika: k1h: utolsó zárt gyertya 92 perc késésben van
+- Diagnosztika: k4h: utolsó zárt gyertya 392 perc késésben van
 
 ### USOIL
 
@@ -59,7 +58,7 @@ Spot (USD): **58.2400** • UTC: `2025-10-10T20:55:00+00:00`
 Valószínűség: **P = 0%**
 Forrás: Twelve Data (lokális JSON)
 
-**Állapot:** no entry — Piac zárva (hétvége); Bias(4H→1H)=short; Regime ok (EMA21 slope); 5M BOS trendirányba; ATR rendben; Diagnosztika: k1m: utolsó zárt gyertya 1044 perc késésben van; Diagnosztika: k5m: utolsó zárt gyertya 1052 perc késésben van; Diagnosztika: k1h: utolsó zárt gyertya 1162 perc késésben van; Diagnosztika: k4h: utolsó zárt gyertya 1342 perc késésben van; missing: session
+**Állapot:** no entry — Piac zárva (hétvége); Bias(4H→1H)=short; Regime ok (EMA21 slope); 5M BOS trendirányba; ATR rendben; Diagnosztika: k1m: utolsó zárt gyertya 1054 perc késésben van; Diagnosztika: k5m: utolsó zárt gyertya 1062 perc késésben van; Diagnosztika: k1h: utolsó zárt gyertya 1172 perc késésben van; Diagnosztika: k4h: utolsó zárt gyertya 1352 perc késésben van; missing: session
 Hiányzó kapuk: Session
 
 #### Elemzés & döntés checklist
