@@ -358,9 +358,11 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     spot_price = None
     spot_utc = "-"
+    spot_retrieved = "-"
     if spot:
         spot_price = spot.get("price") if spot.get("price") is not None else spot.get("price_usd")
         spot_utc = spot.get("utc") or spot.get("timestamp") or "-"
+        spot_retrieved = spot.get("retrieved_at_utc") or spot.get("retrieved") or "-"
 
     if (spot_price is None) or k5m.empty or k1h.empty or k4h.empty:
         msg = {
@@ -368,7 +370,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             "ok": False,
             "retrieved_at_utc": nowiso(),
             "source": "Twelve Data (lokális JSON)",
-            "spot": {"price": spot_price, "utc": spot_utc},
+            "spot": {"price": spot_price, "utc": spot_utc, "retrieved_at_utc": spot_retrieved},
             "signal": "no entry",
             "probability": 0,
             "entry": None, "sl": None, "tp1": None, "tp2": None, "rr": None,
@@ -683,7 +685,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "ok": True,
         "retrieved_at_utc": nowiso(),
         "source": "Twelve Data (lokális JSON)",
-        "spot": {"price": display_spot, "utc": spot_utc},
+        "spot": {"price": display_spot, "utc": spot_utc, "retrieved_at_utc": spot_retrieved},
         "signal": decision,
         "probability": int(P),
         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": (round(rr,2) if rr else None),
