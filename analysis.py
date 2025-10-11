@@ -501,13 +501,62 @@ def analyze(asset: str) -> Dict[str, Any]:
         return msg
 
     # --- ZÁRT gyertyák + kijelzett vs. számításhoz használt ár ---
-    display_spot = float(spot_price)                                # kijelzés
+    try:
+        display_spot = float(spot_price)                            # kijelzés
+    except (TypeError, ValueError):
+        display_spot = None
     k1m_closed = k1m.iloc[:-1] if len(k1m) > 1 else k1m.copy()
     k5m_closed = k5m.iloc[:-1] if len(k5m) > 1 else k5m.copy()
     k1h_closed = k1h.iloc[:-1] if len(k1h) > 1 else k1h.copy()
     k4h_closed = k4h.iloc[:-1] if len(k4h) > 1 else k4h.copy()
 
-    last5_close    = float(k5m_closed["close"].iloc[-1])            # stabil, lezárt 5m
+    required_closed = {
+        "k5m": k5m_closed,
+        "k1h": k1h_closed,
+        "k4h": k4h_closed,
+    }
+    missing_closed = [name for name, df in required_closed.items() if df.empty]
+    if missing_closed:
+        msg = {
+            "asset": asset,
+            "ok": False,
+            "retrieved_at_utc": nowiso(),
+            "source": "Twelve Data (lokális JSON)",
+            "spot": {"price": spot_price, "utc": spot_utc, "retrieved_at_utc": spot_retrieved},
+            "signal": "no entry",
+            "probability": 0,
+            "entry": None, "sl": None, "tp1": None, "tp2": None, "rr": None,
+            "leverage": LEVERAGE.get(asset, 2.0),
+            "reasons": [
+                "Insufficient closed data ({} missing)".format(
+                    ", ".join(sorted(missing_closed))
+                )
+            ],
+        }
+        save_json(os.path.join(outdir, "signal.json"), msg)
+        return msg
+
+    try:
+        last5_close = float(k5m_closed["close"].iloc[-1])  # stabil, lezárt 5m
+    except Exception:
+        last5_close = None
+
+    if last5_close is None or not np.isfinite(last5_close):
+        msg = {
+            "asset": asset,
+            "ok": False,
+            "retrieved_at_utc": nowiso(),
+            "source": "Twelve Data (lokális JSON)",
+            "spot": {"price": spot_price, "utc": spot_utc, "retrieved_at_utc": spot_retrieved},
+            "signal": "no entry",
+            "probability": 0,
+            "entry": None, "sl": None, "tp1": None, "tp2": None, "rr": None,
+            "leverage": LEVERAGE.get(asset, 2.0),
+            "reasons": ["Insufficient closed data (5m close)"],
+        }
+        save_json(os.path.join(outdir, "signal.json"), msg)
+        return msg
+
     price_for_calc = last5_close
 
     now = datetime.now(timezone.utc)
@@ -932,5 +981,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
