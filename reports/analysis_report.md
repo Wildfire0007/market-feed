@@ -1,20 +1,15 @@
 # Intraday riport (Twelve Data-only)
 
-Generálva (UTC): `2025-10-11T09:56:37Z`
+Generálva (UTC): `2025-10-11T10:17:59Z`
 
 ### SOL
 
-Spot (USD): **184.1000** • UTC: `2025-10-11T09:50:00+00:00`
-Valószínűség: **P = 95%**
+Spot (USD): **185.2800** • UTC: `2025-10-11T10:15:00+00:00`
+Valószínűség: **P = 57%**
 Forrás: Twelve Data (lokális JSON)
 
-[SELL @ 185.7900; SL: 186.9996; TP1: 183.3709; TP2: 182.1613; mód: core; Ajánlott tőkeáttétel: 3.0×; RR≈3.00]
-Indoklás:
-- Bias override: 1h trend short + momentum támogatás
-- Regime ok (EMA21 slope)
-- 5M BOS trendirányba
-- Fib zóna konfluencia (0.618–0.886)
-- ATR rendben
+**Állapot:** no entry — Regime ok (EMA21 slope); Fib zóna konfluencia (0.618–0.886); ATR rendben; missing: momentum(ema9x21)
+Hiányzó kapuk: Momentum EMA9×21
 
 ### NSDQ100
 
@@ -32,21 +27,26 @@ Indoklás:
 
 ### GOLD_CFD
 
-Spot (USD): **3995.9900** • UTC: `2025-10-11T09:55:00+00:00`
-Valószínűség: **P = 49%**
+Spot (USD): **3995.3400** • UTC: `2025-10-11T10:15:00+00:00`
+Valószínűség: **P = 40%**
 Forrás: Twelve Data (lokális JSON)
 
-**Állapot:** no entry — Fib zóna konfluencia (0.618–0.886); ATR rendben; missing: regime, bias, bos5m
-Hiányzó kapuk: Regime (EMA21 slope), Bias, 5m BOS
+**Állapot:** no entry — Fib zóna konfluencia (0.618–0.886); missing: regime, bias, bos5m, atr
+Hiányzó kapuk: Regime (EMA21 slope), Bias, 5m BOS, ATR
 
 ### BNB
 
-Spot (USD): **1121.9800** • UTC: `2025-10-11T09:55:00+00:00`
-Valószínűség: **P = 57%**
+Spot (USD): **1130.8100** • UTC: `2025-10-11T10:15:00+00:00`
+Valószínűség: **P = 75%**
 Forrás: Twelve Data (lokális JSON)
 
-**Állapot:** no entry — Regime ok (EMA21 slope); Fib zóna konfluencia (0.618–0.886); ATR rendben; missing: bos5m|struct_break
-Hiányzó kapuk: BOS/Structure
+[BUY @ 1130.4300; SL: 1121.5726; TP1: 1148.1449; TP2: 1157.0023; mód: momentum; Ajánlott tőkeáttétel: 3.0×; RR≈3.00]
+Indoklás:
+- Regime ok (EMA21 slope)
+- Fib zóna konfluencia (0.618–0.886)
+- ATR rendben
+- Momentum override (5m EMA + ATR + BOS)
+- Momentum: rész-realizálás javasolt 2.5R-n
 
 ### USOIL
 
