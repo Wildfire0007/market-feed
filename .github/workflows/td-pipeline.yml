@@ -3,20 +3,23 @@ name: TD Full Pipeline (5m)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"   # 5 percenként
+    - cron: "*/5 * * * *"   # 5 percenként (UTC)
 
+permissions:
+  contents: write
+  
 concurrency:
   group: td-pipeline
   cancel-in-progress: true
 
 jobs:
-  run:
+  trading:
+    name: 1) Trading.py — adatszedés (TD)
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     env:
+      OUT_DIR: public
+      TD_PAUSE: "0.3"
       TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
-      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,71 +28,60 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          cache: "pip"
 
       - name: Install deps
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pandas numpy
 
-      - name: Fetch data from Twelve Data
+      - name: Run Trading.py (pull all OHLC + spot)
         run: python Trading.py
 
-      - name: Build trade signals (TD-only)
-        run: python analysis.py
-
-      - name: Build intraday report
-        run: python scripts/intraday_report.py
-
-      - name: Preflight:list & peek
-        if: always()
+      - name: Commit & Push trading outputs
         run: |
-          echo "== public tree =="
-          ls -R public || true
-
-          # jq biztosan legyen
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y jq
-          fi
-
-          for a in SOL NSDQ100 GOLD_CFD; do
-            echo "---- $a spot.json ----"
-            if test -f public/$a/spot.json; then
-              jq -c '{price:(.price//.price_usd), utc:(.utc//.timestamp//.retrieved_at_utc//.retrieved_at)}' public/$a/spot.json
-            else
-              echo "missing: public/$a/spot.json"
-            fi
-
-            echo "---- $a signal.json ----"
-            if test -f public/$a/signal.json; then
-              jq -c '{signal, probability, entry, sl, tp1, tp2, rr, spot:.spot}' public/$a/signal.json
-            else
-              echo "missing: public/$a/signal.json"
-            fi
-          done
-
-          echo "---- summary ----"
-          if test -f public/analysis_summary.json; then
-            jq -c '.assets' public/analysis_summary.json | head -n 1
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A public
+          if ! git diff --cached --quiet; then
+            git commit -m "Trading.py: update public data [skip ci]"
+            git push
           else
-            echo "missing: public/analysis_summary.json"
+            echo "No changes to commit."
           fi
           
-      - name: TD live probe (compare with local files)
-        run: python scripts/td_verify.py
+  analysis:
+    name: 2) Analysis — jelzésképzés (csak trading után)
+    needs: trading
+    runs-on: ubuntu-latest
+    env:
+      SESSION_OVERRIDE_24_7: "1"
+    steps:
+      - name: Checkout (fresh HEAD incl. trading commit)
+        uses: actions/checkout@v4
 
-      - name: Commit & push outputs
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps
         run: |
-          git config user.name "td-bot"
-          git config user.email "td-bot@users.noreply.github.com"
-          git add public reports || true
-          git commit -m "TD: data+signals+report" || echo "no changes"
-          git push
+          python -m pip install --upgrade pip
+          pip install pandas numpy
 
-      - name: Notify Discord
-        run: python scripts/notify_discord.py
+      - name: Run analysis.py (generate signals)
+        run: python analysis.py
+
+      - name: Commit & Push analysis outputs
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A public
+          if ! git diff --cached --quiet; then
+            git commit -m "analysis.py: update signals/summary [skip ci]"
+            git push
+          else
+            echo "No changes to commit."
+          fi
