@@ -132,8 +132,11 @@ def td_time_series(symbol: str, interval: str, outputsize: int = 500,
             "raw": {"values": []},
         }
 
-def td_quote(symbol: str) -> Dict[str, Any]:
-    j = td_get("quote", symbol=symbol)
+def td_quote(symbol: str, exchange: Optional[str] = None) -> Dict[str, Any]:
+    params = {"symbol": symbol, "timezone": "UTC"}
+    if exchange:
+        params["exchange"] = exchange
+    j = td_get("quote", **params)
     price = j.get("price")
     price = float(price) if price not in (None, "") else None
     ts = j.get("datetime") or j.get("timestamp")
@@ -173,7 +176,7 @@ def td_last_close(symbol: str, interval: str = "5min", exchange: Optional[str] =
 def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[str, Any]:
     """Spot ár: quote → ha nincs, 5m utolsó close (time_series) fallback."""
     try:
-        q = td_quote(symbol)
+        q = td_quote(symbol, exchange)
     except Exception as e:
         q = {"ok": False, "error": str(e)}
 
@@ -336,4 +339,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
