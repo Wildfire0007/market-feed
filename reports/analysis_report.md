@@ -1,14 +1,14 @@
 # Intraday riport (Twelve Data-only)
 
-Generálva (UTC): `2025-10-11T13:41:54Z`
+Generálva (UTC): `2025-10-11T13:51:36Z`
 
 ### SOL
 
-Spot (USD): **182.4800** • UTC: `2025-10-11T13:40:00+00:00`
+Spot (USD): **183.8800** • UTC: `2025-10-11T13:45:00+00:00`
 Valószínűség: **P = 95%**
 Forrás: Twelve Data (lokális JSON)
 
-[SELL @ 182.1700; SL: 183.5801; TP1: 179.3497; TP2: 177.9396; mód: core; Ajánlott tőkeáttétel: 3.0×; RR≈3.00]
+[SELL @ 182.6300; SL: 183.5784; TP1: 180.7331; TP2: 179.7847; mód: core; Ajánlott tőkeáttétel: 3.0×; RR≈3.00]
 Indoklás:
 - Bias(4H→1H)=short
 - Regime ok (EMA21 slope)
@@ -41,17 +41,12 @@ Hiányzó kapuk: Regime (EMA21 slope), Bias, 5m BOS, ATR
 
 ### BNB
 
-Spot (USD): **1121.8100** • UTC: `2025-10-11T13:40:00+00:00`
-Valószínűség: **P = 95%**
+Spot (USD): **1130.5000** • UTC: `2025-10-11T13:50:00+00:00`
+Valószínűség: **P = 57%**
 Forrás: Twelve Data (lokális JSON)
 
-[SELL @ 1120.7000; SL: 1125.7741; TP1: 1110.5517; TP2: 1105.4776; mód: core; Ajánlott tőkeáttétel: 3.0×; RR≈3.00]
-Indoklás:
-- Bias override: 1h trend short + momentum támogatás
-- Regime ok (EMA21 slope)
-- 5M BOS trendirányba
-- Fib zóna konfluencia (0.618–0.886)
-- ATR rendben
+**Állapot:** no entry — Regime ok (EMA21 slope); Fib zóna konfluencia (0.618–0.886); ATR rendben; missing: bos5m|struct_break
+Hiányzó kapuk: BOS/Structure
 
 ### USOIL
 
