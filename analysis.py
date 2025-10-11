@@ -260,6 +260,70 @@ def tp_min_pct_for(asset: str, rel_atr: float, session_flag: bool) -> float:
         return min(base, 0.0010)
     return base
 
+
+def safe_float(value: Any) -> Optional[float]:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(result):
+        return None
+    return result
+
+
+def diagnostics_payload(tf_meta: Dict[str, Dict[str, Any]],
+                        source_files: Dict[str, Optional[str]],
+                        latency_flags: List[str]) -> Dict[str, Any]:
+    return {
+        "timeframes": tf_meta,
+        "source_files": source_files,
+        "latency_flags": list(latency_flags),
+        "refresh_tips": list(REFRESH_TIPS),
+    }
+
+
+def build_data_gap_signal(asset: str,
+                          spot_price: Any,
+                          spot_utc: str,
+                          spot_retrieved: str,
+                          leverage: float,
+                          reasons: List[str],
+                          display_spot: Optional[float],
+                          diagnostics: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "asset": asset,
+        "ok": False,
+        "retrieved_at_utc": nowiso(),
+        "source": "Twelve Data (lokális JSON)",
+        "spot": {
+            "price": display_spot if display_spot is not None else spot_price,
+            "utc": spot_utc,
+            "retrieved_at_utc": spot_retrieved,
+        },
+        "signal": "no entry",
+        "probability": 0,
+        "entry": None,
+        "sl": None,
+        "tp1": None,
+        "tp2": None,
+        "rr": None,
+        "leverage": leverage,
+        "gates": {
+            "mode": "data_gap",
+            "required": ["data_integrity"],
+            "missing": ["data_integrity"],
+        },
+        "session_info": {
+            "open": None,
+            "within_window": None,
+            "weekday_ok": None,
+            "status": "unavailable",
+            "status_note": "Hiányzó adat",
+        },
+        "diagnostics": diagnostics,
+        "reasons": reasons,
+    }
+
 def save_json(path: str, obj: Any) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -484,80 +548,11 @@ def analyze(asset: str) -> Dict[str, Any]:
         spot_utc = spot.get("utc") or spot.get("timestamp") or "-"
         spot_retrieved = spot.get("retrieved_at_utc") or spot.get("retrieved") or "-"
 
-    if (spot_price is None) or k5m.empty or k1h.empty or k4h.empty:
-        msg = {
-            "asset": asset,
-            "ok": False,
-            "retrieved_at_utc": nowiso(),
-            "source": "Twelve Data (lokális JSON)",
-            "spot": {"price": spot_price, "utc": spot_utc, "retrieved_at_utc": spot_retrieved},
-            "signal": "no entry",
-            "probability": 0,
-            "entry": None, "sl": None, "tp1": None, "tp2": None, "rr": None,
-            "leverage": LEVERAGE.get(asset, 2.0),
-            "reasons": ["Insufficient data (spot/k5m/k1h/k4h)"],
-        }
-        save_json(os.path.join(outdir, "signal.json"), msg)
-        return msg
-
-    # --- ZÁRT gyertyák + kijelzett vs. számításhoz használt ár ---
-    try:
-        display_spot = float(spot_price)                            # kijelzés
-    except (TypeError, ValueError):
-        display_spot = None
+    display_spot = safe_float(spot_price)
     k1m_closed = k1m.iloc[:-1] if len(k1m) > 1 else k1m.copy()
     k5m_closed = k5m.iloc[:-1] if len(k5m) > 1 else k5m.copy()
     k1h_closed = k1h.iloc[:-1] if len(k1h) > 1 else k1h.copy()
     k4h_closed = k4h.iloc[:-1] if len(k4h) > 1 else k4h.copy()
-
-    required_closed = {
-        "k5m": k5m_closed,
-        "k1h": k1h_closed,
-        "k4h": k4h_closed,
-    }
-    missing_closed = [name for name, df in required_closed.items() if df.empty]
-    if missing_closed:
-        msg = {
-            "asset": asset,
-            "ok": False,
-            "retrieved_at_utc": nowiso(),
-            "source": "Twelve Data (lokális JSON)",
-            "spot": {"price": spot_price, "utc": spot_utc, "retrieved_at_utc": spot_retrieved},
-            "signal": "no entry",
-            "probability": 0,
-            "entry": None, "sl": None, "tp1": None, "tp2": None, "rr": None,
-            "leverage": LEVERAGE.get(asset, 2.0),
-            "reasons": [
-                "Insufficient closed data ({} missing)".format(
-                    ", ".join(sorted(missing_closed))
-                )
-            ],
-        }
-        save_json(os.path.join(outdir, "signal.json"), msg)
-        return msg
-
-    try:
-        last5_close = float(k5m_closed["close"].iloc[-1])  # stabil, lezárt 5m
-    except Exception:
-        last5_close = None
-
-    if last5_close is None or not np.isfinite(last5_close):
-        msg = {
-            "asset": asset,
-            "ok": False,
-            "retrieved_at_utc": nowiso(),
-            "source": "Twelve Data (lokális JSON)",
-            "spot": {"price": spot_price, "utc": spot_utc, "retrieved_at_utc": spot_retrieved},
-            "signal": "no entry",
-            "probability": 0,
-            "entry": None, "sl": None, "tp1": None, "tp2": None, "rr": None,
-            "leverage": LEVERAGE.get(asset, 2.0),
-            "reasons": ["Insufficient closed data (5m close)"],
-        }
-        save_json(os.path.join(outdir, "signal.json"), msg)
-        return msg
-
-    price_for_calc = last5_close
 
     now = datetime.now(timezone.utc)
     expected_delays = {"k1m": 60, "k5m": 300, "k1h": 3600, "k4h": 4*3600}
@@ -593,6 +588,70 @@ def analyze(asset: str) -> Dict[str, Any]:
         "klines_1h.json": tf_meta["k1h"].get("source_mtime_utc"),
         "klines_4h.json": tf_meta["k4h"].get("source_mtime_utc"),
     }
+
+    diag_factory = lambda: diagnostics_payload(tf_meta, source_files, latency_flags)
+
+    if (spot_price is None) or k5m.empty or k1h.empty or k4h.empty:
+        msg = build_data_gap_signal(
+            asset,
+            spot_price,
+            spot_utc,
+            spot_retrieved,
+            LEVERAGE.get(asset, 2.0),
+            ["Insufficient data (spot/k5m/k1h/k4h)"],
+            display_spot,
+            diag_factory(),
+        )
+        save_json(os.path.join(outdir, "signal.json"), msg)
+        return msg
+
+    required_closed = {
+        "k5m": k5m_closed,
+        "k1h": k1h_closed,
+        "k4h": k4h_closed,
+    }
+    missing_closed = [name for name, df in required_closed.items() if df.empty]
+    if missing_closed:
+        msg = build_data_gap_signal(
+            asset,
+            spot_price,
+            spot_utc,
+            spot_retrieved,
+            LEVERAGE.get(asset, 2.0),
+            [
+                "Insufficient closed data ({} missing)".format(
+                    ", ".join(sorted(missing_closed))
+                )
+            ],
+            display_spot,
+            diag_factory(),
+        )
+        save_json(os.path.join(outdir, "signal.json"), msg)
+        return msg
+
+    try:
+        last5_close = float(k5m_closed["close"].iloc[-1])  # stabil, lezárt 5m
+    except Exception:
+        last5_close = None
+
+    if last5_close is None or not np.isfinite(last5_close):
+        msg = build_data_gap_signal(
+            asset,
+            spot_price,
+            spot_utc,
+            spot_retrieved,
+            LEVERAGE.get(asset, 2.0),
+            ["Insufficient closed data (5m close)"],
+            display_spot,
+            diag_factory(),
+        )
+        save_json(os.path.join(outdir, "signal.json"), msg)
+        return msg
+
+    price_for_calc = last5_close
+
+    if display_spot is None and price_for_calc is not None and np.isfinite(price_for_calc):
+        display_spot = price_for_calc
 
     # 2) Bias 4H→1H (zárt 1h/4h)
     bias4h = bias_from_emas(k4h_closed)
@@ -940,12 +999,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             "missing": missing,
         },
         "session_info": session_meta,
-        "diagnostics": {
-            "timeframes": tf_meta,
-            "source_files": source_files,
-            "latency_flags": latency_flags,
-            "refresh_tips": list(REFRESH_TIPS),
-        },
+        "diagnostics": diagnostics_payload(tf_meta, source_files, latency_flags),
         "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else [])) or ["no signal"],
     }
     save_json(os.path.join(outdir, "signal.json"), decision_obj)
@@ -981,6 +1035,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
