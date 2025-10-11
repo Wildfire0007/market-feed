@@ -568,11 +568,11 @@ def analyze(asset: str) -> Dict[str, Any]:
         bull = (e9_5 > e21_5).tail(MOMENTUM_BARS).all()
         bos_struct_short = struct_retest_short
         bos_struct_long  = struct_retest_long
+        mom_atr_ok = not np.isnan(rel_atr) and (rel_atr >= MOMENTUM_ATR_REL)
         mom_micro_short = bool(micro_bos_short and mom_atr_ok)
         mom_micro_long  = bool(micro_bos_long and mom_atr_ok)
         bos_any_short = bool(bos5m_short or bos_struct_short or mom_micro_short)
         bos_any_long  = bool(bos5m_long or bos_struct_long or mom_micro_long)
-        mom_atr_ok = not np.isnan(rel_atr) and (rel_atr >= MOMENTUM_ATR_REL)
 
         if session_ok_flag:
             if bear and bos_any_short and mom_atr_ok:
@@ -724,3 +724,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
