@@ -34,7 +34,7 @@ FIB_TOL = 0.02
 # --- ATR küszöbök ---
 ATR_LOW_TH_DEFAULT = 0.0007   # 0.07%
 ATR_LOW_TH_ASSET = {
-    "SOL": 0.0008,  # magasabb szűrő marad kriptón
+    "SOL": 0.0005,  # lazított küszöb: 0.05%
 }
 GOLD_HIGH_VOL_WINDOWS = [(6, 30, 21, 30)]  # európai nyitástól US zárásig lazább
 GOLD_LOW_VOL_TH = 0.0006
@@ -42,7 +42,8 @@ SMT_PENALTY_VALUE = 7
 SMT_REQUIRED_BARS = 2
 
 # --- Kereskedési/egz. küszöbök (RR/TP) ---
-MIN_R   = 2.0
+MIN_R_CORE      = 2.0
+MIN_R_MOMENTUM  = 1.6
 TP1_R   = 2.0
 TP2_R   = 3.0
 
@@ -53,7 +54,7 @@ TP_MIN_PCT = {        # min. TP1 távolság %-ban (entry-hez képest)
     "GOLD_CFD": 0.0015, # 0.15%  (arany)
     "USOIL":    0.0020, # 0.20%
     "NSDQ100":  0.0012, # 0.12% alap; cash+magas vol esetén enged 0.10%-ig
-    "SOL":      0.0040, # 0.40%
+    "SOL":      0.0030, # 0.30%
     "BNB":      0.0040, # 0.40%
 }
 TP_MIN_ABS = {        # min. TP1 távolság abszolútban (tick/árjegyzés miatt)
@@ -61,7 +62,7 @@ TP_MIN_ABS = {        # min. TP1 távolság abszolútban (tick/árjegyzés miatt
     "GOLD_CFD": 3.0,   # arany ~3 pont
     "USOIL":    0.08,  # olaj ~0.08
     "NSDQ100":  0.80,
-    "SOL":      0.80,
+    "SOL":      0.50,
     "BNB":      0.50,
 }
 COST_ROUND_PCT_ASSET = {  # várható round-trip költség (spread+jutalék+slip) %
@@ -72,16 +73,19 @@ COST_ROUND_PCT_ASSET = {  # várható round-trip költség (spread+jutalék+slip
     "SOL":      0.0020, # 0.20%
     "BNB":      0.0020, # 0.20%
 }
-COST_MULT_DEFAULT = 2.0
-COST_MULT_HIGH_VOL = 1.7
+COST_MULT_DEFAULT = 1.5
+COST_MULT_HIGH_VOL = 1.3
 ATR5_MIN_MULT  = 0.5     # min. profit >= 0.5× ATR(5m)
 ATR_VOL_HIGH_REL = 0.002  # 0.20% relatív ATR felett lazítjuk a költség-multit
 
 # --- Momentum override csak kriptókra (SOL, BNB) ---
 ENABLE_MOMENTUM_ASSETS = {"SOL", "BNB"}
-MOMENTUM_BARS    = 7             # 5m EMA9–EMA21 legalább 7 bar
-MOMENTUM_ATR_REL = 0.0010        # >= 0.10% 5m relatív ATR
-MOMENTUM_BOS_LB  = 15            # szerkezeti töréshez nézett ablak (bar)␊
+MOMENTUM_BARS    = 5             # 5m EMA9–EMA21 legalább 5 bar
+MOMENTUM_ATR_REL = 0.0008        # >= 0.08% 5m relatív ATR
+MOMENTUM_BOS_LB  = 15            # szerkezeti töréshez nézett ablak (bar)
+
+P_SCORE_MIN = 50
+MICRO_BOS_P_BONUS = 8
 
 # --- Rezsim és session beállítások ---
 EMA_SLOPE_PERIOD   = 21          # 1h EMA21
@@ -92,7 +96,7 @@ EMA_SLOPE_TH       = 0.0007      # ~0.10% relatív elmozdulás (abs) a lookback 
 SESSIONS_UTC: Dict[str, Optional[List[Tuple[int,int,int,int]]]] = {
     "SOL": None,
     "BNB": None,
-    "NSDQ100": [(13,30, 20,0)],   # US cash
+    "NSDQ100": [(0,0, 23,59)],    # teljes nap (0-24)
     "GOLD_CFD": None,             # gyakorlatilag egész nap
     "USOIL": None,                # WTI szinte 23h/nap — nem korlátozzuk
 }
@@ -399,12 +403,6 @@ def analyze(asset: str) -> Dict[str, Any]:
     # 4) 5M BOS a trend irányába (zárt 5m)
     bos5m_long = detect_bos(k5m_closed, "long")
     bos5m_short = detect_bos(k5m_closed, "short")
-    if trend_bias == "long":
-        bos5m = bos5m_long
-    elif trend_bias == "short":
-        bos5m = bos5m_short
-    else:
-        bos5m = False
 
     # 5) ATR szűrő (relatív) — a stabil árhoz viszonyítjuk (zárt 5m)
     atr5 = atr(k5m_closed).iloc[-1]
@@ -434,32 +432,65 @@ def analyze(asset: str) -> Dict[str, Any]:
     struct_retest_long  = structure_break_with_retest(k5m_closed, "long", MOMENTUM_BOS_LB)
     struct_retest_short = structure_break_with_retest(k5m_closed, "short", MOMENTUM_BOS_LB)
 
-    micro_bos = False
-    if trend_bias in ("long", "short"):
-        if micro_bos_with_retest(k1m_closed, k5m_closed, "long" if trend_bias == "long" else "short"):
-            micro_bos = True
+    micro_bos_long = micro_bos_with_retest(k1m_closed, k5m_closed, "long")
+    micro_bos_short = micro_bos_with_retest(k1m_closed, k5m_closed, "short")
+
+    effective_bias = trend_bias
+    bias_override_used = False
+    if trend_bias == "neutral" and bias1h in ("long", "short"):
+        override_dir = bias1h
+        bos_support = bos5m_long if override_dir == "long" else bos5m_short
+        struct_support = struct_retest_long if override_dir == "long" else struct_retest_short
+        micro_support = micro_bos_long if override_dir == "long" else micro_bos_short
+        atr_push = bool(
+            atr_ok and not np.isnan(rel_atr)
+            and rel_atr >= max(atr_threshold * 1.2, MOMENTUM_ATR_REL)
+        )
+        if regime_ok and (bos_support or struct_support or (micro_support and atr_push)):
+            effective_bias = override_dir
+            bias_override_used = True
+
+    if effective_bias == "long":
+        bos5m = bos5m_long
+    elif effective_bias == "short":
+        bos5m = bos5m_short
+    else:
+        bos5m = False
+
+    micro_bos_active = (
+        micro_bos_long if effective_bias == "long"
+        else micro_bos_short if effective_bias == "short"
+        else False
+    )
 
     # 7) P-score (egyszerű súlyozás)
     P, reasons = 20, []
-    if trend_bias != "neutral":
+    if effective_bias != "neutral":
         P += 20
-        reasons.append(f"Bias(4H→1H)={trend_bias}")
+        if bias_override_used:
+            reasons.append(f"Bias override: 1h trend {effective_bias} + momentum támogatás")
+        else:
+            reasons.append(f"Bias(4H→1H)={effective_bias}")
     if regime_ok:
         P += 8
         reasons.append("Regime ok (EMA21 slope)")
     if swept:
         P += 15
         reasons.append("HTF sweep ok")
-    struct_retest_active = ((trend_bias == "long" and struct_retest_long) or
-                            (trend_bias == "short" and struct_retest_short))
+    struct_retest_active = ((effective_bias == "long" and struct_retest_long) or
+                            (effective_bias == "short" and struct_retest_short))
     if bos5m:
         P += 18
         reasons.append("5M BOS trendirányba")
     elif struct_retest_active:
         P += 12
         reasons.append("5m szerkezeti törés + retest a trend irányába")
-    elif micro_bos:
-        reasons.append("1m BOS + 5m retest — várjuk a 5m megerősítést")
+    elif micro_bos_active:
+        if atr_ok and not np.isnan(rel_atr) and rel_atr >= max(atr_threshold, MOMENTUM_ATR_REL):
+            P += MICRO_BOS_P_BONUS
+            reasons.append("Micro BOS megerősítés (1m szerkezet + magas ATR)")
+        else:
+            reasons.append("1m BOS + 5m retest — várjuk a 5m megerősítést")
     if fib_ok:
         P += 20
         reasons.append("Fib zóna konfluencia (0.618–0.886)")
@@ -477,35 +508,55 @@ def analyze(asset: str) -> Dict[str, Any]:
     P = max(0, min(100, P))
 
     # --- Kapuk (liquidity = Fib zóna VAGY sweep) + session + regime ---
-    liquidity_ok = bool(
+    session_ok_flag = session_ok(asset)
+    liquidity_ok_base = bool(
         fib_ok
         or swept
         or ema21_dist_ok
-        or (trend_bias == "long" and struct_retest_long)
-        or (trend_bias == "short" and struct_retest_short)
+        or (effective_bias == "long" and struct_retest_long)
+        or (effective_bias == "short" and struct_retest_short)
     )
-    session_ok_flag = session_ok(asset)
+    candidate_dir = effective_bias if effective_bias in ("long", "short") else (bias1h if bias1h in ("long", "short") else None)
+    strong_momentum = False
+    if candidate_dir == "long":
+        strong_momentum = bool(bos5m_long or struct_retest_long or micro_bos_long)
+    elif candidate_dir == "short":
+        strong_momentum = bool(bos5m_short or struct_retest_short or micro_bos_short)
+    liquidity_relaxed = False
+    liquidity_ok = liquidity_ok_base
+    if not liquidity_ok_base and strong_momentum:
+        high_atr_push = bool(
+            atr_ok and not np.isnan(rel_atr)
+            and rel_atr >= max(atr_threshold * 1.3, MOMENTUM_ATR_REL)
+        )
+        if high_atr_push or P >= 65:
+            liquidity_ok = True
+            liquidity_relaxed = True
 
     conds_core = {
         "session": bool(session_ok_flag),
         "regime":  bool(regime_ok),
-        "bias":    trend_bias in ("long","short"),
-        "bos5m":   bool(bos5m or (trend_bias == "long" and struct_retest_long) or (trend_bias == "short" and struct_retest_short)),
+        "bias":    effective_bias in ("long","short"),
+        "bos5m":   bool(bos5m or (effective_bias == "long" and struct_retest_long) or (effective_bias == "short" and struct_retest_short)),
         "liquidity": liquidity_ok,
         "atr":     bool(atr_ok),
     }
     base_core_ok = all(v for k, v in conds_core.items() if k != "bos5m")
-    bos_gate_ok = conds_core["bos5m"] or micro_bos
-    can_enter_core = (P >= 55) and base_core_ok and bos_gate_ok
+    bos_gate_ok = conds_core["bos5m"] or micro_bos_active
+    can_enter_core = (P >= P_SCORE_MIN) and base_core_ok and bos_gate_ok
     missing_core = [k for k, v in conds_core.items() if not v]
-    if micro_bos and not conds_core["bos5m"]:
+    if micro_bos_active and not conds_core["bos5m"]:
         if "bos5m" not in missing_core:
             missing_core.append("bos5m")
+    if liquidity_relaxed:
+        reasons.append("Likviditási kapu lazítva erős momentum miatt")
 
     # --- Momentum feltételek (override) — kriptókra (zárt 5m-ből) ---
     momentum_used = False
     mom_dir: Optional[str] = None
-    mom_required = ["session", "momentum(ema9x21)", "bos5m|struct_break", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
+    mom_micro_long = False
+    mom_micro_short = False
+    mom_required = ["session", "momentum(ema9x21)", "bos5m|struct_break", "atr", f"rr_math>={MIN_R_MOMENTUM:.1f}", "tp_min_profit"]
     missing_mom: List[str] = []
 
     if asset in ENABLE_MOMENTUM_ASSETS:
@@ -515,8 +566,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         bull = (e9_5 > e21_5).tail(MOMENTUM_BARS).all()
         bos_struct_short = struct_retest_short
         bos_struct_long  = struct_retest_long
-        bos_any_short = bool(bos5m_short or bos_struct_short)
-        bos_any_long  = bool(bos5m_long or bos_struct_long)
+        mom_micro_short = bool(micro_bos_short and mom_atr_ok)
+        mom_micro_long  = bool(micro_bos_long and mom_atr_ok)
+        bos_any_short = bool(bos5m_short or bos_struct_short or mom_micro_short)
+        bos_any_long  = bool(bos5m_long or bos_struct_long or mom_micro_long)
         mom_atr_ok = not np.isnan(rel_atr) and (rel_atr >= MOMENTUM_ATR_REL)
 
         if session_ok_flag:
@@ -541,7 +594,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     mode = "core"
     missing = list(missing_core)
 
-    def compute_levels(decision_side: str):
+    def compute_levels(decision_side: str, rr_required: float):
         nonlocal entry, sl, tp1, tp2, rr, missing
         atr5_val  = float(atr5 or 0.0)
         atr1h_val = float(atr1h or 0.0)
@@ -549,8 +602,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         # vol/költség alapú minimum kockázat és puffer
         risk_min = max(0.6 * atr5_val, 0.0035 * price_for_calc, 0.50)
         atr1h_cap = 0.12 * atr1h_val
-        atr1h_component = min(max(0.0, atr1h_cap), 0.0012 * price_for_calc)
-        buf      = max(0.3 * atr5_val, atr1h_component)
+        atr1h_component = min(max(0.0, atr1h_cap), 0.0008 * price_for_calc)
+        buf      = max(0.2 * atr5_val, atr1h_component)
 
         k5_sw = find_swings(k5m_closed, lb=2)
         hi5, lo5 = last_swing_levels(k5_sw)
@@ -589,16 +642,21 @@ def analyze(asset: str) -> Dict[str, Any]:
             ATR5_MIN_MULT * atr5_val
         )
 
-        if (not ok_math) or (rr is None) or (rr < MIN_R) or (tp1_dist < min_profit_abs):
-            if rr is None or rr < MIN_R: missing.append(f"rr_math>={MIN_R}")
+        if (not ok_math) or (rr is None) or (rr < rr_required) or (tp1_dist < min_profit_abs):
+            if rr is None or rr < rr_required: missing.append(f"rr_math>={rr_required:.1f}")
             if tp1_dist < min_profit_abs: missing.append("tp_min_profit")
             return False
         return True
 
     if can_enter_core:
-        decision = "buy" if trend_bias=="long" else "sell"
+        if effective_bias == "long":
+            decision = "buy"
+        elif effective_bias == "short":
+            decision = "sell"
+        else:
+            decision = "no entry"
         mode = "core"
-        if not compute_levels(decision):
+        if decision in ("buy", "sell") and not compute_levels(decision, MIN_R_CORE):
             decision = "no entry"
     else:
         if mom_dir is not None:
@@ -606,11 +664,13 @@ def analyze(asset: str) -> Dict[str, Any]:
             missing = []
             momentum_used = True
             decision = mom_dir
-            if not compute_levels(decision):
+            if not compute_levels(decision, MIN_R_MOMENTUM):
                 decision = "no entry"
             else:
                 reasons.append("Momentum override (5m EMA + ATR + BOS)")
                 reasons.append("Momentum: rész-realizálás javasolt 2.5R-n")
+                if (mom_dir == "buy" and mom_micro_long) or (mom_dir == "sell" and mom_micro_short):
+                    reasons.append("Momentum: micro BOS elfogadva (1m szerkezet)")
                 P = max(P, 75)
         elif asset in ENABLE_MOMENTUM_ASSETS and missing_mom:
             mode = "momentum"
@@ -631,9 +691,9 @@ def analyze(asset: str) -> Dict[str, Any]:
         "gates": {
             "mode": mode,
             "required": (
-                ["session", "regime", "bias", "bos5m", "liquidity(fib|sweep|ema21|retest)", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
+                ["session", "regime", "bias", "bos5m", "liquidity(fib|sweep|ema21|retest)", "atr", f"rr_math>={MIN_R_CORE:.1f}", "tp_min_profit"]
                 if mode == "core" else
-                ["session", "momentum(ema9x21)", "bos5m|struct_break", "atr", f"rr_math>={MIN_R}", "tp_min_profit"]
+                ["session", "momentum(ema9x21)", "bos5m|struct_break", "atr", f"rr_math>={MIN_R_MOMENTUM:.1f}", "tp_min_profit"]
             ),
             "missing": missing,
         },
@@ -662,6 +722,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
