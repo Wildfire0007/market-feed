@@ -21,7 +21,7 @@ ENV:
 - DISCORD_COOLDOWN_MIN (perc, default 10)
 """
 
-import os, json, requests
+import os, json, sys, requests
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo  # Py3.9+
 
@@ -35,7 +35,15 @@ COOLDOWN_MIN   = int(os.getenv("DISCORD_COOLDOWN_MIN", "10"))  # perc; 0 = off
 MOMENTUM_COOLDOWN_MIN = int(os.getenv("DISCORD_COOLDOWN_MOMENTUM_MIN", "8"))
 
 # ---- Időzóna a fejlécben / órakulcshoz ----
-HB_TZ   = ZoneInfo("Europe/Budapest")
+try:
+    HB_TZ = ZoneInfo("Europe/Budapest")
+except Exception as exc:  # pragma: no cover - környezeti hiányosságokra
+    print(
+        "WARN: Europe/Budapest időzóna nem elérhető, UTC-re esünk vissza.",
+        f"({exc})",
+        file=sys.stderr,
+    )
+    HB_TZ = timezone.utc
 
 # ---- Megjelenés / emoji / színek ----
 EMOJI = {
