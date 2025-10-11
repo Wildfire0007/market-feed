@@ -58,7 +58,7 @@ jobs:
           else
             echo "No changes to commit."
           fi
-          
+         
   analysis:
     name: 2) Analysis — jelzésképzés (csak trading után)
     needs: trading
@@ -102,4 +102,54 @@ jobs:
             git push
           else
             echo "No changes to commit."
+          fi
+  notify:
+    name: 3) Discord értesítő
+    needs: analysis
+    runs-on: ubuntu-latest
+    env:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      DISCORD_COOLDOWN_MIN: ${{ secrets.DISCORD_COOLDOWN_MIN }}
+      DISCORD_COOLDOWN_MOMENTUM_MIN: ${{ secrets.DISCORD_COOLDOWN_MOMENTUM_MIN }}
+    steps:
+      - name: Checkout latest signals
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Sync with latest main
+        run: |
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Discord notifier
+        run: python scripts/notify_discord.py
+
+      - name: Commit & Push notify state
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if test -f public/_notify_state.json; then
+            git add public/_notify_state.json
+            if ! git diff --cached --quiet; then
+              git commit -m "notify_discord: update state [skip ci]"
+              git pull --rebase origin main
+              git push
+            else
+              echo "Notify state unchanged."
+            fi
+          else
+            echo "No notify state to persist."
           fi
