@@ -9,7 +9,8 @@ Kimenet:
 """
 
 import os, json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from datetime import time as dtime
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -96,9 +97,35 @@ EMA_SLOPE_TH       = 0.0007      # ~0.10% relatív elmozdulás (abs) a lookback 
 SESSIONS_UTC: Dict[str, Optional[List[Tuple[int,int,int,int]]]] = {
     "SOL": None,
     "BNB": None,
-    "NSDQ100": [(0,0, 23,59)],    # teljes nap (0-24)
-    "GOLD_CFD": None,             # gyakorlatilag egész nap
-    "USOIL": None,                # WTI szinte 23h/nap — nem korlátozzuk
+    # NASDAQ (QQQ) normál kereskedési ablak – DST miatt engedékeny sáv.
+    "NSDQ100": [
+        (13, 0, 21, 30),   # 13:00–21:30 UTC (9:00–17:30 New York; pre/after market puffer)
+    ],
+    # Arany/olaj: kvázi 24/5, de szombaton zárva.
+    "GOLD_CFD": [
+        (0, 0, 23, 59),
+    ],
+    "USOIL": [
+        (0, 0, 23, 59),
+    ],
+}
+
+# Diagnosztikai tippek — a dashboard / Worker frissítéséhez.
+REFRESH_TIPS = [
+    "Az analysis.py mindig a legutóbbi ZÁRT gyertyával számol (5m: max. ~5 perc késés).",
+    "CI/CD-ben kösd össze a Trading és Analysis futást: az analysis job csak a trading után induljon (needs: trading).",
+    "A kliens kéréséhez adj cache-busting query paramot (pl. ?v=<timestamp>) és no-store cache-control fejlécet.",
+    "Cloudflare Worker stale policy: 5m feedre állítsd 120s-re, hogy hamar átjöjjön az új jel.",
+    "A dashboard stabilizáló (2 azonos jel + 10 perc cooldown) lassíthatja a kártya frissítését — lazítsd, ha realtime kell.",
+]
+
+# Heti naptári korlátozások (Python weekday: hétfő=0 ... vasárnap=6). None = mindig.
+SESSION_WEEKDAYS: Dict[str, Optional[List[int]]] = {
+    "SOL": None,
+    "BNB": None,
+    "NSDQ100": [0, 1, 2, 3, 4],        # hétfő–péntek
+    "GOLD_CFD": [0, 1, 2, 3, 4, 6],    # vasárnap esti nyitás – szombat zárva
+    "USOIL": [0, 1, 2, 3, 4, 6],       # vasárnap esti nyitás – szombat zárva
 }
 
 # -------------------------- segédek -----------------------------------
@@ -106,9 +133,30 @@ SESSIONS_UTC: Dict[str, Optional[List[Tuple[int,int,int,int]]]] = {
 def nowiso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+def to_utc_iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
 def now_utctime_hm() -> Tuple[int,int]:
     t = datetime.now(timezone.utc)
     return t.hour, t.minute
+
+def df_last_timestamp(df: pd.DataFrame) -> Optional[datetime]:
+    if df.empty:
+        return None
+    idx = df.index
+    if isinstance(idx, pd.DatetimeIndex) and len(idx):
+        ts = idx[-1]
+        if isinstance(ts, pd.Timestamp):
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
+            return ts.to_pydatetime()
+    return None
+
+def file_mtime(path: str) -> Optional[str]:
+    try:
+        return to_utc_iso(datetime.fromtimestamp(os.path.getmtime(path), tz=timezone.utc))
+    except Exception:
+        return None
 
 def in_any_window_utc(windows: Optional[List[Tuple[int,int,int,int]]], h: int, m: int) -> bool:
     if not windows:
@@ -121,8 +169,80 @@ def in_any_window_utc(windows: Optional[List[Tuple[int,int,int,int]]], h: int, m
             return True
     return False
 
+def session_weekday_ok(asset: str, now: Optional[datetime] = None) -> bool:
+    if now is None:
+        now = datetime.now(timezone.utc)
+    allowed = SESSION_WEEKDAYS.get(asset)
+    if not allowed:
+        return True
+    return now.weekday() in allowed
+
+def next_session_open(asset: str, now: Optional[datetime] = None) -> Optional[datetime]:
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    windows = SESSIONS_UTC.get(asset)
+    weekdays = SESSION_WEEKDAYS.get(asset)
+
+    if not windows:
+        windows = [(0, 0, 23, 59)]
+
+    for day_offset in range(0, 8):
+        day = (now + timedelta(days=day_offset)).date()
+        if weekdays and day.weekday() not in weekdays:
+            continue
+
+        for sh, sm, eh, em in windows:
+            start_dt = datetime.combine(day, dtime(sh, sm, tzinfo=timezone.utc))
+            end_dt = datetime.combine(day, dtime(eh, em, tzinfo=timezone.utc))
+
+            if day_offset == 0:
+                if end_dt <= now:
+                    continue
+                if now < start_dt:
+                    return start_dt
+            else:
+                return start_dt
+
+    return None
+
+def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
+    now = datetime.now(timezone.utc)
+    h, m = now.hour, now.minute
+    window_ok = in_any_window_utc(SESSIONS_UTC.get(asset), h, m)
+    weekday_ok = session_weekday_ok(asset, now)
+    open_now = window_ok and weekday_ok
+
+    info: Dict[str, Any] = {
+        "open": open_now,
+        "within_window": window_ok,
+        "weekday_ok": weekday_ok,
+        "now_utc": now.isoformat(),
+        "windows_utc": SESSIONS_UTC.get(asset),
+    }
+    allowed = SESSION_WEEKDAYS.get(asset)
+    if allowed:
+        info["allowed_weekdays"] = list(allowed)
+    if not weekday_ok:
+        status = "closed_weekend"
+        status_note = "Piac zárva (hétvége)"
+    elif not window_ok:
+        status = "closed_out_of_hours"
+        status_note = "Piac zárva (nyitáson kívül)"
+    else:
+        status = "open"
+        status_note = "Piac nyitva"
+    info["status"] = status
+    info["status_note"] = status_note
+    if not open_now:
+        nxt = next_session_open(asset, now)
+        if nxt:
+            info["next_open_utc"] = nxt.isoformat()
+    return open_now, info
+
 def session_ok(asset: str) -> bool:
-    return in_any_window_utc(SESSIONS_UTC.get(asset), *now_utctime_hm())
+    ok, _ = session_state(asset)
+    return ok
 
 def atr_low_threshold(asset: str) -> float:
     h, m = now_utctime_hm()
@@ -390,6 +510,41 @@ def analyze(asset: str) -> Dict[str, Any]:
     last5_close    = float(k5m_closed["close"].iloc[-1])            # stabil, lezárt 5m
     price_for_calc = last5_close
 
+    now = datetime.now(timezone.utc)
+    expected_delays = {"k1m": 60, "k5m": 300, "k1h": 3600, "k4h": 4*3600}
+    tf_meta: Dict[str, Dict[str, Any]] = {}
+    latency_flags: List[str] = []
+    tf_inputs = [
+        ("k1m", k1m, k1m_closed, os.path.join(outdir, "klines_1m.json")),
+        ("k5m", k5m, k5m_closed, os.path.join(outdir, "klines_5m.json")),
+        ("k1h", k1h, k1h_closed, os.path.join(outdir, "klines_1h.json")),
+        ("k4h", k4h, k4h_closed, os.path.join(outdir, "klines_4h.json")),
+    ]
+    for key, df_full, df_closed, path in tf_inputs:
+        last_raw = df_last_timestamp(df_full)
+        last_closed = df_last_timestamp(df_closed)
+        latency_sec = None
+        if last_closed:
+            latency_sec = int((now - last_closed).total_seconds())
+            expected = expected_delays.get(key, 0)
+            if expected and latency_sec > expected + 240:
+                latency_flags.append(f"{key}: utolsó zárt gyertya {latency_sec//60} perc késésben van")
+        tf_meta[key] = {
+            "last_raw_utc": to_utc_iso(last_raw) if last_raw else None,
+            "last_closed_utc": to_utc_iso(last_closed) if last_closed else None,
+            "latency_seconds": latency_sec,
+            "expected_max_delay_seconds": expected_delays.get(key),
+            "source_mtime_utc": file_mtime(path),
+        }
+
+    source_files = {
+        "spot.json": file_mtime(os.path.join(outdir, "spot.json")),
+        "klines_1m.json": tf_meta["k1m"].get("source_mtime_utc"),
+        "klines_5m.json": tf_meta["k5m"].get("source_mtime_utc"),
+        "klines_1h.json": tf_meta["k1h"].get("source_mtime_utc"),
+        "klines_4h.json": tf_meta["k4h"].get("source_mtime_utc"),
+    }
+
     # 2) Bias 4H→1H (zárt 1h/4h)
     bias4h = bias_from_emas(k4h_closed)
     bias1h = bias_from_emas(k1h_closed)
@@ -510,7 +665,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     P = max(0, min(100, P))
 
     # --- Kapuk (liquidity = Fib zóna VAGY sweep) + session + regime ---
-    session_ok_flag = session_ok(asset)
+    session_ok_flag, session_meta = session_state(asset)
     liquidity_ok_base = bool(
         fib_ok
         or swept
@@ -535,6 +690,17 @@ def analyze(asset: str) -> Dict[str, Any]:
             liquidity_ok = True
             liquidity_relaxed = True
 
+    core_required = [
+        "session",
+        "regime",
+        "bias",
+        "bos5m",
+        "liquidity(fib|sweep|ema21|retest)",
+        "atr",
+        f"rr_math>={MIN_R_CORE:.1f}",
+        "tp_min_profit",
+    ]
+
     conds_core = {
         "session": bool(session_ok_flag),
         "regime":  bool(regime_ok),
@@ -558,7 +724,14 @@ def analyze(asset: str) -> Dict[str, Any]:
     mom_dir: Optional[str] = None
     mom_micro_long = False
     mom_micro_short = False
-    mom_required = ["session", "momentum(ema9x21)", "bos5m|struct_break", "atr", f"rr_math>={MIN_R_MOMENTUM:.1f}", "tp_min_profit"]
+    mom_required = [
+        "session",
+        "momentum(ema9x21)",
+        "bos5m|struct_break",
+        "atr",
+        f"rr_math>={MIN_R_MOMENTUM:.1f}",
+        "tp_min_profit",
+    ]
     missing_mom: List[str] = []
 
     if asset in ENABLE_MOMENTUM_ASSETS:
@@ -595,6 +768,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     lev = LEVERAGE.get(asset, 2.0)
     mode = "core"
     missing = list(missing_core)
+    required_list: List[str] = list(core_required)
 
     def compute_levels(decision_side: str, rr_required: float):
         nonlocal entry, sl, tp1, tp2, rr, missing
@@ -658,11 +832,13 @@ def analyze(asset: str) -> Dict[str, Any]:
         else:
             decision = "no entry"
         mode = "core"
+        required_list = list(core_required)
         if decision in ("buy", "sell") and not compute_levels(decision, MIN_R_CORE):
             decision = "no entry"
     else:
         if mom_dir is not None:
             mode = "momentum"
+            required_list = list(mom_required)
             missing = []
             momentum_used = True
             decision = mom_dir
@@ -676,9 +852,28 @@ def analyze(asset: str) -> Dict[str, Any]:
                 P = max(P, 75)
         elif asset in ENABLE_MOMENTUM_ASSETS and missing_mom:
             mode = "momentum"
+            required_list = list(mom_required)
             missing = list(dict.fromkeys(missing_mom))  # uniq
 
-    # 9) Mentés: signal.json
+    # 9) Session override + mentés: signal.json
+    if latency_flags:
+        for flag in latency_flags:
+            msg = f"Diagnosztika: {flag}"
+            if msg not in reasons:
+                reasons.append(msg)
+
+    if not session_ok_flag:
+        status_note = session_meta.get("status_note") or "Session zárva"
+        if status_note not in reasons:
+            reasons.insert(0, status_note)
+        decision = "market closed"
+        P = 0
+        entry = sl = tp1 = tp2 = rr = None
+        mode = "session_closed"
+        required_list = ["session"]
+        if "session" not in missing:
+            missing.append("session")
+
     missing = list(dict.fromkeys(missing))
     decision_obj = {
         "asset": asset,
@@ -692,12 +887,15 @@ def analyze(asset: str) -> Dict[str, Any]:
         "leverage": lev,
         "gates": {
             "mode": mode,
-            "required": (
-                ["session", "regime", "bias", "bos5m", "liquidity(fib|sweep|ema21|retest)", "atr", f"rr_math>={MIN_R_CORE:.1f}", "tp_min_profit"]
-                if mode == "core" else
-                ["session", "momentum(ema9x21)", "bos5m|struct_break", "atr", f"rr_math>={MIN_R_MOMENTUM:.1f}", "tp_min_profit"]
-            ),
+            "required": required_list,
             "missing": missing,
+        },
+        "session_info": session_meta,
+        "diagnostics": {
+            "timeframes": tf_meta,
+            "source_files": source_files,
+            "latency_flags": latency_flags,
+            "refresh_tips": list(REFRESH_TIPS),
         },
         "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else [])) or ["no signal"],
     }
@@ -707,11 +905,21 @@ def analyze(asset: str) -> Dict[str, Any]:
 # ------------------------------- főfolyamat ------------------------------------
 
 def main():
-    summary = {"ok": True, "generated_utc": nowiso(), "assets": {}}
+    summary = {
+        "ok": True,
+        "generated_utc": nowiso(),
+        "assets": {},
+        "latency_flags": [],
+        "troubleshooting": list(REFRESH_TIPS),
+    }
     for asset in ASSETS:
         try:
             res = analyze(asset)
             summary["assets"][asset] = res
+            diag = res.get("diagnostics", {}) if isinstance(res, dict) else {}
+            flags = diag.get("latency_flags") if isinstance(diag, dict) else None
+            if flags:
+                summary["latency_flags"].extend(flags)
         except Exception as e:
             summary["assets"][asset] = {"asset": asset, "ok": False, "error": str(e)}
     save_json(os.path.join(PUBLIC_DIR, "analysis_summary.json"), summary)
@@ -724,4 +932,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
