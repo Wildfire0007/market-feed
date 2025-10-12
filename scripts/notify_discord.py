@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo  # Py3.9+
 
 PUBLIC_DIR = "public"
-ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "USOIL"]  # GER40 -> USOIL
+ASSETS = ["EURUSD", "NSDQ100", "GOLD_CFD", "BNB", "USOIL"]
 
 # ---- Debounce / stabilitás / cooldown ----
 STATE_PATH = f"{PUBLIC_DIR}/_notify_state.json"
@@ -61,7 +61,7 @@ except Exception as exc:  # pragma: no cover - környezeti hiányosságokra
 
 # ---- Megjelenés / emoji / színek ----
 EMOJI = {
-    "SOL": "💵",
+    "EURUSD": "💶",
     "NSDQ100": "📈",
     "GOLD_CFD": "💰",
     "BNB": "🪙",
