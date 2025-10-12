@@ -35,7 +35,7 @@ ASSETS = {
     "EURUSD":   {"symbol": "EUR/USD", "exchange": "FX", "alt": ["EURUSD", "EURUSD:CUR"]},
     "NSDQ100":  {"symbol": "QQQ",      "exchange": None},
     "GOLD_CFD": {"symbol": "XAU/USD",  "exchange": None},
-    "BNB":      {"symbol": "BNB/USD",  "exchange": "Binance"},
+    "USDJPY":   {"symbol": "USD/JPY",  "exchange": "FX", "alt": ["USDJPY", "USDJPY:CUR"]},
 
     # ÚJ: WTI kőolaj. A Twelve Data-n a hivatalos jelölés: WTI/USD.
     # Biztonság kedvéért próbálunk alternatív jelöléseket is.
@@ -339,6 +339,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
