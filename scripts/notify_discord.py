@@ -15,10 +15,13 @@ Küldés:
 - Korábban küldött BUY/SELL stabilan NO ENTRY ➜ "invalidate"
 - ÓRÁNKÉNTI HEARTBEAT (minden órában), akkor is, ha nincs riasztás.
   Ha adott órában már ment event (normal/flip/invalidate), külön heartbeat nem megy ki.
+  --force / --manual kapcsolóval (vagy DISCORD_FORCE_NOTIFY=1) kézi futtatáskor is kimegy az összefoglaló.
 
 ENV:
 - DISCORD_WEBHOOK_URL
 - DISCORD_COOLDOWN_MIN (perc, default 10)
+- DISCORD_FORCE_NOTIFY=1 ➜ cooldown figyelmen kívül hagyása + összefoglaló kényszerítése
+- DISCORD_FORCE_HEARTBEAT=1 ➜ csak az összefoglalót kényszerítjük (cooldown marad)
 """
 
 import os, json, sys, requests
@@ -47,6 +50,12 @@ def int_env(name: str, default: int) -> int:
 
 COOLDOWN_MIN   = int_env("DISCORD_COOLDOWN_MIN", 10)  # perc; 0 = off
 MOMENTUM_COOLDOWN_MIN = int_env("DISCORD_COOLDOWN_MOMENTUM_MIN", 8)
+
+def env_flag(name: str) -> bool:
+    raw = os.getenv(name)
+    if not raw:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 # ---- Időzóna a fejlécben / órakulcshoz ----
 try:
@@ -256,6 +265,14 @@ def main():
         print("No DISCORD_WEBHOOK_URL, skipping notify.")
         return
 
+    argv = sys.argv[1:]
+    force_flags = {"--force", "--manual", "--force-heartbeat", "-f"}
+    force_any = any(arg in force_flags for arg in argv)
+    force_env = env_flag("DISCORD_FORCE_NOTIFY")
+    force_heartbeat_env = env_flag("DISCORD_FORCE_HEARTBEAT")
+    force_send = force_any or force_env
+    force_heartbeat = force_send or force_heartbeat_env
+
     state = load_state()
     meta  = state.get("_meta", {})
     embeds = []
@@ -308,6 +325,8 @@ def main():
         cooldown_active = False
         if COOLDOWN_MIN > 0 and cooldown_until_iso:
             cooldown_active = now_ep < iso_to_epoch(cooldown_until_iso)
+        if force_send:
+            cooldown_active = False
 
         prev_sent_decision = st.get("last_sent_decision")
 
@@ -355,12 +374,24 @@ def main():
 
     # --- Heartbeat: MINDEN órában, ha az órában még nem ment ki event ---
     last_hb_key = meta.get("last_heartbeat_key")
-    if not embeds and last_hb_key != bud_key:
+    heartbeat_due = last_hb_key != bud_key
+    want_heartbeat = force_heartbeat or (not embeds and heartbeat_due)
+    heartbeat_embeds = []
+    if want_heartbeat:
         for asset in ASSETS:
             sig = per_asset_sigs.get(asset) or {"asset": asset, "signal": "no entry", "probability": 0}
             is_stable = per_asset_is_stable.get(asset, True)
-            embeds.append(build_embed_for_asset(asset, sig, is_stable=is_stable, kind="heartbeat"))
-        meta["last_heartbeat_key"] = bud_key
+            heartbeat_embeds.append(
+                build_embed_for_asset(asset, sig, is_stable=is_stable, kind="heartbeat")
+            )
+
+        if heartbeat_embeds:
+            if embeds and not force_heartbeat:
+                # már van küldendő embed, de nem force-olt heartbeat -> kihagyjuk
+                heartbeat_embeds = []
+            else:
+                embeds.extend(heartbeat_embeds)
+                meta["last_heartbeat_key"] = bud_key
 
     state["_meta"] = meta
     save_state(state)
