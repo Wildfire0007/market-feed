@@ -16,6 +16,7 @@ Küldés:
 - ÓRÁNKÉNTI HEARTBEAT (minden órában), akkor is, ha nincs riasztás.
   Ha adott órában már ment event (normal/flip/invalidate), külön heartbeat nem megy ki.
   --force / --manual kapcsolóval (vagy DISCORD_FORCE_NOTIFY=1) kézi futtatáskor is kimegy az összefoglaló.
+  Kézi futtatáskor elfogadjuk a "manual"/"force" kulcsszavakat is flag nélkül.
 
 ENV:
 - DISCORD_WEBHOOK_URL
@@ -25,6 +26,7 @@ ENV:
 """
 
 import os, json, sys, requests
+from typing import Iterable, Set
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo  # Py3.9+
 
@@ -56,6 +58,24 @@ def env_flag(name: str) -> bool:
     if not raw:
         return False
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+def normalize_cli_flags(argv: Iterable[str]) -> Set[str]:
+    """Egyszerű (argparse nélküli) flag normalizálás kézi futtatáshoz."""
+    norm: Set[str] = set()
+    for arg in argv:
+        if not arg:
+            continue
+        if arg.startswith("--"):
+            norm.add(arg[2:].lower())
+        elif arg.startswith("-"):
+            # jelenleg csak -f/-F érdekes, de legyen rugalmas
+            if arg.lower() in {"-f", "-force"}:
+                norm.add("force")
+            else:
+                norm.add(arg[1:].lower())
+        else:
+            norm.add(arg.lower())
+    return norm
 
 # ---- Időzóna a fejlécben / órakulcshoz ----
 try:
@@ -269,12 +289,22 @@ def main():
         return
 
     argv = sys.argv[1:]
-    force_flags = {"--force", "--manual", "--force-heartbeat", "-f"}
-    force_any = any(arg in force_flags for arg in argv)
+    flags = normalize_cli_flags(argv)
+  
     force_env = env_flag("DISCORD_FORCE_NOTIFY")
     force_heartbeat_env = env_flag("DISCORD_FORCE_HEARTBEAT")
-    force_send = force_any or force_env
-    force_heartbeat = force_send or force_heartbeat_env
+  
+    manual_flag = any(key in flags for key in {"manual", "m", "man"})
+    force_flag = any(key in flags for key in {"force", "f"})
+    heartbeat_flag = any(key in flags for key in {"force-heartbeat", "heartbeat", "hb"})
+    skip_cooldown_flag = any(key in flags for key in {"skip-cooldown", "no-cooldown", "nocooldown"})
+
+    # Ha TTY-ból futtatjuk kézzel és nincs külön flag, tekintsük manuális kényszerítésnek.
+    if not flags and (sys.stdin.isatty() or sys.stdout.isatty()):
+        manual_flag = True
+
+    force_send = force_flag or manual_flag or force_env or skip_cooldown_flag
+    force_heartbeat = force_send or heartbeat_flag or force_heartbeat_env
 
     state = load_state()
     meta  = state.get("_meta", {})
