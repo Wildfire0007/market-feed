@@ -17,7 +17,7 @@ import pandas as pd
 import numpy as np
 
 # --- Elemzendő eszközök (GER40 -> USOIL) ---
-ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "USOIL"]
+ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "USOIL"]␊
 
 PUBLIC_DIR = "public"
 
@@ -94,9 +94,9 @@ EMA_SLOPE_LOOKBACK = 3           # hány baron mérjük a változást
 EMA_SLOPE_TH       = 0.0007      # ~0.10% relatív elmozdulás (abs) a lookback alatt
 
 # UTC idősávok: [(start_h, start_m, end_h, end_m), ...]; None = mindig
-SESSIONS_UTC: Dict[str, Optional[List[Tuple[int,int,int,int]]]] = {
-    "SOL": None,
-    "BNB": None,
+SESSIONS_UTC: Dict[str, Optional[List[Tuple[int,int,int,int]]]] = {␊
+    "SOL": None,␊
+    "BNB": None,␊
     # NASDAQ (QQQ) normál kereskedési ablak – DST miatt engedékeny sáv.
     "NSDQ100": [
         (13, 0, 21, 30),   # 13:00–21:30 UTC (9:00–17:30 New York; pre/after market puffer)
@@ -108,6 +108,15 @@ SESSIONS_UTC: Dict[str, Optional[List[Tuple[int,int,int,int]]]] = {
     "USOIL": [
         (0, 0, 23, 59),
     ],
+}
+
+USOIL_SUNDAY_OPEN_MINUTE = 22 * 60  # 22:00 UTC vasárnap esti nyitás
+
+# Spot-adat elavulás küszöbök (másodperc)
+SPOT_MAX_AGE_SECONDS: Dict[str, int] = {
+    "default": 20 * 60,      # 20 perc
+    "GOLD_CFD": 45 * 60,     # 45 perc — lazább, mert cash session
+    "USOIL":    45 * 60,     # 45 perc — CME/NYMEX CFD feed esti szünettel
 }
 
 # Diagnosztikai tippek — a dashboard / Worker frissítéséhez.
@@ -135,6 +144,23 @@ def nowiso() -> str:
 
 def to_utc_iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+def parse_utc_timestamp(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        ts = pd.to_datetime(value, utc=True)
+    except Exception:
+        return None
+    if ts is None or pd.isna(ts):
+        return None
+    if isinstance(ts, pd.Timestamp):
+        return ts.to_pydatetime()
+    if isinstance(ts, datetime):
+        if ts.tzinfo is None:
+            return ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
+    return None
 
 def now_utctime_hm() -> Tuple[int,int]:
     t = datetime.now(timezone.utc)
@@ -211,6 +237,9 @@ def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
     h, m = now.hour, now.minute
     window_ok = in_any_window_utc(SESSIONS_UTC.get(asset), h, m)
     weekday_ok = session_weekday_ok(asset, now)
+    if asset == "USOIL" and now.weekday() == 6:
+        if (h * 60 + m) < USOIL_SUNDAY_OPEN_MINUTE:
+            window_ok = False
     open_now = window_ok and weekday_ok
 
     info: Dict[str, Any] = {
@@ -223,12 +252,12 @@ def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
     allowed = SESSION_WEEKDAYS.get(asset)
     if allowed:
         info["allowed_weekdays"] = list(allowed)
-    if not weekday_ok:
-        status = "closed_weekend"
-        status_note = "Piac zárva (hétvége)"
-    elif not window_ok:
-        status = "closed_out_of_hours"
-        status_note = "Piac zárva (nyitáson kívül)"
+    if not weekday_ok:␊
+        status = "closed_weekend"␊
+        status_note = "Piac zárva (hétvége)"␊
+    elif not window_ok:␊
+        status = "closed_out_of_hours"␊
+        status_note = "Piac zárva (nyitáson kívül)"␊
     else:
         status = "open"
         status_note = "Piac nyitva"
@@ -548,13 +577,35 @@ def analyze(asset: str) -> Dict[str, Any]:
         spot_utc = spot.get("utc") or spot.get("timestamp") or "-"
         spot_retrieved = spot.get("retrieved_at_utc") or spot.get("retrieved") or "-"
 
+    now = datetime.now(timezone.utc)
+
+    spot_ts_primary = parse_utc_timestamp(spot_utc)
+    spot_ts_fallback = parse_utc_timestamp(spot_retrieved)
+    spot_ts = spot_ts_primary or spot_ts_fallback
+    spot_latency_sec: Optional[int] = None
+    spot_stale_reason: Optional[str] = None
+    spot_max_age = SPOT_MAX_AGE_SECONDS.get(asset, SPOT_MAX_AGE_SECONDS["default"])
+    if spot_ts:
+        delta = now - spot_ts
+        if delta.total_seconds() < 0:
+            spot_latency_sec = 0
+        else:
+            spot_latency_sec = int(delta.total_seconds())
+        if spot_latency_sec is not None and spot_latency_sec > spot_max_age:
+            age_min = spot_latency_sec // 60
+            limit_min = spot_max_age // 60
+            spot_stale_reason = f"Spot data stale: {age_min} min behind (limit {limit_min} min)"
+    elif spot_price is not None:
+        spot_stale_reason = "Spot timestamp missing"
+    else:
+        spot_stale_reason = "Spot data missing"
+
     display_spot = safe_float(spot_price)
     k1m_closed = k1m.iloc[:-1] if len(k1m) > 1 else k1m.copy()
     k5m_closed = k5m.iloc[:-1] if len(k5m) > 1 else k5m.copy()
     k1h_closed = k1h.iloc[:-1] if len(k1h) > 1 else k1h.copy()
     k4h_closed = k4h.iloc[:-1] if len(k4h) > 1 else k4h.copy()
 
-    now = datetime.now(timezone.utc)
     expected_delays = {"k1m": 60, "k5m": 300, "k1h": 3600, "k4h": 4*3600}
     tf_meta: Dict[str, Dict[str, Any]] = {}
     latency_flags: List[str] = []
@@ -581,6 +632,19 @@ def analyze(asset: str) -> Dict[str, Any]:
             "source_mtime_utc": file_mtime(path),
         }
 
+    tf_meta["spot"] = {
+        "last_raw_utc": to_utc_iso(spot_ts) if spot_ts else None,
+        "latency_seconds": spot_latency_sec,
+        "expected_max_delay_seconds": spot_max_age,
+        "source_mtime_utc": file_mtime(os.path.join(outdir, "spot.json")),
+    }
+    if spot_stale_reason and spot_latency_sec is not None and spot_latency_sec > spot_max_age:
+        if spot_latency_sec >= 3600:
+            age_hours = spot_latency_sec // 3600
+            latency_flags.append(f"spot: utolsó adat {age_hours} óra késésben van")
+        else:
+            latency_flags.append(f"spot: utolsó adat {spot_latency_sec//60} perc késésben van")
+
     source_files = {
         "spot.json": file_mtime(os.path.join(outdir, "spot.json")),
         "klines_1m.json": tf_meta["k1m"].get("source_mtime_utc"),
@@ -591,14 +655,30 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     diag_factory = lambda: diagnostics_payload(tf_meta, source_files, latency_flags)
 
-    if (spot_price is None) or k5m.empty or k1h.empty or k4h.empty:
+    data_gap_reasons: List[str] = []
+    if spot_price is None:
+        data_gap_reasons.append("Missing spot price")
+    elif spot_stale_reason:
+        data_gap_reasons.append(spot_stale_reason)
+
+    if k5m.empty or k1h.empty or k4h.empty:
+        missing_frames = []
+        if k5m.empty:
+            missing_frames.append("k5m")
+        if k1h.empty:
+            missing_frames.append("k1h")
+        if k4h.empty:
+            missing_frames.append("k4h")
+        data_gap_reasons.append("Missing candles: " + ", ".join(missing_frames))
+
+    if data_gap_reasons:
         msg = build_data_gap_signal(
             asset,
             spot_price,
             spot_utc,
             spot_retrieved,
             LEVERAGE.get(asset, 2.0),
-            ["Insufficient data (spot/k5m/k1h/k4h)"],
+            data_gap_reasons,
             display_spot,
             diag_factory(),
         )
@@ -1035,6 +1115,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
