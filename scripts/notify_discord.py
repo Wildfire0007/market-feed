@@ -26,7 +26,7 @@ ENV:
 """
 
 import os, json, sys, requests
-from typing import Iterable, Set, Tuple
+from typing import Iterable, Optional, Set, Tuple
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo  # Py3.9+
 
@@ -315,6 +315,44 @@ def decision_of(sig: dict) -> str:
     if d not in ("buy","sell"):
         return "no entry"
     return d
+  
+def note_implies_open(note: str) -> bool:
+    n = (note or "").strip().lower()
+    if not n:
+        return False
+    hints = {
+        "market open",
+        "market opened",
+        "market opening",
+        "piac nyitva",
+        "nyitva",
+        "open",
+        "opened",
+    }
+    return any(h in n for h in hints)
+
+
+def format_closed_note(base_note: str = "", reason: Optional[str] = None) -> str:
+    note = (base_note or "").strip()
+    if note_implies_open(note):
+        note = ""
+
+    if not note:
+        note = "Piac zárva"
+
+    lower = note.lower()
+    if "market" not in lower:
+        if "piac" not in lower:
+            note = f"{note} • Market closed"
+        else:
+            note = f"{note} (market closed)"
+
+    if reason:
+        note = f"{note} – {reason}"
+
+    return note
+
+
 
 def market_closed_info(sig: dict) -> Tuple[bool, str]:
     sig = sig or {}
@@ -333,11 +371,11 @@ def market_closed_info(sig: dict) -> Tuple[bool, str]:
     }
 
     if isinstance(open_flag, bool) and not open_flag:
-        return True, note or "Piac zárva (market closed)"
+        return True, format_closed_note(note)
 
     if status:
         if status in closed_statuses or status.startswith("closed") or status.startswith("halt"):
-            return True, note or "Piac zárva (market closed)"
+            return True, format_closed_note(note)
 
     diagnostics = sig.get("diagnostics") or {}
     tf_spot = (diagnostics.get("timeframes") or {}).get("spot") or {}
@@ -348,14 +386,23 @@ def market_closed_info(sig: dict) -> Tuple[bool, str]:
         limit = expected if expected and expected > 0 else base_limit
         limit = max(limit, base_limit)
         if latency > limit:
-            return True, note or "Piac zárva (market closed)"
+             latency_minutes = int(latency // 60)
+            if latency_minutes <= 0:
+                latency_minutes = 1
+            reason = f"adat késik ≈{latency_minutes} perc"
+            return True, format_closed_note(note, reason)
 
     spot = sig.get("spot") or {}
     spot_ts = parse_utc(spot.get("utc") or spot.get("timestamp"))
     if spot_ts is not None:
         age = datetime.now(timezone.utc) - spot_ts
-        if age > timedelta(seconds=max((expected or 0), 1800)):
-            return True, note or "Piac zárva (market closed)"
+        limit_seconds = max((expected or 0), 1800)
+        if age > timedelta(seconds=limit_seconds):
+            age_minutes = int(age.total_seconds() // 60)
+            if age_minutes <= 0:
+                age_minutes = 1
+            reason = f"adat {age_minutes} perc óta nem frissült"
+            return True, format_closed_note(note, reason)
 
     return False, ""
 
@@ -404,13 +451,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     ]
 
     if closed:
-        note = closed_note or "Piac zárva"
-        note_lower = note.lower()
-        if "piac" not in note_lower and "market" not in note_lower:
-            note = f"{note} • Market closed"
-        elif "market" not in note_lower:
-            note = f"{note} (market closed)"
-        lines.append(f"🔒 {note}")
+        lines.append(f"🔒 {closed_note or 'Piac zárva (market closed)'}")
 
     # RR/TP/SL sor (ha minden adat megvan)
     if dec in ("BUY", "SELL") and all(v is not None for v in (entry, sl, t1, t2, rr)):
@@ -473,6 +514,7 @@ def main():
 
     state = load_state()
     meta  = state.get("_meta", {})
+    last_heartbeat_prev = meta.get("last_heartbeat_key")
     embeds = []
     assets_with_embed = set()
     actionable_any = False
@@ -573,9 +615,8 @@ def main():
         state[asset] = st
 
     # --- Heartbeat: MINDEN órában, ha az órában még nem ment ki event ---
-    last_hb_key = meta.get("last_heartbeat_key")
-    heartbeat_due = last_hb_key != bud_key
-    want_heartbeat = force_heartbeat or (not embeds and heartbeat_due)
+    heartbeat_due = last_heartbeat_prev != bud_key
+    want_heartbeat = force_heartbeat or heartbeat_due
     heartbeat_embeds = []
     if want_heartbeat:
         for asset in ASSETS:
@@ -588,12 +629,8 @@ def main():
             )
 
         if heartbeat_embeds:
-            if embeds and not force_heartbeat:
-                # már van küldendő embed, de nem force-olt heartbeat -> kihagyjuk
-                heartbeat_embeds = []
-            else:
-                embeds.extend(heartbeat_embeds)
-                meta["last_heartbeat_key"] = bud_key
+            embeds.extend(heartbeat_embeds)
+            meta["last_heartbeat_key"] = bud_key
 
     state["_meta"] = meta
     save_state(state)
