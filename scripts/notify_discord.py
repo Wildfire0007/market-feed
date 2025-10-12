@@ -130,6 +130,30 @@ def iso_to_epoch(s: str) -> int:
     except Exception:
         return 0
 
+def parse_utc(value):
+    if value is None or value == "-":
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except Exception:
+            try:
+                return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            except Exception:
+                return None
+    return None
+
+
+def to_utc_iso(dt):
+    if dt is None:
+        return None
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
 def load(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -163,6 +187,43 @@ def spot_from_sig_or_file(asset: str, sig: dict):
         js = load(f"{PUBLIC_DIR}/{asset}/spot.json") or {}
         price = js.get("price") or js.get("price_usd")
         utc = utc or js.get("utc") or js.get("timestamp")
+    spot_ts = parse_utc(utc)
+
+    kline_data = load(f"{PUBLIC_DIR}/{asset}/klines_5m.json") or {}
+    rows = []
+    if isinstance(kline_data, dict):
+        rows = kline_data.get("values") or []
+    elif isinstance(kline_data, list):
+        rows = kline_data
+
+    fallback_price = None
+    fallback_ts = None
+    for row in rows:
+        ts_raw = row.get("datetime") or row.get("t")
+        close_raw = row.get("close") or row.get("c")
+        if ts_raw is None or close_raw in (None, ""):
+            continue
+        ts = parse_utc(ts_raw)
+        if ts is None:
+            continue
+        try:
+            close_val = float(close_raw)
+        except (TypeError, ValueError):
+            continue
+        if fallback_ts is None or ts > fallback_ts:
+            fallback_ts = ts
+            fallback_price = close_val
+
+    use_fallback = False
+    if fallback_price is not None:
+        if price is None or spot_ts is None:
+            use_fallback = True
+        elif fallback_ts and spot_ts and fallback_ts > spot_ts:
+            use_fallback = True
+
+    if use_fallback:
+        price = fallback_price
+        utc = to_utc_iso(fallback_ts) or utc
     return price, utc
 
 def missing_from_sig(sig: dict):
