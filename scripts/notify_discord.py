@@ -502,16 +502,19 @@ def main():
     heartbeat_flag = flag_any(flags, "force-heartbeat", "heartbeat", "hb", "summary", "all")
     skip_cooldown_flag = flag_any(flags, "skip-cooldown", "no-cooldown", "nocooldown", "skipcooldown")
 
+    # Ezek a jelzők (manual/force + DISCORD_FORCE_NOTIFY) jelentik a valódi kézi kényszerítést.
+    manual_context = manual_flag or force_flag or force_env
+
     # Ha TTY-ból futtatjuk kézzel és nincs külön flag, tekintsük manuális kényszerítésnek.
     if not flags and (sys.stdin.isatty() or sys.stdout.isatty()):
         manual_flag = True
+        manual_context = True
 
-    force_send = force_flag or manual_flag or force_env or skip_cooldown_flag
-    force_heartbeat = force_send or heartbeat_flag or force_heartbeat_env
+    force_send = manual_context or skip_cooldown_flag
+    force_heartbeat = manual_context or heartbeat_flag or force_heartbeat_env
 
     state = load_state()
     meta  = state.get("_meta", {})
-    last_heartbeat_prev = meta.get("last_heartbeat_key")
     last_heartbeat_prev = meta.get("last_heartbeat_key")
     asset_embeds = {}
     actionable_any = False
