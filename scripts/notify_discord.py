@@ -140,7 +140,10 @@ def parse_utc(value):
             return None
     if isinstance(value, str):
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
         except Exception:
             try:
                 return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
@@ -152,7 +155,10 @@ def parse_utc(value):
 def to_utc_iso(dt):
     if dt is None:
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
 
 def load(path):
     try:
@@ -224,6 +230,7 @@ def spot_from_sig_or_file(asset: str, sig: dict):
     if use_fallback:
         price = fallback_price
         utc = to_utc_iso(fallback_ts) or utc
+      
     return price, utc
 
 def missing_from_sig(sig: dict):
