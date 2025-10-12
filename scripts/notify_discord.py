@@ -353,7 +353,6 @@ def format_closed_note(base_note: str = "", reason: Optional[str] = None) -> str
     return note
 
 
-
 def market_closed_info(sig: dict) -> Tuple[bool, str]:
     sig = sig or {}
     session = sig.get("session_info") or {}
@@ -386,9 +385,7 @@ def market_closed_info(sig: dict) -> Tuple[bool, str]:
         limit = expected if expected and expected > 0 else base_limit
         limit = max(limit, base_limit)
         if latency > limit:
-             latency_minutes = int(latency // 60)
-            if latency_minutes <= 0:
-                latency_minutes = 1
+            latency_minutes = max(1, int(latency // 60))
             reason = f"adat késik ≈{latency_minutes} perc"
             return True, format_closed_note(note, reason)
 
@@ -515,8 +512,8 @@ def main():
     state = load_state()
     meta  = state.get("_meta", {})
     last_heartbeat_prev = meta.get("last_heartbeat_key")
-    embeds = []
-    assets_with_embed = set()
+    last_heartbeat_prev = meta.get("last_heartbeat_key")
+    asset_embeds = {}
     actionable_any = False
     now_iso = utcnow_iso()
     now_ep  = utcnow_epoch()
@@ -590,8 +587,13 @@ def main():
 
         # --- embed + állapot frissítés ---
         if send_kind:
-            embeds.append(build_embed_for_asset(asset, sig, display_stable, kind=send_kind, prev_decision=prev_sent_decision))
-            assets_with_embed.add(asset)
+            asset_embeds[asset] = build_embed_for_asset(
+                asset,
+                sig,
+                display_stable,
+                kind=send_kind,
+                prev_decision=prev_sent_decision,
+            )
             if send_kind in ("normal","flip"):
                 cooldown_minutes = COOLDOWN_MIN
                 if COOLDOWN_MIN > 0 and mode_current == "momentum":
@@ -617,25 +619,29 @@ def main():
     # --- Heartbeat: MINDEN órában, ha az órában még nem ment ki event ---
     heartbeat_due = last_heartbeat_prev != bud_key
     want_heartbeat = force_heartbeat or heartbeat_due
-    heartbeat_embeds = []
+    heartbeat_added = False
     if want_heartbeat:
         for asset in ASSETS:
-            if asset in assets_with_embed:
-                continue
             sig = per_asset_sigs.get(asset) or {"asset": asset, "signal": "no entry", "probability": 0}
             is_stable = per_asset_is_stable.get(asset, True)
-            heartbeat_embeds.append(
-                build_embed_for_asset(asset, sig, is_stable=is_stable, kind="heartbeat")
-            )
+            if asset not in asset_embeds:
+                asset_embeds[asset] = build_embed_for_asset(
+                    asset,
+                    sig,
+                    is_stable=is_stable,
+                    kind="heartbeat",
+                )
+                heartbeat_added = True
 
-        if heartbeat_embeds:
-            embeds.extend(heartbeat_embeds)
+        if heartbeat_added:
             meta["last_heartbeat_key"] = bud_key
 
     state["_meta"] = meta
     save_state(state)
 
-    if not embeds:
+    ordered_embeds = [asset_embeds[a] for a in ASSETS if a in asset_embeds]
+
+    if not ordered_embeds:
         print("Discord notify: nothing to send.")
         return
 
@@ -646,7 +652,7 @@ def main():
     content = f"**{title}**\n{header}"
 
     try:
-        r = requests.post(hook, json={"content": content, "embeds": embeds[:10]}, timeout=20)
+        r = requests.post(hook, json={"content": content, "embeds": ordered_embeds[:10]}, timeout=20)
         r.raise_for_status()
         print("Discord notify OK.")
     except Exception as e:
