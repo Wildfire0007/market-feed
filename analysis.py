@@ -17,7 +17,7 @@ import pandas as pd
 import numpy as np
 
 # --- Elemzendő eszközök (GER40 -> USOIL) ---
-ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "USOIL"]␊
+ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "USOIL"]
 
 PUBLIC_DIR = "public"
 
@@ -94,9 +94,9 @@ EMA_SLOPE_LOOKBACK = 3           # hány baron mérjük a változást
 EMA_SLOPE_TH       = 0.0007      # ~0.10% relatív elmozdulás (abs) a lookback alatt
 
 # UTC idősávok: [(start_h, start_m, end_h, end_m), ...]; None = mindig
-SESSIONS_UTC: Dict[str, Optional[List[Tuple[int,int,int,int]]]] = {␊
-    "SOL": None,␊
-    "BNB": None,␊
+SESSIONS_UTC: Dict[str, Optional[List[Tuple[int,int,int,int]]]] = {
+    "SOL": None,
+    "BNB": None,
     # NASDAQ (QQQ) normál kereskedési ablak – DST miatt engedékeny sáv.
     "NSDQ100": [
         (13, 0, 21, 30),   # 13:00–21:30 UTC (9:00–17:30 New York; pre/after market puffer)
@@ -252,12 +252,12 @@ def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
     allowed = SESSION_WEEKDAYS.get(asset)
     if allowed:
         info["allowed_weekdays"] = list(allowed)
-    if not weekday_ok:␊
-        status = "closed_weekend"␊
-        status_note = "Piac zárva (hétvége)"␊
-    elif not window_ok:␊
-        status = "closed_out_of_hours"␊
-        status_note = "Piac zárva (nyitáson kívül)"␊
+    if not weekday_ok:
+        status = "closed_weekend"
+        status_note = "Piac zárva (hétvége)"
+    elif not window_ok:
+        status = "closed_out_of_hours"
+        status_note = "Piac zárva (nyitáson kívül)"
     else:
         status = "open"
         status_note = "Piac nyitva"
@@ -1115,6 +1115,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
