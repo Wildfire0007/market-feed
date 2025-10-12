@@ -77,6 +77,38 @@ def normalize_cli_flags(argv: Iterable[str]) -> Set[str]:
             norm.add(arg.lower())
     return norm
 
+def flag_any(flags: Set[str], *candidates: str) -> bool:
+    """Rugalmas flag-azonosítás (force/manual/heartbeat variációk)."""
+
+    if not flags or not candidates:
+        return False
+
+    normalized_flags: Set[str] = set()
+    for flag in flags:
+        f = flag.lower()
+        normalized_flags.add(f)
+        normalized_flags.add(f.replace("-", ""))
+        normalized_flags.add(f.replace("_", ""))
+
+    normalized_candidates: Set[str] = set()
+    for cand in candidates:
+        c = (cand or "").lower()
+        if not c:
+            continue
+        normalized_candidates.add(c)
+        normalized_candidates.add(c.replace("-", ""))
+        normalized_candidates.add(c.replace("_", ""))
+
+    if normalized_candidates.intersection(normalized_flags):
+        return True
+
+    for flag in normalized_flags:
+        for cand in normalized_candidates:
+            if len(cand) >= 3 and cand in flag:
+                return True
+
+    return False
+
 # ---- Időzóna a fejlécben / órakulcshoz ----
 try:
     HB_TZ = ZoneInfo("Europe/Budapest")
@@ -427,10 +459,10 @@ def main():
     force_env = env_flag("DISCORD_FORCE_NOTIFY")
     force_heartbeat_env = env_flag("DISCORD_FORCE_HEARTBEAT")
   
-    manual_flag = any(key in flags for key in {"manual", "m", "man"})
-    force_flag = any(key in flags for key in {"force", "f"})
-    heartbeat_flag = any(key in flags for key in {"force-heartbeat", "heartbeat", "hb"})
-    skip_cooldown_flag = any(key in flags for key in {"skip-cooldown", "no-cooldown", "nocooldown"})
+    manual_flag = flag_any(flags, "manual", "manual-run", "manualmode", "m", "man")
+    force_flag = flag_any(flags, "force", "force-notify", "notify-force", "f")
+    heartbeat_flag = flag_any(flags, "force-heartbeat", "heartbeat", "hb", "summary", "all")
+    skip_cooldown_flag = flag_any(flags, "skip-cooldown", "no-cooldown", "nocooldown", "skipcooldown")
 
     # Ha TTY-ból futtatjuk kézzel és nincs külön flag, tekintsük manuális kényszerítésnek.
     if not flags and (sys.stdin.isatty() or sys.stdout.isatty()):
