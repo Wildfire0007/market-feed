@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo  # Py3.9+
 
 PUBLIC_DIR = "public"
-ASSETS = ["EURUSD", "NSDQ100", "GOLD_CFD", "BNB", "USOIL"]
+ASSETS = ["EURUSD", "NSDQ100", "GOLD_CFD", "USDJPY", "USOIL"]
 
 # ---- Debounce / stabilitás / cooldown ----
 STATE_PATH = f"{PUBLIC_DIR}/_notify_state.json"
@@ -73,7 +73,7 @@ EMOJI = {
     "EURUSD": "💶",
     "NSDQ100": "📈",
     "GOLD_CFD": "💰",
-    "BNB": "🪙",
+    "USDJPY": "💴",
     "USOIL": "🛢️",
 }
 COLOR = {
@@ -157,8 +157,11 @@ def missing_from_sig(sig: dict):
         "bos5m": "BOS (5m)",
         "liquidity": "Liquidity",
         "liquidity(fib_zone|sweep)": "Liquidity",
+        "liquidity(fib|sweep|ema21|retest)": "Liquidity",
         "atr": "ATR",
         "tp_min_profit": "TP min. profit",
+        "tp1_net>=+1.0%": "TP1 nettó ≥ +1.0%",
+        "min_stoploss": "Minimum stoploss",
         "RR≥1.5": "RR≥1.5",
         "rr_math>=2.0": "RR≥2.0",
         # momentum
