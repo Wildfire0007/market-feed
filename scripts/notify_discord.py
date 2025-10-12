@@ -26,8 +26,8 @@ ENV:
 """
 
 import os, json, sys, requests
-from typing import Iterable, Set
-from datetime import datetime, timezone
+from typing import Iterable, Set, Tuple
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo  # Py3.9+
 
 PUBLIC_DIR = "public"
@@ -185,6 +185,14 @@ def fmt_num(x, digits=4):
     except Exception:
         return "—"
 
+def safe_float(value):
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
 def spot_from_sig_or_file(asset: str, sig: dict):
     spot = (sig or {}).get("spot") or {}
     price = spot.get("price") or spot.get("price_usd")
@@ -267,11 +275,57 @@ def gates_mode(sig: dict) -> str:
     return ((sig or {}).get("gates") or {}).get("mode") or "-"
 
 def decision_of(sig: dict) -> str:
+    closed, _ = market_closed_info(sig)
+    if closed:
+        return "no entry"
     d = (sig or {}).get("signal", "no entry")
     d = (d or "").lower()
     if d not in ("buy","sell"):
         return "no entry"
     return d
+
+def market_closed_info(sig: dict) -> Tuple[bool, str]:
+    sig = sig or {}
+    session = sig.get("session_info") or {}
+    open_flag = session.get("open")
+    status = str(session.get("status") or "").lower()
+    note = session.get("status_note") or ""
+
+    closed_statuses = {
+        "closed",
+        "closed_out_of_hours",
+        "halted",
+        "halted_limit",
+        "maintenance",
+        "holiday",
+    }
+
+    if isinstance(open_flag, bool) and not open_flag:
+        return True, note or "Piac zárva (market closed)"
+
+    if status:
+        if status in closed_statuses or status.startswith("closed") or status.startswith("halt"):
+            return True, note or "Piac zárva (market closed)"
+
+    diagnostics = sig.get("diagnostics") or {}
+    tf_spot = (diagnostics.get("timeframes") or {}).get("spot") or {}
+    latency = safe_float(tf_spot.get("latency_seconds"))
+    expected = safe_float(tf_spot.get("expected_max_delay_seconds"))
+    if latency is not None:
+        base_limit = 1800.0  # 30 perc — ha nincs explicit limit
+        limit = expected if expected and expected > 0 else base_limit
+        limit = max(limit, base_limit)
+        if latency > limit:
+            return True, note or "Piac zárva (market closed)"
+
+    spot = sig.get("spot") or {}
+    spot_ts = parse_utc(spot.get("utc") or spot.get("timestamp"))
+    if spot_ts is not None:
+        age = datetime.now(timezone.utc) - spot_ts
+        if age > timedelta(seconds=max((expected or 0), 1800)):
+            return True, note or "Piac zárva (market closed)"
+
+    return False, ""
 
 # ------------- embed-renderek -------------
 
@@ -289,10 +343,12 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     kind: "normal" | "invalidate" | "flip" | "heartbeat"
     """
     emoji = EMOJI.get(asset, "📊")
-    dec_raw = (sig.get("signal") or "no entry").upper()
-    dec = dec_raw if dec_raw in ("BUY","SELL") else "NO ENTRY"
+    closed, closed_note = market_closed_info(sig)
+    dec_effective = decision_of(sig).upper()
+    dec = dec_effective if dec_effective in ("BUY", "SELL") else "NO ENTRY"
 
-    p   = int(sig.get("probability", 0) or 0)
+    p_raw = int(sig.get("probability", 0) or 0)
+    p = 0 if closed else p_raw
     entry = sig.get("entry"); sl = sig.get("sl"); t1 = sig.get("tp1"); t2 = sig.get("tp2")
     rr = sig.get("rr")
     mode = gates_mode(sig)
@@ -314,6 +370,15 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
         f"{status_bold} • P={p}% • mód: `{mode}`",
         f"Spot: `{spot_s}` • UTC: `{utc_s}`",
     ]
+
+    if closed:
+        note = closed_note or "Piac zárva"
+        note_lower = note.lower()
+        if "piac" not in note_lower and "market" not in note_lower:
+            note = f"{note} • Market closed"
+        elif "market" not in note_lower:
+            note = f"{note} (market closed)"
+        lines.append(f"🔒 {note}")
 
     # RR/TP/SL sor (ha minden adat megvan)
     if dec in ("BUY", "SELL") and all(v is not None for v in (entry, sl, t1, t2, rr)):
@@ -377,6 +442,7 @@ def main():
     state = load_state()
     meta  = state.get("_meta", {})
     embeds = []
+    assets_with_embed = set()
     actionable_any = False
     now_iso = utcnow_iso()
     now_ep  = utcnow_epoch()
@@ -451,6 +517,7 @@ def main():
         # --- embed + állapot frissítés ---
         if send_kind:
             embeds.append(build_embed_for_asset(asset, sig, display_stable, kind=send_kind, prev_decision=prev_sent_decision))
+            assets_with_embed.add(asset)
             if send_kind in ("normal","flip"):
                 cooldown_minutes = COOLDOWN_MIN
                 if COOLDOWN_MIN > 0 and mode_current == "momentum":
@@ -480,6 +547,8 @@ def main():
     heartbeat_embeds = []
     if want_heartbeat:
         for asset in ASSETS:
+            if asset in assets_with_embed:
+                continue
             sig = per_asset_sigs.get(asset) or {"asset": asset, "signal": "no entry", "probability": 0}
             is_stable = per_asset_is_stable.get(asset, True)
             heartbeat_embeds.append(
