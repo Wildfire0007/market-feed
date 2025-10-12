@@ -29,10 +29,10 @@ API_KEY  = os.environ["TWELVEDATA_API_KEY"].strip()
 TD_BASE  = "https://api.twelvedata.com"
 TD_PAUSE = float(os.getenv("TD_PAUSE", "0.3"))
 
-# ───────────────────────────────── ASSETS ────────────────────────────────
-# GER40 helyett USOIL. A fő ticker a WTI/USD, de adunk több fallbackot.
+# ───────────────────────────────── ASSETS ────────────────────────────────␊
+# GER40 helyett USOIL. A fő ticker a WTI/USD, de adunk több fallbackot.␊
 ASSETS = {
-    "SOL":      {"symbol": "SOL/USD",  "exchange": "Binance"},
+    "EURUSD":   {"symbol": "EUR/USD", "exchange": "FX", "alt": ["EURUSD", "EURUSD:CUR"]},
     "NSDQ100":  {"symbol": "QQQ",      "exchange": None},
     "GOLD_CFD": {"symbol": "XAU/USD",  "exchange": None},
     "BNB":      {"symbol": "BNB/USD",  "exchange": "Binance"},
@@ -339,5 +339,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
