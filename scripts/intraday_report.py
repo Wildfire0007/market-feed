@@ -31,8 +31,10 @@ MISSING_LABELS = {
     "liquidity(fib_zone|sweep)": "Liquidity",
     "atr": "ATR",
     "tp_min_profit": "TP min. profit",
+    "tp1_net>=+1.0%": "TP1 nettó ≥ +1.0%",
     "rr_math>=2.0": "RR≥2.0",
     "rr_math>=1.6": "RR≥1.6",
+    "min_stoploss": "Minimum stoploss",
     "momentum(ema9x21)": "Momentum EMA9×21",
     "bos5m|struct_break": "BOS/Structure",
 }
@@ -134,9 +136,9 @@ def write_markdown(signals: List[Dict[str, Any]]) -> None:
         handle.write("- 4H→1H trend bias + EMA21 rezsim\n")
         handle.write("- Likviditás: HTF sweep / Fib zóna / EMA21 visszateszt / szerkezet\n")
         handle.write("- 5M BOS vagy szerkezeti retest a trend irányába (micro BOS támogatás)\n")
-        handle.write("- ATR filter + TP minimum (költség + ATR alapú)\n")
-        handle.write("- RR küszöb: core ≥2.0R, momentum ≥1.6R; kockázat ≤ 1.8%\n")
-        handle.write("- Momentum override: EMA9×21 + ATR + BOS + micro-BOS (csak kriptók)\n")
+        handle.write("- ATR filter + TP minimum (költség + ATR alapú) + nettó TP1 ≥ +1.0%\n")
+        handle.write("- RR küszöb: core ≥2.0R, momentum ≥1.6R; kockázat ≤ 1.8%; minimum stoploss ≥1%\n")
+        handle.write("- Momentum override: EMA9×21 + ATR + BOS + micro-BOS (csak engedélyezett eszközöknél)\n")
 
 def write_summary_csv(signals: List[Dict[str, Any]]) -> None:
     ensure_dir(REPORT_DIR)
