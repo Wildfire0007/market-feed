@@ -1119,6 +1119,49 @@ def analyze(asset: str) -> Dict[str, Any]:
     k1h_closed = k1h.iloc[:-1] if len(k1h) > 1 else k1h.copy()
     k4h_closed = k4h.iloc[:-1] if len(k4h) > 1 else k4h.copy()
 
+    last5_close: Optional[float] = None
+    last5_closed_ts = df_last_timestamp(k5m_closed)
+    if not k5m_closed.empty:
+        try:
+            last5_close = float(k5m_closed["close"].iloc[-1])
+            if not np.isfinite(last5_close):
+                last5_close = None
+        except Exception:
+            last5_close = None
+
+    spot_issue_initial: Optional[str] = None
+    if spot_price is None:
+        spot_issue_initial = "Spot price missing"
+    elif spot_stale_reason:
+        spot_issue_initial = spot_stale_reason
+
+    spot_source = "quote"
+    spot_fallback_used = False
+    spot_latency_notes: List[str] = []
+    if (spot_price is None or spot_stale_reason) and last5_close is not None:
+        spot_fallback_used = True
+        spot_source = "kline_5m_close"
+        spot_price = last5_close
+        display_spot = safe_float(last5_close)
+        if last5_closed_ts:
+            spot_utc = to_utc_iso(last5_closed_ts)
+            spot_ts = last5_closed_ts
+        spot_retrieved = to_utc_iso(now)
+        if spot_ts:
+            delta = now - spot_ts
+            spot_latency_sec = 0 if delta.total_seconds() < 0 else int(delta.total_seconds())
+        else:
+            spot_latency_sec = None
+        spot_stale_reason = None
+
+    if spot_fallback_used:
+        if spot_issue_initial:
+            spot_latency_notes.append(
+                f"spot: {spot_issue_initial.lower()} — 5m zárt gyertya árát használjuk"
+            )
+        else:
+            spot_latency_notes.append("spot: 5m zárt gyertya árát használjuk")
+
     analysis_now = datetime.now(timezone.utc)
 
     intervention_summary: Optional[Dict[str, Any]] = None
@@ -1160,6 +1203,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     expected_delays = {"k1m": 60, "k5m": 300, "k1h": 3600, "k4h": 4*3600}
     tf_meta: Dict[str, Dict[str, Any]] = {}
     latency_flags: List[str] = []
+    latency_flags.extend(spot_latency_notes)
     tf_inputs = [
         ("k1m", k1m, k1m_closed, os.path.join(outdir, "klines_1m.json")),
         ("k5m", k5m, k5m_closed, os.path.join(outdir, "klines_5m.json")),
@@ -1188,7 +1232,11 @@ def analyze(asset: str) -> Dict[str, Any]:
         "latency_seconds": spot_latency_sec,
         "expected_max_delay_seconds": spot_max_age,
         "source_mtime_utc": file_mtime(os.path.join(outdir, "spot.json")),
+        "source": spot_source,
+        "fallback_used": spot_fallback_used,
     }
+    if spot_issue_initial:
+        tf_meta["spot"]["original_issue"] = spot_issue_initial
     if spot_stale_reason and spot_latency_sec is not None and spot_latency_sec > spot_max_age:
         if spot_latency_sec >= 3600:
             age_hours = spot_latency_sec // 3600
@@ -1260,12 +1308,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         save_json(os.path.join(outdir, "signal.json"), msg)
         return msg
 
-    try:
-        last5_close = float(k5m_closed["close"].iloc[-1])  # stabil, lezárt 5m
-    except Exception:
-        last5_close = None
-
-    if last5_close is None or not np.isfinite(last5_close):
+    if last5_close is None:
         msg = build_data_gap_signal(
             asset,
             spot_price,
@@ -1764,6 +1807,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
