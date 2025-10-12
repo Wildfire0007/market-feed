@@ -17,16 +17,16 @@ import pandas as pd
 import numpy as np
 
 # --- Elemzendő eszközök (GER40 -> USOIL) ---
-ASSETS = ["EURUSD", "NSDQ100", "GOLD_CFD", "BNB", "USOIL"]
+ASSETS = ["EURUSD", "NSDQ100", "GOLD_CFD", "USDJPY", "USOIL"]
 
 PUBLIC_DIR = "public"
 
 LEVERAGE = {
     "EURUSD": 30.0,
-    "NSDQ100": 3.0,
-    "GOLD_CFD": 2.0,
-    "BNB": 3.0,
-    "USOIL": 2.0,   # WTI olaj
+    "NSDQ100": 20.0,
+    "GOLD_CFD": 20.0,
+    "USDJPY": 30.0,
+    "USOIL": 10.0,
 }
 
 MAX_RISK_PCT = 1.8
@@ -35,7 +35,8 @@ FIB_TOL = 0.02
 # --- ATR küszöbök ---
 ATR_LOW_TH_DEFAULT = 0.0007   # 0.07%
 ATR_LOW_TH_ASSET = {
-    "EURUSD": 0.00012,  # 0.012% — fő devizapár, alacsonyabb volatilitás
+    "EURUSD": 0.0006,  # 0.06%
+    "USDJPY": 0.0006,
 }
 GOLD_HIGH_VOL_WINDOWS = [(6, 30, 21, 30)]  # európai nyitástól US zárásig lazább
 GOLD_LOW_VOL_TH = 0.0006
@@ -47,40 +48,67 @@ MIN_R_CORE      = 2.0
 MIN_R_MOMENTUM  = 1.6
 TP1_R   = 2.0
 TP2_R   = 3.0
+MIN_STOPLOSS_PCT = 0.01
+TP_NET_MIN = 0.01
 
-# --- Per-asset TP minimumok és round-trip költség + ATR alapú elvárás ---
-# Ezek határozzák meg a TP1 minimális távolságát az entrytől.
+# --- Per-asset TP minimumok, költségek és SL pufferek ---
 TP_MIN_PCT = {        # min. TP1 távolság %-ban (entry-hez képest)
-    "default": 0.0030,  # 0.30%
-    "GOLD_CFD": 0.0015, # 0.15%  (arany)
-    "USOIL":    0.0020, # 0.20%
-    "NSDQ100":  0.0012, # 0.12% alap; cash+magas vol esetén enged 0.10%-ig
-    "EURUSD":   0.0010, # 0.10%
-    "BNB":      0.0040, # 0.40%
+    "default": 0.0020,  # 0.20%
+    "GOLD_CFD": 0.0020, # 0.20%
+    "USOIL":    0.0020,
+    "NSDQ100":  0.0010, # 0.10%
+    "EURUSD":   0.0015, # 15 pip ~0.15%
+    "USDJPY":   0.0012, # 18 pip ~0.12%
 }
 TP_MIN_ABS = {        # min. TP1 távolság abszolútban (tick/árjegyzés miatt)
     "default": 0.50,
-    "GOLD_CFD": 3.0,   # arany ~3 pont
-    "USOIL":    0.08,  # olaj ~0.08
-    "NSDQ100":  0.80,
-    "EURUSD":   0.0008, # 8 pip
-    "BNB":      0.50,
+    "GOLD_CFD": 3.0,
+    "USOIL":    0.70,
+    "NSDQ100":  10.0,
+    "EURUSD":   0.0015,
+    "USDJPY":   0.18,
 }
-COST_ROUND_PCT_ASSET = {  # várható round-trip költség (spread+jutalék+slip) %
-    "default": 0.0015,  # 0.15%
-    "GOLD_CFD": 0.0008, # 0.08%
-    "USOIL":    0.0010, # 0.10%
-    "NSDQ100":  0.0007, # 0.07%
-    "EURUSD":   0.0002, # 0.02%
-    "BNB":      0.0020, # 0.20%
+SL_BUFFER_RULES = {
+    "default": {"atr_mult": 0.2, "abs_min": 0.5},
+    "GOLD_CFD": {"atr_mult": 0.2, "abs_min": 2.0},
+    "NSDQ100": {"atr_mult": 0.25, "abs_min": 10.0},
+    "USOIL":    {"atr_mult": 0.25, "abs_min": 0.15},
+    "EURUSD":   {"atr_mult": 0.2, "abs_min": 0.0008},
+    "USDJPY":   {"atr_mult": 0.2, "abs_min": 0.10},
 }
+MIN_RISK_ABS = {
+    "default": 0.5,
+    "GOLD_CFD": 2.0,
+    "USOIL": 0.15,
+    "NSDQ100": 8.0,
+    "EURUSD": 0.0008,
+    "USDJPY": 0.10,
+}
+
+ASSET_COST_MODEL = {
+    "GOLD_CFD": {"type": "pct", "round_trip_pct": 0.0005, "overnight_pct": 0.00035},
+    "NSDQ100": {"type": "pct", "round_trip_pct": 0.0007, "overnight_pct": 0.00040},
+    "USOIL":   {"type": "pct", "round_trip_pct": 0.0008, "overnight_pct": 0.00050},
+    "EURUSD":  {"type": "pip", "round_trip_pips": 1.0, "overnight_pips": 0.6},
+    "USDJPY":  {"type": "pip", "round_trip_pips": 1.0, "overnight_pips": 0.7},
+}
+DEFAULT_COST_MODEL = {"type": "pct", "round_trip_pct": 0.0010, "overnight_pct": 0.00030}
 COST_MULT_DEFAULT = 1.5
 COST_MULT_HIGH_VOL = 1.3
 ATR5_MIN_MULT  = 0.5     # min. profit >= 0.5× ATR(5m)
 ATR_VOL_HIGH_REL = 0.002  # 0.20% relatív ATR felett lazítjuk a költség-multit
 
-# --- Momentum override csak kriptókra (BNB marad) ---
-ENABLE_MOMENTUM_ASSETS = {"BNB"}
+EMA_SLOPE_TH_DEFAULT = 0.0008
+EMA_SLOPE_TH_ASSET = {
+    "EURUSD": 0.0010,
+    "USDJPY": 0.0010,
+    "NSDQ100": 0.0010,
+    "GOLD_CFD": 0.0008,
+    "USOIL": 0.0008,
+}
+
+# --- Momentum override (kripto nélkül) ---
+ENABLE_MOMENTUM_ASSETS: set = set()
 MOMENTUM_BARS    = 5             # 5m EMA9–EMA21 legalább 5 bar
 MOMENTUM_ATR_REL = 0.0008        # >= 0.08% 5m relatív ATR
 MOMENTUM_BOS_LB  = 15            # szerkezeti töréshez nézett ablak (bar)
@@ -91,24 +119,35 @@ MICRO_BOS_P_BONUS = 8
 # --- Rezsim és session beállítások ---
 EMA_SLOPE_PERIOD   = 21          # 1h EMA21
 EMA_SLOPE_LOOKBACK = 3           # hány baron mérjük a változást
-EMA_SLOPE_TH       = 0.0007      # ~0.10% relatív elmozdulás (abs) a lookback alatt
+EMA_SLOPE_TH       = EMA_SLOPE_TH_DEFAULT      # alap küszöb (ha nincs asset-specifikus)
 
 # UTC idősávok: [(start_h, start_m, end_h, end_m), ...]; None = mindig
 SESSIONS_UTC: Dict[str, Optional[List[Tuple[int,int,int,int]]]] = {
     "EURUSD": [
-        (0, 0, 23, 59),  # 24/5 OTC forex piac
+        (7, 0, 17, 0),   # LDN core ablak (téli)
+        (8, 0, 18, 0),   # LDN core ablak (nyári)
     ],
-    "BNB": None,
-    # NASDAQ (QQQ) normál kereskedési ablak – DST miatt engedékeny sáv.
+    "USDJPY": [
+        (16, 0, 23, 59),  # Tokyo (előző nap 16:00 UTC-től)
+        (0, 0, 1, 0),     # Tokyo záró szakasz
+        (8, 0, 10, 0),    # LDN nyitás (nyári)
+        (9, 0, 11, 0),    # LDN nyitás (téli)
+        (13, 0, 16, 0),   # LDN/NY átfedés (nyári)
+        (14, 0, 17, 0),   # LDN/NY átfedés (téli)
+    ],
+    # NASDAQ (QQQ) normál kereskedési ablak – DST miatt két sáv.
     "NSDQ100": [
-        (13, 0, 21, 30),   # 13:00–21:30 UTC (9:00–17:30 New York; pre/after market puffer)
+        (12, 30, 19, 0),   # US cash (nyári)
+        (14, 30, 21, 0),   # US cash (téli)
     ],
-    # Arany/olaj: kvázi 24/5, de szombaton zárva.
+    # Arany/olaj: európai fókusz ablakok (Budapest idő).
     "GOLD_CFD": [
-        (0, 0, 23, 59),
+        (7, 0, 17, 30),
+        (8, 0, 18, 30),
     ],
     "USOIL": [
-        (0, 0, 23, 59),
+        (7, 0, 18, 0),
+        (8, 0, 19, 0),
     ],
 }
 
@@ -133,7 +172,7 @@ REFRESH_TIPS = [
 # Heti naptári korlátozások (Python weekday: hétfő=0 ... vasárnap=6). None = mindig.
 SESSION_WEEKDAYS: Dict[str, Optional[List[int]]] = {
     "EURUSD": [0, 1, 2, 3, 4, 6],  # hétfő–péntek + vasárnap esti nyitás
-    "BNB": None,
+    "USDJPY": [0, 1, 2, 3, 4, 6],
     "NSDQ100": [0, 1, 2, 3, 4],        # hétfő–péntek
     "GOLD_CFD": [0, 1, 2, 3, 4, 6],    # vasárnap esti nyitás – szombat zárva
     "USOIL": [0, 1, 2, 3, 4, 6],       # vasárnap esti nyitás – szombat zárva
@@ -290,6 +329,38 @@ def tp_min_pct_for(asset: str, rel_atr: float, session_flag: bool) -> float:
     if asset == "NSDQ100" and session_flag and rel_atr >= ATR_VOL_HIGH_REL:
         return min(base, 0.0010)
     return base
+
+
+def pip_size(asset: str) -> float:
+    if asset.endswith("JPY"):
+        return 0.01
+    return 0.0001
+
+
+def compute_cost_components(asset: str, entry: float, overnight_days: int) -> Tuple[float, float]:
+    if entry <= 0:
+        return 0.0, 0.0
+    model = ASSET_COST_MODEL.get(asset, DEFAULT_COST_MODEL)
+    mtype = model.get("type", "pct")
+    if mtype == "pip":
+        pip = pip_size(asset)
+        rt = float(model.get("round_trip_pips", 0.0) or 0.0) * pip / entry
+        overnight = float(model.get("overnight_pips", 0.0) or 0.0) * pip * overnight_days / entry
+    else:
+        rt = float(model.get("round_trip_pct", 0.0) or 0.0)
+        overnight = float(model.get("overnight_pct", 0.0) or 0.0) * overnight_days
+    return rt, overnight
+
+
+def estimate_overnight_days(asset: str, now: Optional[datetime] = None) -> int:
+    if now is None:
+        now = datetime.now(timezone.utc)
+    wd = now.weekday()
+    if asset in {"EURUSD", "USDJPY"}:
+        return 3 if wd == 2 else 1   # FX: szerdai tripla díj
+    if asset in {"GOLD_CFD", "USOIL", "NSDQ100"}:
+        return 3 if wd == 4 else 1   # hétvégi elszámolás pénteken
+    return 1
 
 
 def safe_float(value: Any) -> Optional[float]:
@@ -735,13 +806,20 @@ def analyze(asset: str) -> Dict[str, Any]:
     if display_spot is None and price_for_calc is not None and np.isfinite(price_for_calc):
         display_spot = price_for_calc
 
+    analysis_now = datetime.now(timezone.utc)
+
     # 2) Bias 4H→1H (zárt 1h/4h)
     bias4h = bias_from_emas(k4h_closed)
     bias1h = bias_from_emas(k1h_closed)
     trend_bias = "long" if (bias4h=="long" and bias1h!="short") else ("short" if (bias4h=="short" and bias1h!="long") else "neutral")
 
     # 2/b Rezsim (EMA21 meredekség 1h)
-    regime_ok, regime_val = ema_slope_ok(k1h_closed, EMA_SLOPE_PERIOD, EMA_SLOPE_LOOKBACK, EMA_SLOPE_TH)
+    regime_ok, regime_val = ema_slope_ok(
+        k1h_closed,
+        EMA_SLOPE_PERIOD,
+        EMA_SLOPE_LOOKBACK,
+        EMA_SLOPE_TH_ASSET.get(asset, EMA_SLOPE_TH_DEFAULT),
+    )
 
     # 3) HTF sweep (zárt 1h/4h)
     sw1h = detect_sweep(k1h_closed, 24); sw4h = detect_sweep(k4h_closed, 24)
@@ -889,6 +967,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         "atr",
         f"rr_math>={MIN_R_CORE:.1f}",
         "tp_min_profit",
+        "min_stoploss",
+        "tp1_net>=+1.0%",
     ]
 
     conds_core = {
@@ -921,6 +1001,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         "atr",
         f"rr_math>={MIN_R_MOMENTUM:.1f}",
         "tp_min_profit",
+        "min_stoploss",
+        "tp1_net>=+1.0%",
     ]
     missing_mom: List[str] = []
 
@@ -959,58 +1041,102 @@ def analyze(asset: str) -> Dict[str, Any]:
     mode = "core"
     missing = list(missing_core)
     required_list: List[str] = list(core_required)
+    min_stoploss_ok = True
+    tp1_net_pct_value: Optional[float] = None
 
     def compute_levels(decision_side: str, rr_required: float):
-        nonlocal entry, sl, tp1, tp2, rr, missing
+        nonlocal entry, sl, tp1, tp2, rr, missing, min_stoploss_ok, tp1_net_pct_value
         atr5_val  = float(atr5 or 0.0)
-        atr1h_val = float(atr1h or 0.0)
 
-        # vol/költség alapú minimum kockázat és puffer
-        risk_min = max(0.6 * atr5_val, 0.0035 * price_for_calc, 0.50)
-        atr1h_cap = 0.12 * atr1h_val
-        atr1h_component = min(max(0.0, atr1h_cap), 0.0008 * price_for_calc)
-        buf      = max(0.2 * atr5_val, atr1h_component)
+        buf_rule = SL_BUFFER_RULES.get(asset, SL_BUFFER_RULES["default"])
+        buf = max(buf_rule.get("atr_mult", 0.2) * atr5_val, buf_rule.get("abs_min", 0.5))
 
         k5_sw = find_swings(k5m_closed, lb=2)
         hi5, lo5 = last_swing_levels(k5_sw)
 
         entry = price_for_calc
         if decision_side == "buy":
-            sl = (lo5 if lo5 is not None else (entry - atr5_val)) - buf
-            if (entry - sl) < risk_min: sl = entry - risk_min
-            risk = max(1e-6, entry - sl)
+            base_sl = lo5 if lo5 is not None else (entry - atr5_val)
+            sl = base_sl - buf
+            risk = entry - sl
+            if risk < 0:
+                sl = entry - buf
+                risk = entry - sl
+            tp1 = entry + TP1_R * risk
+            tp2 = entry + TP2_R * risk
+            tp1_dist = tp1 - entry
+            ok_math = (sl < entry < tp1 <= tp2)
+        else:
+            base_sl = hi5 if hi5 is not None else (entry + atr5_val)
+            sl = base_sl + buf
+            risk = sl - entry
+            if risk < 0:
+                sl = entry + buf
+                risk = sl - entry
+            tp1 = entry - TP1_R * risk
+            tp2 = entry - TP2_R * risk
+            tp1_dist = entry - tp1
+            ok_math = (tp2 <= tp1 < entry < sl)
+
+        risk_min = max(
+            MIN_RISK_ABS.get(asset, MIN_RISK_ABS["default"]),
+            entry * MIN_STOPLOSS_PCT,
+            buf,
+        )
+        if risk < risk_min:
+            if decision_side == "buy":
+                sl = entry - risk_min
+                risk = entry - sl
+            else:
+                sl = entry + risk_min
+                risk = sl - entry
+
+        risk = max(risk, 1e-6)
+        min_stoploss_ok_local = risk >= entry * MIN_STOPLOSS_PCT - 1e-9
+        if not min_stoploss_ok_local:
+            min_stoploss_ok = False
+
+        if decision_side == "buy":
             tp1 = entry + TP1_R * risk
             tp2 = entry + TP2_R * risk
             rr  = (tp2 - entry) / risk
             tp1_dist = tp1 - entry
-            ok_math = (sl < entry < tp1 <= tp2)
+            ok_math = ok_math and (sl < entry < tp1 <= tp2)
+            gross_pct = tp1_dist / entry
         else:
-            sl = (hi5 if hi5 is not None else (entry + atr5_val)) + buf
-            if (sl - entry) < risk_min: sl = entry + risk_min
-            risk = max(1e-6, sl - entry)
             tp1 = entry - TP1_R * risk
             tp2 = entry - TP2_R * risk
             rr  = (entry - tp2) / risk
             tp1_dist = entry - tp1
-            ok_math = (tp2 <= tp1 < entry < sl)
+            ok_math = ok_math and (tp2 <= tp1 < entry < sl)
+            gross_pct = tp1_dist / entry
 
-        # --- ÚJ: per-asset TP minimum + költségbuffer + ATR(5m) minimum
-        cost_pct = COST_ROUND_PCT_ASSET.get(asset, COST_ROUND_PCT_ASSET["default"])
         rel_atr_local = float(rel_atr) if not np.isnan(rel_atr) else float("nan")
         high_vol = (not np.isnan(rel_atr_local)) and (rel_atr_local >= ATR_VOL_HIGH_REL)
         cost_mult = COST_MULT_HIGH_VOL if high_vol else COST_MULT_DEFAULT
         tp_min_pct = tp_min_pct_for(asset, rel_atr_local, session_ok_flag)
+        overnight_days = estimate_overnight_days(asset, analysis_now)
+        cost_round_pct, overnight_pct = compute_cost_components(asset, entry, overnight_days)
+        total_cost_pct = cost_mult * cost_round_pct + overnight_pct
+        net_pct = gross_pct - total_cost_pct
+        tp1_net_pct_value = net_pct
 
         min_profit_abs = max(
             TP_MIN_ABS.get(asset, TP_MIN_ABS["default"]),
             tp_min_pct * entry,
-            cost_mult * cost_pct * entry,
-            ATR5_MIN_MULT * atr5_val
+            (cost_mult * cost_round_pct + overnight_pct) * entry,
+            ATR5_MIN_MULT * atr5_val,
         )
 
-        if (not ok_math) or (rr is None) or (rr < rr_required) or (tp1_dist < min_profit_abs):
-            if rr is None or rr < rr_required: missing.append(f"rr_math>={rr_required:.1f}")
-            if tp1_dist < min_profit_abs: missing.append("tp_min_profit")
+        if (not ok_math) or (rr is None) or (rr < rr_required) or (tp1_dist < min_profit_abs) or (net_pct < TP_NET_MIN):
+            if rr is None or rr < rr_required:
+                missing.append(f"rr_math>={rr_required:.1f}")
+            if tp1_dist < min_profit_abs:
+                missing.append("tp_min_profit")
+            if net_pct < TP_NET_MIN:
+                missing.append("tp1_net>=+1.0%")
+            if not min_stoploss_ok_local:
+                missing.append("min_stoploss")
             return False
         return True
 
@@ -1023,8 +1149,13 @@ def analyze(asset: str) -> Dict[str, Any]:
             decision = "no entry"
         mode = "core"
         required_list = list(core_required)
-        if decision in ("buy", "sell") and not compute_levels(decision, MIN_R_CORE):
-            decision = "no entry"
+        if decision in ("buy", "sell"):
+            if not compute_levels(decision, MIN_R_CORE):
+                decision = "no entry"
+            elif tp1_net_pct_value is not None:
+                msg_net = f"TP1 nettó profit ≈ {tp1_net_pct_value*100:.2f}%"
+                if msg_net not in reasons:
+                    reasons.append(msg_net)
     else:
         if mom_dir is not None:
             mode = "momentum"
@@ -1040,6 +1171,10 @@ def analyze(asset: str) -> Dict[str, Any]:
                 if (mom_dir == "buy" and mom_micro_long) or (mom_dir == "sell" and mom_micro_short):
                     reasons.append("Momentum: micro BOS elfogadva (1m szerkezet)")
                 P = max(P, 75)
+                if tp1_net_pct_value is not None:
+                    msg_net = f"TP1 nettó profit ≈ {tp1_net_pct_value*100:.2f}%"
+                    if msg_net not in reasons:
+                        reasons.append(msg_net)
         elif asset in ENABLE_MOMENTUM_ASSETS and missing_mom:
             mode = "momentum"
             required_list = list(mom_required)
@@ -1117,6 +1252,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
