@@ -17,12 +17,12 @@ import pandas as pd
 import numpy as np
 
 # --- Elemzendő eszközök (GER40 -> USOIL) ---
-ASSETS = ["SOL", "NSDQ100", "GOLD_CFD", "BNB", "USOIL"]
+ASSETS = ["EURUSD", "NSDQ100", "GOLD_CFD", "BNB", "USOIL"]
 
 PUBLIC_DIR = "public"
 
 LEVERAGE = {
-    "SOL": 3.0,
+    "EURUSD": 30.0,
     "NSDQ100": 3.0,
     "GOLD_CFD": 2.0,
     "BNB": 3.0,
@@ -35,7 +35,7 @@ FIB_TOL = 0.02
 # --- ATR küszöbök ---
 ATR_LOW_TH_DEFAULT = 0.0007   # 0.07%
 ATR_LOW_TH_ASSET = {
-    "SOL": 0.0005,  # lazított küszöb: 0.05%
+    "EURUSD": 0.00012,  # 0.012% — fő devizapár, alacsonyabb volatilitás
 }
 GOLD_HIGH_VOL_WINDOWS = [(6, 30, 21, 30)]  # európai nyitástól US zárásig lazább
 GOLD_LOW_VOL_TH = 0.0006
@@ -55,7 +55,7 @@ TP_MIN_PCT = {        # min. TP1 távolság %-ban (entry-hez képest)
     "GOLD_CFD": 0.0015, # 0.15%  (arany)
     "USOIL":    0.0020, # 0.20%
     "NSDQ100":  0.0012, # 0.12% alap; cash+magas vol esetén enged 0.10%-ig
-    "SOL":      0.0030, # 0.30%
+    "EURUSD":   0.0010, # 0.10%
     "BNB":      0.0040, # 0.40%
 }
 TP_MIN_ABS = {        # min. TP1 távolság abszolútban (tick/árjegyzés miatt)
@@ -63,7 +63,7 @@ TP_MIN_ABS = {        # min. TP1 távolság abszolútban (tick/árjegyzés miatt
     "GOLD_CFD": 3.0,   # arany ~3 pont
     "USOIL":    0.08,  # olaj ~0.08
     "NSDQ100":  0.80,
-    "SOL":      0.50,
+    "EURUSD":   0.0008, # 8 pip
     "BNB":      0.50,
 }
 COST_ROUND_PCT_ASSET = {  # várható round-trip költség (spread+jutalék+slip) %
@@ -71,7 +71,7 @@ COST_ROUND_PCT_ASSET = {  # várható round-trip költség (spread+jutalék+slip
     "GOLD_CFD": 0.0008, # 0.08%
     "USOIL":    0.0010, # 0.10%
     "NSDQ100":  0.0007, # 0.07%
-    "SOL":      0.0020, # 0.20%
+    "EURUSD":   0.0002, # 0.02%
     "BNB":      0.0020, # 0.20%
 }
 COST_MULT_DEFAULT = 1.5
@@ -79,8 +79,8 @@ COST_MULT_HIGH_VOL = 1.3
 ATR5_MIN_MULT  = 0.5     # min. profit >= 0.5× ATR(5m)
 ATR_VOL_HIGH_REL = 0.002  # 0.20% relatív ATR felett lazítjuk a költség-multit
 
-# --- Momentum override csak kriptókra (SOL, BNB) ---
-ENABLE_MOMENTUM_ASSETS = {"SOL", "BNB"}
+# --- Momentum override csak kriptókra (BNB marad) ---
+ENABLE_MOMENTUM_ASSETS = {"BNB"}
 MOMENTUM_BARS    = 5             # 5m EMA9–EMA21 legalább 5 bar
 MOMENTUM_ATR_REL = 0.0008        # >= 0.08% 5m relatív ATR
 MOMENTUM_BOS_LB  = 15            # szerkezeti töréshez nézett ablak (bar)
@@ -95,7 +95,9 @@ EMA_SLOPE_TH       = 0.0007      # ~0.10% relatív elmozdulás (abs) a lookback 
 
 # UTC idősávok: [(start_h, start_m, end_h, end_m), ...]; None = mindig
 SESSIONS_UTC: Dict[str, Optional[List[Tuple[int,int,int,int]]]] = {
-    "SOL": None,
+    "EURUSD": [
+        (0, 0, 23, 59),  # 24/5 OTC forex piac
+    ],
     "BNB": None,
     # NASDAQ (QQQ) normál kereskedési ablak – DST miatt engedékeny sáv.
     "NSDQ100": [
@@ -130,7 +132,7 @@ REFRESH_TIPS = [
 
 # Heti naptári korlátozások (Python weekday: hétfő=0 ... vasárnap=6). None = mindig.
 SESSION_WEEKDAYS: Dict[str, Optional[List[int]]] = {
-    "SOL": None,
+    "EURUSD": [0, 1, 2, 3, 4, 6],  # hétfő–péntek + vasárnap esti nyitás
     "BNB": None,
     "NSDQ100": [0, 1, 2, 3, 4],        # hétfő–péntek
     "GOLD_CFD": [0, 1, 2, 3, 4, 6],    # vasárnap esti nyitás – szombat zárva
@@ -1115,6 +1117,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
