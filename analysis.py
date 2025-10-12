@@ -9,6 +9,7 @@ Kimenet:
 """
 
 import os, json
+from copy import deepcopy
 from datetime import datetime, timezone, timedelta
 from datetime import time as dtime
 from typing import Any, Dict, List, Optional, Tuple
@@ -158,6 +159,50 @@ SPOT_MAX_AGE_SECONDS: Dict[str, int] = {
     "default": 20 * 60,      # 20 perc
     "GOLD_CFD": 45 * 60,     # 45 perc — lazább, mert cash session
     "USOIL":    45 * 60,     # 45 perc — CME/NYMEX CFD feed esti szünettel
+}
+
+INTERVENTION_CONFIG_FILENAME = "intervention_watch_config.json"
+INTERVENTION_NEWS_FILENAME = "intervention_watch_news_flag.json"
+INTERVENTION_STATE_FILENAME = "intervention_watch_state.json"
+INTERVENTION_SUMMARY_FILENAME = "analysis_summary.json"
+INTERVENTION_P_SCORE_ADD = 15
+
+INTERVENTION_WATCH_DEFAULT: Dict[str, Any] = {
+    "USDJPY": {
+        "intervention_watch": {
+            "big_figures": [150.0, 152.0, 155.0, 160.0, 165.0],
+            "session_primary_utc": ["00:00", "09:00"],
+            "session_secondary_utc": ["18:00", "21:00"],
+            "speed_thresholds_pips_30m": [40, 60, 80],
+            "spike_multiplier_atr5": 1.2,
+            "wick_ratio_trigger": 0.55,
+            "vr_threshold": 1.4,
+            "atr_spike_ratio": 1.6,
+            "irs_bands": {
+                "LOW": [0, 39],
+                "ELEVATED": [40, 59],
+                "HIGH": [60, 79],
+                "IMMINENT": [80, 100],
+            },
+            "actions": {
+                "HIGH": {
+                    "block_new_longs": True,
+                    "reduce_long_size_pct": 50,
+                    "p_score_long_add": 15,
+                    "tighten_sl": {"atr5_mult": 0.3, "min_pct": 0.10},
+                },
+                "IMMINENT": {
+                    "force_partial_close_long_pct": 50,
+                    "trailing_sl": {"atr5_mult": 0.5, "min_pct": 0.20},
+                    "allow_new_shorts_after_pullback": {
+                        "pullback_atr5_mult": 0.5,
+                        "rr_min": 2.5,
+                    },
+                    "leverage_cap_jpy_cross": 2,
+                },
+            },
+        }
+    }
 }
 
 # Diagnosztikai tippek — a dashboard / Worker frissítéséhez.
@@ -371,6 +416,401 @@ def safe_float(value: Any) -> Optional[float]:
     if not np.isfinite(result):
         return None
     return result
+
+
+def deep_update(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            base[key] = deep_update(dict(base[key]), value)
+        else:
+            base[key] = value
+    return base
+
+
+def parse_hhmm(value: str) -> Optional[int]:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        hour, minute = value.split(":", 1)
+        return int(hour) * 60 + int(minute)
+    except Exception:
+        return None
+
+
+def in_utc_range(now_utc: datetime, start: str, end: str) -> bool:
+    start_min = parse_hhmm(start)
+    end_min = parse_hhmm(end)
+    if start_min is None or end_min is None:
+        return False
+    minute_now = now_utc.hour * 60 + now_utc.minute
+    if start_min <= end_min:
+        return start_min <= minute_now < end_min
+    # Átívelés éjfélen
+    return minute_now >= start_min or minute_now < end_min
+
+
+def intervention_band(score: int, bands: Dict[str, List[int]]) -> str:
+    try:
+        items = [
+            (name, int(bounds[0]), int(bounds[1]))
+            for name, bounds in bands.items()
+            if isinstance(bounds, (list, tuple)) and len(bounds) == 2
+        ]
+    except Exception:
+        items = []
+    if items:
+        items.sort(key=lambda x: x[1])
+        for name, low, high in items:
+            if low <= score <= high:
+                return name
+    if score >= 80:
+        return "IMMINENT"
+    if score >= 60:
+        return "HIGH"
+    if score >= 40:
+        return "ELEVATED"
+    return "LOW"
+
+
+def compute_irs_usdjpy(
+    df_1m: pd.DataFrame,
+    df_5m: pd.DataFrame,
+    now_utc: datetime,
+    config: Dict[str, Any],
+    news_flag: int = 0,
+) -> Tuple[int, str, Dict[str, Any]]:
+    cfg = config.get("intervention_watch", config)
+    metrics: Dict[str, Any] = {
+        "price": None,
+        "nearest_big_figure": None,
+        "dist_pips": None,
+        "roc_30m_pips": None,
+        "d5_pips": None,
+        "atr5_pips": None,
+        "atr5_median_pips": None,
+        "rv_ratio": None,
+        "session_points": 0,
+        "comms_points": 0,
+        "components": {},
+    }
+
+    if df_1m.empty or df_5m.empty:
+        return 0, "LOW", metrics
+
+    price = safe_float(df_1m["close"].iloc[-1])
+    if price is None:
+        return 0, "LOW", metrics
+
+    big_figures = cfg.get("big_figures") or []
+    if big_figures:
+        nearest = min(big_figures, key=lambda x: abs(price - float(x)))
+    else:
+        nearest = round(price)
+    nearest = float(nearest)
+    dist_pips = abs(price - nearest) * 100.0
+    lps = max(0.0, min(30.0, 30.0 - dist_pips / 5.0))
+
+    roc_30 = 0.0
+    speed_score = 0.0
+    speed_thresholds = cfg.get("speed_thresholds_pips_30m", [40, 60, 80])
+    if len(df_1m) >= 31:
+        price_30 = safe_float(df_1m["close"].iloc[-30])
+        if price_30 is not None:
+            roc_30 = abs(price - price_30) * 100.0
+            if roc_30 >= float(speed_thresholds[2] if len(speed_thresholds) > 2 else 80):
+                speed_score += 18
+            elif roc_30 >= float(speed_thresholds[1] if len(speed_thresholds) > 1 else 60):
+                speed_score += 12
+            elif roc_30 >= float(speed_thresholds[0] if speed_thresholds else 40):
+                speed_score += 7
+
+    d5 = 0.0
+    atr5_val = None
+    atr5_series = atr(df_5m, 14)
+    if len(df_5m) >= 2:
+        close_curr = safe_float(df_5m["close"].iloc[-1])
+        close_prev = safe_float(df_5m["close"].iloc[-2])
+        if close_curr is not None and close_prev is not None:
+            d5 = abs(close_curr - close_prev) * 100.0
+    if not atr5_series.empty:
+        atr5_raw = safe_float(atr5_series.iloc[-1])
+        if atr5_raw is not None:
+            atr5_val = atr5_raw
+    atr5_pips = (atr5_val or 0.0) * 100.0
+    atr5_med = None
+    if not atr5_series.empty:
+        tail = atr5_series.tail(48).to_numpy(dtype=float)
+        if tail.size:
+            atr5_med = float(np.nanmedian(tail))
+    atr5_med_pips = (atr5_med or 0.0) * 100.0
+
+    spike_mult = float(cfg.get("spike_multiplier_atr5", 1.2) or 1.2)
+    delta5_spike = False
+    if d5 >= 25.0 and atr5_pips > 0 and d5 >= spike_mult * atr5_pips:
+        speed_score += 12
+        delta5_spike = True
+    speed_score = min(30.0, speed_score)
+
+    vol_spike = 0.0
+    atr_spike_ratio = float(cfg.get("atr_spike_ratio", 1.6) or 1.6)
+    atr_spike = False
+    if atr5_med_pips > 0 and atr5_pips > 0:
+        if (atr5_pips / atr5_med_pips) >= atr_spike_ratio:
+            vol_spike += 12
+            atr_spike = True
+
+    rv_ratio = None
+    vr_threshold = float(cfg.get("vr_threshold", 1.4) or 1.4)
+    vr_spike = False
+    if len(df_1m) >= 60 and len(df_5m) >= 12:
+        rv1 = safe_float(np.var(np.diff(df_1m["close"].iloc[-60:].to_numpy(dtype=float))))
+        rv5 = safe_float(np.var(np.diff(df_5m["close"].iloc[-12:].to_numpy(dtype=float))))
+        if rv1 is not None and rv5 is not None and rv5 > 0:
+            rv_ratio = rv1 / rv5
+            if rv_ratio >= vr_threshold:
+                vol_spike += 8
+                vr_spike = True
+
+    wick_pressure = False
+    wick_threshold = float(cfg.get("wick_ratio_trigger", 0.55) or 0.55)
+    if len(df_5m) >= 3:
+        last_bars = df_5m.iloc[-3:]
+        wick_hits = 0
+        for _, row in last_bars.iterrows():
+            high = safe_float(row.get("high"))
+            low = safe_float(row.get("low"))
+            open_ = safe_float(row.get("open"))
+            close = safe_float(row.get("close"))
+            if None in (high, low, open_, close):
+                continue
+            total = high - low
+            if total <= 0:
+                continue
+            if close >= open_:
+                upper = high - max(open_, close)
+                if upper / total >= wick_threshold:
+                    wick_hits += 1
+        if wick_hits >= 2:
+            vol_spike += 4
+            wick_pressure = True
+
+    vol_spike = min(20.0, vol_spike)
+
+    session_points = 0.0
+    primary = cfg.get("session_primary_utc")
+    secondary = cfg.get("session_secondary_utc")
+    if isinstance(primary, (list, tuple)) and len(primary) == 2:
+        if in_utc_range(now_utc, str(primary[0]), str(primary[1])):
+            session_points += 8
+    if isinstance(secondary, (list, tuple)) and len(secondary) == 2:
+        if in_utc_range(now_utc, str(secondary[0]), str(secondary[1])):
+            session_points += 3
+    session_points = min(10.0, session_points)
+
+    comms = max(0, min(10, int(news_flag or 0)))
+
+    total_score = lps + speed_score + vol_spike + session_points + comms
+    irs = int(round(max(0.0, min(100.0, total_score))))
+    band = intervention_band(irs, cfg.get("irs_bands", {}))
+
+    metrics.update(
+        {
+            "price": price,
+            "nearest_big_figure": nearest,
+            "dist_pips": dist_pips,
+            "roc_30m_pips": roc_30,
+            "d5_pips": d5,
+            "atr5_pips": atr5_pips,
+            "atr5_median_pips": atr5_med_pips,
+            "rv_ratio": rv_ratio,
+            "session_points": session_points,
+            "comms_points": comms,
+            "components": {
+                "level_pressure": lps,
+                "speed": speed_score,
+                "vol_spike": vol_spike,
+                "session": session_points,
+                "comms": comms,
+                "delta5_spike": delta5_spike,
+                "atr_spike": atr_spike,
+                "vr_spike": vr_spike,
+                "wick_pressure": wick_pressure,
+            },
+        }
+    )
+
+    return irs, band, metrics
+
+
+def load_intervention_config(outdir: str) -> Dict[str, Any]:
+    base_cfg = deepcopy(INTERVENTION_WATCH_DEFAULT.get("USDJPY", {}))
+    path = os.path.join(outdir, INTERVENTION_CONFIG_FILENAME)
+    override = load_json(path)
+    if isinstance(override, dict):
+        candidate = override
+        if "USDJPY" in candidate and isinstance(candidate["USDJPY"], dict):
+            candidate = candidate["USDJPY"]
+        if "intervention_watch" in candidate and isinstance(candidate["intervention_watch"], dict):
+            candidate = candidate["intervention_watch"]
+        if isinstance(candidate, dict):
+            base_cfg = deep_update(deepcopy(base_cfg), candidate)
+    return base_cfg
+
+
+def load_intervention_news_flag(outdir: str, config: Dict[str, Any]) -> int:
+    cfg = config.get("intervention_watch", config)
+    base_flag = cfg.get("news_flag", 0)
+    path = os.path.join(outdir, INTERVENTION_NEWS_FILENAME)
+    data = load_json(path)
+    if isinstance(data, dict):
+        candidate = data.get("news_flag")
+        if candidate is not None:
+            base_flag = candidate
+    try:
+        flag = int(base_flag)
+    except (TypeError, ValueError):
+        flag = 0
+    return max(0, min(10, flag))
+
+
+def load_intervention_state(outdir: str) -> Dict[str, Any]:
+    path = os.path.join(outdir, INTERVENTION_STATE_FILENAME)
+    data = load_json(path)
+    return data if isinstance(data, dict) else {}
+
+
+def update_intervention_state(outdir: str, band: str, now_utc: datetime) -> str:
+    state = load_intervention_state(outdir)
+    since = state.get("since_utc") if state.get("band") == band else None
+    if not since:
+        since = to_utc_iso(now_utc)
+    save_json(
+        os.path.join(outdir, INTERVENTION_STATE_FILENAME),
+        {"band": band, "since_utc": since},
+    )
+    return since
+
+
+def build_intervention_reasons(
+    metrics: Dict[str, Any],
+    config: Dict[str, Any],
+) -> List[str]:
+    reasons: List[str] = []
+    cfg = config.get("intervention_watch", config)
+    dist = safe_float(metrics.get("dist_pips"))
+    nearest = safe_float(metrics.get("nearest_big_figure"))
+    if dist is not None and nearest is not None and dist <= 30:
+        reasons.append(f"Near {nearest:.2f} (dist {dist:.0f} pip)")
+
+    roc = safe_float(metrics.get("roc_30m_pips"))
+    speed_thresholds = cfg.get("speed_thresholds_pips_30m", [40, 60, 80])
+    if roc is not None and speed_thresholds:
+        if roc >= float(speed_thresholds[-1]):
+            reasons.append(f"+Speed 30m={roc:.0f} pip")
+        elif roc >= float(speed_thresholds[0]):
+            reasons.append(f"Speed 30m={roc:.0f} pip")
+
+    if metrics.get("components", {}).get("delta5_spike"):
+        d5 = safe_float(metrics.get("d5_pips"))
+        atr5 = safe_float(metrics.get("atr5_pips"))
+        ratio = (d5 / atr5) if d5 and atr5 else None
+        if ratio:
+            reasons.append(f"5m Δ={d5:.0f} pip ({ratio:.1f}×ATR5)")
+        elif d5:
+            reasons.append(f"5m Δ={d5:.0f} pip spike")
+
+    if metrics.get("components", {}).get("atr_spike"):
+        reasons.append("ATR5 spike vs 48-bar median")
+
+    if metrics.get("components", {}).get("vr_spike"):
+        vr = safe_float(metrics.get("rv_ratio"))
+        if vr:
+            reasons.append(f"Variance-ratio={vr:.2f} (>={cfg.get('vr_threshold', 1.4)})")
+        else:
+            reasons.append("Variance-ratio spike")
+
+    if metrics.get("components", {}).get("wick_pressure"):
+        reasons.append("Upper wick pressure (parabola risk)")
+
+    session_pts = safe_float(metrics.get("session_points"))
+    if session_pts and session_pts >= 6:
+        reasons.append("Tokyo session focus")
+    elif session_pts and session_pts > 0:
+        reasons.append("US afternoon window")
+
+    comms_pts = metrics.get("comms_points")
+    if comms_pts:
+        reasons.append(f"Comms/news flag +{int(comms_pts)}")
+
+    return reasons
+
+
+def build_intervention_policy(band: str, metrics: Dict[str, Any], config: Dict[str, Any]) -> List[str]:
+    policy: List[str] = [
+        "spread_guard_top3bars>=1.4×normal → pause entries 5-10m",
+        "discord_alert_cooldown:10m",
+    ]
+    cfg = config.get("intervention_watch", config)
+    actions = cfg.get("actions", {})
+
+    if band in {"HIGH", "IMMINENT"}:
+        high_actions = actions.get("HIGH", {})
+        if high_actions.get("block_new_longs"):
+            policy.append("block_new_longs")
+        reduce_pct = high_actions.get("reduce_long_size_pct")
+        if reduce_pct:
+            policy.append(f"reduce_long_size_pct:{int(reduce_pct)}")
+        p_add = high_actions.get("p_score_long_add")
+        if p_add:
+            policy.append(f"p_score_long_add:+{int(p_add)}")
+        if high_actions.get("tighten_sl"):
+            ts = high_actions["tighten_sl"]
+            policy.append(
+                "tighten_sl>=max({:.1f}×ATR5m,{:.2f}%)".format(
+                    float(ts.get("atr5_mult", 0.3)), float(ts.get("min_pct", 0.10))
+                )
+            )
+        policy.append("jpy_cross_longs_blocked")
+        policy.append("jpy_cross_shorts_slippage_buffer")
+
+    if band == "IMMINENT":
+        immin_actions = actions.get("IMMINENT", {})
+        force_pct = immin_actions.get("force_partial_close_long_pct")
+        if force_pct:
+            policy.append(f"force_partial_close_long_pct:{int(force_pct)}")
+        trailing = immin_actions.get("trailing_sl")
+        if trailing:
+            policy.append(
+                "trailing_sl>=max({:.1f}×ATR5m,{:.2f}%)".format(
+                    float(trailing.get("atr5_mult", 0.5)), float(trailing.get("min_pct", 0.20))
+                )
+            )
+        pb = immin_actions.get("allow_new_shorts_after_pullback", {})
+        if pb:
+            pullback_mult = float(pb.get("pullback_atr5_mult", 0.5) or 0.5)
+            rr_min = float(pb.get("rr_min", 2.5) or 2.5)
+            policy.append(
+                "new_shorts_after_pullback≥{:.1f}×ATR5m(rr≥{:.1f})".format(
+                    pullback_mult,
+                    rr_min,
+                )
+            )
+        lev_cap = immin_actions.get("leverage_cap_jpy_cross")
+        if lev_cap:
+            policy.append(f"jpy_cross_leverage_cap:{float(lev_cap):.0f}x")
+        policy.append("tp_targets_jpy_cross:1.8R/2.8R")
+        policy.append("market_entries_blocked_use_limit_with≥0.5×ATR5m_buffer")
+
+    return policy
+
+
+def save_intervention_asset_summary(outdir: str, risk_summary: Dict[str, Any]) -> None:
+    payload = {
+        "asset": "USDJPY",
+        "generated_utc": nowiso(),
+        "boj_mof_risk": risk_summary,
+    }
+    save_json(os.path.join(outdir, INTERVENTION_SUMMARY_FILENAME), payload)
 
 
 def diagnostics_payload(tf_meta: Dict[str, Dict[str, Any]],
@@ -679,6 +1119,44 @@ def analyze(asset: str) -> Dict[str, Any]:
     k1h_closed = k1h.iloc[:-1] if len(k1h) > 1 else k1h.copy()
     k4h_closed = k4h.iloc[:-1] if len(k4h) > 1 else k4h.copy()
 
+    analysis_now = datetime.now(timezone.utc)
+
+    intervention_summary: Optional[Dict[str, Any]] = None
+    intervention_band: Optional[str] = None
+    if asset == "USDJPY":
+        intervention_config = load_intervention_config(outdir)
+        news_flag = load_intervention_news_flag(outdir, intervention_config)
+        irs_value, irs_band, irs_metrics = compute_irs_usdjpy(
+            k1m_closed,
+            k5m_closed,
+            analysis_now,
+            intervention_config,
+            news_flag=news_flag,
+        )
+        since_utc = update_intervention_state(outdir, irs_band, analysis_now)
+        iw_reasons = build_intervention_reasons(irs_metrics, intervention_config)
+        policy = build_intervention_policy(irs_band, irs_metrics, intervention_config)
+        score_breakdown = {
+            "level_pressure": irs_metrics.get("components", {}).get("level_pressure", 0.0),
+            "speed": irs_metrics.get("components", {}).get("speed", 0.0),
+            "vol_spike": irs_metrics.get("components", {}).get("vol_spike", 0.0),
+            "session": irs_metrics.get("components", {}).get("session", 0.0),
+            "comms": irs_metrics.get("components", {}).get("comms", 0.0),
+        }
+        intervention_summary = {
+            "irs": irs_value,
+            "band": irs_band,
+            "since_utc": since_utc,
+            "updated_utc": to_utc_iso(analysis_now),
+            "reasons": iw_reasons,
+            "policy": policy,
+            "metrics": irs_metrics,
+            "score_breakdown": score_breakdown,
+            "news_flag": news_flag,
+        }
+        intervention_band = irs_band
+        save_intervention_asset_summary(outdir, intervention_summary)
+
     expected_delays = {"k1m": 60, "k5m": 300, "k1h": 3600, "k4h": 4*3600}
     tf_meta: Dict[str, Dict[str, Any]] = {}
     latency_flags: List[str] = []
@@ -805,8 +1283,6 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     if display_spot is None and price_for_calc is not None and np.isfinite(price_for_calc):
         display_spot = price_for_calc
-
-    analysis_now = datetime.now(timezone.utc)
 
     # 2) Bias 4H→1H (zárt 1h/4h)
     bias4h = bias_from_emas(k4h_closed)
@@ -958,6 +1434,13 @@ def analyze(asset: str) -> Dict[str, Any]:
             liquidity_ok = True
             liquidity_relaxed = True
 
+    p_score_min_local = P_SCORE_MIN
+    if asset == "USDJPY" and intervention_band in {"HIGH", "IMMINENT"} and effective_bias == "long":
+        p_score_min_local += INTERVENTION_P_SCORE_ADD
+        note = f"Intervention Watch: USDJPY long P-score küszöb +{INTERVENTION_P_SCORE_ADD} (IRS {intervention_summary['irs']} {intervention_band})" if intervention_summary else None
+        if note and note not in reasons:
+            reasons.append(note)
+
     core_required = [
         "session",
         "regime",
@@ -981,8 +1464,10 @@ def analyze(asset: str) -> Dict[str, Any]:
     }
     base_core_ok = all(v for k, v in conds_core.items() if k != "bos5m")
     bos_gate_ok = conds_core["bos5m"] or micro_bos_active
-    can_enter_core = (P >= P_SCORE_MIN) and base_core_ok and bos_gate_ok
+    can_enter_core = (P >= p_score_min_local) and base_core_ok and bos_gate_ok
     missing_core = [k for k, v in conds_core.items() if not v]
+    if P < p_score_min_local:
+        missing_core.append(f"P_score>={p_score_min_local}")
     if micro_bos_active and not conds_core["bos5m"]:
         if "bos5m" not in missing_core:
             missing_core.append("bos5m")
@@ -1187,6 +1672,31 @@ def analyze(asset: str) -> Dict[str, Any]:
             if msg not in reasons:
                 reasons.append(msg)
 
+    if intervention_summary and intervention_summary.get("irs", 0) >= 40:
+        highlight = f"BoJ/MoF Intervention Watch: IRS {intervention_summary['irs']} ({intervention_summary['band']})"
+        if highlight not in reasons:
+            reasons.insert(0, highlight)
+    if asset == "USDJPY" and intervention_band:
+        if decision == "buy" and intervention_band in {"HIGH", "IMMINENT"}:
+            block_msg = (
+                f"Intervention Watch: IRS {intervention_summary['irs']} ({intervention_band}) → USDJPY long belépés tiltva"
+                if intervention_summary else "Intervention Watch: USDJPY long belépés tiltva"
+            )
+            if block_msg not in reasons:
+                reasons.insert(0, block_msg)
+            decision = "no entry"
+            entry = sl = tp1 = tp2 = rr = None
+            if "intervention_watch" not in missing:
+                missing.append("intervention_watch")
+        elif decision == "sell" and intervention_band == "IMMINENT":
+            note_short = "Intervention Watch: új short csak 0.5×ATR5m pullback + RR≥2.5 után"
+            if note_short not in reasons:
+                reasons.append(note_short)
+        if intervention_band == "IMMINENT":
+            guard_note = "Order guard: market belépés tiltva, limit ≥0.5×ATR5m bufferrel"
+            if guard_note not in reasons:
+                reasons.append(guard_note)
+
     if not session_ok_flag:
         status_note = session_meta.get("status_note") or "Session zárva"
         if status_note not in reasons:
@@ -1219,6 +1729,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         "diagnostics": diagnostics_payload(tf_meta, source_files, latency_flags),
         "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else [])) or ["no signal"],
     }
+    if intervention_summary:
+        decision_obj["intervention_watch"] = intervention_summary
     save_json(os.path.join(outdir, "signal.json"), decision_obj)
     return decision_obj
 
@@ -1252,6 +1764,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
