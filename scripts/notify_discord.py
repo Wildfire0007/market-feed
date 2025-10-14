@@ -26,10 +26,17 @@ ENV:
 """
 
 import os, json, sys, requests
+from pathlib import Path
 import numpy as np
 from typing import Iterable, Optional, Set, Tuple, Dict, Any, List
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo  # Py3.9+
+
+# --- Ensure repository root on sys.path when executed as a script ---
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _SCRIPTS_DIR.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from active_anchor import load_anchor_state, touch_anchor
 
