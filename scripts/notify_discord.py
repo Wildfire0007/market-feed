@@ -84,6 +84,7 @@ ACTIVE_WATCHER_CONFIG = {
 # ---- Debounce / stabilitás / cooldown ----
 STATE_PATH = f"{PUBLIC_DIR}/_notify_state.json"
 STABILITY_RUNS = 2
+HEARTBEAT_STALE_MIN = 55  # ennyi perc után küldünk összefoglalót akkor is, ha az óra nem váltott
 def int_env(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
@@ -451,6 +452,12 @@ def save_state(st):
     os.makedirs(PUBLIC_DIR, exist_ok=True)
     with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(st, f, ensure_ascii=False, indent=2)
+
+def mark_heartbeat(meta: Dict[str, Any], bud_key: str, now_iso: str) -> None:
+    if meta is None:
+        return
+    meta["last_heartbeat_key"] = bud_key
+    meta["last_heartbeat_utc"] = now_iso
 
 
 def load_active_position_state() -> Dict[str, Any]:
@@ -1293,10 +1300,12 @@ def main():
     state = load_state()
     meta  = state.get("_meta", {})
     last_heartbeat_prev = meta.get("last_heartbeat_key")
+    last_heartbeat_iso = meta.get("last_heartbeat_utc")
     asset_embeds = {}
     actionable_any = False
-    now_iso = utcnow_iso()
-    now_ep  = utcnow_epoch()
+    now_dt  = datetime.now(timezone.utc)
+    now_iso = to_utc_iso(now_dt)
+    now_ep  = int(now_dt.timestamp())
     bud_dt  = bud_now()
     bud_key = bud_hh_key(bud_dt)
 
@@ -1389,12 +1398,12 @@ def main():
                 st["last_sent"] = now_iso
                 st["last_sent_decision"] = eff
                 st["last_sent_mode"] = mode_current
-                meta["last_heartbeat_key"] = bud_key
+                mark_heartbeat(meta, bud_key, now_iso)
             elif send_kind == "invalidate":
                 st["last_sent"] = now_iso
                 st["last_sent_decision"] = "no entry"
                 st["last_sent_mode"] = None
-                meta["last_heartbeat_key"] = bud_key
+                mark_heartbeat(meta, bud_key, now_iso)
 
         state[asset] = st
 
@@ -1408,6 +1417,14 @@ def main():
 
     # --- Heartbeat: MINDEN órában, ha az órában még nem ment ki event ---
     heartbeat_due = last_heartbeat_prev != bud_key
+    if not heartbeat_due:
+        last_hb_dt = parse_utc(last_heartbeat_iso)
+        if last_hb_dt is None:
+            heartbeat_due = True
+        else:
+            delta = now_dt - last_hb_dt
+            if delta < timedelta(0) or delta >= timedelta(minutes=HEARTBEAT_STALE_MIN):
+                heartbeat_due = True
     want_heartbeat = force_heartbeat or heartbeat_due
     heartbeat_added = False
     if want_heartbeat:
@@ -1425,7 +1442,7 @@ def main():
                 heartbeat_added = True
 
         if heartbeat_added:
-            meta["last_heartbeat_key"] = bud_key
+            mark_heartbeat(meta, bud_key, now_iso)
 
     state["_meta"] = meta
     save_state(state)
