@@ -1342,22 +1342,29 @@ def analyze(asset: str) -> Dict[str, Any]:
     # 2) Bias 4H→1H (zárt 1h/4h)
     bias4h = bias_from_emas(k4h_closed)
     bias1h = bias_from_emas(k1h_closed)
-    trend_bias = "long" if (bias4h=="long" and bias1h!="short") else ("short" if (bias4h=="short" and bias1h!="long") else "neutral")
+    trend_bias = (
+        "long"
+        if (bias4h == "long" and bias1h != "short")
+        else (
+            "short"
+            if (bias4h == "short" and bias1h != "long")
+            else "neutral"
+        )
+    )
 
     # 2/b Rezsim (EMA21 meredekség 1h)
-   regime_ok, regime_val, regime_slope_signed = ema_slope_ok(
+    regime_ok, regime_val, regime_slope_signed = ema_slope_ok(
         k1h_closed,
         EMA_SLOPE_PERIOD,
         EMA_SLOPE_LOOKBACK,
         EMA_SLOPE_TH_ASSET.get(asset, EMA_SLOPE_TH_DEFAULT),
     )
-
     # 3) HTF sweep (zárt 1h/4h)
     sw1h = detect_sweep(k1h_closed, 24); sw4h = detect_sweep(k4h_closed, 24)
     swept = sw1h["sweep_high"] or sw1h["sweep_low"] or sw4h["sweep_high"] or sw4h["sweep_low"]
 
     # 4) 5M BOS a trend irányába (zárt 5m)
-   bos5m_long = detect_bos(k5m_closed, "long")
+    bos5m_long = detect_bos(k5m_closed, "long")
     bos5m_short = detect_bos(k5m_closed, "short")
 
     bos1h_long = detect_bos(k1h_closed, "long")
@@ -1370,7 +1377,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     atr_ok = not (np.isnan(rel_atr) or rel_atr < atr_threshold)
 
     # 6) Fib zóna (0.618–0.886) 1H swingekre, ATR(1h) alapú tűréssel — zárt 1h
-   k1h_sw = find_swings(k1h_closed, lb=2)
+    k1h_sw = find_swings(k1h_closed, lb=2)
     move_hi, move_lo = last_swing_levels(k1h_sw)
     atr1h_val = float(atr(k1h_closed).iloc[-1]) if not k1h_closed.empty else float("nan")
     atr1h = atr1h_val if np.isfinite(atr1h_val) else None
@@ -1914,6 +1921,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
