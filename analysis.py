@@ -14,6 +14,8 @@ from datetime import datetime, timezone, timedelta
 from datetime import time as dtime
 from typing import Any, Dict, List, Optional, Tuple
 
+from active_anchor import record_anchor
+
 import pandas as pd
 import numpy as np
 
@@ -84,6 +86,11 @@ MIN_RISK_ABS = {
     "NSDQ100": 8.0,
     "EURUSD": 0.0008,
     "USDJPY": 0.10,
+}
+
+ACTIVE_INVALID_BUFFER_ABS = {
+    "GOLD_CFD": 2.0,
+    "USOIL": 0.15,
 }
 
 ASSET_COST_MODEL = {
@@ -1052,20 +1059,25 @@ def bias_from_emas(df: pd.DataFrame) -> str:
     if last < e200 and e50 < e200 and e9 < e21:  return "short"
     return "neutral"
 
-def ema_slope_ok(df_1h: pd.DataFrame,
-                 period: int = EMA_SLOPE_PERIOD,
-                 lookback: int = EMA_SLOPE_LOOKBACK,
-                 th: float = EMA_SLOPE_TH) -> Tuple[bool, float]:
-    """EMA21 relatív meredekség 1h-n: abs(ema_now - ema_prev)/price_now >= th"""
+def ema_slope_ok(
+    df_1h: pd.DataFrame,
+    period: int = EMA_SLOPE_PERIOD,
+    lookback: int = EMA_SLOPE_LOOKBACK,
+    th: float = EMA_SLOPE_TH,
+) -> Tuple[bool, float, float]:
+    """EMA21 relatív meredekség 1h-n: abs(ema_now - ema_prev)/price_now >= th."""
+
     if df_1h.empty or len(df_1h) < period + lookback + 1:
-        return False, 0.0
+        return False, 0.0, 0.0
+
     c = df_1h["close"]
     e = ema(c, period)
     ema_now = float(e.iloc[-1])
     ema_prev = float(e.iloc[-1 - lookback])
     price_now = float(c.iloc[-1])
-    rel = abs(ema_now - ema_prev) / max(1e-9, price_now)
-    return (rel >= th), rel
+    slope_signed = (ema_now - ema_prev) / max(1e-9, price_now)
+    rel = abs(slope_signed)
+    return (rel >= th), rel, slope_signed
 
 # ------------------------------ elemzés egy eszközre ---------------------------
 
@@ -1333,7 +1345,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     trend_bias = "long" if (bias4h=="long" and bias1h!="short") else ("short" if (bias4h=="short" and bias1h!="long") else "neutral")
 
     # 2/b Rezsim (EMA21 meredekség 1h)
-    regime_ok, regime_val = ema_slope_ok(
+   regime_ok, regime_val, regime_slope_signed = ema_slope_ok(
         k1h_closed,
         EMA_SLOPE_PERIOD,
         EMA_SLOPE_LOOKBACK,
@@ -1345,8 +1357,11 @@ def analyze(asset: str) -> Dict[str, Any]:
     swept = sw1h["sweep_high"] or sw1h["sweep_low"] or sw4h["sweep_high"] or sw4h["sweep_low"]
 
     # 4) 5M BOS a trend irányába (zárt 5m)
-    bos5m_long = detect_bos(k5m_closed, "long")
+   bos5m_long = detect_bos(k5m_closed, "long")
     bos5m_short = detect_bos(k5m_closed, "short")
+
+    bos1h_long = detect_bos(k1h_closed, "long")
+    bos1h_short = detect_bos(k1h_closed, "short")
 
     # 5) ATR szűrő (relatív) — a stabil árhoz viszonyítjuk (zárt 5m)
     atr5 = atr(k5m_closed).iloc[-1]
@@ -1355,13 +1370,33 @@ def analyze(asset: str) -> Dict[str, Any]:
     atr_ok = not (np.isnan(rel_atr) or rel_atr < atr_threshold)
 
     # 6) Fib zóna (0.618–0.886) 1H swingekre, ATR(1h) alapú tűréssel — zárt 1h
-    k1h_sw = find_swings(k1h_closed, lb=2)
+   k1h_sw = find_swings(k1h_closed, lb=2)
     move_hi, move_lo = last_swing_levels(k1h_sw)
-    atr1h = float(atr(k1h_closed).iloc[-1]) if not k1h_closed.empty else 0.0
+    atr1h_val = float(atr(k1h_closed).iloc[-1]) if not k1h_closed.empty else float("nan")
+    atr1h = atr1h_val if np.isfinite(atr1h_val) else None
+    atr_half = (atr1h * 0.5) if (atr1h is not None) else None
+    invalid_buffer_candidates: List[float] = []
+    min_buffer = ACTIVE_INVALID_BUFFER_ABS.get(asset)
+    if min_buffer is not None:
+        invalid_buffer_candidates.append(float(min_buffer))
+    if atr_half is not None:
+        invalid_buffer_candidates.append(float(atr_half))
+    invalid_buffer = max(invalid_buffer_candidates) if invalid_buffer_candidates else None
+    invalid_level_sell = (
+        float(move_hi + invalid_buffer)
+        if (move_hi is not None and invalid_buffer is not None)
+        else None
+    )
+    invalid_level_buy = (
+        float(move_lo - invalid_buffer)
+        if (move_lo is not None and invalid_buffer is not None)
+        else None
+    )
+    atr1h_tol = atr1h_val if np.isfinite(atr1h_val) else 0.0
     fib_ok = fib_zone_ok(
         move_hi, move_lo, price_for_calc,
         low=0.618, high=0.886,
-        tol_abs=atr1h * 0.75,   # SZÉLESÍTVE: ±0.75×ATR(1h)
+        tol_abs=atr1h_tol * 0.75,   # SZÉLESÍTVE: ±0.75×ATR(1h)
         tol_frac=0.02
     )
 
@@ -1369,9 +1404,25 @@ def analyze(asset: str) -> Dict[str, Any]:
     ema21_1h = float(ema(k1h_closed["close"], 21).iloc[-1]) if not k1h_closed.empty else float("nan")
     ema21_dist_ok = (
         np.isfinite(ema21_1h)
-        and not np.isnan(atr1h)
-        and abs(price_for_calc - ema21_1h) <= max(atr1h, 0.0008 * price_for_calc)
+        and np.isfinite(atr1h_val)
+        and abs(price_for_calc - ema21_1h) <= max(atr1h_val, 0.0008 * price_for_calc)
     )
+
+    last_close_1h = float(k1h_closed["close"].iloc[-1]) if not k1h_closed.empty else float("nan")
+    ema21_relation = "unknown"
+    if np.isfinite(last_close_1h) and np.isfinite(ema21_1h):
+        tol = max(
+            (atr1h_val * 0.1) if np.isfinite(atr1h_val) else 0.0,
+            abs(ema21_1h) * 0.0001,
+            1e-5,
+        )
+        diff = last_close_1h - ema21_1h
+        if diff > tol:
+            ema21_relation = "above"
+        elif diff < -tol:
+            ema21_relation = "below"
+        else:
+            ema21_relation = "at"
 
     struct_retest_long  = structure_break_with_retest(k5m_closed, "long", MOMENTUM_BOS_LB)
     struct_retest_short = structure_break_with_retest(k5m_closed, "short", MOMENTUM_BOS_LB)
@@ -1772,11 +1823,67 @@ def analyze(asset: str) -> Dict[str, Any]:
         "diagnostics": diagnostics_payload(tf_meta, source_files, latency_flags),
         "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else [])) or ["no signal"],
     }
+    decision_obj["ema21_slope_1h"] = regime_slope_signed
+    decision_obj["ema21_slope_threshold"] = EMA_SLOPE_TH_ASSET.get(asset, EMA_SLOPE_TH_DEFAULT)
+    decision_obj["ema21_relation_1h"] = ema21_relation
+    decision_obj["last_swing_high_1h"] = float(move_hi) if move_hi is not None else None
+    decision_obj["last_swing_low_1h"] = float(move_lo) if move_lo is not None else None
+    decision_obj["last_close_1h"] = float(last_close_1h) if np.isfinite(last_close_1h) else None
+    decision_obj["bos_5m_dir"] = structure_flag
+    decision_obj["atr1h"] = atr1h
+    decision_obj["invalid_levels"] = {
+        "buy": invalid_level_buy,
+        "sell": invalid_level_sell,
+    }
+    decision_obj["invalid_buffer_abs"] = float(invalid_buffer) if invalid_buffer is not None else None
+    structure_flag = "range"
+    if bos5m_short:
+        structure_flag = "bos_down"
+    elif bos5m_long:
+        structure_flag = "bos_up"
+
+    active_position_meta = {
+        "ema21_slope_abs": regime_val,
+        "ema21_slope_signed": regime_slope_signed,
+        "ema21_slope_threshold": EMA_SLOPE_TH_ASSET.get(asset, EMA_SLOPE_TH_DEFAULT),
+        "ema21_relation": ema21_relation,
+        "structure_5m": structure_flag,
+        "atr1h": atr1h,
+        "atr1h_trail_floor": float(invalid_buffer) if invalid_buffer is not None else None,
+        "atr5": float(atr5 or 0.0) if np.isfinite(float(atr5 or 0.0)) else None,
+        "atr5_rel": rel_atr if (rel_atr is not None and np.isfinite(rel_atr)) else None,
+        "atr5_threshold": atr_threshold,
+        "bos1h_long": bool(bos1h_long),
+        "bos1h_short": bool(bos1h_short),
+        "regime_ok": bool(regime_ok),
+        "effective_bias": effective_bias,
+        "last_close_1h": float(last_close_1h) if np.isfinite(last_close_1h) else None,
+        "last_swing_high_1h": float(move_hi) if move_hi is not None else None,
+        "last_swing_low_1h": float(move_lo) if move_lo is not None else None,
+        "invalid_level_sell": invalid_level_sell,
+        "invalid_level_buy": invalid_level_buy,
+        "invalid_buffer_abs": float(invalid_buffer) if invalid_buffer is not None else None,
+    }
+    decision_obj["active_position_meta"] = active_position_meta
     if intervention_summary:
         decision_obj["intervention_watch"] = intervention_summary
+
+    if decision in ("buy", "sell"):
+        anchor_price = entry or spot_price
+        if anchor_price is None and np.isfinite(last_close_1h):
+            anchor_price = float(last_close_1h)
+        try:
+            record_anchor(
+                asset,
+                decision,
+                price=anchor_price,
+                timestamp=decision_obj["retrieved_at_utc"],
+            )
+        except Exception:
+            # Anchor frissítés hibája ne állítsa meg az elemzést.
+            pass
     save_json(os.path.join(outdir, "signal.json"), decision_obj)
     return decision_obj
-
 # ------------------------------- főfolyamat ------------------------------------
 
 def main():
@@ -1807,6 +1914,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
