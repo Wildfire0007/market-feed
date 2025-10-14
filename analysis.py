@@ -1811,6 +1811,12 @@ def analyze(asset: str) -> Dict[str, Any]:
             missing.append("session")
 
     missing = list(dict.fromkeys(missing))
+    structure_flag = "range"
+    if bos5m_short:
+        structure_flag = "bos_down"
+    elif bos5m_long:
+        structure_flag = "bos_up"
+
     decision_obj = {
         "asset": asset,
         "ok": True,
@@ -1843,12 +1849,6 @@ def analyze(asset: str) -> Dict[str, Any]:
         "sell": invalid_level_sell,
     }
     decision_obj["invalid_buffer_abs"] = float(invalid_buffer) if invalid_buffer is not None else None
-    structure_flag = "range"
-    if bos5m_short:
-        structure_flag = "bos_down"
-    elif bos5m_long:
-        structure_flag = "bos_up"
-
     active_position_meta = {
         "ema21_slope_abs": regime_val,
         "ema21_slope_signed": regime_slope_signed,
@@ -1921,6 +1921,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
