@@ -1135,6 +1135,10 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     dec_effective = decision_of(sig).upper()
     dec = dec_effective if dec_effective in ("BUY", "SELL") else "NO ENTRY"
 
+    session_info = (sig or {}).get("session_info") or {}
+    entry_open = session_info.get("entry_open")
+    monitor_open = session_info.get("open")
+
     p_raw = int(sig.get("probability", 0) or 0)
     p = 0 if closed else p_raw
     entry = sig.get("entry"); sl = sig.get("sl"); t1 = sig.get("tp1"); t2 = sig.get("tp2")
@@ -1161,6 +1165,8 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
 
     if closed:
         lines.append(f"🔒 {closed_note or 'Piac zárva (market closed)'}")
+    elif monitor_open and entry_open is False:
+        lines.append("🌙 Entry ablak zárva — csak pozíció menedzsment, új belépő tiltva.")
 
     # RR/TP/SL sor (ha minden adat megvan)
     if dec in ("BUY", "SELL") and all(v is not None for v in (entry, sl, t1, t2, rr)):
