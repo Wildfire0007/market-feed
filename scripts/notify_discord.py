@@ -986,12 +986,12 @@ class ActivePositionWatcher:
         reduce_condition = regime_flip and structure_opposite
 
         if exit_condition:
-            state = "EXIT"            
+            state = "EXIT"
         elif event_mode:
             state = "EVENT"
         elif reduce_condition:
             state = "REDUCE"
-            else:
+        else:
             state = "HOLD"
 
         action_map = {
