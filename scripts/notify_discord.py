@@ -1114,7 +1114,7 @@ class ActivePositionWatcher:
         self.state_cache[asset] = state_record
         return None
     
-def snapshot_embeds(self, exclude: Optional[Iterable[str]] = None) -> List[Dict[str, Any]]:
+    def snapshot_embeds(self, exclude: Optional[Iterable[str]] = None) -> List[Dict[str, Any]]:
         exclude_keys = {normalize_asset_key(x) for x in (exclude or []) if x}
         embeds: List[Dict[str, Any]] = []
         for asset in self.ASSET_ORDER:
