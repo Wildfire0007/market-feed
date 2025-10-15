@@ -129,37 +129,57 @@ EMA_SLOPE_PERIOD   = 21          # 1h EMA21
 EMA_SLOPE_LOOKBACK = 3           # hány baron mérjük a változást
 EMA_SLOPE_TH       = EMA_SLOPE_TH_DEFAULT      # alap küszöb (ha nincs asset-specifikus)
 
-# UTC idősávok: [(start_h, start_m, end_h, end_m), ...]; None = mindig
-SESSIONS_UTC: Dict[str, Optional[List[Tuple[int,int,int,int]]]] = {
-    "EURUSD": [
-        (7, 0, 17, 0),   # LDN core ablak (téli)
-        (8, 0, 18, 0),   # LDN core ablak (nyári)
-    ],
-    "USDJPY": [
-        (16, 0, 23, 59),  # Tokyo (előző nap 16:00 UTC-től)
-        (0, 0, 1, 0),     # Tokyo záró szakasz
-        (8, 0, 10, 0),    # LDN nyitás (nyári)
-        (9, 0, 11, 0),    # LDN nyitás (téli)
-        (13, 0, 16, 0),   # LDN/NY átfedés (nyári)
-        (14, 0, 17, 0),   # LDN/NY átfedés (téli)
-    ],
+# UTC idősávok: mind az entry (új belépő) mind a 24/5 megfigyelés számára.
+# "entry": kereskedési (új pozíció) ablakok
+# "monitor": tágabb, eToro-kompatibilis felügyeleti ablakok (24/5, napi szünettel)
+SESSION_WINDOWS_UTC: Dict[str, Dict[str, Optional[List[Tuple[int, int, int, int]]]]] = {
+    "EURUSD": {
+        "entry": [
+            (7, 0, 17, 0),   # LDN core ablak (téli)
+            (8, 0, 18, 0),   # LDN core ablak (nyári)
+        ],
+    },
+    "USDJPY": {
+        "entry": [
+            (16, 0, 23, 59),  # Tokyo (előző nap 16:00 UTC-től)
+            (0, 0, 1, 0),     # Tokyo záró szakasz
+            (8, 0, 10, 0),    # LDN nyitás (nyári)
+            (9, 0, 11, 0),    # LDN nyitás (téli)
+            (13, 0, 16, 0),   # LDN/NY átfedés (nyári)
+            (14, 0, 17, 0),   # LDN/NY átfedés (téli)
+        ],
+    },
     # NASDAQ (QQQ) normál kereskedési ablak – DST miatt két sáv.
-    "NSDQ100": [
-        (12, 30, 19, 0),   # US cash (nyári)
-        (14, 30, 21, 0),   # US cash (téli)
-    ],
-    # Arany/olaj: európai fókusz ablakok (Budapest idő).
-    "GOLD_CFD": [
-        (7, 0, 17, 30),
-        (8, 0, 18, 30),
-    ],
-    "USOIL": [
-        (7, 0, 18, 0),
-        (8, 0, 19, 0),
-    ],
+    "NSDQ100": {
+        "entry": [
+            (12, 30, 19, 0),   # US cash (nyári)
+            (14, 30, 21, 0),   # US cash (téli)
+        ],
+    },
+    # Arany/olaj: szűk entry, de 24/5 kitettség felügyelet (napi 1h karbantartási szünet).
+    "GOLD_CFD": {
+        "entry": [
+            (7, 0, 17, 30),
+            (8, 0, 18, 30),
+        ],
+        "monitor": [
+            (0, 0, 21, 55),    # 00:00–21:55 UTC
+            (23, 0, 23, 59),   # 23:00–23:59 UTC (eToro esti nyitás)
+        ],
+    },
+    "USOIL": {
+        "entry": [
+            (7, 0, 18, 0),
+            (8, 0, 19, 0),
+        ],
+        "monitor": [
+            (0, 0, 21, 55),
+            (23, 0, 23, 59),
+        ],
+    },
 }
 
-USOIL_SUNDAY_OPEN_MINUTE = 22 * 60  # 22:00 UTC vasárnap esti nyitás
+USOIL_SUNDAY_OPEN_MINUTE = 23 * 60  # 23:00 UTC vasárnap esti nyitás (eToro specifikáció)
 
 # Spot-adat elavulás küszöbök (másodperc)
 SPOT_MAX_AGE_SECONDS: Dict[str, int] = {
@@ -277,6 +297,25 @@ def file_mtime(path: str) -> Optional[str]:
     except Exception:
         return None
 
+def session_windows_utc(asset: str) -> Tuple[
+    Optional[List[Tuple[int, int, int, int]]],
+    Optional[List[Tuple[int, int, int, int]]],
+]:
+    cfg = SESSION_WINDOWS_UTC.get(asset)
+    if not cfg:
+        return None, None
+    if isinstance(cfg, dict):
+        entry_windows = cfg.get("entry")
+        monitor_windows = cfg.get("monitor")
+    else:  # visszafelé-kompatibilis: ha listát kapnánk, kezeljük entry-ként
+        entry_windows = cfg  # type: ignore[assignment]
+        monitor_windows = cfg  # type: ignore[assignment]
+    if entry_windows is None and monitor_windows is not None:
+        entry_windows = monitor_windows
+    if monitor_windows is None and entry_windows is not None:
+        monitor_windows = entry_windows
+    return entry_windows, monitor_windows
+
 def in_any_window_utc(windows: Optional[List[Tuple[int,int,int,int]]], h: int, m: int) -> bool:
     if not windows:
         return True
@@ -300,18 +339,18 @@ def next_session_open(asset: str, now: Optional[datetime] = None) -> Optional[da
     if now is None:
         now = datetime.now(timezone.utc)
 
-    windows = SESSIONS_UTC.get(asset)
+    entry_windows, _ = session_windows_utc(asset)
     weekdays = SESSION_WEEKDAYS.get(asset)
 
-    if not windows:
-        windows = [(0, 0, 23, 59)]
+    if not entry_windows:
+        entry_windows = [(0, 0, 23, 59)]
 
     for day_offset in range(0, 8):
         day = (now + timedelta(days=day_offset)).date()
         if weekdays and day.weekday() not in weekdays:
             continue
 
-        for sh, sm, eh, em in windows:
+        for sh, sm, eh, em in entry_windows:
             start_dt = datetime.combine(day, dtime(sh, sm, tzinfo=timezone.utc))
             end_dt = datetime.combine(day, dtime(eh, em, tzinfo=timezone.utc))
 
@@ -328,39 +367,53 @@ def next_session_open(asset: str, now: Optional[datetime] = None) -> Optional[da
 def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
     now = datetime.now(timezone.utc)
     h, m = now.hour, now.minute
-    window_ok = in_any_window_utc(SESSIONS_UTC.get(asset), h, m)
+    entry_windows, monitor_windows = session_windows_utc(asset)
+    monitor_ok = in_any_window_utc(monitor_windows, h, m)
+    entry_window_ok = in_any_window_utc(entry_windows, h, m)
     weekday_ok = session_weekday_ok(asset, now)
     if asset == "USOIL" and now.weekday() == 6:
         if (h * 60 + m) < USOIL_SUNDAY_OPEN_MINUTE:
-            window_ok = False
-    open_now = window_ok and weekday_ok
+            monitor_ok = False
+            entry_window_ok = False
+    open_now = monitor_ok and weekday_ok
+    entry_open = entry_window_ok and weekday_ok and (
+        monitor_ok or not monitor_windows
+    )
 
     info: Dict[str, Any] = {
         "open": open_now,
-        "within_window": window_ok,
+        "entry_open": entry_open,
+        "within_window": entry_window_ok,
+        "within_entry_window": entry_window_ok,
+        "within_monitor_window": monitor_ok,
         "weekday_ok": weekday_ok,
         "now_utc": now.isoformat(),
-        "windows_utc": SESSIONS_UTC.get(asset),
+        "windows_utc": entry_windows,
     }
+    if monitor_windows and monitor_windows != entry_windows:
+        info["monitor_windows_utc"] = monitor_windows
     allowed = SESSION_WEEKDAYS.get(asset)
     if allowed:
         info["allowed_weekdays"] = list(allowed)
     if not weekday_ok:
         status = "closed_weekend"
         status_note = "Piac zárva (hétvége)"
-    elif not window_ok:
+    elif not open_now:
         status = "closed_out_of_hours"
         status_note = "Piac zárva (nyitáson kívül)"
+    elif not entry_open:
+        status = "open_entry_limited"
+        status_note = "Piac nyitva (csak pozíciómenedzsment, entry ablak zárva)"
     else:
         status = "open"
         status_note = "Piac nyitva"
     info["status"] = status
     info["status_note"] = status_note
-    if not open_now:
+    if not entry_open:
         nxt = next_session_open(asset, now)
         if nxt:
             info["next_open_utc"] = nxt.isoformat()
-    return open_now, info
+    return entry_open, info
 
 def session_ok(asset: str) -> bool:
     ok, _ = session_state(asset)
@@ -1921,6 +1974,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
