@@ -1168,6 +1168,23 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     elif monitor_open and entry_open is False:
         lines.append("🌙 Entry ablak zárva — csak pozíció menedzsment, új belépő tiltva.")
 
+    position_note = None
+    if isinstance(sig, dict):
+        raw_note = sig.get("position_management")
+        if not raw_note:
+            reasons = sig.get("reasons")
+            if isinstance(reasons, list):
+                for reason in reasons:
+                    if isinstance(reason, str) and reason.strip().lower().startswith("pozíciómenedzsment"):
+                        raw_note = reason
+                        break
+        if isinstance(raw_note, str):
+            raw_note = raw_note.strip()
+        position_note = raw_note
+
+    if position_note:
+        if not any(line.strip() == position_note for line in lines):
+            lines.append(f"🧭 {position_note}")
     # RR/TP/SL sor (ha minden adat megvan)
     if dec in ("BUY", "SELL") and all(v is not None for v in (entry, sl, t1, t2, rr)):
         lines.append(f"@ `{fmt_num(entry)}` • SL `{fmt_num(sl)}` • TP1 `{fmt_num(t1)}` • TP2 `{fmt_num(t2)}` • RR≈`{rr}`")
