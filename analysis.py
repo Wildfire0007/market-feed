@@ -15,7 +15,7 @@ from datetime import time as dtime
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from active_anchor import record_anchor
+from active_anchor import load_anchor_state, record_anchor
 
 import pandas as pd
 import numpy as np
@@ -127,6 +127,15 @@ ENABLE_MOMENTUM_ASSETS: set = set()
 MOMENTUM_BARS    = 5             # 5m EMA9–EMA21 legalább 5 bar
 MOMENTUM_ATR_REL = 0.0008        # >= 0.08% 5m relatív ATR
 MOMENTUM_BOS_LB  = 15            # szerkezeti töréshez nézett ablak (bar)
+
+ANCHOR_STATE_CACHE: Optional[Dict[str, Dict[str, Any]]] = None
+
+
+def current_anchor_state() -> Dict[str, Dict[str, Any]]:
+    global ANCHOR_STATE_CACHE
+    if ANCHOR_STATE_CACHE is None:
+        ANCHOR_STATE_CACHE = load_anchor_state()
+    return ANCHOR_STATE_CACHE
 
 P_SCORE_MIN = 50
 MICRO_BOS_P_BONUS = 8
@@ -576,24 +585,52 @@ def derive_position_management_note(
     effective_bias: str,
     structure_flag: str,
     atr1h: Optional[float],
+    anchor_bias: Optional[str],
+    anchor_timestamp: Optional[str],
 ) -> Optional[str]:
     if not session_meta.get("open"):
         return None
-    if session_meta.get("entry_open"):
-        return None
     if session_meta.get("status") in {"maintenance", "closed_out_of_hours"}:
         return None
+
+    monitor_only = not session_meta.get("entry_open")
+    anchor_active = anchor_bias in {"long", "short"}
+    if not monitor_only and not anchor_active:
+        return None
+
     bias = effective_bias or "neutral"
+
+    hint_parts: List[str] = []
+    if anchor_active:
+        anchor_note = f"aktív {anchor_bias} pozíció"
+        anchor_dt = parse_utc_timestamp(anchor_timestamp)
+        if anchor_dt:
+            local_dt = anchor_dt.astimezone(MARKET_TIMEZONE)
+            anchor_note += f", nyitva: {local_dt.strftime('%Y-%m-%d %H:%M')} helyi idő"
+        hint_parts.append(anchor_note)
+
     atr_hint = format_atr_hint(asset, atr1h)
-    hint_suffix = f" ({atr_hint})" if atr_hint else ""
+    if atr_hint:
+        hint_parts.append(atr_hint)
+
+    hint_suffix = f" ({'; '.join(hint_parts)})" if hint_parts else ""
     prefix = "Pozíciómenedzsment: "
-    if bias == "long":
+
+    if anchor_active and bias in {"long", "short"} and anchor_bias != bias:
+        return (
+            prefix
+            + f"aktív {anchor_bias} pozíció a jelenlegi bias ({bias}) ellen → defenzív menedzsment, részleges zárás vagy szoros SL"
+            + hint_suffix
+        )
+
+    direction = anchor_bias or bias
+    if direction == "long":
         if regime_ok and structure_flag == "bos_up":
             return prefix + "long trend aktív → pozíció tartható, SL igazítás az 1h swing alatt" + hint_suffix
         if regime_ok:
             return prefix + "long bias, de friss BOS nincs → részleges realizálás vagy szorosabb SL" + hint_suffix
         return prefix + "long kitettség gyenge trendben → méretcsökkentés vagy zárás mérlegelendő" + hint_suffix
-    if bias == "short":
+    if direction == "short":
         if regime_ok and structure_flag == "bos_down":
             return prefix + "short trend aktív → pozíció tartható, SL az 1h csúcsa felett" + hint_suffix
         if regime_ok:
@@ -1749,6 +1786,20 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     # --- Kapuk (liquidity = Fib zóna VAGY sweep) + session + regime ---
     session_ok_flag, session_meta = session_state(asset)
+
+    anchor_state = current_anchor_state()
+    anchor_record = anchor_state.get(asset.upper()) if isinstance(anchor_state, dict) else None
+    anchor_bias = None
+    anchor_timestamp = None
+    anchor_price_state: Optional[float] = None
+    if isinstance(anchor_record, dict):
+        side_raw = (anchor_record.get("side") or "").lower()
+        if side_raw == "buy":
+            anchor_bias = "long"
+        elif side_raw == "sell":
+            anchor_bias = "short"
+        anchor_timestamp = anchor_record.get("timestamp")
+        anchor_price_state = safe_float(anchor_record.get("price"))
     liquidity_ok_base = bool(
         fib_ok
         or swept
@@ -2066,6 +2117,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         effective_bias,
         structure_flag,
         atr1h,
+        anchor_bias,
+        anchor_timestamp,
     )
     if position_note and position_note not in reasons:
         reasons.append(position_note)
@@ -2126,6 +2179,12 @@ def analyze(asset: str) -> Dict[str, Any]:
         "invalid_level_buy": invalid_level_buy,
         "invalid_buffer_abs": float(invalid_buffer) if invalid_buffer is not None else None,
     }
+    if anchor_bias:
+        active_position_meta["anchor_side"] = anchor_bias
+    if anchor_price_state is not None:
+        active_position_meta["anchor_price"] = anchor_price_state
+    if anchor_timestamp:
+        active_position_meta["anchor_timestamp"] = anchor_timestamp
     decision_obj["active_position_meta"] = active_position_meta
     if intervention_summary:
         decision_obj["intervention_watch"] = intervention_summary
@@ -2135,7 +2194,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         if anchor_price is None and np.isfinite(last_close_1h):
             anchor_price = float(last_close_1h)
         try:
-            record_anchor(
+            global ANCHOR_STATE_CACHE
+            ANCHOR_STATE_CACHE = record_anchor(
                 asset,
                 decision,
                 price=anchor_price,
