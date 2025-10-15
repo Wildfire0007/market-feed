@@ -13,6 +13,7 @@ from copy import deepcopy
 from datetime import datetime, timezone, timedelta
 from datetime import time as dtime
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from active_anchor import record_anchor
 
@@ -21,6 +22,8 @@ import numpy as np
 
 # --- Elemzendő eszközök (GER40 -> USOIL) ---
 ASSETS = ["EURUSD", "NSDQ100", "GOLD_CFD", "USDJPY", "USOIL"]
+
+MARKET_TIMEZONE = ZoneInfo("Europe/Berlin")
 
 PUBLIC_DIR = "public"
 
@@ -139,18 +142,18 @@ EMA_SLOPE_TH       = EMA_SLOPE_TH_DEFAULT      # alap küszöb (ha nincs asset-s
 SESSION_WINDOWS_UTC: Dict[str, Dict[str, Optional[List[Tuple[int, int, int, int]]]]] = {
     "EURUSD": {
         "entry": [
-            (7, 0, 17, 0),   # LDN core ablak (téli)
-            (8, 0, 18, 0),   # LDN core ablak (nyári)
+            (0, 0, 23, 59),
+        ],
+        "monitor": [
+            (0, 0, 23, 59),
         ],
     },
     "USDJPY": {
         "entry": [
-            (16, 0, 23, 59),  # Tokyo (előző nap 16:00 UTC-től)
-            (0, 0, 1, 0),     # Tokyo záró szakasz
-            (8, 0, 10, 0),    # LDN nyitás (nyári)
-            (9, 0, 11, 0),    # LDN nyitás (téli)
-            (13, 0, 16, 0),   # LDN/NY átfedés (nyári)
-            (14, 0, 17, 0),   # LDN/NY átfedés (téli)
+            (0, 0, 23, 59),
+        ],
+        "monitor": [
+            (0, 0, 23, 59),
         ],
     },
     # NASDAQ (QQQ) normál kereskedési ablak – DST miatt két sáv.
@@ -258,12 +261,12 @@ def _min_of_day(hour: int, minute: int = 0) -> int:
 SESSION_TIME_RULES: Dict[str, Dict[str, Any]] = {
     "EURUSD": {
         "sunday_open_minute": _min_of_day(21, 5),    # 23:05 CEST → 21:05 UTC
-        "friday_close_minute": _min_of_day(20, 30),   # 22:30 CEST → 20:30 UTC
+        "friday_close_minute": _min_of_day(21, 55),   # 23:55 CEST → 21:55 UTC
         "daily_breaks": [(_min_of_day(22, 0), _min_of_day(22, 5))],
     },
     "USDJPY": {
         "sunday_open_minute": _min_of_day(21, 5),
-        "friday_close_minute": _min_of_day(20, 30),
+        "friday_close_minute": _min_of_day(21, 55),
         "daily_breaks": [(_min_of_day(22, 0), _min_of_day(22, 5))],
     },
     "GOLD_CFD": {
@@ -372,6 +375,39 @@ def format_utc_minute(minute: int) -> str:
     return f"{minute // 60:02d}:{minute % 60:02d}"
 
 
+def format_local_range(start_dt: datetime, end_dt: datetime) -> List[str]:
+    return [start_dt.strftime("%H:%M"), end_dt.strftime("%H:%M")]
+
+
+def convert_windows_to_local(
+    windows: Optional[List[Tuple[int, int, int, int]]]
+) -> Optional[List[List[str]]]:
+    if not windows:
+        return None
+    today_utc = datetime.now(timezone.utc).date()
+    result: List[List[str]] = []
+    for sh, sm, eh, em in windows:
+        start_dt = datetime.combine(today_utc, dtime(sh, sm, tzinfo=timezone.utc))
+        end_dt = datetime.combine(today_utc, dtime(eh, em, tzinfo=timezone.utc))
+        if end_dt <= start_dt:
+            end_dt += timedelta(days=1)
+        start_local = start_dt.astimezone(MARKET_TIMEZONE)
+        end_local = end_dt.astimezone(MARKET_TIMEZONE)
+        result.append(format_local_range(start_local, end_local))
+    return result
+
+
+def convert_minutes_to_local_range(start: int, end: int) -> List[str]:
+    today_utc = datetime.now(timezone.utc).date()
+    start_dt = datetime.combine(today_utc, dtime(start // 60, start % 60, tzinfo=timezone.utc))
+    end_dt = datetime.combine(today_utc, dtime(end // 60, end % 60, tzinfo=timezone.utc))
+    if end_dt <= start_dt:
+        end_dt += timedelta(days=1)
+    start_local = start_dt.astimezone(MARKET_TIMEZONE)
+    end_local = end_dt.astimezone(MARKET_TIMEZONE)
+    return format_local_range(start_local, end_local)
+
+
 def session_weekday_ok(asset: str, now: Optional[datetime] = None) -> bool:
     if now is None:
         now = datetime.now(timezone.utc)
@@ -473,6 +509,13 @@ def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
     }
     if monitor_windows and monitor_windows != entry_windows:
         info["monitor_windows_utc"] = monitor_windows
+    info["time_zone"] = "Europe/Berlin"
+    entry_local = convert_windows_to_local(entry_windows)
+    if entry_local:
+        info["windows_local_cet"] = entry_local
+    monitor_local = convert_windows_to_local(monitor_windows)
+    if monitor_local and monitor_windows != entry_windows:
+        info["monitor_windows_local_cet"] = monitor_local
     allowed = SESSION_WEEKDAYS.get(asset)
     if allowed:
         info["allowed_weekdays"] = list(allowed)
@@ -496,6 +539,7 @@ def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
         info["daily_break_active"] = True
     if break_window:
         info["daily_break_window_utc"] = [format_utc_minute(break_window[0]), format_utc_minute(break_window[1])]
+        info["daily_break_window_cet"] = convert_minutes_to_local_range(*break_window)
     if special_reason:
         info["special_closure_reason"] = special_reason
     info["status"] = status
@@ -509,6 +553,53 @@ def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
 def session_ok(asset: str) -> bool:
     ok, _ = session_state(asset)
     return ok
+
+
+def format_atr_hint(asset: str, atr_value: Optional[float]) -> Optional[str]:
+    if atr_value is None or not np.isfinite(atr_value):
+        return None
+    if atr_value == 0:
+        return None
+    if asset in {"EURUSD", "USDJPY"}:
+        return f"1h ATR ≈ {atr_value:.4f}"
+    if atr_value >= 100:
+        return f"1h ATR ≈ {atr_value:.0f}"
+    if atr_value >= 10:
+        return f"1h ATR ≈ {atr_value:.1f}"
+    return f"1h ATR ≈ {atr_value:.2f}"
+
+
+def derive_position_management_note(
+    asset: str,
+    session_meta: Dict[str, Any],
+    regime_ok: bool,
+    effective_bias: str,
+    structure_flag: str,
+    atr1h: Optional[float],
+) -> Optional[str]:
+    if not session_meta.get("open"):
+        return None
+    if session_meta.get("entry_open"):
+        return None
+    if session_meta.get("status") in {"maintenance", "closed_out_of_hours"}:
+        return None
+    bias = effective_bias or "neutral"
+    atr_hint = format_atr_hint(asset, atr1h)
+    hint_suffix = f" ({atr_hint})" if atr_hint else ""
+    prefix = "Pozíciómenedzsment: "
+    if bias == "long":
+        if regime_ok and structure_flag == "bos_up":
+            return prefix + "long trend aktív → pozíció tartható, SL igazítás az 1h swing alatt" + hint_suffix
+        if regime_ok:
+            return prefix + "long bias, de friss BOS nincs → részleges realizálás vagy szorosabb SL" + hint_suffix
+        return prefix + "long kitettség gyenge trendben → méretcsökkentés vagy zárás mérlegelendő" + hint_suffix
+    if bias == "short":
+        if regime_ok and structure_flag == "bos_down":
+            return prefix + "short trend aktív → pozíció tartható, SL az 1h csúcsa felett" + hint_suffix
+        if regime_ok:
+            return prefix + "short bias, de szerkezeti megerősítés hiányzik → részleges realizálás / SL szűkítés" + hint_suffix
+        return prefix + "short kitettség gyenge trendben → méretcsökkentés vagy zárás mérlegelendő" + hint_suffix
+    return prefix + "nincs egyértelmű bias → defenzív menedzsment, részleges zárás vagy szoros SL" + hint_suffix
 
 def atr_low_threshold(asset: str) -> float:
     h, m = now_utctime_hm()
@@ -1968,6 +2059,17 @@ def analyze(asset: str) -> Dict[str, Any]:
     elif bos5m_long:
         structure_flag = "bos_up"
 
+    position_note = derive_position_management_note(
+        asset,
+        session_meta,
+        regime_ok,
+        effective_bias,
+        structure_flag,
+        atr1h,
+    )
+    if position_note and position_note not in reasons:
+        reasons.append(position_note)
+
     decision_obj = {
         "asset": asset,
         "ok": True,
@@ -2000,6 +2102,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         "sell": invalid_level_sell,
     }
     decision_obj["invalid_buffer_abs"] = float(invalid_buffer) if invalid_buffer is not None else None
+    if position_note:
+        decision_obj["position_management"] = position_note
     active_position_meta = {
         "ema21_slope_abs": regime_val,
         "ema21_slope_signed": regime_slope_signed,
@@ -2072,4 +2176,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
