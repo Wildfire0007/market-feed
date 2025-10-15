@@ -26,6 +26,7 @@ ENV:
 """
 
 import os, json, sys, requests
+from copy import deepcopy
 from pathlib import Path
 import numpy as np
 from typing import Iterable, Optional, Set, Tuple, Dict, Any, List
@@ -48,10 +49,7 @@ TDSTATUS_PATH = f"{PUBLIC_DIR}/tdstatus.json"
 EIA_OVERRIDES_PATH = f"{PUBLIC_DIR}/USOIL/eia_schedule_overrides.json"
 
 EMA21_SLOPE_MIN = 0.0008  # 0.08%
-ATR_TRAIL_MULT_DEFAULT = 0.5
 ATR_TRAIL_MIN_ABS = 0.15
-ATR_REL_MIN = 0.0007
-EIA_RISK_WINDOW_MIN = 60
 
 ACTIVE_POSITION_STATE_PATH = f"{PUBLIC_DIR}/_active_position_state.json"
 ACTIVE_WATCHER_CONFIG = {
@@ -711,6 +709,29 @@ def format_percentage(value: Optional[float]) -> str:
     return f"{value * 100:.2f}%"
 
 
+def format_signed_percentage(value: Optional[float]) -> str:
+    if value is None or not isinstance(value, (int, float)) or not np.isfinite(value):
+        return "n/a"
+    return f"{value * 100:+.2f}%"
+
+
+def format_tminus(delta: timedelta) -> str:
+    total_seconds = int(delta.total_seconds())
+    if total_seconds >= 0:
+        prefix = "T−"
+    else:
+        prefix = "T+"
+        total_seconds = abs(total_seconds)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes = remainder // 60
+    parts: List[str] = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes or not parts:
+        parts.append(f"{minutes}m")
+    return f"{prefix}{' '.join(parts)}"
+
+
 HU_WEEKDAYS = ["Hét", "Ked", "Sze", "Csü", "Pén", "Szo", "Vas"]
 
 
@@ -760,9 +781,14 @@ class ActivePositionWatcher:
         self.state_cache = load_active_position_state()
         self.updated_state = False
         self.embeds: List[Dict[str, Any]] = []
+        self.latest_cards: Dict[str, Dict[str, Any]] = {}
+        self.changed_assets: Set[str] = set()
 
     # -------------------- helpers --------------------
     def run(self) -> List[Dict[str, Any]]:
+        self.latest_cards = {}
+        self.changed_assets = set()
+        self.embeds = []
         for asset in self.ASSET_ORDER:
             embed = self._evaluate_asset(asset)
             if embed:
@@ -787,7 +813,7 @@ class ActivePositionWatcher:
     def _title_for_asset(self, asset: str, side: str) -> str:
         base = "GOLD" if asset == "GOLD_CFD" else asset
         side_txt = (side or "").upper() or "-"
-        return f"{base} • Aktív pozíció ({side_txt})"
+        return f"{base} • Active Position ({side_txt})"
 
     def _resolve_anchor(self, asset: str, status: Dict[str, Any]) -> Tuple[Optional[str], Optional[float], Optional[str]]:
         asset_key = asset.upper()
@@ -821,18 +847,23 @@ class ActivePositionWatcher:
         if not event_dt:
             return None
         delta = event_dt - self.now
-        bud_dt = event_dt.astimezone(HB_TZ)
-        countdown = format_hu_countdown(delta)
         pre_window = int(event_cfg.get("pre_window_min") or 0)
         minutes = delta.total_seconds() / 60.0
         event_mode = pre_window > 0 and 0 <= minutes <= pre_window
+        et_dt = event_dt.astimezone(NY_TZ)
+        bud_dt = event_dt.astimezone(HB_TZ)
+        countdown = format_tminus(delta)
+        name = event_cfg.get("name", "EIA")
+        et_label = et_dt.strftime("%a %H:%M")
+        bud_label = bud_dt.strftime("%H:%M")
+        field_value = f"{name}: {et_label} ET (Bp {bud_label}) • {countdown}"
         return {
-            "name": event_cfg.get("name", "EIA"),
+            "name": name,
             "datetime": event_dt,
-            "budapest": f"{weekday_short_hu(bud_dt)} {bud_dt.strftime('%H:%M')} (Bp) – {countdown}",
-            "delta": delta,
+            "display": field_value,
             "event_mode": event_mode,
             "minutes": minutes,
+            "countdown": countdown,
         }
 
     def _rollover_active(self, cfg: Dict[str, Any]) -> bool:
@@ -868,6 +899,7 @@ class ActivePositionWatcher:
         prev_entry = self._state_cache_entry(asset)
 
         if not has_open:
+            self.latest_cards.pop(asset, None)
             if prev_entry.get("state") != "FLAT":
                 self.state_cache[asset] = {
                     "state": "FLAT",
@@ -875,13 +907,13 @@ class ActivePositionWatcher:
                     "updated": _now_utc_iso(self.now),
                 }
                 self.updated_state = True
+            print(f"watcher: no-open-position ({asset})")
             return None
 
         signal = self._signal(asset)
         meta = (signal.get("active_position_meta") or {}) if isinstance(signal, dict) else {}
-        decision_now = decision_of(signal)
-
-        anchor_side, anchor_price, anchor_ts = self._resolve_anchor(asset, status)
+        
+        anchor_side, anchor_price, _ = self._resolve_anchor(asset, status)
         if anchor_side not in {"buy", "sell"}:
             return None
 
@@ -890,7 +922,13 @@ class ActivePositionWatcher:
         if slope_th is None:
             slope_th = safe_float(cfg.get("ema21_slope_min_abs")) or EMA21_SLOPE_MIN
 
-        structure_flag = (meta.get("structure_5m") or signal.get("bos_5m_dir") or "").lower()
+        structure_raw = (meta.get("structure_5m") or signal.get("bos_5m_dir") or "").lower()
+        if structure_raw in {"bos↑", "bosup", "bos-up"}:
+            structure_flag = "bos_up"
+        elif structure_raw in {"bos↓", "bosdown", "bos-down"}:
+            structure_flag = "bos_down"
+        else:
+            structure_flag = structure_raw
         structure_display = structure_label(meta.get("structure_5m") or signal.get("bos_5m_dir"))
 
         atr1h = safe_float(meta.get("atr1h") or signal.get("atr1h"))
@@ -906,328 +944,187 @@ class ActivePositionWatcher:
 
         last_close_1h = safe_float(meta.get("last_close_1h") or signal.get("last_close_1h"))
 
-        bos1h_long = bool(meta.get("bos1h_long"))
-        bos1h_short = bool(meta.get("bos1h_short"))
-
         event_info = self._event_info(asset, cfg)
-        rollover_active = self._rollover_active(cfg)
+        event_mode = bool(event_info and event_info.get("event_mode"))
 
-        status_side = (status.get("side") or "").lower()
+        tp1_raw = meta.get("tp1_reached")
+        if tp1_raw is None and isinstance(signal, dict):
+            tp1_raw = signal.get("tp1_reached")
+        if isinstance(tp1_raw, str):
+            tp1_reached = tp1_raw.strip().lower() in {"1", "true", "yes", "hit", "ok"}
+        elif isinstance(tp1_raw, (int, float)):
+            tp1_reached = bool(tp1_raw)
+        else:
+            tp1_reached = bool(tp1_raw) if isinstance(tp1_raw, bool) else None
+
         size = safe_float(status.get("size"))
         avg_entry = safe_float(status.get("avg_entry"))
         anchor_price_display = anchor_price or avg_entry
 
-        exit_invalid = False
         if anchor_side == "sell":
-            if invalid_level_sell is not None and last_close_1h is not None:
-                exit_invalid = last_close_1h > invalid_level_sell
+            invalid_level = invalid_level_sell
+            invalid_hit = (
+                invalid_level is not None
+                and last_close_1h is not None
+                and last_close_1h > invalid_level
+            )
+            regime_flip = slope is not None and slope_th is not None and slope >= slope_th
+            structure_opposite = structure_flag == "bos_up"
+            exit_arrow = "↑"
         else:
-            if invalid_level_buy is not None and last_close_1h is not None:
-                exit_invalid = last_close_1h < invalid_level_buy
+            invalid_level = invalid_level_buy
+            invalid_hit = (
+                invalid_level is not None
+                and last_close_1h is not None
+                and last_close_1h < invalid_level
+            )
+            regime_flip = slope is not None and slope_th is not None and slope <= -slope_th
+            structure_opposite = structure_flag == "bos_down"
+            exit_arrow = "↓"
 
-        exit_bos = (anchor_side == "sell" and bos1h_long) or (anchor_side == "buy" and bos1h_short)
-        exit_flip = (anchor_side == "sell" and decision_now == "buy") or (
-            anchor_side == "buy" and decision_now == "sell"
-        )
-        exit_triggered = exit_invalid or exit_bos or exit_flip
+        exit_condition = invalid_hit and structure_opposite
+        reduce_condition = regime_flip and structure_opposite
 
-        slope_flip = False
-        if anchor_side == "sell":
-            slope_flip = slope is not None and slope_th is not None and slope >= slope_th
-            bos_opposite = structure_flag == "bos_up"
-        else:
-            slope_flip = slope is not None and slope_th is not None and slope <= -(slope_th)
-            bos_opposite = structure_flag == "bos_down"
-
-        reduce_trigger = slope_flip and bos_opposite
-        event_mode = bool(event_info and event_info.get("event_mode"))
-
-        state = "HOLD"
-        exit_reasons: List[str] = []
-        reduce_reasons: List[str] = []
-
-        if exit_triggered:
-            state = "EXIT"
-            if exit_invalid:
-                exit_reasons.append("invalid szint sérült")
-            if exit_bos:
-                exit_reasons.append("1h BOS fordult")
-            if exit_flip:
-                exit_reasons.append("rendszer FLIP ellentétes")
+        if exit_condition:
+            state = "EXIT"            
         elif event_mode:
             state = "EVENT"
-        elif reduce_trigger:
+        elif reduce_condition:
             state = "REDUCE"
-            if slope_flip:
-                reduce_reasons.append("EMA21 slope ellened")
-            if bos_opposite:
-                reduce_reasons.append("5m BOS ellenirányú")
-        elif rollover_active:
-            state = "ROLLOVER"
+            else:
+            state = "HOLD"
 
-        action_text = "✅ Akció: TART"
-        if state == "REDUCE":
-            detail = f" – {', '.join(reduce_reasons)}" if reduce_reasons else ""
-            action_text = f"⚠ Akció: CSÖKKENT 30–50%{detail}"
-        elif state == "EVENT":
-            action_text = "⚠ Akció: CSÖKKENT 30–50% (EIA-ablak)"
-        elif state == "EXIT":
-            detail = f" – {', '.join(exit_reasons)}" if exit_reasons else ""
-            action_text = f"⛔ Akció: TELJES EXIT{detail}"
-        elif state == "ROLLOVER":
-            action_text = "ℹ️ Akció: TART (Rollover – spread tágulhat)"
+        action_map = {
+            "HOLD": "✅ HOLD",
+            "REDUCE": "⚠️ REDUCE 30–50%",
+            "EVENT": "⚠️ REDUCE 30–50% (event window)",
+            "EXIT": "⛔ EXIT now",
+        }
+        action_field = {"name": "Action", "value": action_map.get(state, "✅ HOLD"), "inline": False}
 
-        action_field = {"name": "Akció", "value": action_text, "inline": False}
-
-        anchor_parts = []
+        anchor_parts: List[str] = []
         if anchor_price_display is not None:
             anchor_parts.append(f"@ {fmt_num(anchor_price_display, digits=2)}")
         if size is not None:
-            anchor_parts.append(f"méret {fmt_num(size, digits=2)}")
+            anchor_parts.append(f"size {fmt_num(size, digits=2)}")
         anchor_value = f"{anchor_side.upper()}" + (" " + " • ".join(anchor_parts) if anchor_parts else "")
 
-        invalid_level = invalid_level_sell if anchor_side == "sell" else invalid_level_buy
-        arrow = "↑" if anchor_side == "sell" else "↓"
-        invalid_text = (
-            f"{fmt_num(invalid_level, digits=2)} (zárás {arrow} ⇒ EXIT)"
-            if invalid_level is not None
-            else "n/a"
-        )
+        if invalid_level is not None:
+            invalid_text = f"{fmt_num(invalid_level, digits=2)} (1h close{exit_arrow} ⇒ EXIT)"
+        else:
+            invalid_text = "n/a"
 
         slope_icon = slope_status_icon(slope, slope_th or EMA21_SLOPE_MIN, anchor_side)
-        regime_text = f"EMA21 meredekség {format_percentage(slope)} ({slope_icon})"
+        threshold_text = format_percentage(abs(slope_th or EMA21_SLOPE_MIN))
+        regime_text = f"{format_signed_percentage(slope)} • {slope_icon} (küszöb: {threshold_text} abs.)"
 
-        atr_floor_candidates = []
+        atr_floor_candidates: List[float] = []
         if atr1h is not None:
             atr_floor_candidates.append(0.5 * atr1h)
+            if asset == "USOIL":
+                atr_floor_candidates.append(ATR_TRAIL_MIN_ABS)
         if invalid_buffer_abs is not None:
             atr_floor_candidates.append(invalid_buffer_abs)
-        trail_floor = max(atr_floor_candidates) if atr_floor_candidates else None
-        atr_range = cfg.get("atr_trail_k") or (0.6, 1.0)
+        trail_floor = max(atr_floor_candidates) if atr_floor_candidates else None        
         if atr1h is not None:
-            base = f"{fmt_num(atr1h, digits=2)}"
-            if trail_floor is not None:
-                if invalid_buffer_abs is not None:
-                    trail_desc = f"max(0.5×ATR, ${fmt_num(invalid_buffer_abs, digits=2)}) = ${fmt_num(trail_floor, digits=2)}"
-                else:
-                    trail_desc = f"≥ ${fmt_num(trail_floor, digits=2)}"
-            else:
-                trail_desc = "n/a"
-            atr_text = f"{base} → Trail: {trail_desc}"
+            atr_text_base = fmt_num(atr1h, digits=2)
         else:
-            atr_text = "n/a"
-        atr_text += f" (aj.: {atr_range[0]:.1f}–{atr_range[1]:.1f}×ATR)"
+            atr_text_base = "n/a"
+        if atr1h is not None and trail_floor is not None and atr1h not in (0, 0.0):
+            trail_text = f"${fmt_num(trail_floor, digits=2)}"
+            k_val = trail_floor / atr1h if atr1h else None
+            if k_val is not None and np.isfinite(k_val):
+                k_text = f"{k_val:.2f}".rstrip("0").rstrip(".")
+            else:
+                k_text = "n/a"
+        else:
+            trail_text = "n/a"
+            k_text = "n/a"
+        atr_field_text = f"{atr_text_base} / {trail_text}"
+        if k_text != "n/a":
+            atr_field_text += f" (K={k_text})"
 
         fields = [
             action_field,
-            {"name": "Anchor", "value": anchor_value, "inline": True},
+            {"name": "Anchor", "value": anchor_value or "-", "inline": True},
             {"name": "Invalid (1H)", "value": invalid_text, "inline": True},
-            {"name": "Regime", "value": regime_text, "inline": True},
-            {"name": "5m struktúra", "value": structure_display, "inline": True},
-            {"name": "ATR(1h) / Trail", "value": atr_text, "inline": True},
+            {"name": "Regime (1h EMA21 slope)", "value": regime_text, "inline": True},
+            {"name": "5m structure", "value": structure_display or "-", "inline": True},
+            {"name": "ATR(1h) / Trail", "value": atr_field_text, "inline": True},
         ]
 
-        if event_info:
-            suffix = " – Event mód" if event_mode else ""
+        if event_info:            
             fields.append(
                 {
-                    "name": event_info.get("name", "Következő adat"),
-                    "value": f"{event_info['budapest']}{suffix}",
+                    "name": "Next Event",
+                    "value": event_info.get("display") or "-",
                     "inline": False,
                 }
             )
 
-        desc_lines = [
-            "TP1 után: 25–50% rész-zárás, maradék BE + költség, trail: ATR×0.6–1.0.",
-        ]
-        if event_mode:
-            desc_lines.append("EIA -60…0 perc: momentum belépők tiltva, méret csökkentendő.")
-        if rollover_active:
-            desc_lines.append("Rollover – spread tágulhat.")
+        desc_lines: List[str] = []
+        if tp1_reached is True:
+            desc_lines.append("TP1 reached → BE + cost, ATR trailing active.")
+        elif tp1_reached is False:
+            desc_lines.append("TP1 pending → manage core size cautiously.")
+        if state == "EXIT" and invalid_level is not None and last_close_1h is not None:
+            desc_lines.append(
+                f"Trigger: 1h close {fmt_num(last_close_1h, digits=2)} vs invalid {fmt_num(invalid_level, digits=2)} + 5m BOS flip."
+            )
+        elif state in {"REDUCE", "EVENT"} and structure_opposite:
+            reason = "Regime + 5m BOS opposite" if state == "REDUCE" else "Event window active"
+            if event_mode and event_info:
+                reason = f"EIA window {event_info.get('countdown')}"
+            desc_lines.append(f"Trigger: {reason}.")
+        elif state == "HOLD":
+            desc_lines.append("Anchor bias intact – defensive management only.")
 
-        embed = {
+        color_map = {
+            "HOLD": 0x2ecc71,
+            "REDUCE": 0xf1c40f,
+            "EVENT": 0xf1c40f,
+            "EXIT": 0xe74c3c,
+        }
+
+        embed: Dict[str, Any] = {
             "title": self._title_for_asset(asset, anchor_side),
-            "color": (
-                COLOR["NO"]
-                if state == "EXIT"
-                else COLOR["WAIT"]
-                if state in {"REDUCE", "EVENT"}
-                else COLOR["INFO"]
-                if state == "ROLLOVER"
-                else COLOR["BUY"]
-            ),
+            "color": color_map.get(state, 0x2ecc71),
             "fields": fields,
-            "footer": {
-                "text": "Ajánlás aktív pozíció menedzselésére; nem új belépő. Üzenet csak állapot-változáskor küldve (rate-limit safe).",
-            },
+            "footer": {"text": "Active-position menedzsment; nem új belépő."},
         }
         if desc_lines:
             embed["description"] = "\n".join(desc_lines)
 
-        state_key = f"{state}|{anchor_side}"
+        state_key = f"{state}|{anchor_side}|event={1 if event_mode else 0}"
+        state_record = {
+            "state": state,
+            "key": state_key,
+            "anchor": anchor_side,
+            "updated": _now_utc_iso(self.now),
+        }
+        self.latest_cards[asset] = deepcopy(embed)
+  
         if prev_entry.get("key") != state_key:
-            self.state_cache[asset] = {
-                "state": state,
-                "key": state_key,
-                "anchor": anchor_side,
-                "updated": _now_utc_iso(self.now),
-            }
+            self.state_cache[asset] = state_record
             self.updated_state = True
+            self.changed_assets.add(asset)
             return embed
 
-        # Állapot változatlan – frissítsük az időbélyeget, de ne küldjünk új üzenetet.
-        self.state_cache[asset] = {
-            "state": prev_entry.get("state", state),
-            "key": prev_entry.get("key", state_key),
-            "anchor": anchor_side,
-            "updated": prev_entry.get("updated", _now_utc_iso(self.now)),
-        }
+        state_record["updated"] = prev_entry.get("updated", state_record["updated"])
+        self.state_cache[asset] = state_record
         return None
-
-def build_active_position_helper(
-    asset: str,
-    sig: dict,
-    dec: str,
-    kind: str,
-    tdstatus: Optional[Dict[str, Dict[str, Any]]],
-) -> Optional[list]:
-    if asset not in {"USOIL", "GOLD_CFD"}:
-        return None
-    status = tdstatus_for_asset(tdstatus or {}, asset)
-    if not status or not status.get("has_open_position"):
-        return None
-    side = (status.get("side") or "").lower()
-    if side not in {"sell", "buy"}:
-        return None
-    if dec in ("BUY", "SELL") and kind not in {"invalidate"}:
-        return None
-
-    meta = (sig or {}).get("active_position_meta") or {}
-    asset_cfg = (ACTIVE_WATCHER_CONFIG.get("assets") or {}).get(asset, {})
-    common_cfg = ACTIVE_WATCHER_CONFIG.get("common") or {}
-    slope_signed = safe_float(meta.get("ema21_slope_signed"))
-    threshold = safe_float(meta.get("ema21_slope_threshold")) or EMA21_SLOPE_MIN
-    slope_text = format_percentage(slope_signed)
-    th_text = format_percentage(threshold)
-    icon = slope_status_icon(slope_signed, threshold, side)
-
-    ema_relation = (meta.get("ema21_relation") or "-").capitalize()
-    structure = structure_label(meta.get("structure_5m"))
-
-    atr1h = safe_float(meta.get("atr1h"))
-    invalid_buffer_abs = safe_float(
-        meta.get("invalid_buffer_abs")
-        or asset_cfg.get("invalid_buffer_abs")
-        or common_cfg.get("invalid_buffer_abs")
-    )
-    trail_candidates: List[float] = []
-    if atr1h is not None:
-        trail_candidates.append(atr1h * ATR_TRAIL_MULT_DEFAULT)
-    if invalid_buffer_abs is not None:
-        trail_candidates.append(invalid_buffer_abs)
-    if asset == "USOIL":
-        trail_candidates.append(ATR_TRAIL_MIN_ABS)
-    trail = max(trail_candidates) if trail_candidates else None
-
-    if asset == "USOIL":
-        countdown_text, minutes_to_event = eia_countdown()
-    else:
-        countdown_text, minutes_to_event = (None, None)
-
-    avg_entry = safe_float(status.get("avg_entry"))
-    size = safe_float(status.get("size"))
-    pos_line = None
-    if avg_entry is not None or size is not None:
-        parts = []
-        if avg_entry is not None:
-            parts.append(f"@ {fmt_num(avg_entry, digits=2)}")
-        if size is not None:
-            parts.append(f"méret {fmt_num(size, digits=2)}")
-        if parts:
-            pos_line = f"Pozíció: {side.upper()} " + ", ".join(parts)
-
-    asset_label = "GOLD" if asset == "GOLD_CFD" else asset
-    helper_lines = [f"**{asset_label} • Active-Position Policy ({side.upper()} open)**"]
-    helper_lines.append(f"Regime: {icon} (EMA21 slope: {slope_text} vs {th_text})")
-    helper_lines.append(f"1h vs EMA21: {ema_relation}")
-    helper_lines.append(f"Structure(5m): {structure}")
-    if atr1h is not None:
-        trail_text = "n/a"
-        if trail is not None:
-            trail_text = f"${fmt_num(trail, digits=2)}"
-        min_floor = ATR_TRAIL_MIN_ABS if asset == "USOIL" else invalid_buffer_abs
-        if min_floor is not None:
-            floor_text = f"≥ ${fmt_num(min_floor, digits=2)}"
-        else:
-            floor_text = "n/a"
-        helper_lines.append(
-            f"ATR(1h): {fmt_num(atr1h, digits=2)} → Trail ≈ {trail_text} ({floor_text})"
-        )
-    if countdown_text and asset == "USOIL":
-        helper_lines.append(f"Next data: EIA {countdown_text}")
-    if pos_line:
-        helper_lines.append(pos_line)
-
-    actions = []
-    ema_relation_lower = ema_relation.lower()
-    structure_flag = (meta.get("structure_5m") or "").lower()
-
-    atr_rel_threshold = safe_float(
-        meta.get("atr5_threshold")
-        or asset_cfg.get("atr_rel_min_5m")
-        or common_cfg.get("atr_rel_min_5m")
-    )
-    atr_rel_text = format_percentage(atr_rel_threshold)
-
-    if side == "sell":
-        if slope_signed is not None and slope_signed <= -threshold and ema_relation_lower == "below":
-            actions.append("Hold (defenzív): Tartsd, trail: ATR×0.5–1.0, TP1-nél BE+cost.")
-        if ema_relation_lower == "above" and structure_flag == "bos_up":
-            actions.append("Reduce 30–50%: 1h zár EMA21 fölött + 5m HH/HL (BOS↑).")
-        bos_key = "bos1h_long"
-        flip_target = "buy"
-        exit_text = "Full Exit: 1h BOS↑ vagy rendszer FLIP BUY."
-        final_note = (
-            "A fenti pontok pozíció-menedzsment javaslatok, nem új belépő. "
-            f"Új short csak Regime=OK + 5m BOS↓ + ATR_rel≥{atr_rel_text} esetén."
-        )
-    else:
-        if slope_signed is not None and slope_signed >= threshold and ema_relation_lower == "above":
-            actions.append("Hold (defenzív): Tartsd, trail: ATR×0.5–1.0, TP1-nél BE+cost.")
-        if ema_relation_lower == "below" and structure_flag == "bos_down":
-            actions.append("Reduce 30–50%: 1h zár EMA21 alatt + 5m LL/LH (BOS↓).")
-        bos_key = "bos1h_short"
-        flip_target = "sell"
-        exit_text = "Full Exit: 1h BOS↓ vagy rendszer FLIP SELL."
-        final_note = (
-            "A fenti pontok pozíció-menedzsment javaslatok, nem új belépő. "
-            f"Új long csak Regime=OK + 5m BOS↑ + ATR_rel≥{atr_rel_text} esetén."
-        )
-
-    bos_trigger = bool(meta.get(bos_key))
-    reasons = (sig or {}).get("reasons") or []
-    flip_hit = any(
-        isinstance(r, str) and "flip" in r.lower() and flip_target in r.lower()
-        for r in reasons
-    )
-    if bos_trigger or flip_hit:
-        actions.append(exit_text)
-
-    if (
-        asset == "USOIL"
-        and minutes_to_event is not None
-        and 0 <= minutes_to_event <= EIA_RISK_WINDOW_MIN
-    ):
-        actions.append("Event mode: EIA −60–0 perc: reduce 30–50%, momentum off.")
-
-    if actions:
-        helper_lines.append("Akció-javaslatok:")
-        helper_lines.extend(f"- {line}" for line in actions)
-
-    helper_lines.append(final_note)
-
-    return helper_lines
-
+    
+def snapshot_embeds(self, exclude: Optional[Iterable[str]] = None) -> List[Dict[str, Any]]:
+        exclude_keys = {normalize_asset_key(x) for x in (exclude or []) if x}
+        embeds: List[Dict[str, Any]] = []
+        for asset in self.ASSET_ORDER:
+            card = self.latest_cards.get(asset)
+            if not card:
+                continue
+            if exclude_keys and normalize_asset_key(asset) in exclude_keys:
+                continue
+            embeds.append(deepcopy(card))
+        return embeds
 
 def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "normal", prev_decision: str = None, tdstatus: Optional[Dict[str, Dict[str, Any]]] = None):
     """
@@ -1291,11 +1188,6 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
         title += " • ℹ️ Állapot"
 
     color = card_color(dec, is_stable, kind)
-
-    helper_lines = build_active_position_helper(asset, sig, dec, kind, tdstatus)
-    if helper_lines:
-        lines.append("")
-        lines.extend(helper_lines)
 
     return {
         "title": title,
@@ -1464,6 +1356,7 @@ def main():
                 heartbeat_due = True
     want_heartbeat = force_heartbeat or heartbeat_due
     heartbeat_added = False
+    heartbeat_snapshots: List[Dict[str, Any]] = []
     if want_heartbeat:
         for asset in ASSETS:
             sig = per_asset_sigs.get(asset) or {"asset": asset, "signal": "no entry", "probability": 0}
@@ -1478,6 +1371,10 @@ def main():
                 )
                 heartbeat_added = True
 
+        heartbeat_snapshots = watcher.snapshot_embeds(exclude=watcher.changed_assets)
+        if heartbeat_snapshots:
+            heartbeat_added = True
+
         if heartbeat_added:
             mark_heartbeat(meta, bud_key, now_iso)
 
@@ -1486,6 +1383,7 @@ def main():
 
     ordered_embeds = [asset_embeds[a] for a in ASSETS if a in asset_embeds]
     ordered_embeds.extend(watcher_embeds)
+    ordered_embeds.extend(heartbeat_snapshots)
 
     if not ordered_embeds:
         print("Discord notify: nothing to send.")
