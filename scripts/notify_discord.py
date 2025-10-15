@@ -1091,7 +1091,7 @@ def build_active_position_helper(
     kind: str,
     tdstatus: Optional[Dict[str, Dict[str, Any]]],
 ) -> Optional[list]:
-    if asset != "USOIL":
+    if asset not in {"USOIL", "GOLD_CFD"}:
         return None
     status = tdstatus_for_asset(tdstatus or {}, asset)
     if not status or not status.get("has_open_position"):
@@ -1103,6 +1103,8 @@ def build_active_position_helper(
         return None
 
     meta = (sig or {}).get("active_position_meta") or {}
+    asset_cfg = (ACTIVE_WATCHER_CONFIG.get("assets") or {}).get(asset, {})
+    common_cfg = ACTIVE_WATCHER_CONFIG.get("common") or {}
     slope_signed = safe_float(meta.get("ema21_slope_signed"))
     threshold = safe_float(meta.get("ema21_slope_threshold")) or EMA21_SLOPE_MIN
     slope_text = format_percentage(slope_signed)
@@ -1113,11 +1115,24 @@ def build_active_position_helper(
     structure = structure_label(meta.get("structure_5m"))
 
     atr1h = safe_float(meta.get("atr1h"))
-    trail = None
+    invalid_buffer_abs = safe_float(
+        meta.get("invalid_buffer_abs")
+        or asset_cfg.get("invalid_buffer_abs")
+        or common_cfg.get("invalid_buffer_abs")
+    )
+    trail_candidates: List[float] = []
     if atr1h is not None:
-        trail = max(ATR_TRAIL_MIN_ABS, atr1h * ATR_TRAIL_MULT_DEFAULT)
+        trail_candidates.append(atr1h * ATR_TRAIL_MULT_DEFAULT)
+    if invalid_buffer_abs is not None:
+        trail_candidates.append(invalid_buffer_abs)
+    if asset == "USOIL":
+        trail_candidates.append(ATR_TRAIL_MIN_ABS)
+    trail = max(trail_candidates) if trail_candidates else None
 
-    countdown_text, minutes_to_event = eia_countdown()
+    if asset == "USOIL":
+        countdown_text, minutes_to_event = eia_countdown()
+    else:
+        countdown_text, minutes_to_event = (None, None)
 
     avg_entry = safe_float(status.get("avg_entry"))
     size = safe_float(status.get("size"))
@@ -1131,15 +1146,24 @@ def build_active_position_helper(
         if parts:
             pos_line = f"Pozíció: {side.upper()} " + ", ".join(parts)
 
-    helper_lines = [f"**USOIL • Active-Position Policy ({side.upper()} open)**"]
+    asset_label = "GOLD" if asset == "GOLD_CFD" else asset
+    helper_lines = [f"**{asset_label} • Active-Position Policy ({side.upper()} open)**"]
     helper_lines.append(f"Regime: {icon} (EMA21 slope: {slope_text} vs {th_text})")
     helper_lines.append(f"1h vs EMA21: {ema_relation}")
     helper_lines.append(f"Structure(5m): {structure}")
     if atr1h is not None:
+        trail_text = "n/a"
+        if trail is not None:
+            trail_text = f"${fmt_num(trail, digits=2)}"
+        min_floor = ATR_TRAIL_MIN_ABS if asset == "USOIL" else invalid_buffer_abs
+        if min_floor is not None:
+            floor_text = f"≥ ${fmt_num(min_floor, digits=2)}"
+        else:
+            floor_text = "n/a"
         helper_lines.append(
-            f"ATR(1h): {fmt_num(atr1h, digits=2)} → Trail ≈ ${fmt_num(trail, digits=2)} (≥ ${ATR_TRAIL_MIN_ABS:.2f})"
+            f"ATR(1h): {fmt_num(atr1h, digits=2)} → Trail ≈ {trail_text} ({floor_text})"
         )
-    if countdown_text:
+    if countdown_text and asset == "USOIL":
         helper_lines.append(f"Next data: EIA {countdown_text}")
     if pos_line:
         helper_lines.append(pos_line)
@@ -1147,6 +1171,13 @@ def build_active_position_helper(
     actions = []
     ema_relation_lower = ema_relation.lower()
     structure_flag = (meta.get("structure_5m") or "").lower()
+
+    atr_rel_threshold = safe_float(
+        meta.get("atr5_threshold")
+        or asset_cfg.get("atr_rel_min_5m")
+        or common_cfg.get("atr_rel_min_5m")
+    )
+    atr_rel_text = format_percentage(atr_rel_threshold)
 
     if side == "sell":
         if slope_signed is not None and slope_signed <= -threshold and ema_relation_lower == "below":
@@ -1157,7 +1188,8 @@ def build_active_position_helper(
         flip_target = "buy"
         exit_text = "Full Exit: 1h BOS↑ vagy rendszer FLIP BUY."
         final_note = (
-            "A fenti pontok pozíció-menedzsment javaslatok, nem új belépő. Új short csak Regime=OK + 5m BOS↓ + ATR_rel≥0.07% esetén."
+            "A fenti pontok pozíció-menedzsment javaslatok, nem új belépő. "
+            f"Új short csak Regime=OK + 5m BOS↓ + ATR_rel≥{atr_rel_text} esetén."
         )
     else:
         if slope_signed is not None and slope_signed >= threshold and ema_relation_lower == "above":
@@ -1168,7 +1200,8 @@ def build_active_position_helper(
         flip_target = "sell"
         exit_text = "Full Exit: 1h BOS↓ vagy rendszer FLIP SELL."
         final_note = (
-            "A fenti pontok pozíció-menedzsment javaslatok, nem új belépő. Új long csak Regime=OK + 5m BOS↑ + ATR_rel≥0.07% esetén."
+            "A fenti pontok pozíció-menedzsment javaslatok, nem új belépő. "
+            f"Új long csak Regime=OK + 5m BOS↑ + ATR_rel≥{atr_rel_text} esetén."
         )
 
     bos_trigger = bool(meta.get(bos_key))
@@ -1180,7 +1213,11 @@ def build_active_position_helper(
     if bos_trigger or flip_hit:
         actions.append(exit_text)
 
-    if minutes_to_event is not None and 0 <= minutes_to_event <= EIA_RISK_WINDOW_MIN:
+    if (
+        asset == "USOIL"
+        and minutes_to_event is not None
+        and 0 <= minutes_to_event <= EIA_RISK_WINDOW_MIN
+    ):
         actions.append("Event mode: EIA −60–0 perc: reduce 30–50%, momentum off.")
 
     if actions:
