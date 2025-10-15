@@ -52,7 +52,11 @@ MIN_R_MOMENTUM  = 1.6
 TP1_R   = 2.0
 TP2_R   = 3.0
 MIN_STOPLOSS_PCT = 0.01
-TP_NET_MIN = 0.01
+TP_NET_MIN_DEFAULT = 0.01
+TP_NET_MIN_ASSET = {
+    "EURUSD": 0.0035,
+    "USDJPY": 0.0035,
+}
 
 # --- Per-asset TP minimumok, költségek és SL pufferek ---
 TP_MIN_PCT = {        # min. TP1 távolság %-ban (entry-hez képest)
@@ -163,8 +167,7 @@ SESSION_WINDOWS_UTC: Dict[str, Dict[str, Optional[List[Tuple[int, int, int, int]
             (8, 0, 18, 30),
         ],
         "monitor": [
-            (0, 0, 21, 55),    # 00:00–21:55 UTC
-            (23, 0, 23, 59),   # 23:00–23:59 UTC (eToro esti nyitás)
+            (0, 0, 23, 59),
         ],
     },
     "USOIL": {
@@ -173,13 +176,10 @@ SESSION_WINDOWS_UTC: Dict[str, Dict[str, Optional[List[Tuple[int, int, int, int]
             (8, 0, 19, 0),
         ],
         "monitor": [
-            (0, 0, 21, 55),
-            (23, 0, 23, 59),
+            (0, 0, 23, 59),
         ],
     },
 }
-
-USOIL_SUNDAY_OPEN_MINUTE = 23 * 60  # 23:00 UTC vasárnap esti nyitás (eToro specifikáció)
 
 # Spot-adat elavulás küszöbök (másodperc)
 SPOT_MAX_AGE_SECONDS: Dict[str, int] = {
@@ -245,9 +245,42 @@ REFRESH_TIPS = [
 SESSION_WEEKDAYS: Dict[str, Optional[List[int]]] = {
     "EURUSD": [0, 1, 2, 3, 4, 6],  # hétfő–péntek + vasárnap esti nyitás
     "USDJPY": [0, 1, 2, 3, 4, 6],
-    "NSDQ100": [0, 1, 2, 3, 4],        # hétfő–péntek
-    "GOLD_CFD": [0, 1, 2, 3, 4, 6],    # vasárnap esti nyitás – szombat zárva
-    "USOIL": [0, 1, 2, 3, 4, 6],       # vasárnap esti nyitás – szombat zárva
+    "NSDQ100": [0, 1, 2, 3, 4, 6],      # vasárnap esti nyitás – szombat zárva
+    "GOLD_CFD": [0, 1, 2, 3, 4, 6],     # vasárnap esti nyitás – szombat zárva
+    "USOIL": [0, 1, 2, 3, 4, 6],        # vasárnap esti nyitás – szombat zárva
+}
+
+
+def _min_of_day(hour: int, minute: int = 0) -> int:
+    return hour * 60 + minute
+
+
+SESSION_TIME_RULES: Dict[str, Dict[str, Any]] = {
+    "EURUSD": {
+        "sunday_open_minute": _min_of_day(21, 5),    # 23:05 CEST → 21:05 UTC
+        "friday_close_minute": _min_of_day(20, 30),   # 22:30 CEST → 20:30 UTC
+        "daily_breaks": [(_min_of_day(22, 0), _min_of_day(22, 5))],
+    },
+    "USDJPY": {
+        "sunday_open_minute": _min_of_day(21, 5),
+        "friday_close_minute": _min_of_day(20, 30),
+        "daily_breaks": [(_min_of_day(22, 0), _min_of_day(22, 5))],
+    },
+    "GOLD_CFD": {
+        "sunday_open_minute": _min_of_day(22, 0),     # 00:00 CEST → 22:00 UTC
+        "friday_close_minute": _min_of_day(20, 30),
+        "daily_breaks": [(_min_of_day(21, 0), _min_of_day(22, 0))],
+    },
+    "USOIL": {
+        "sunday_open_minute": _min_of_day(22, 0),
+        "friday_close_minute": _min_of_day(20, 30),
+        "daily_breaks": [(_min_of_day(21, 0), _min_of_day(22, 0))],
+    },
+    "NSDQ100": {
+        "sunday_open_minute": _min_of_day(22, 0),
+        "friday_close_minute": _min_of_day(20, 30),
+        "daily_breaks": [(_min_of_day(21, 0), _min_of_day(0, 0))],
+    },
 }
 
 # -------------------------- segédek -----------------------------------
@@ -326,6 +359,18 @@ def in_any_window_utc(windows: Optional[List[Tuple[int,int,int,int]]], h: int, m
         if s <= minutes <= e:
             return True
     return False
+def minute_in_interval(minute: int, start: int, end: int) -> bool:
+    if start == end:
+        return False
+    if start < end:
+        return start <= minute < end
+    return minute >= start or minute < end
+
+
+def format_utc_minute(minute: int) -> str:
+    minute = max(0, min(23 * 60 + 59, minute))
+    return f"{minute // 60:02d}:{minute % 60:02d}"
+
 
 def session_weekday_ok(asset: str, now: Optional[datetime] = None) -> bool:
     if now is None:
@@ -367,14 +412,50 @@ def next_session_open(asset: str, now: Optional[datetime] = None) -> Optional[da
 def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
     now = datetime.now(timezone.utc)
     h, m = now.hour, now.minute
+    minute_of_day = h * 60 + m
     entry_windows, monitor_windows = session_windows_utc(asset)
     monitor_ok = in_any_window_utc(monitor_windows, h, m)
     entry_window_ok = in_any_window_utc(entry_windows, h, m)
     weekday_ok = session_weekday_ok(asset, now)
-    if asset == "USOIL" and now.weekday() == 6:
-        if (h * 60 + m) < USOIL_SUNDAY_OPEN_MINUTE:
-            monitor_ok = False
-            entry_window_ok = False
+
+    special_status: Optional[str] = None
+    special_note: Optional[str] = None
+    special_reason: Optional[str] = None
+    break_active = False
+    break_window: Optional[Tuple[int, int]] = None
+
+    rules = SESSION_TIME_RULES.get(asset, {})
+    sunday_open = rules.get("sunday_open_minute")
+    if sunday_open is not None and now.weekday() == 6 and minute_of_day < sunday_open:
+        monitor_ok = False
+        entry_window_ok = False
+        special_status = "closed_out_of_hours"
+        special_reason = "sunday_open_pending"
+        special_note = f"Piac zárva (vasárnapi nyitás {format_utc_minute(sunday_open)} UTC után)"
+
+    if special_status is None:
+        daily_breaks = rules.get("daily_breaks") or []
+        for start, end in daily_breaks:
+            if minute_in_interval(minute_of_day, start, end):
+                monitor_ok = False
+                entry_window_ok = False
+                break_active = True
+                break_window = (start, end)
+                special_status = "maintenance"
+                special_reason = "daily_break"
+                start_s = format_utc_minute(start)
+                end_s = format_utc_minute(end)
+                special_note = f"Piac zárva (napi karbantartás {start_s}–{end_s} UTC)"
+                break
+
+    friday_close = rules.get("friday_close_minute")
+    if friday_close is not None and now.weekday() == 4 and minute_of_day >= friday_close:
+        monitor_ok = False
+        entry_window_ok = False
+        special_status = "closed_out_of_hours"
+        special_reason = "friday_close"
+        special_note = f"Piac zárva (pénteki zárás {format_utc_minute(friday_close)} UTC)"
+
     open_now = monitor_ok and weekday_ok
     entry_open = entry_window_ok and weekday_ok and (
         monitor_ok or not monitor_windows
@@ -407,6 +488,16 @@ def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
     else:
         status = "open"
         status_note = "Piac nyitva"
+    if special_status:
+        status = special_status
+    if special_note:
+        status_note = special_note
+    if break_active:
+        info["daily_break_active"] = True
+    if break_window:
+        info["daily_break_window_utc"] = [format_utc_minute(break_window[0]), format_utc_minute(break_window[1])]
+    if special_reason:
+        info["special_closure_reason"] = special_reason
     info["status"] = status
     info["status_note"] = status_note
     if not entry_open:
@@ -434,6 +525,9 @@ def tp_min_pct_for(asset: str, rel_atr: float, session_flag: bool) -> float:
     if asset == "NSDQ100" and session_flag and rel_atr >= ATR_VOL_HIGH_REL:
         return min(base, 0.0010)
     return base
+
+def tp_net_min_for(asset: str) -> float:
+    return TP_NET_MIN_ASSET.get(asset, TP_NET_MIN_DEFAULT)
 
 
 def pip_size(asset: str) -> float:
@@ -1595,6 +1689,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         if note and note not in reasons:
             reasons.append(note)
 
+    tp_net_threshold = tp_net_min_for(asset)
+    tp_net_pct_display = f"{tp_net_threshold * 100:.2f}".rstrip("0").rstrip(".")
+    tp_net_label = f"tp1_net>=+{tp_net_pct_display}%"
+
     core_required = [
         "session",
         "regime",
@@ -1605,7 +1703,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         f"rr_math>={MIN_R_CORE:.1f}",
         "tp_min_profit",
         "min_stoploss",
-        "tp1_net>=+1.0%",
+        tp_net_label,
     ]
 
     conds_core = {
@@ -1641,7 +1739,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         f"rr_math>={MIN_R_MOMENTUM:.1f}",
         "tp_min_profit",
         "min_stoploss",
-        "tp1_net>=+1.0%",
+        tp_net_label,
     ]
     missing_mom: List[str] = []
 
@@ -1767,13 +1865,13 @@ def analyze(asset: str) -> Dict[str, Any]:
             ATR5_MIN_MULT * atr5_val,
         )
 
-        if (not ok_math) or (rr is None) or (rr < rr_required) or (tp1_dist < min_profit_abs) or (net_pct < TP_NET_MIN):
+        if (not ok_math) or (rr is None) or (rr < rr_required) or (tp1_dist < min_profit_abs) or (net_pct < tp_net_threshold):
             if rr is None or rr < rr_required:
                 missing.append(f"rr_math>={rr_required:.1f}")
             if tp1_dist < min_profit_abs:
                 missing.append("tp_min_profit")
-            if net_pct < TP_NET_MIN:
-                missing.append("tp1_net>=+1.0%")
+            if net_pct < tp_net_threshold:
+                missing.append(tp_net_label)
             if not min_stoploss_ok_local:
                 missing.append("min_stoploss")
             return False
@@ -1974,17 +2072,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
 
