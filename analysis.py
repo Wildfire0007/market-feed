@@ -1686,7 +1686,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     bos1h_short = detect_bos(k1h_closed, "short")
 
     # 5) ATR szűrő (relatív) — a stabil árhoz viszonyítjuk (zárt 5m)
-   atr_series_5m = atr(k5m_closed)
+    atr_series_5m = atr(k5m_closed)
     atr5_raw = atr_series_5m.iloc[-1] if not atr_series_5m.empty else float("nan")
     atr5 = float(atr5_raw) if atr5_raw is not None else float("nan")
     rel_atr = (
@@ -2391,6 +2391,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
