@@ -22,6 +22,8 @@ import numpy as np
 
 # --- Elemzendő eszközök (GER40 -> USOIL) ---
 ASSETS = ["EURUSD", "NSDQ100", "GOLD_CFD", "USDJPY", "USOIL"]
+FX_TUNED_ASSETS = {"EURUSD", "USDJPY"}
+
 
 MARKET_TIMEZONE = ZoneInfo("Europe/Berlin")
 
@@ -652,7 +654,12 @@ def atr_low_threshold(asset: str, price_hint: Optional[float] = None) -> float:
         return GOLD_LOW_VOL_TH
     base = ATR_LOW_TH_ASSET.get(asset, ATR_LOW_TH_DEFAULT)
     avg_range = AVERAGE_RANGE_24H_ABS.get(asset)
-    if avg_range and price_hint and price_hint > 0:
+    if (
+        asset in FX_TUNED_ASSETS
+        and avg_range
+        and price_hint
+        and price_hint > 0
+    ):
         dynamic_rel = (ATR_DYNAMIC_MULT * avg_range) / price_hint
         base = min(base, dynamic_rel) if asset == "EURUSD" else max(base, dynamic_rel)
     return base
@@ -1657,7 +1664,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     trend_alignment = bias1h in ("long", "short") and bias1h == bias4h
     regime_relaxed = False
     if (
-        not regime_ok
+        asset in FX_TUNED_ASSETS
+        and not regime_ok
         and trend_alignment
         and regime_val is not None
         and regime_val > 0
@@ -1678,7 +1686,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     bos1h_short = detect_bos(k1h_closed, "short")
 
     # 5) ATR szűrő (relatív) — a stabil árhoz viszonyítjuk (zárt 5m)
-    atr_series_5m = atr(k5m_closed)
+   atr_series_5m = atr(k5m_closed)
     atr5_raw = atr_series_5m.iloc[-1] if not atr_series_5m.empty else float("nan")
     atr5 = float(atr5_raw) if atr5_raw is not None else float("nan")
     rel_atr = (
@@ -1688,7 +1696,11 @@ def analyze(asset: str) -> Dict[str, Any]:
     )
     atr_threshold = atr_low_threshold(asset, price_for_calc if price_for_calc else None)
     avg_range_abs = AVERAGE_RANGE_24H_ABS.get(asset)
-    atr_abs_threshold = (avg_range_abs * ATR_DYNAMIC_MULT) if avg_range_abs else None
+    atr_abs_threshold = (
+        (avg_range_abs * ATR_DYNAMIC_MULT)
+        if (avg_range_abs and asset in FX_TUNED_ASSETS)
+        else None
+    )
     atr_rel_ok = not (np.isnan(rel_atr) or rel_atr < atr_threshold)
     atr_abs_ok = True
     if atr_abs_threshold is not None:
@@ -1772,6 +1784,10 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     micro_bos_long = micro_bos_with_retest(k1m_closed, k5m_closed, "long")
     micro_bos_short = micro_bos_with_retest(k1m_closed, k5m_closed, "short")
+    micro_bos_allowed = asset in FX_TUNED_ASSETS
+    if not micro_bos_allowed:
+        micro_bos_long = False
+        micro_bos_short = False
 
     swing_near_ok = False
     if price_for_calc and np.isfinite(price_for_calc):
@@ -1790,12 +1806,19 @@ def analyze(asset: str) -> Dict[str, Any]:
                 swing_checks.append(near_level(price_for_calc, move_lo, swing_tol))
             swing_near_ok = any(swing_checks)
 
-    liquidity_zone_ok = bool(fib_ok or ema21_dist_ok or swing_near_ok)
+    if asset in FX_TUNED_ASSETS:
+        liquidity_zone_ok = bool(fib_ok or ema21_dist_ok or swing_near_ok)
+    else:
+        liquidity_zone_ok = bool(fib_ok)
 
     effective_bias = trend_bias
     bias_override_used = False
     bias_override_reason: Optional[str] = None
-    if trend_bias == "neutral" and bias1h in ("long", "short"):
+    if (
+        asset in FX_TUNED_ASSETS
+        and trend_bias == "neutral"
+        and bias1h in ("long", "short")
+    ):
         override_dir = bias1h
         bos_support = bos5m_long if override_dir == "long" else bos5m_short
         struct_support = struct_retest_long if override_dir == "long" else struct_retest_short
@@ -1827,9 +1850,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         else micro_bos_short if effective_bias == "short"
         else False
     )
-    micro_bos_active = bool(micro_bos_active_raw)
+    micro_bos_active = bool(micro_bos_active_raw) if micro_bos_allowed else False
     micro_bos_confirmed = (
-        micro_bos_active
+        micro_bos_allowed
+        and micro_bos_active
         and not np.isnan(rel_atr)
         and rel_atr >= max(atr_threshold, MOMENTUM_ATR_REL)
         and atr_abs_ok
@@ -1874,10 +1898,10 @@ def analyze(asset: str) -> Dict[str, Any]:
     if fib_ok:
         P += 20
         reasons.append("Fib zóna konfluencia (0.618–0.886)")
-    elif ema21_dist_ok:
+    elif asset in FX_TUNED_ASSETS and ema21_dist_ok:
         P += 12
         reasons.append("Ár 1h EMA21 zónában (ATR tolerancia)")
-    elif swing_near_ok:
+    elif asset in FX_TUNED_ASSETS and swing_near_ok:
         P += 10
         reasons.append("Ár 1h swing szint kontextusában")
     if atr_ok:
@@ -1898,7 +1922,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     elif regime_slope_signed < 0:
         atr_dir = "short"
     if (
-        bias_dir
+        asset in FX_TUNED_ASSETS
+        and bias_dir
         and structure_dir
         and atr_dir
         and bias_dir == structure_dir == atr_dir
@@ -2289,7 +2314,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     active_position_meta = {
         "ema21_slope_abs": regime_val,
         "ema21_slope_signed": regime_slope_signed,
-        "ema21_slope_threshold": regime_th,
+         "ema21_slope_threshold": regime_th,
         "ema21_relation": ema21_relation,
         "structure_5m": structure_flag,
         "atr1h": atr1h,
@@ -2366,6 +2391,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
