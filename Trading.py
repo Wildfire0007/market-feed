@@ -16,6 +16,13 @@ Környezeti változók:
   TWELVEDATA_API_KEY = "<api key>"
   OUT_DIR            = "public" (alapértelmezés)
   TD_PAUSE           = "0.3"    (kímélő szünet hívások közt, sec)
+  TD_MAX_RETRIES     = "4"      (újrapróbálkozások száma)
+  TD_BACKOFF_BASE    = "0.3"    (exponenciális visszavárás alapja)
+  TD_BACKOFF_MAX     = "8"      (exponenciális visszavárás plafonja, sec)
+  TD_REALTIME_SPOT   = "0/1"    (bekapcsolja a valós idejű spot-frissítést)
+  TD_REALTIME_INTERVAL = "5"    (realtime ciklus közötti szünet sec)
+  TD_REALTIME_DURATION = "60"   (realtime poll futási ideje sec)
+  TD_REALTIME_ASSETS = ""       (komma-szeparált lista, üres = mind)
 """
 
 import os, json, time
@@ -25,9 +32,55 @@ from typing import Any, Dict, Optional, List, Tuple
 import requests
 
 OUT_DIR  = os.getenv("OUT_DIR", "public")
-API_KEY  = os.environ["TWELVEDATA_API_KEY"].strip()
+API_KEY_RAW = os.getenv("TWELVEDATA_API_KEY", "")
+API_KEY  = API_KEY_RAW.strip() if API_KEY_RAW else ""
 TD_BASE  = "https://api.twelvedata.com"
 TD_PAUSE = float(os.getenv("TD_PAUSE", "0.3"))
+TD_PAUSE_MIN = float(os.getenv("TD_PAUSE_MIN", str(max(TD_PAUSE * 0.5, 0.1))))
+TD_PAUSE_MAX = float(os.getenv("TD_PAUSE_MAX", str(max(TD_PAUSE * 6, 3.0))))
+TD_MAX_RETRIES = int(os.getenv("TD_MAX_RETRIES", "4"))
+TD_BACKOFF_BASE = float(os.getenv("TD_BACKOFF_BASE", str(max(TD_PAUSE, 0.3))))
+TD_BACKOFF_MAX = float(os.getenv("TD_BACKOFF_MAX", "8.0"))
+REALTIME_FLAG = os.getenv("TD_REALTIME_SPOT", "").lower() in {"1", "true", "yes", "on"}
+REALTIME_INTERVAL = float(os.getenv("TD_REALTIME_INTERVAL", "5"))
+REALTIME_DURATION = float(os.getenv("TD_REALTIME_DURATION", "60"))
+REALTIME_ASSETS_ENV = os.getenv("TD_REALTIME_ASSETS", "")
+
+
+class AdaptiveRateLimiter:
+    def __init__(self, base_pause: float, min_pause: float, max_pause: float) -> None:
+        self.base = max(base_pause, 0.0)
+        self.min_pause = max(min_pause, 0.0)
+        self.max_pause = max(max_pause, self.min_pause if self.min_pause else 0.0)
+        self.current = max(self.base, self.min_pause)
+
+    @property
+    def current_delay(self) -> float:
+        return self.current
+
+    def wait(self) -> None:
+        if self.current > 0:
+            time.sleep(self.current)
+
+    def record_success(self) -> None:
+        if self.current <= 0:
+            return
+        self.current = max(self.min_pause, self.current * 0.85)
+
+    def record_failure(self, throttled: bool = False) -> None:
+        growth = 1.6 if throttled else 1.3
+        baseline = self.base if self.base > 0 else 0.3
+        self.current = min(self.max_pause, max(self.current, baseline) * growth)
+
+    def backoff_seconds(self, attempt: int, retry_after: Optional[float] = None) -> float:
+        baseline = self.base if self.base > 0 else TD_BACKOFF_BASE
+        wait = baseline * (2 ** max(attempt - 1, 0))
+        if retry_after is not None:
+            wait = max(wait, retry_after)
+        return min(wait, TD_BACKOFF_MAX)
+
+
+TD_RATE_LIMITER = AdaptiveRateLimiter(TD_PAUSE, TD_PAUSE_MIN, TD_PAUSE_MAX)
 
 # ───────────────────────────────── ASSETS ────────────────────────────────␊
 # GER40 helyett USOIL. A fő ticker a WTI/USD, de adunk több fallbackot.␊
@@ -79,20 +132,66 @@ def save_json(path: str, obj: Dict[str, Any]) -> None:
         json.dump(obj, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
+def _parse_retry_after(value: Optional[str]) -> Optional[float]:
+    if not value:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
 def td_get(path: str, **params) -> Dict[str, Any]:
+    if not API_KEY:
+        raise RuntimeError("TWELVEDATA_API_KEY hiányzik")
     params["apikey"] = API_KEY
-    r = requests.get(
-        f"{TD_BASE}/{path}",
-        params=params,
-        timeout=30,
-        headers={"User-Agent": "market-feed/td-only/1.0"},
-    )
-    r.raise_for_status()
-    data = r.json()
-    if isinstance(data, dict) and data.get("status") == "error":
-        # a hívó oldalon hibatűrően kezeljük
-        raise RuntimeError(data.get("message", "TD error"))
-    return data
+    last_error: Optional[Exception] = None
+    last_status: Optional[int] = None
+    for attempt in range(1, TD_MAX_RETRIES + 1):
+        TD_RATE_LIMITER.wait()
+        response: Optional[requests.Response] = None
+        try:
+            response = requests.get(
+                f"{TD_BASE}/{path}",
+                params=params,
+                timeout=30,
+                headers={"User-Agent": "market-feed/td-only/1.0"},
+            )
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, dict) and data.get("status") == "error":
+                message = data.get("message", "TD error")
+                err = RuntimeError(message)
+                last_error = err
+                last_status = response.status_code if response is not None else None
+                throttled = "limit" in message.lower()
+                TD_RATE_LIMITER.record_failure(throttled=throttled)
+                if attempt == TD_MAX_RETRIES:
+                    raise err
+            else:
+                TD_RATE_LIMITER.record_success()
+                return data
+        except requests.HTTPError as exc:
+            last_error = exc
+            last_status = exc.response.status_code if exc.response else None
+            TD_RATE_LIMITER.record_failure(throttled=last_status in {429, 503})
+            if attempt == TD_MAX_RETRIES:
+                raise
+        except (requests.RequestException, ValueError, json.JSONDecodeError) as exc:
+            last_error = exc
+            last_status = None
+            TD_RATE_LIMITER.record_failure()
+            if attempt == TD_MAX_RETRIES:
+                raise RuntimeError(f"TD request failed: {exc}") from exc
+
+        retry_after: Optional[float] = None
+        if response is not None:
+            retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+        backoff = TD_RATE_LIMITER.backoff_seconds(attempt, retry_after=retry_after)
+        time.sleep(backoff)
+
+    status_str = f" status={last_status}" if last_status else ""
+    raise RuntimeError(f"TD request failed after {TD_MAX_RETRIES} attempts{status_str}: {last_error}")
 
 def _iso_from_td_ts(ts: Any) -> Optional[str]:
     """TD időbélyeg ISO-UTC-re (kezeli a 'YYYY-MM-DD HH:MM:SS' és epoch sec formátumot)."""
@@ -263,7 +362,8 @@ def try_symbols(attempts: List[Tuple[str, Optional[str]]], fetch_fn):
                 return r
         except Exception as e:
             last = {"ok": False, "error": str(e)}
-        time.sleep(TD_PAUSE * 0.5)
+        delay = max(TD_RATE_LIMITER.current_delay * 0.5, 0.1)
+        time.sleep(delay)
     return last or {"ok": False}
 
 # ───────────────────── 5m EMA9–EMA21 (előzetes jelzés) ───────────────────
@@ -387,6 +487,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
