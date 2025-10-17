@@ -18,7 +18,11 @@ if str(ROOT) not in sys.path:
 
 import analysis
 
-ASSETS: Iterable[str] = getattr(analysis, "ASSETS", ("EURUSD", "NSDQ100", "GOLD_CFD", "USDJPY", "USOIL"))
+ASSETS: Iterable[str] = getattr(
+    analysis,
+    "ASSETS",
+    ("EURUSD", "GOLD_CFD", "USDJPY", "USOIL", "NVDA", "SRTY"),
+)
 PUBLIC_DIR = os.getenv("PUBLIC_DIR", getattr(analysis, "PUBLIC_DIR", "public"))
 REPORT_DIR = os.getenv("REPORT_DIR", "reports")
 
