@@ -15,9 +15,12 @@ import requests
 
 PUBLIC_DIR = "public"
 ASSETS = {
-    "EURUSD": {"symbol": "EUR/USD"},
-    "NSDQ100": {"symbol": "QQQ"},
+    "EURUSD": {"symbol": "EUR/USD", "exchange": "FX"},
+    "USDJPY": {"symbol": "USD/JPY", "exchange": "FX"},
     "GOLD_CFD": {"symbol": "XAU/USD"},
+    "USOIL": {"symbol": "WTI/USD"},
+    "NVDA": {"symbol": "NVDA", "exchange": "NASDAQ"},
+    "SRTY": {"symbol": "SRTY", "exchange": "NYSEARCA"},
 }
 
 INTERVALS = ["5min", "1h", "4h"]
@@ -63,8 +66,12 @@ def main():
     print("== Twelve Data live probe ==")
     for asset, meta in ASSETS.items():
         sym = meta["symbol"]
+        exchange = meta.get("exchange")
         # Quote
-        q = td_get("quote", {"symbol": sym})
+        q_params = {"symbol": sym}
+        if exchange:
+            q_params["exchange"] = exchange
+        q = td_get("quote", q_params)
         q_price = None
         q_ts = "-"
         if isinstance(q, dict):
@@ -79,7 +86,10 @@ def main():
         # Time series timestamps
         ts_info: List[str] = []
         for iv in INTERVALS:
-            ts = td_get("time_series", {"symbol": sym, "interval": iv, "outputsize": 1, "dp": 6})
+            ts_params = {"symbol": sym, "interval": iv, "outputsize": 1, "dp": 6}
+            if exchange:
+                ts_params["exchange"] = exchange
+            ts = td_get("time_series", ts_params)
             if isinstance(ts, dict) and isinstance(ts.get("values"), list) and ts["values"]:
                 ts_info.append(f"{iv}:{ts['values'][0].get('datetime', '-')}")
             else:
