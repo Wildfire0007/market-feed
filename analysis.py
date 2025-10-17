@@ -2339,7 +2339,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         hi5, lo5 = last_swing_levels(k5_sw)
 
         entry = price_for_calc
-       if decision_side == "buy":
+        if decision_side == "buy":
             base_sl = lo5 if lo5 is not None else (entry - atr5_val)
             sl = base_sl - buf
             risk = entry - sl
@@ -2700,6 +2700,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
