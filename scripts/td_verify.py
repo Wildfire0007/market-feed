@@ -9,7 +9,7 @@ Twelve Data ellenőrző szonda.
 
 import os, json, sys, time
 from datetime import datetime, timezone
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple, List, Optional
 
 import requests
 
@@ -19,8 +19,26 @@ ASSETS = {
     "USDJPY": {"symbol": "USD/JPY", "exchange": "FX"},
     "GOLD_CFD": {"symbol": "XAU/USD"},
     "USOIL": {"symbol": "WTI/USD"},
-    "NVDA": {"symbol": "NVDA", "exchange": "NASDAQ"},
-    "SRTY": {"symbol": "SRTY", "exchange": "NYSEARCA"},
+    "NVDA": {
+        "symbol": "NVDA",
+        "exchange": "NASDAQ",
+        "alt": [
+            {"symbol": "NVDA", "exchange": None},
+            "NVDA:US",
+        ],
+    },
+    "SRTY": {
+        "symbol": "SRTY",
+        "exchange": "NYSEARCA",
+        "alt": [
+            {"symbol": "SRTY", "exchange": None},
+            {"symbol": "SRTY", "exchange": "NYSE"},
+            {"symbol": "SRTY", "exchange": "ARCA"},
+            {"symbol": "SRTY", "exchange": "NSE"},
+            "SRTY:US",
+            "SRTY:NSE",
+        ],
+    },
 }
 
 INTERVALS = ["5min", "1h", "4h"]
@@ -62,47 +80,97 @@ def bps_diff(a: float, b: float) -> str:
     except Exception:
         return "—"
 
+def _normalize_attempts(meta: Dict[str, Any]) -> List[Tuple[str, Optional[str]]]:
+    base_symbol = meta["symbol"]
+    base_exchange = meta.get("exchange")
+    attempts: List[Tuple[str, Optional[str]]] = []
+
+    def push(symbol: Optional[str], exchange: Optional[str]) -> None:
+        if symbol:
+            attempts.append((symbol, exchange))
+
+    push(base_symbol, base_exchange)
+    for alt in meta.get("alt", []):
+        if isinstance(alt, str):
+            push(alt, base_exchange)
+        elif isinstance(alt, dict):
+            push(alt.get("symbol", base_symbol), alt.get("exchange", base_exchange))
+        elif isinstance(alt, (list, tuple)) and alt:
+            symbol = alt[0]
+            exchange = alt[1] if len(alt) > 1 else base_exchange
+            push(symbol, exchange)
+
+    seen = set()
+    uniq: List[Tuple[str, Optional[str]]] = []
+    for sym, exch in attempts:
+        key = (sym, exch)
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append((sym, exch))
+    return uniq
+
+
+def fetch_attempt(sym: str, exchange: Optional[str]) -> Tuple[Optional[float], str, List[str]]:
+    q_params = {"symbol": sym}
+    if exchange:
+        q_params["exchange"] = exchange
+    q = td_get("quote", q_params)
+    q_price = None
+    q_ts = "-"
+    if isinstance(q, dict):
+        q_price = q.get("price")
+        q_ts = q.get("timestamp") or q.get("datetime") or "-"
+        try:
+            if q_price is not None:
+                q_price = float(q_price)
+        except Exception:
+            q_price = None
+
+    ts_info: List[str] = []
+    for iv in INTERVALS:
+        ts_params = {"symbol": sym, "interval": iv, "outputsize": 1, "dp": 6}
+        if exchange:
+            ts_params["exchange"] = exchange
+        ts = td_get("time_series", ts_params)
+        if isinstance(ts, dict) and isinstance(ts.get("values"), list) and ts["values"]:
+            ts_info.append(f"{iv}:{ts['values'][0].get('datetime', '-')}")
+        else:
+            ts_info.append(f"{iv}:n/a")
+
+    return q_price, q_ts, ts_info
+
+
 def main():
     print("== Twelve Data live probe ==")
     for asset, meta in ASSETS.items():
-        sym = meta["symbol"]
-        exchange = meta.get("exchange")
-        # Quote
-        q_params = {"symbol": sym}
-        if exchange:
-            q_params["exchange"] = exchange
-        q = td_get("quote", q_params)
-        q_price = None
-        q_ts = "-"
-        if isinstance(q, dict):
-            q_price = q.get("price")
-            q_ts = q.get("timestamp") or q.get("datetime") or "-"
-            try:
-                if q_price is not None:
-                    q_price = float(q_price)
-            except Exception:
-                q_price = None
+        attempts = _normalize_attempts(meta)
+        chosen_index = 0
+        chosen_payload: Tuple[Optional[float], str, List[str]] = (None, "-", ["n/a"] * len(INTERVALS))
+        chosen_meta: Tuple[str, Optional[str]] = (attempts[0][0], attempts[0][1])
 
-        # Time series timestamps
-        ts_info: List[str] = []
-        for iv in INTERVALS:
-            ts_params = {"symbol": sym, "interval": iv, "outputsize": 1, "dp": 6}
-            if exchange:
-                ts_params["exchange"] = exchange
-            ts = td_get("time_series", ts_params)
-            if isinstance(ts, dict) and isinstance(ts.get("values"), list) and ts["values"]:
-                ts_info.append(f"{iv}:{ts['values'][0].get('datetime', '-')}")
-            else:
-                ts_info.append(f"{iv}:n/a")
+        for idx, (sym, exchange) in enumerate(attempts, start=1):
+            payload = fetch_attempt(sym, exchange)
+            price, _, ts_info = payload
+            chosen_index = idx
+            chosen_payload = payload
+            chosen_meta = (sym, exchange)
+            has_series = any(part != f"{iv}:n/a" for part, iv in zip(ts_info, INTERVALS))
+            if price is not None or has_series:
+                break
+            time.sleep(0.2)
 
-        # Local spot
+        price, q_ts, ts_info = chosen_payload
+        sym, exchange = chosen_meta
+        exch_str = exchange or "default"
+        attempt_label = f"{sym} @ {exch_str}" if exchange else sym
+
         l_price, l_utc = load_local_spot(asset)
 
-        print(f"-- {asset} ({sym})")
-        print(f"TD quote:   price={q_price}  utc={q_ts}")
+        print(f"-- {asset} (attempt {chosen_index}: {attempt_label})")
+        print(f"TD quote:   price={price}  utc={q_ts}")
         print(f"TD series:  {', '.join(ts_info)}")
-        print(f"Local spot: price={l_price}  utc={l_utc}  (diff={bps_diff(l_price, q_price)})")
-        print()
+        print(f"Local spot: price={l_price}  utc={l_utc}  (diff={bps_diff(l_price, price)})")
 
 if __name__ == "__main__":
     main()
