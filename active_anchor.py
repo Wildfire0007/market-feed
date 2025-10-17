@@ -54,11 +54,14 @@ def load_anchor_state(path: str = ANCHOR_STATE_PATH) -> Dict[str, Dict[str, Any]
     for key, value in raw.items():
         if not isinstance(value, dict):
             continue
-        record = {
+        record: Dict[str, Any] = {
             "side": str(value.get("side") or "").lower(),
             "price": value.get("price"),
             "timestamp": value.get("timestamp"),
         }
+        for extra_key, extra_value in value.items():
+            if extra_key not in record:
+                record[extra_key] = extra_value
         if not record["side"]:
             continue
         norm[key.upper()] = record
@@ -77,6 +80,7 @@ def record_anchor(
     price: Optional[float] = None,
     timestamp: Optional[str] = None,
     path: str = ANCHOR_STATE_PATH,
+    extras: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Frissíti az anchor állapotot (ha újabb jel érkezett)."""
 
@@ -108,6 +112,8 @@ def record_anchor(
             "price": price,
             "timestamp": ts,
         }
+        if extras:
+            state[asset_key].update(extras)
         save_anchor_state(state, path)
 
     return state
@@ -128,10 +134,27 @@ def touch_anchor(
         return state
     return record_anchor(asset, side, price=price, timestamp=timestamp, path=path)
 
+
+def update_anchor_metrics(
+    asset: str,
+    extras: Optional[Dict[str, Any]] = None,
+    path: str = ANCHOR_STATE_PATH,
+) -> Dict[str, Dict[str, Any]]:
+    if not extras:
+        return load_anchor_state(path)
+    state = load_anchor_state(path)
+    asset_key = asset.upper()
+    if asset_key not in state:
+        return state
+    state[asset_key].update(extras)
+    save_anchor_state(state, path)
+    return state
+
 __all__ = [
     "ANCHOR_STATE_PATH",
     "load_anchor_state",
     "save_anchor_state",
     "record_anchor",
     "touch_anchor",
+    "update_anchor_metrics",
 ]
