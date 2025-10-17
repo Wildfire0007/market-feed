@@ -53,7 +53,14 @@ ASSETS = {
     "SRTY": {
         "symbol": "SRTY",
         "exchange": "NYSEARCA",
-        "alt": ["SRTY", "SRTY:US"]
+        "alt": [
+            {"symbol": "SRTY", "exchange": None},
+            {"symbol": "SRTY", "exchange": "NYSE"},
+            {"symbol": "SRTY", "exchange": "ARCA"},
+            {"symbol": "SRTY", "exchange": "NSE"},
+            "SRTY:US",
+            "SRTY:NSE",
+        ],
     },
 }
 
@@ -214,12 +221,43 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
 
 # ─────────────────────── több-szimbólumos fallback ───────────────────────
 
-def try_symbols(symbols: List[str], fetch_fn):
-    """Próbálkozik több tickerrel sorban; az első ok:true visszatér. Máskülönben az utolsó eredményt adja."""
+def _normalize_symbol_attempts(cfg: Dict[str, Any]) -> List[Tuple[str, Optional[str]]]:
+    base_symbol = cfg["symbol"]
+    base_exchange = cfg.get("exchange")
+    attempts: List[Tuple[str, Optional[str]]] = []
+
+    def push(symbol: Optional[str], exchange: Optional[str]) -> None:
+        if symbol:
+            attempts.append((symbol, exchange))
+
+    push(base_symbol, base_exchange)
+    for alt in cfg.get("alt", []):
+        if isinstance(alt, str):
+            push(alt, base_exchange)
+        elif isinstance(alt, dict):
+            push(alt.get("symbol", base_symbol), alt.get("exchange", base_exchange))
+        elif isinstance(alt, (list, tuple)) and alt:
+            symbol = alt[0]
+            exchange = alt[1] if len(alt) > 1 else base_exchange
+            push(symbol, exchange)
+
+    seen = set()
+    unique: List[Tuple[str, Optional[str]]] = []
+    for sym, exch in attempts:
+        key = (sym, exch)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((sym, exch))
+    return unique
+
+
+def try_symbols(attempts: List[Tuple[str, Optional[str]]], fetch_fn):
+    """Próbálkozik több tickerrel (szimbólum, tőzsde) sorban; az első ok:true visszatér."""
     last = None
-    for s in symbols:
+    for sym, exch in attempts:
         try:
-            r = fetch_fn(s)
+            r = fetch_fn(sym, exch)
             last = r
             if isinstance(r, dict) and r.get("ok"):
                 return r
@@ -282,31 +320,30 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     adir = os.path.join(OUT_DIR, asset)
     ensure_dir(adir)
 
-    symbols = [cfg["symbol"]] + list(cfg.get("alt", []))
-    exch = cfg.get("exchange")
+    attempts = _normalize_symbol_attempts(cfg)
 
     # 1) Spot (quote → 5m close fallback), több tickerrel
-    spot = try_symbols(symbols, lambda s: td_spot_with_fallback(s, exch))
+    spot = try_symbols(attempts, lambda s, ex: td_spot_with_fallback(s, ex))
     save_json(os.path.join(adir, "spot.json"), spot)
     time.sleep(TD_PAUSE)
 
     # 2) OHLC (1m / 5m / 1h / 4h) – az első sikeres tickerrel
-    def ts(s: str, iv: str):
-        return td_time_series(s, iv, 500, exch, "desc")
+    def ts(s: str, ex: Optional[str], iv: str):
+        return td_time_series(s, iv, 500, ex, "desc")
 
-    k1m = try_symbols(symbols, lambda s: ts(s, "1min"))
+    k1m = try_symbols(attempts, lambda s, ex: ts(s, ex, "1min"))
     save_json(os.path.join(adir, "klines_1m.json"), k1m.get("raw", {"values": []}))
     time.sleep(TD_PAUSE)
 
-    k5 = try_symbols(symbols, lambda s: ts(s, "5min"))
+    k5 = try_symbols(attempts, lambda s, ex: ts(s, ex, "5min"))
     save_json(os.path.join(adir, "klines_5m.json"), k5.get("raw", {"values": []}))
     time.sleep(TD_PAUSE)
 
-    k1 = try_symbols(symbols, lambda s: ts(s, "1h"))
+    k1 = try_symbols(attempts, lambda s, ex: ts(s, ex, "1h"))
     save_json(os.path.join(adir, "klines_1h.json"), k1.get("raw", {"values": []}))
     time.sleep(TD_PAUSE)
 
-    k4 = try_symbols(symbols, lambda s: ts(s, "4h"))
+    k4 = try_symbols(attempts, lambda s, ex: ts(s, ex, "4h"))
     save_json(os.path.join(adir, "klines_4h.json"), k4.get("raw", {"values": []}))
     time.sleep(TD_PAUSE)
 
@@ -350,6 +387,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
