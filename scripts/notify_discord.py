@@ -42,7 +42,7 @@ if str(_REPO_ROOT) not in sys.path:
 from active_anchor import load_anchor_state, touch_anchor
 
 PUBLIC_DIR = "public"
-ASSETS = ["EURUSD", "NSDQ100", "GOLD_CFD", "USDJPY", "USOIL"]
+ASSETS = ["EURUSD", "USDJPY", "GOLD_CFD", "USOIL", "NVDA", "SRTY"]
 
 # ---- Active position helper config ----
 TDSTATUS_PATH = f"{PUBLIC_DIR}/tdstatus.json"
@@ -180,10 +180,11 @@ except Exception as exc:  # pragma: no cover - fallback
 # ---- Megjelenés / emoji / színek ----
 EMOJI = {
     "EURUSD": "💶",
-    "NSDQ100": "📈",
-    "GOLD_CFD": "💰",
     "USDJPY": "💴",
+    "GOLD_CFD": "💰",
     "USOIL": "🛢️",
+    "NVDA": "🤖",
+    "SRTY": "📉",
 }
 COLOR = {
     "BUY":   0x2ecc71,  # zöld
