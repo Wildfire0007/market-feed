@@ -419,6 +419,48 @@ def df_last_timestamp(df: pd.DataFrame) -> Optional[datetime]:
             return ts.to_pydatetime()
     return None
 
+
+def ensure_closed_candles(df: pd.DataFrame,
+                          now: Optional[datetime] = None,
+                          tolerance_seconds: int = 5) -> pd.DataFrame:
+    """Return a dataframe that contains only candles that have already closed.
+
+    A Twelve Data time_series lekérés teljesen zárt gyertyákat ad vissza, de a
+    feldolgozás során védjük magunkat a jövőbe eső (pl. cache/proxy hiba miatti)
+    időbélyegek ellen. Ha a legutolsó gyertya timestampje a jelenhez képest
+    jövőbeni, eltávolítjuk, különben megtartjuk az összes sort.
+
+    Parameters
+    ----------
+    df: pd.DataFrame
+        Idősor, datetime index-szel.
+    now: Optional[datetime]
+        Aktuális idő (UTC). Ha nincs megadva, a rendszer idejét használjuk.
+    tolerance_seconds: int
+        Ennyi másodpercet engedünk a jövő irányába a szerverórák közti pici
+        csúszás miatt.
+    """
+
+    if df.empty:
+        return df.copy()
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    idx = df.index
+    if not isinstance(idx, pd.DatetimeIndex):
+        return df.copy()
+
+    cutoff = now + timedelta(seconds=max(tolerance_seconds, 0))
+    mask = idx <= cutoff
+
+    if mask.all():
+        return df.copy()
+
+    # Távolítsuk el a jövőbeli sorokat; ha mindet kidobtuk volna, adjunk üres df-et.
+    filtered = df.loc[mask]
+    return filtered.copy() if not filtered.empty else df.iloc[0:0].copy()
+
 def file_mtime(path: str) -> Optional[str]:
     try:
         return to_utc_iso(datetime.fromtimestamp(os.path.getmtime(path), tz=timezone.utc))
@@ -1583,10 +1625,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         spot_stale_reason = "Spot data missing"
 
     display_spot = safe_float(spot_price)
-    k1m_closed = k1m.iloc[:-1] if len(k1m) > 1 else k1m.copy()
-    k5m_closed = k5m.iloc[:-1] if len(k5m) > 1 else k5m.copy()
-    k1h_closed = k1h.iloc[:-1] if len(k1h) > 1 else k1h.copy()
-    k4h_closed = k4h.iloc[:-1] if len(k4h) > 1 else k4h.copy()
+    k1m_closed = ensure_closed_candles(k1m, now)
+    k5m_closed = ensure_closed_candles(k5m, now)
+    k1h_closed = ensure_closed_candles(k1h, now)
+    k4h_closed = ensure_closed_candles(k4h, now)
 
     last5_close: Optional[float] = None
     last5_closed_ts = df_last_timestamp(k5m_closed)
@@ -2700,6 +2742,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
