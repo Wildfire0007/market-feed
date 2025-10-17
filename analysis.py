@@ -134,6 +134,7 @@ EMA_SLOPE_TH_ASSET = {
     "NVDA": 0.0010,
     "SRTY": 0.0010,
 }
+EMA_SLOPE_SIGN_ENFORCED = {"EURUSD", "USDJPY", "GOLD_CFD", "USOIL", "NVDA", "SRTY"}
 
 # --- Asset-specifikus ATR és RR küszöbök ---
 ATR_ABS_MIN = {
@@ -171,6 +172,13 @@ ENABLE_MOMENTUM_ASSETS: set = {"NVDA", "SRTY"}
 MOMENTUM_BARS    = 7             # 5m EMA9–EMA21 legfeljebb 7 baron belüli jel
 MOMENTUM_ATR_REL = 0.0010        # alap momentum ATR küszöb (asset-specifikus felülírás)
 MOMENTUM_BOS_LB  = 15            # szerkezeti töréshez nézett ablak (bar)
+
+TF_STALE_TOLERANCE = {
+    "k1m": 90,
+    "k5m": 240,
+    "k1h": 900,
+    "k4h": 1800,
+}
 
 ANCHOR_STATE_CACHE: Optional[Dict[str, Dict[str, Any]]] = None
 
@@ -1575,6 +1583,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     tf_meta: Dict[str, Dict[str, Any]] = {}
     latency_flags: List[str] = []
     latency_flags.extend(spot_latency_notes)
+    stale_timeframes: Dict[str, bool] = {key: False for key in expected_delays}
     tf_inputs = [
         ("k1m", k1m, k1m_closed, os.path.join(outdir, "klines_1m.json")),
         ("k5m", k5m, k5m_closed, os.path.join(outdir, "klines_5m.json")),
@@ -1590,12 +1599,20 @@ def analyze(asset: str) -> Dict[str, Any]:
             expected = expected_delays.get(key, 0)
             if expected and latency_sec > expected + 240:
                 latency_flags.append(f"{key}: utolsó zárt gyertya {latency_sec//60} perc késésben van")
+            tol = TF_STALE_TOLERANCE.get(key, 0)
+            if expected and tol and latency_sec > expected + tol:
+                stale_timeframes[key] = True
+                delay_min = latency_sec // 60
+                flag_msg = f"{key}: jelzés korlátozva {delay_min} perc késés miatt"
+                if flag_msg not in latency_flags:
+                    latency_flags.append(flag_msg)
         tf_meta[key] = {
             "last_raw_utc": to_utc_iso(last_raw) if last_raw else None,
             "last_closed_utc": to_utc_iso(last_closed) if last_closed else None,
             "latency_seconds": latency_sec,
             "expected_max_delay_seconds": expected_delays.get(key),
             "source_mtime_utc": file_mtime(path),
+            "stale_for_signals": stale_timeframes.get(key, False),
         }
 
     tf_meta["spot"] = {
@@ -1699,8 +1716,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         display_spot = price_for_calc
 
     # 2) Bias 4H→1H (zárt 1h/4h)
-    bias4h = bias_from_emas(k4h_closed)
-    bias1h = bias_from_emas(k1h_closed)
+    raw_bias4h = bias_from_emas(k4h_closed)
+    raw_bias1h = bias_from_emas(k1h_closed)
+    bias4h = "neutral" if stale_timeframes.get("k4h") else raw_bias4h
+    bias1h = "neutral" if stale_timeframes.get("k1h") else raw_bias1h
     trend_bias = (
         "long"
         if (bias4h == "long" and bias1h != "short")
@@ -1725,7 +1744,10 @@ def analyze(asset: str) -> Dict[str, Any]:
     slope_threshold = EMA_SLOPE_TH_ASSET.get(asset, EMA_SLOPE_TH_DEFAULT)
     slope_sign_ok = True
     desired_bias = trend_bias if trend_bias in {"long", "short"} else bias1h
-    if asset in {"EURUSD", "USDJPY", "NVDA", "SRTY"} and desired_bias in {"long", "short"}:
+    if stale_timeframes.get("k1h"):
+        regime_ok = False
+        slope_sign_ok = False
+    if asset in EMA_SLOPE_SIGN_ENFORCED and desired_bias in {"long", "short"}:
         if desired_bias == "long":
             slope_sign_ok = regime_slope_signed >= slope_threshold
         else:
@@ -1734,10 +1756,14 @@ def analyze(asset: str) -> Dict[str, Any]:
     # 3) HTF sweep (zárt 1h/4h)
     sw1h = detect_sweep(k1h_closed, 24); sw4h = detect_sweep(k4h_closed, 24)
     swept = sw1h["sweep_high"] or sw1h["sweep_low"] or sw4h["sweep_high"] or sw4h["sweep_low"]
+    if stale_timeframes.get("k1h") or stale_timeframes.get("k4h"):
+        swept = False
 
     # 4) 5M BOS a trend irányába (zárt 5m)
     bos5m_long = detect_bos(k5m_closed, "long")
     bos5m_short = detect_bos(k5m_closed, "short")
+    if stale_timeframes.get("k5m"):
+        bos5m_long = bos5m_short = False
 
     bos1h_long = detect_bos(k1h_closed, "long")
     bos1h_short = detect_bos(k1h_closed, "short")
@@ -1754,6 +1780,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         except Exception:
             atr_abs_ok = False
     atr_ok = not (np.isnan(rel_atr) or rel_atr < atr_threshold or not atr_abs_ok)
+    if stale_timeframes.get("k5m"):
+        atr_ok = False
 
     # 6) Fib zóna (0.618–0.886) 1H swingekre, ATR(1h) alapú tűréssel — zárt 1h
     k1h_sw = find_swings(k1h_closed, lb=2)
@@ -1809,12 +1837,19 @@ def analyze(asset: str) -> Dict[str, Any]:
             ema21_relation = "below"
         else:
             ema21_relation = "at"
+    if stale_timeframes.get("k1h"):
+        ema21_dist_ok = False
+        ema21_relation = "stale"
 
     struct_retest_long  = structure_break_with_retest(k5m_closed, "long", MOMENTUM_BOS_LB)
     struct_retest_short = structure_break_with_retest(k5m_closed, "short", MOMENTUM_BOS_LB)
+    if stale_timeframes.get("k5m"):
+        struct_retest_long = struct_retest_short = False
 
     micro_bos_long = micro_bos_with_retest(k1m_closed, k5m_closed, "long")
     micro_bos_short = micro_bos_with_retest(k1m_closed, k5m_closed, "short")
+    if stale_timeframes.get("k1m") or stale_timeframes.get("k5m"):
+        micro_bos_long = micro_bos_short = False
 
     effective_bias = trend_bias
     bias_override_used = False
@@ -1849,8 +1884,13 @@ def analyze(asset: str) -> Dict[str, Any]:
         else False
     )
 
-    structure_ok_long = bool(bos5m_long or struct_retest_long)
-    structure_ok_short = bool(bos5m_short or struct_retest_short)
+    recent_break_long = broke_structure(k5m_closed, "long", MOMENTUM_BOS_LB)
+    recent_break_short = broke_structure(k5m_closed, "short", MOMENTUM_BOS_LB)
+    if stale_timeframes.get("k5m"):
+        recent_break_long = recent_break_short = False
+
+    structure_ok_long = bool((bos5m_long or struct_retest_long) and not recent_break_short)
+    structure_ok_short = bool((bos5m_short or struct_retest_short) and not recent_break_long)
     nvda_cross_long = nvda_cross_short = False
     if asset == "NVDA":
         ema9_5m = ema(k5m_closed["close"], 9)
@@ -1905,6 +1945,16 @@ def analyze(asset: str) -> Dict[str, Any]:
             reasons.append("Micro BOS megerősítés (1m szerkezet + magas ATR)")
         else:
             reasons.append("1m BOS + 5m retest — várjuk a 5m megerősítést")
+    
+    stale_penalty = 0
+    if stale_timeframes.get("k5m"):
+        stale_penalty += 25
+        reasons.append("5m adat késés — momentum pontok csökkentve")
+    if stale_timeframes.get("k1h") or stale_timeframes.get("k4h"):
+        stale_penalty += 10
+        reasons.append("HTF adat késés — trend pontok csökkentve")
+    if stale_penalty:
+        P = max(0, P - stale_penalty)
     if fib_ok:
         P += 20
         reasons.append("Fib zóna konfluencia (0.618–0.886)")
@@ -1981,22 +2031,35 @@ def analyze(asset: str) -> Dict[str, Any]:
     candidate_dir = effective_bias if effective_bias in ("long", "short") else (bias1h if bias1h in ("long", "short") else None)
     strong_momentum = False
     if candidate_dir == "long":
-        strong_momentum = bool(bos5m_long or struct_retest_long or micro_bos_long)
+        strong_momentum = bool(
+            bos5m_long
+            or (struct_retest_long and not recent_break_short)
+            or micro_bos_long
+        )
         if asset == "NVDA":
             strong_momentum = strong_momentum or nvda_cross_long
     elif candidate_dir == "short":
-        strong_momentum = bool(bos5m_short or struct_retest_short or micro_bos_short)
+        strong_momentum = bool(
+            bos5m_short
+            or (struct_retest_short and not recent_break_long)
+            or micro_bos_short
+        )
         if asset == "NVDA":
             strong_momentum = strong_momentum or nvda_cross_short
     liquidity_relaxed = False
     liquidity_ok = liquidity_ok_base
+    directional_confirmation = False
+    if candidate_dir == "long":
+        directional_confirmation = bool(bos5m_long or micro_bos_long)
+    elif candidate_dir == "short":
+        directional_confirmation = bool(bos5m_short or micro_bos_short)
     if asset != "SRTY":
         if not liquidity_ok_base and strong_momentum:
             high_atr_push = bool(
                 atr_ok and not np.isnan(rel_atr)
                 and rel_atr >= max(atr_threshold * 1.3, MOMENTUM_ATR_REL)
             )
-            if high_atr_push or P >= 65:
+            if high_atr_push and directional_confirmation:
                 liquidity_ok = True
                 liquidity_relaxed = True
 
@@ -2334,6 +2397,13 @@ def analyze(asset: str) -> Dict[str, Any]:
         "probability": int(P),
         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": (round(rr,2) if rr else None),
         "leverage": lev,
+        "stale_timeframes": dict(stale_timeframes),
+        "biases": {
+            "raw_4h": raw_bias4h,
+            "raw_1h": raw_bias1h,
+            "adjusted_4h": bias4h,
+            "adjusted_1h": bias1h,
+        },
         "gates": {
             "mode": mode,
             "required": required_list,
@@ -2364,6 +2434,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "ema21_slope_threshold": EMA_SLOPE_TH_ASSET.get(asset, EMA_SLOPE_TH_DEFAULT),
         "ema21_relation": ema21_relation,
         "structure_5m": structure_flag,
+        "stale_timeframes": dict(stale_timeframes),
         "atr1h": atr1h,
         "atr1h_trail_floor": float(invalid_buffer) if invalid_buffer is not None else None,
         "atr5": float(atr5 or 0.0) if np.isfinite(float(atr5 or 0.0)) else None,
@@ -2437,6 +2508,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
