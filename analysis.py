@@ -20,19 +20,20 @@ from active_anchor import load_anchor_state, record_anchor
 import pandas as pd
 import numpy as np
 
-# --- Elemzendő eszközök (GER40 -> USOIL) ---
-ASSETS = ["EURUSD", "NSDQ100", "GOLD_CFD", "USDJPY", "USOIL"]
+# --- Elemzendő eszközök ---
+ASSETS = ["EURUSD", "GOLD_CFD", "USDJPY", "USOIL", "NVDA", "SRTY"]
 
 MARKET_TIMEZONE = ZoneInfo("Europe/Berlin")
 
 PUBLIC_DIR = "public"
 
 LEVERAGE = {
-    "EURUSD": 30.0,
-    "NSDQ100": 20.0,
-    "GOLD_CFD": 20.0,
-    "USDJPY": 30.0,
-    "USOIL": 10.0,
+    "EURUSD": 5.0,
+    "USDJPY": 5.0,
+    "GOLD_CFD": 2.0,
+    "USOIL": 2.0,
+    "NVDA": 2.0,
+    "SRTY": 2.0,
 }
 
 MAX_RISK_PCT = 1.8
@@ -41,8 +42,10 @@ FIB_TOL = 0.02
 # --- ATR küszöbök ---
 ATR_LOW_TH_DEFAULT = 0.0007   # 0.07%
 ATR_LOW_TH_ASSET = {
-    "EURUSD": 0.0006,  # 0.06%
-    "USDJPY": 0.0006,
+    "EURUSD": 0.0005,  # 0.05%
+    "USDJPY": 0.0005,
+    "NVDA": 0.0012,
+    "SRTY": 0.0015,
 }
 GOLD_HIGH_VOL_WINDOWS = [(6, 30, 21, 30)]  # európai nyitástól US zárásig lazább
 GOLD_LOW_VOL_TH = 0.0006
@@ -58,41 +61,49 @@ MIN_STOPLOSS_PCT = 0.01
 TP_NET_MIN_DEFAULT = 0.01
 TP_NET_MIN_ASSET = {
     "EURUSD": 0.0035,
-    "USDJPY": 0.0035,
+    "USDJPY": 0.0030,
+    "GOLD_CFD": 0.0025,
+    "USOIL": 0.0030,
+    "NVDA": 0.0120,
+    "SRTY": 0.0150,
 }
 
 # --- Per-asset TP minimumok, költségek és SL pufferek ---
 TP_MIN_PCT = {        # min. TP1 távolság %-ban (entry-hez képest)
     "default": 0.0020,  # 0.20%
-    "GOLD_CFD": 0.0020, # 0.20%
-    "USOIL":    0.0020,
-    "NSDQ100":  0.0010, # 0.10%
-    "EURUSD":   0.0015, # 15 pip ~0.15%
-    "USDJPY":   0.0012, # 18 pip ~0.12%
+    "GOLD_CFD": 0.0025, # 0.25%
+    "USOIL":    0.0030, # 0.30%
+    "EURUSD":   0.0035, # 0.35%
+    "USDJPY":   0.0030, # 0.30%
+    "NVDA":     0.0120, # 1.20%
+    "SRTY":     0.0150, # 1.50%
 }
 TP_MIN_ABS = {        # min. TP1 távolság abszolútban (tick/árjegyzés miatt)
     "default": 0.50,
     "GOLD_CFD": 3.0,
     "USOIL":    0.70,
-    "NSDQ100":  10.0,
     "EURUSD":   0.0015,
-    "USDJPY":   0.18,
+    "USDJPY":   0.20,
+    "NVDA":     4.0,
+    "SRTY":     0.35,
 }
 SL_BUFFER_RULES = {
     "default": {"atr_mult": 0.2, "abs_min": 0.5},
     "GOLD_CFD": {"atr_mult": 0.2, "abs_min": 2.0},
-    "NSDQ100": {"atr_mult": 0.25, "abs_min": 10.0},
     "USOIL":    {"atr_mult": 0.25, "abs_min": 0.15},
     "EURUSD":   {"atr_mult": 0.2, "abs_min": 0.0008},
     "USDJPY":   {"atr_mult": 0.2, "abs_min": 0.10},
+    "NVDA":     {"atr_mult": 0.10, "abs_min": 2.0},
+    "SRTY":     {"atr_mult": 0.12, "abs_min": 0.25},
 }
 MIN_RISK_ABS = {
     "default": 0.5,
     "GOLD_CFD": 2.0,
     "USOIL": 0.15,
-    "NSDQ100": 8.0,
     "EURUSD": 0.0008,
     "USDJPY": 0.10,
+    "NVDA": 2.0,
+    "SRTY": 0.25,
 }
 
 ACTIVE_INVALID_BUFFER_ABS = {
@@ -102,10 +113,11 @@ ACTIVE_INVALID_BUFFER_ABS = {
 
 ASSET_COST_MODEL = {
     "GOLD_CFD": {"type": "pct", "round_trip_pct": 0.0005, "overnight_pct": 0.00035},
-    "NSDQ100": {"type": "pct", "round_trip_pct": 0.0007, "overnight_pct": 0.00040},
     "USOIL":   {"type": "pct", "round_trip_pct": 0.0008, "overnight_pct": 0.00050},
     "EURUSD":  {"type": "pip", "round_trip_pips": 1.0, "overnight_pips": 0.6},
     "USDJPY":  {"type": "pip", "round_trip_pips": 1.0, "overnight_pips": 0.7},
+    "NVDA":    {"type": "pct", "round_trip_pct": 0.0008, "overnight_pct": 0.00040},
+    "SRTY":    {"type": "pct", "round_trip_pct": 0.0010, "overnight_pct": 0.00045},
 }
 DEFAULT_COST_MODEL = {"type": "pct", "round_trip_pct": 0.0010, "overnight_pct": 0.00030}
 COST_MULT_DEFAULT = 1.5
@@ -115,17 +127,49 @@ ATR_VOL_HIGH_REL = 0.002  # 0.20% relatív ATR felett lazítjuk a költség-mult
 
 EMA_SLOPE_TH_DEFAULT = 0.0008
 EMA_SLOPE_TH_ASSET = {
-    "EURUSD": 0.0010,
-    "USDJPY": 0.0010,
-    "NSDQ100": 0.0010,
+    "EURUSD": 0.0006,
+    "USDJPY": 0.0006,
     "GOLD_CFD": 0.0008,
     "USOIL": 0.0008,
+    "NVDA": 0.0010,
+    "SRTY": 0.0010,
 }
 
-# --- Momentum override (kripto nélkül) ---
-ENABLE_MOMENTUM_ASSETS: set = set()
-MOMENTUM_BARS    = 5             # 5m EMA9–EMA21 legalább 5 bar
-MOMENTUM_ATR_REL = 0.0008        # >= 0.08% 5m relatív ATR
+# --- Asset-specifikus ATR és RR küszöbök ---
+ATR_ABS_MIN = {
+    "EURUSD": 0.00035,
+    "USDJPY": 0.20,
+    "GOLD_CFD": 1.8,
+    "USOIL": 0.25,
+    "NVDA": 4.0,
+    "SRTY": 0.35,
+}
+
+CORE_RR_MIN = {
+    "default": MIN_R_CORE,
+    "NVDA": 2.2,
+    "SRTY": 2.5,
+}
+
+MOMENTUM_RR_MIN = {
+    "default": MIN_R_MOMENTUM,
+    "NVDA": 1.6,
+    "SRTY": 1.8,
+}
+
+FX_TP_TARGETS = {
+    "EURUSD": 0.0035,
+    "USDJPY": 0.0030,
+}
+
+NVDA_EXTENDED_ATR_REL = 0.0015
+NVDA_MOMENTUM_ATR_REL = 0.0010
+SRTY_MOMENTUM_ATR_REL = 0.0010
+
+# --- Momentum override ---
+ENABLE_MOMENTUM_ASSETS: set = {"NVDA", "SRTY"}
+MOMENTUM_BARS    = 7             # 5m EMA9–EMA21 legfeljebb 7 baron belüli jel
+MOMENTUM_ATR_REL = 0.0010        # alap momentum ATR küszöb (asset-specifikus felülírás)
 MOMENTUM_BOS_LB  = 15            # szerkezeti töréshez nézett ablak (bar)
 
 ANCHOR_STATE_CACHE: Optional[Dict[str, Dict[str, Any]]] = None
@@ -137,7 +181,7 @@ def current_anchor_state() -> Dict[str, Dict[str, Any]]:
         ANCHOR_STATE_CACHE = load_anchor_state()
     return ANCHOR_STATE_CACHE
 
-P_SCORE_MIN = 50
+P_SCORE_MIN = 60
 MICRO_BOS_P_BONUS = 8
 
 # --- Rezsim és session beállítások ---
@@ -165,13 +209,6 @@ SESSION_WINDOWS_UTC: Dict[str, Dict[str, Optional[List[Tuple[int, int, int, int]
             (0, 0, 23, 59),
         ],
     },
-    # NASDAQ (QQQ) normál kereskedési ablak – DST miatt két sáv.
-    "NSDQ100": {
-        "entry": [
-            (12, 30, 19, 0),   # US cash (nyári)
-            (14, 30, 21, 0),   # US cash (téli)
-        ],
-    },
     # Arany/olaj: szűk entry, de 24/5 kitettség felügyelet (napi 1h karbantartási szünet).
     "GOLD_CFD": {
         "entry": [
@@ -191,6 +228,22 @@ SESSION_WINDOWS_UTC: Dict[str, Dict[str, Optional[List[Tuple[int, int, int, int]
             (0, 0, 23, 59),
         ],
     },
+    "NVDA": {
+        "entry": [
+            (13, 30, 20, 0),
+        ],
+        "monitor": [
+            (12, 0, 21, 30),
+        ],
+    },
+    "SRTY": {
+        "entry": [
+            (13, 30, 20, 0),
+        ],
+        "monitor": [
+            (12, 0, 21, 30),
+        ],
+    },
 }
 
 # Spot-adat elavulás küszöbök (másodperc)
@@ -198,6 +251,8 @@ SPOT_MAX_AGE_SECONDS: Dict[str, int] = {
     "default": 20 * 60,      # 20 perc
     "GOLD_CFD": 45 * 60,     # 45 perc — lazább, mert cash session
     "USOIL":    45 * 60,     # 45 perc — CME/NYMEX CFD feed esti szünettel
+    "NVDA":    15 * 60,
+    "SRTY":    15 * 60,
 }
 
 INTERVENTION_CONFIG_FILENAME = "intervention_watch_config.json"
@@ -257,9 +312,10 @@ REFRESH_TIPS = [
 SESSION_WEEKDAYS: Dict[str, Optional[List[int]]] = {
     "EURUSD": [0, 1, 2, 3, 4, 6],  # hétfő–péntek + vasárnap esti nyitás
     "USDJPY": [0, 1, 2, 3, 4, 6],
-    "NSDQ100": [0, 1, 2, 3, 4, 6],      # vasárnap esti nyitás – szombat zárva
     "GOLD_CFD": [0, 1, 2, 3, 4, 6],     # vasárnap esti nyitás – szombat zárva
     "USOIL": [0, 1, 2, 3, 4, 6],        # vasárnap esti nyitás – szombat zárva
+    "NVDA": [0, 1, 2, 3, 4],
+    "SRTY": [0, 1, 2, 3, 4],
 }
 
 
@@ -288,10 +344,15 @@ SESSION_TIME_RULES: Dict[str, Dict[str, Any]] = {
         "friday_close_minute": _min_of_day(20, 30),
         "daily_breaks": [(_min_of_day(21, 0), _min_of_day(22, 0))],
     },
-    "NSDQ100": {
+    "NVDA": {
         "sunday_open_minute": _min_of_day(22, 0),
         "friday_close_minute": _min_of_day(20, 30),
-        "daily_breaks": [(_min_of_day(21, 0), _min_of_day(0, 0))],
+        "daily_breaks": [(_min_of_day(21, 0), _min_of_day(21, 15))],
+    },
+    "SRTY": {
+        "sunday_open_minute": _min_of_day(22, 0),
+        "friday_close_minute": _min_of_day(20, 30),
+        "daily_breaks": [(_min_of_day(21, 0), _min_of_day(21, 15))],
     },
 }
 
@@ -650,8 +711,6 @@ def tp_min_pct_for(asset: str, rel_atr: float, session_flag: bool) -> float:
     base = TP_MIN_PCT.get(asset, TP_MIN_PCT["default"])
     if np.isnan(rel_atr):
         return base
-    if asset == "NSDQ100" and session_flag and rel_atr >= ATR_VOL_HIGH_REL:
-        return min(base, 0.0010)
     return base
 
 def tp_net_min_for(asset: str) -> float:
@@ -685,7 +744,7 @@ def estimate_overnight_days(asset: str, now: Optional[datetime] = None) -> int:
     wd = now.weekday()
     if asset in {"EURUSD", "USDJPY"}:
         return 3 if wd == 2 else 1   # FX: szerdai tripla díj
-    if asset in {"GOLD_CFD", "USOIL", "NSDQ100"}:
+    if asset in {"GOLD_CFD", "USOIL", "NVDA", "SRTY"}:
         return 3 if wd == 4 else 1   # hétvégi elszámolás pénteken
     return 1
 
@@ -1294,6 +1353,31 @@ def micro_bos_with_retest(k1m: pd.DataFrame, k5m: pd.DataFrame, direction: str) 
         return False
     return retest_level(k5m, direction, MOMENTUM_BOS_LB)
 
+def ema_cross_recent(short: pd.Series, long: pd.Series, bars: int = MOMENTUM_BARS, direction: str = "long") -> bool:
+    if short.empty or long.empty or len(short) < bars + 2 or len(long) < bars + 2:
+        return False
+    short = short.dropna()
+    long = long.dropna()
+    if len(short) < bars + 2 or len(long) < bars + 2:
+        return False
+    for i in range(1, bars + 1):
+        idx_now = -i
+        idx_prev = -i - 1
+        try:
+            s_now = short.iloc[idx_now]
+            s_prev = short.iloc[idx_prev]
+            l_now = long.iloc[idx_now]
+            l_prev = long.iloc[idx_prev]
+        except IndexError:
+            continue
+        if not (np.isfinite(s_now) and np.isfinite(s_prev) and np.isfinite(l_now) and np.isfinite(l_prev)):
+            continue
+        if direction == "long" and s_prev <= l_prev and s_now > l_now:
+            return True
+        if direction == "short" and s_prev >= l_prev and s_now < l_now:
+            return True
+    return False
+
 def smt_penalty(asset: str) -> Tuple[int, Optional[str]]:
     path = os.path.join(PUBLIC_DIR, asset, "smt.json")
     data = load_json(path)
@@ -1627,6 +1711,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         )
     )
 
+    if asset in {"EURUSD", "USDJPY", "NVDA", "SRTY"}:
+        if bias4h != bias1h or bias1h not in {"long", "short"}:
+            trend_bias = "neutral"
+
     # 2/b Rezsim (EMA21 meredekség 1h)
     regime_ok, regime_val, regime_slope_signed = ema_slope_ok(
         k1h_closed,
@@ -1634,6 +1722,15 @@ def analyze(asset: str) -> Dict[str, Any]:
         EMA_SLOPE_LOOKBACK,
         EMA_SLOPE_TH_ASSET.get(asset, EMA_SLOPE_TH_DEFAULT),
     )
+    slope_threshold = EMA_SLOPE_TH_ASSET.get(asset, EMA_SLOPE_TH_DEFAULT)
+    slope_sign_ok = True
+    desired_bias = trend_bias if trend_bias in {"long", "short"} else bias1h
+    if asset in {"EURUSD", "USDJPY", "NVDA", "SRTY"} and desired_bias in {"long", "short"}:
+        if desired_bias == "long":
+            slope_sign_ok = regime_slope_signed >= slope_threshold
+        else:
+            slope_sign_ok = regime_slope_signed <= -slope_threshold
+        regime_ok = regime_ok and slope_sign_ok
     # 3) HTF sweep (zárt 1h/4h)
     sw1h = detect_sweep(k1h_closed, 24); sw4h = detect_sweep(k4h_closed, 24)
     swept = sw1h["sweep_high"] or sw1h["sweep_low"] or sw4h["sweep_high"] or sw4h["sweep_low"]
@@ -1649,7 +1746,14 @@ def analyze(asset: str) -> Dict[str, Any]:
     atr5 = atr(k5m_closed).iloc[-1]
     rel_atr = float(atr5 / price_for_calc) if (atr5 and price_for_calc) else float("nan")
     atr_threshold = atr_low_threshold(asset)
-    atr_ok = not (np.isnan(rel_atr) or rel_atr < atr_threshold)
+    atr_abs_min = ATR_ABS_MIN.get(asset)
+    atr_abs_ok = True
+    if atr_abs_min is not None:
+        try:
+            atr_abs_ok = float(atr5) >= atr_abs_min
+        except Exception:
+            atr_abs_ok = False
+    atr_ok = not (np.isnan(rel_atr) or rel_atr < atr_threshold or not atr_abs_ok)
 
     # 6) Fib zóna (0.618–0.886) 1H swingekre, ATR(1h) alapú tűréssel — zárt 1h
     k1h_sw = find_swings(k1h_closed, lb=2)
@@ -1727,6 +1831,11 @@ def analyze(asset: str) -> Dict[str, Any]:
             effective_bias = override_dir
             bias_override_used = True
 
+    if asset == "SRTY" and effective_bias != "short":
+        effective_bias = "neutral"
+    if asset == "NVDA" and effective_bias == "neutral" and bias1h in {"long", "short"} and bias4h == bias1h and regime_ok:
+        effective_bias = bias1h
+
     if effective_bias == "long":
         bos5m = bos5m_long
     elif effective_bias == "short":
@@ -1739,6 +1848,28 @@ def analyze(asset: str) -> Dict[str, Any]:
         else micro_bos_short if effective_bias == "short"
         else False
     )
+
+    structure_ok_long = bool(bos5m_long or struct_retest_long)
+    structure_ok_short = bool(bos5m_short or struct_retest_short)
+    nvda_cross_long = nvda_cross_short = False
+    if asset == "NVDA":
+        ema9_5m = ema(k5m_closed["close"], 9)
+        ema21_5m = ema(k5m_closed["close"], 21)
+        nvda_cross_long = ema_cross_recent(ema9_5m, ema21_5m, bars=7, direction="long")
+        nvda_cross_short = ema_cross_recent(ema9_5m, ema21_5m, bars=7, direction="short")
+    structure_gate = False
+    if effective_bias == "long":
+        structure_gate = structure_ok_long
+        if asset == "NVDA":
+            structure_gate = structure_gate or nvda_cross_long
+    elif effective_bias == "short":
+        structure_gate = structure_ok_short
+        if asset == "NVDA":
+            structure_gate = structure_gate or nvda_cross_short
+        if asset == "SRTY":
+            structure_gate = bool(bos5m_short)
+    else:
+        structure_gate = False
 
     # 7) P-score (egyszerű súlyozás)
     P, reasons = 20, []
@@ -1762,6 +1893,12 @@ def analyze(asset: str) -> Dict[str, Any]:
     elif struct_retest_active:
         P += 12
         reasons.append("5m szerkezeti törés + retest a trend irányába")
+    elif asset == "NVDA" and (
+        (effective_bias == "long" and nvda_cross_long)
+        or (effective_bias == "short" and nvda_cross_short)
+    ):
+        P += 15
+        reasons.append("5m EMA9×21 momentum kereszt megerősítés")
     elif micro_bos_active:
         if atr_ok and not np.isnan(rel_atr) and rel_atr >= max(atr_threshold, MOMENTUM_ATR_REL):
             P += MICRO_BOS_P_BONUS
@@ -1787,6 +1924,29 @@ def analyze(asset: str) -> Dict[str, Any]:
     # --- Kapuk (liquidity = Fib zóna VAGY sweep) + session + regime ---
     session_ok_flag, session_meta = session_state(asset)
 
+    if asset == "NVDA":
+        h, m = now_utctime_hm()
+        minute = h * 60 + m
+        cash_start = _min_of_day(13, 30)
+        cash_end = _min_of_day(20, 0)
+        in_cash_session = cash_start <= minute <= cash_end
+        high_atr_for_extended_hours = (
+            not np.isnan(rel_atr)
+            and rel_atr >= NVDA_EXTENDED_ATR_REL
+            and atr_abs_ok
+        )
+        if not in_cash_session and high_atr_for_extended_hours:
+            session_ok_flag = True
+            session_meta["entry_open"] = True
+            session_meta["within_window"] = True
+            session_meta.setdefault("notes", []).append(
+                "Extended hours engedélyezve magas ATR miatt"
+            )
+        elif not in_cash_session and not high_atr_for_extended_hours:
+            session_meta.setdefault("notes", []).append(
+                "Cash sessionen kívül — ATR nem elég magas a kereskedéshez"
+            )
+
     anchor_state = current_anchor_state()
     anchor_record = anchor_state.get(asset.upper()) if isinstance(anchor_state, dict) else None
     anchor_bias = None
@@ -1800,29 +1960,45 @@ def analyze(asset: str) -> Dict[str, Any]:
             anchor_bias = "short"
         anchor_timestamp = anchor_record.get("timestamp")
         anchor_price_state = safe_float(anchor_record.get("price"))
-    liquidity_ok_base = bool(
-        fib_ok
-        or swept
-        or ema21_dist_ok
-        or (effective_bias == "long" and struct_retest_long)
-        or (effective_bias == "short" and struct_retest_short)
-    )
+    if asset in {"EURUSD", "USDJPY"}:
+        liquidity_ok_base = bool(fib_ok)
+    elif asset == "SRTY":
+        liquidity_ok_base = bool(fib_ok)
+    elif asset == "NVDA":
+        liquidity_ok_base = bool(
+            fib_ok
+            or (effective_bias == "long" and struct_retest_long)
+            or (effective_bias == "short" and struct_retest_short)
+        )
+    else:
+        liquidity_ok_base = bool(
+            fib_ok
+            or swept
+            or ema21_dist_ok
+            or (effective_bias == "long" and struct_retest_long)
+            or (effective_bias == "short" and struct_retest_short)
+        )
     candidate_dir = effective_bias if effective_bias in ("long", "short") else (bias1h if bias1h in ("long", "short") else None)
     strong_momentum = False
     if candidate_dir == "long":
         strong_momentum = bool(bos5m_long or struct_retest_long or micro_bos_long)
+        if asset == "NVDA":
+            strong_momentum = strong_momentum or nvda_cross_long
     elif candidate_dir == "short":
         strong_momentum = bool(bos5m_short or struct_retest_short or micro_bos_short)
+        if asset == "NVDA":
+            strong_momentum = strong_momentum or nvda_cross_short
     liquidity_relaxed = False
     liquidity_ok = liquidity_ok_base
-    if not liquidity_ok_base and strong_momentum:
-        high_atr_push = bool(
-            atr_ok and not np.isnan(rel_atr)
-            and rel_atr >= max(atr_threshold * 1.3, MOMENTUM_ATR_REL)
-        )
-        if high_atr_push or P >= 65:
-            liquidity_ok = True
-            liquidity_relaxed = True
+    if asset != "SRTY":
+        if not liquidity_ok_base and strong_momentum:
+            high_atr_push = bool(
+                atr_ok and not np.isnan(rel_atr)
+                and rel_atr >= max(atr_threshold * 1.3, MOMENTUM_ATR_REL)
+            )
+            if high_atr_push or P >= 65:
+                liquidity_ok = True
+                liquidity_relaxed = True
 
     p_score_min_local = P_SCORE_MIN
     if asset == "USDJPY" and intervention_band in {"HIGH", "IMMINENT"} and effective_bias == "long":
@@ -1835,14 +2011,23 @@ def analyze(asset: str) -> Dict[str, Any]:
     tp_net_pct_display = f"{tp_net_threshold * 100:.2f}".rstrip("0").rstrip(".")
     tp_net_label = f"tp1_net>=+{tp_net_pct_display}%"
 
+    core_rr_min = CORE_RR_MIN.get(asset, CORE_RR_MIN["default"])
+    momentum_rr_min = MOMENTUM_RR_MIN.get(asset, MOMENTUM_RR_MIN["default"])
+
+    liquidity_label = "liquidity(fib|sweep|ema21|retest)"
+    if asset in {"EURUSD", "USDJPY", "SRTY"}:
+        liquidity_label = "liquidity(fib zone)"
+    elif asset == "NVDA":
+        liquidity_label = "liquidity(fib|retest)"
+
     core_required = [
         "session",
         "regime",
         "bias",
         "bos5m",
-        "liquidity(fib|sweep|ema21|retest)",
+        liquidity_label,
         "atr",
-        f"rr_math>={MIN_R_CORE:.1f}",
+        f"rr_math>={core_rr_min:.1f}",
         "tp_min_profit",
         "min_stoploss",
         tp_net_label,
@@ -1852,7 +2037,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "session": bool(session_ok_flag),
         "regime":  bool(regime_ok),
         "bias":    effective_bias in ("long","short"),
-        "bos5m":   bool(bos5m or (effective_bias == "long" and struct_retest_long) or (effective_bias == "short" and struct_retest_short)),
+        "bos5m":   bool(structure_gate),
         "liquidity": liquidity_ok,
         "atr":     bool(atr_ok),
     }
@@ -1871,47 +2056,62 @@ def analyze(asset: str) -> Dict[str, Any]:
     # --- Momentum feltételek (override) — kriptókra (zárt 5m-ből) ---
     momentum_used = False
     mom_dir: Optional[str] = None
-    mom_micro_long = False
-    mom_micro_short = False
     mom_required = [
         "session",
-        "momentum(ema9x21)",
-        "bos5m|struct_break",
+        "regime",
+        "bias",
+        "momentum_trigger",
+        "bos5m",
         "atr",
-        f"rr_math>={MIN_R_MOMENTUM:.1f}",
+        f"rr_math>={momentum_rr_min:.1f}",
         "tp_min_profit",
         "min_stoploss",
         tp_net_label,
     ]
     missing_mom: List[str] = []
+    mom_trigger_desc: Optional[str] = None
 
     if asset in ENABLE_MOMENTUM_ASSETS:
-        e9_5 = ema(k5m_closed["close"], 9)
-        e21_5 = ema(k5m_closed["close"], 21)
-        bear = (e9_5 < e21_5).tail(MOMENTUM_BARS).all()
-        bull = (e9_5 > e21_5).tail(MOMENTUM_BARS).all()
-        bos_struct_short = struct_retest_short
-        bos_struct_long  = struct_retest_long
-        mom_atr_ok = not np.isnan(rel_atr) and (rel_atr >= MOMENTUM_ATR_REL)
-        mom_micro_short = bool(micro_bos_short and mom_atr_ok)
-        mom_micro_long  = bool(micro_bos_long and mom_atr_ok)
-        bos_any_short = bool(bos5m_short or bos_struct_short or mom_micro_short)
-        bos_any_long  = bool(bos5m_long or bos_struct_long or mom_micro_long)
+        direction = effective_bias if effective_bias in {"long", "short"} else None
+        if not session_ok_flag:
+            missing_mom.append("session")
+        if not regime_ok:
+            missing_mom.append("regime")
+        if direction is None:
+            missing_mom.append("bias")
 
-        if session_ok_flag:
-            if bear and bos_any_short and mom_atr_ok:
+        if asset == "NVDA" and direction is not None:
+            mom_atr_ok = not np.isnan(rel_atr) and rel_atr >= NVDA_MOMENTUM_ATR_REL and atr_abs_ok
+            cross_flag = nvda_cross_long if direction == "long" else nvda_cross_short
+            if session_ok_flag and regime_ok and mom_atr_ok and cross_flag:
+                mom_dir = "buy" if direction == "long" else "sell"
+                mom_trigger_desc = "EMA9×21 momentum cross"
+                missing_mom = []
+            else:
+                if not mom_atr_ok:
+                    missing_mom.append("atr")
+                if not cross_flag:
+                    missing_mom.append("momentum_trigger")
+        elif asset == "SRTY" and direction == "short":
+            h, m = now_utctime_hm()
+            minute = h * 60 + m
+            window_ok = _min_of_day(13, 30) <= minute <= _min_of_day(15, 0)
+            mom_atr_ok = not np.isnan(rel_atr) and rel_atr >= SRTY_MOMENTUM_ATR_REL and atr_abs_ok
+            bos_ok = bool(bos5m_short)
+            if session_ok_flag and regime_ok and mom_atr_ok and bos_ok and window_ok:
                 mom_dir = "sell"
-            elif bull and bos_any_long and mom_atr_ok:
-                mom_dir = "buy"
-
-        if mom_dir is None:
-            if not session_ok_flag: missing_mom.append("session")
-            if not (bear or bull):  missing_mom.append("momentum(ema9x21)")
-            if bear and not bos_any_short:
-                missing_mom.append("bos5m|struct_break")
-            if bull and not bos_any_long:
-                missing_mom.append("bos5m|struct_break")
-            if not mom_atr_ok: missing_mom.append("atr")
+                mom_trigger_desc = "Momentum window 13:30–15:00 UTC"
+                missing_mom = []
+            else:
+                if not window_ok:
+                    missing_mom.append("momentum_trigger")
+                if not mom_atr_ok:
+                    missing_mom.append("atr")
+                if not bos_ok:
+                    missing_mom.append("bos5m")
+        else:
+            if asset == "SRTY" and direction != "short":
+                missing_mom.append("bias")
 
     # 8) Döntés + szintek (RR/TP matek) — core vagy momentum
     decision = "no entry"
@@ -2029,7 +2229,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         mode = "core"
         required_list = list(core_required)
         if decision in ("buy", "sell"):
-            if not compute_levels(decision, MIN_R_CORE):
+            if not compute_levels(decision, core_rr_min):
                 decision = "no entry"
             elif tp1_net_pct_value is not None:
                 msg_net = f"TP1 nettó profit ≈ {tp1_net_pct_value*100:.2f}%"
@@ -2042,13 +2242,14 @@ def analyze(asset: str) -> Dict[str, Any]:
             missing = []
             momentum_used = True
             decision = mom_dir
-            if not compute_levels(decision, MIN_R_MOMENTUM):
+            if not compute_levels(decision, momentum_rr_min):
                 decision = "no entry"
             else:
-                reasons.append("Momentum override (5m EMA + ATR + BOS)")
+                reason_msg = "Momentum override"
+                if mom_trigger_desc:
+                    reason_msg += f" ({mom_trigger_desc})"
+                reasons.append(reason_msg)
                 reasons.append("Momentum: rész-realizálás javasolt 2.5R-n")
-                if (mom_dir == "buy" and mom_micro_long) or (mom_dir == "sell" and mom_micro_short):
-                    reasons.append("Momentum: micro BOS elfogadva (1m szerkezet)")
                 P = max(P, 75)
                 if tp1_net_pct_value is not None:
                     msg_net = f"TP1 nettó profit ≈ {tp1_net_pct_value*100:.2f}%"
@@ -2236,5 +2437,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
