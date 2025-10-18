@@ -8,7 +8,63 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-import requests
+try:
+    import requests
+except ModuleNotFoundError:  # pragma: no cover - exercised in CI without requests
+    import json as _json
+    from typing import Any as _Any
+    from urllib import error as _urlerror, request as _urlrequest
+    from urllib.parse import urlencode as _urlencode
+
+    class _RequestException(Exception):
+        """Fallback replacement for requests.RequestException."""
+
+
+    class _Response:
+        def __init__(self, *, status_code: int, body: bytes, headers: _Any = None) -> None:
+            self.status_code = status_code
+            self._body = body
+            self.headers = headers
+
+        @property
+        def text(self) -> str:
+            return self._body.decode("utf-8", errors="replace")
+
+        def json(self) -> _Any:
+            return _json.loads(self.text)
+
+
+    class _Session:
+        def get(
+            self,
+            url: str,
+            *,
+            params: Optional[dict] = None,
+            headers: Optional[dict] = None,
+            timeout: Optional[int] = None,
+        ) -> _Response:
+            if params:
+                query = _urlencode(params, doseq=True)
+                separator = "&" if "?" in url else "?"
+                url = f"{url}{separator}{query}"
+            req = _urlrequest.Request(url, headers=headers or {})
+            try:
+                with _urlrequest.urlopen(req, timeout=timeout) as resp:
+                    body = resp.read()
+                    return _Response(status_code=resp.getcode(), body=body, headers=resp.headers)
+            except _urlerror.HTTPError as exc:
+                body = exc.read()
+                return _Response(status_code=exc.code, body=body, headers=exc.headers)
+            except _urlerror.URLError as exc:  # pragma: no cover - network errors are rare in tests
+                raise _RequestException(str(exc)) from exc
+
+
+    class _RequestsShim:
+        Session = _Session
+        RequestException = _RequestException
+
+
+    requests = _RequestsShim()  # type: ignore[assignment]
 
 SENTIMENT_FILENAME = "news_sentiment.json"
 
