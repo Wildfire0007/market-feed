@@ -97,7 +97,7 @@ def predict_signal_probability(asset: str, features: Dict[str, Any]) -> Optional
         that the analysed setup will finish in profit.
     """
     
-     if load is None or _SKLEARN_IMPORT_ERROR is not None:
+    if load is None or _SKLEARN_IMPORT_ERROR is not None:
         global _JOBLIB_WARNING_EMITTED, _SKLEARN_WARNING_EMITTED
         if _JOBLIB_IMPORT_ERROR is not None and not _JOBLIB_WARNING_EMITTED:
             warnings.warn(
