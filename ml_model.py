@@ -165,8 +165,10 @@ def export_feature_schema() -> Path:
     path = FEATURE_LOG_DIR / "schema.json"
     payload = {
         "features": MODEL_FEATURES,
-        "notes": "Each row corresponds to a single analysis snapshot."
-        " Use the columns to assemble supervised labels offline.",
+        "notes": (
+            "Each row corresponds to a single analysis snapshot. "
+            "Use the columns to assemble supervised labels offline."
+        ),
     }
     with path.open("w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
