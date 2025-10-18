@@ -16,13 +16,30 @@ from __future__ import annotations
 
 import os
 import json
+import warnings
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 import pandas as pd
-from joblib import load
-from sklearn.ensemble import GradientBoostingClassifier
+try:  # scikit-learn might be missing on lightweight runners
+    from sklearn.ensemble import GradientBoostingClassifier
+except ModuleNotFoundError as exc:  # pragma: no cover - environment specific
+    GradientBoostingClassifier = type("GradientBoostingClassifier", (), {})
+    _SKLEARN_IMPORT_ERROR = exc
+else:
+    _SKLEARN_IMPORT_ERROR = None
+
+try:  # joblib is optional on the analysis runner
+    from joblib import load
+except ModuleNotFoundError as exc:  # pragma: no cover - environment specific
+    load = None  # type: ignore[assignment]
+    _JOBLIB_IMPORT_ERROR = exc
+else:
+    _JOBLIB_IMPORT_ERROR = None
+
+_JOBLIB_WARNING_EMITTED = False
+_SKLEARN_WARNING_EMITTED = False
 
 PUBLIC_DIR = Path(os.getenv("PUBLIC_DIR", "public"))
 MODEL_DIR = PUBLIC_DIR / "models"
@@ -79,7 +96,25 @@ def predict_signal_probability(asset: str, features: Dict[str, Any]) -> Optional
         ``None`` if no trained model is available, otherwise the probability
         that the analysed setup will finish in profit.
     """
-
+    
+     if load is None or _SKLEARN_IMPORT_ERROR is not None:
+        global _JOBLIB_WARNING_EMITTED, _SKLEARN_WARNING_EMITTED
+        if _JOBLIB_IMPORT_ERROR is not None and not _JOBLIB_WARNING_EMITTED:
+            warnings.warn(
+                "joblib is not available; skipping probability prediction. "
+                "Install joblib to enable ML scoring.",
+                RuntimeWarning,
+            )
+            _JOBLIB_WARNING_EMITTED = True
+        if _SKLEARN_IMPORT_ERROR is not None and not _SKLEARN_WARNING_EMITTED:
+            warnings.warn(
+                "scikit-learn is not available; skipping probability prediction. "
+                "Install scikit-learn to enable ML scoring.",
+                RuntimeWarning,
+            )
+            _SKLEARN_WARNING_EMITTED = True
+        return None
+    
     model_file = _model_path(asset)
     if not model_file.exists():
         return None
