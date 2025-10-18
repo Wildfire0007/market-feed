@@ -31,8 +31,26 @@ from typing import Any, Dict, Optional
 
 import dateutil.parser
 
+from usdjpy_sentiment import DEFAULT_MIN_INTERVAL, SENTIMENT_FILENAME, refresh_usdjpy_sentiment
+
 PUBLIC_DIR = Path(os.getenv("PUBLIC_DIR", "public"))
-SENTIMENT_FILENAME = "news_sentiment.json"
+
+_AUTO_REFRESH_DEFAULT = "1"
+_AUTO_REFRESH_FLAG = os.getenv("USDJPY_SENTIMENT_AUTO", _AUTO_REFRESH_DEFAULT).lower()
+AUTO_REFRESH_ENABLED = _AUTO_REFRESH_FLAG not in {"0", "false", "off", "no"}
+
+def _auto_interval(default: int) -> int:
+    raw = os.getenv("USDJPY_SENTIMENT_MIN_INTERVAL")
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(0, value)
+
+
+AUTO_REFRESH_MIN_INTERVAL = _auto_interval(DEFAULT_MIN_INTERVAL)
 
 
 @dataclass
@@ -55,6 +73,18 @@ def load_sentiment(asset: str, outdir: Optional[Path] = None) -> Optional[Sentim
     base = outdir if outdir is not None else PUBLIC_DIR / asset.upper()
     if not isinstance(base, Path):
         base = Path(base)
+
+    if AUTO_REFRESH_ENABLED:
+        try:
+            refresh_usdjpy_sentiment(
+                api_key=os.getenv("NEWSAPI_KEY", ""),
+                output_dir=base,
+                min_interval=AUTO_REFRESH_MIN_INTERVAL,
+            )
+        except Exception:
+            # Auto-refresh must never break signal loading; fall back to existing snapshot.
+            pass
+            
     path = base / SENTIMENT_FILENAME
     if not path.exists():
         return None
