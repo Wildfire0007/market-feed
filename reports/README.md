@@ -1,11 +1,15 @@
-# Intraday reports
+## Pipeline futtatási sorrend
 
-- **latest/** – mindig a legutóbbi futás
+1. **`Trading.py`** – minden eszközre szekvenciálisan lekéri a spot és OHLC adatokat. A folyamat
+   rugalmas rate-limitet és exponenciális visszavárást használ, így rövid hálózati hibák esetén
+   is stabilan elkészülnek a `public/<ASSET>/` fájlok.
+2. **`analysis.py`** – a Trading által előállított JSON-okra építve számolja a trend- és
+   momentum-jelzéseket, alkalmazza a frissített RR/TP profilokat, valamint a real-time spot feed
+   és késésgátak alapján dönti el, hogy érvényes-e a setup.
+3. **Riportok / notifier scriptek** – igény szerint futtathatók (pl. `scripts/intraday_report.py`,
+   `scripts/notify_discord.py`), amelyek a `public/` alatti legfrissebb `signal.json` állapotot
+   használják fel. Ezek csak olvasnak, ezért a Trading → Analysis sorrend teljes lefutása után
+   indítsuk őket.
 
-## Strategy implementation notes
-
-A stratégiák minden döntési logikája az `analysis.py`-ben található. A `Trading.py` kizárólag
-az adatgyűjtést és az előzetes (EMA-alapú) jelzést végzi, így az új thresholdok és
-momentum/likviditási módosítások életbe lépéséhez további módosítás a `Trading.py`-ben nem
-szükséges. Amint a frissített `analysis.py` fut, automatikusan az új feltételek alapján készíti
-el a `public/<ASSET>/signal.json` és a kapcsolódó riportokat.
+A pipeline így garantálja, hogy az elemző modul mindig a legfrissebb, validált adatállapotot
+dolgozza fel, és a későbbi riportolás már az elemzett kimenetekre támaszkodik.
