@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 from active_anchor import load_anchor_state, record_anchor, update_anchor_metrics
 from ml_model import log_feature_snapshot, predict_signal_probability
-from news_feed import load_sentiment
+from news_feed import SentimentSignal, load_sentiment
 
 import pandas as pd
 import numpy as np
@@ -303,6 +303,9 @@ INTERVENTION_WATCH_DEFAULT: Dict[str, Any] = {
             "wick_ratio_trigger": 0.55,
             "vr_threshold": 1.4,
             "atr_spike_ratio": 1.6,
+            "sentiment_min_abs": 0.15,
+            "sentiment_weight_positive": 6.0,
+            "sentiment_weight_negative": 4.0,
             "irs_bands": {
                 "LOW": [0, 39],
                 "ELEVATED": [40, 59],
@@ -923,12 +926,40 @@ def intervention_band(score: int, bands: Dict[str, List[int]]) -> str:
     return "LOW"
 
 
+def _normalize_usdjpy_sentiment(signal: SentimentSignal) -> float:
+    bias = (signal.bias or "").lower()
+    direction = 1.0
+    if "usd" in bias:
+        if any(flag in bias for flag in ("bearish", "weak", "dovish")):
+            direction = -1.0
+    elif "jpy" in bias:
+        if any(flag in bias for flag in ("bullish", "strong", "hawkish")):
+            direction = -1.0
+    return signal.score * direction
+
+
+def _sentiment_points_usdjpy(
+    signal: Optional[SentimentSignal], cfg: Dict[str, Any]
+) -> Tuple[Optional[float], float]:
+    if signal is None:
+        return None, 0.0
+    normalized = _normalize_usdjpy_sentiment(signal)
+    threshold = float(cfg.get("sentiment_min_abs", 0.15) or 0.0)
+    if abs(normalized) < threshold:
+        return normalized, 0.0
+    weight_pos = float(cfg.get("sentiment_weight_positive", 6.0) or 0.0)
+    weight_neg = float(cfg.get("sentiment_weight_negative", 4.0) or 0.0)
+    weight = weight_pos if normalized >= 0 else weight_neg
+    return normalized, normalized * weight
+
+
 def compute_irs_usdjpy(
     df_1m: pd.DataFrame,
     df_5m: pd.DataFrame,
     now_utc: datetime,
     config: Dict[str, Any],
     news_flag: int = 0,
+    sentiment_signal: Optional[SentimentSignal] = None,
 ) -> Tuple[int, str, Dict[str, Any]]:
     cfg = config.get("intervention_watch", config)
     metrics: Dict[str, Any] = {
@@ -942,6 +973,9 @@ def compute_irs_usdjpy(
         "rv_ratio": None,
         "session_points": 0,
         "comms_points": 0,
+        "comms_from_flag": 0,
+        "comms_from_sentiment": 0,
+        "sentiment_score": None,
         "components": {},
     }
 
@@ -1058,7 +1092,12 @@ def compute_irs_usdjpy(
             session_points += 3
     session_points = min(10.0, session_points)
 
-    comms = max(0, min(10, int(news_flag or 0)))
+    base_comms = max(0.0, min(10.0, float(news_flag or 0)))
+    sentiment_norm, sentiment_points = _sentiment_points_usdjpy(sentiment_signal, cfg)
+    applied_sentiment = 0.0
+    if sentiment_points:
+        applied_sentiment = max(-base_comms, min(sentiment_points, 10.0 - base_comms))
+    comms = max(0.0, min(10.0, base_comms + applied_sentiment))
 
     total_score = lps + speed_score + vol_spike + session_points + comms
     irs = int(round(max(0.0, min(100.0, total_score))))
@@ -1076,6 +1115,9 @@ def compute_irs_usdjpy(
             "rv_ratio": rv_ratio,
             "session_points": session_points,
             "comms_points": comms,
+            "comms_from_flag": base_comms,
+            "comms_from_sentiment": applied_sentiment,
+            "sentiment_score": sentiment_norm,
             "components": {
                 "level_pressure": lps,
                 "speed": speed_score,
@@ -1189,9 +1231,13 @@ def build_intervention_reasons(
     elif session_pts and session_pts > 0:
         reasons.append("US afternoon window")
 
-    comms_pts = metrics.get("comms_points")
-    if comms_pts:
-        reasons.append(f"Comms/news flag +{int(comms_pts)}")
+    comms_flag = safe_float(metrics.get("comms_from_flag"))
+    if comms_flag:
+        reasons.append(f"Manual news flag +{int(round(comms_flag))}")
+    sentiment_pts = safe_float(metrics.get("comms_from_sentiment"))
+    if sentiment_pts:
+        sign = "+" if sentiment_pts > 0 else ""
+        reasons.append(f"Sentiment {sign}{sentiment_pts:.1f}")
 
     return reasons
 
@@ -1832,15 +1878,19 @@ def analyze(asset: str) -> Dict[str, Any]:
     intervention_summary: Optional[Dict[str, Any]] = None
     intervention_band: Optional[str] = None
     sentiment_signal = None
+    sentiment_applied_points: Optional[float] = None
+    sentiment_normalized: Optional[float] = None
     if asset == "USDJPY":
         intervention_config = load_intervention_config(outdir)
         news_flag = load_intervention_news_flag(outdir, intervention_config)
+        sentiment_signal = load_sentiment(asset, Path(outdir))
         irs_value, irs_band, irs_metrics = compute_irs_usdjpy(
             k1m_closed,
             k5m_closed,
             analysis_now,
             intervention_config,
             news_flag=news_flag,
+            sentiment_signal=sentiment_signal,
         )
         since_utc = update_intervention_state(outdir, irs_band, analysis_now)
         iw_reasons = build_intervention_reasons(irs_metrics, intervention_config)
@@ -1863,8 +1913,22 @@ def analyze(asset: str) -> Dict[str, Any]:
             "score_breakdown": score_breakdown,
             "news_flag": news_flag,
         }
+        sentiment_applied_points = irs_metrics.get("comms_from_sentiment", 0.0)
+        sentiment_normalized = irs_metrics.get("sentiment_score")
         intervention_band = irs_band
-        sentiment_signal = load_sentiment(asset, Path(outdir))
+        if sentiment_signal:
+            intervention_summary["sentiment"] = {
+                "score": sentiment_signal.score,
+                "bias": sentiment_signal.bias,
+                "headline": sentiment_signal.headline,
+                "expires_at": (
+                    sentiment_signal.expires_at.isoformat()
+                    if sentiment_signal.expires_at
+                    else None
+                ),
+                "applied_points": sentiment_applied_points,
+                "normalized_score": irs_metrics.get("sentiment_score"),
+            }
         save_intervention_asset_summary(outdir, intervention_summary)
 
     expected_delays = {"k1m": 60, "k5m": 300, "k1h": 3600, "k4h": 4*3600}
@@ -2909,10 +2973,19 @@ def analyze(asset: str) -> Dict[str, Any]:
     decision_obj["dynamic_tp_profile"] = dynamic_tp_profile
     decision_obj["order_flow_metrics"] = order_flow_metrics
     if sentiment_signal:
-        decision_obj["news_sentiment"] = {
+        sentiment_payload = {
             "score": sentiment_signal.score,
             "bias": sentiment_signal.bias,
         }
+        if sentiment_signal.headline:
+            sentiment_payload["headline"] = sentiment_signal.headline
+        if sentiment_signal.expires_at:
+            sentiment_payload["expires_at"] = sentiment_signal.expires_at.isoformat()
+        if sentiment_applied_points is not None:
+            sentiment_payload["applied_points"] = sentiment_applied_points
+        if sentiment_normalized is not None:
+            sentiment_payload["normalized_score"] = sentiment_normalized
+        decision_obj["news_sentiment"] = sentiment_payload
     if momentum_trailing_plan:
         decision_obj["momentum_trailing_plan"] = momentum_trailing_plan
     decision_obj["invalid_levels"] = {
@@ -3063,6 +3136,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
