@@ -14,6 +14,24 @@ el a `public/<ASSET>/signal.json` és a kapcsolódó riportokat.
 
 ### Automatikus frissítés scripts/update_usdjpy_sentiment.py-vel
 
+#### Beépített automatikus futtatás
+
+Amint `analysis.py` USDJPY eszközhöz fut, a `news_feed.load_sentiment()` automatikusan meghívja a
+NewsAPI-alapú lekérdező modult. Ha a `NEWSAPI_KEY` környezeti változó be van állítva és a
+`USDJPY_SENTIMENT_AUTO` nincs kikapcsolva (`0`/`false`), a rendszer:
+
+1. ellenőrzi, hogy a meglévő `news_sentiment.json` snapshot lejárt-e, vagy régebbi, mint a
+   `USDJPY_SENTIMENT_MIN_INTERVAL` (alapértelmezés: 600 s),
+2. szükség esetén lekéri a legfrissebb címeket a NewsAPI-ról, kiszámolja a kulcsszavas
+   sentiment-átlagot, majd frissíti a fájlt új `expires_at` időbélyeggel.
+
+Így a pipeline futtatása önmagában elegendő a makro hangulatfolyam naprakészen tartásához – nincs
+szükség kézi szerkesztésre, ha a kulcs és az internetkapcsolat rendelkezésre áll. A folyamat
+hibatűrő: hálózati vagy API-hiba esetén a meglévő snapshot marad érvényben, az elemzés pedig a
+legutóbbi érvényes sentimenttel dolgozik tovább.
+
+#### Kézi script futtatása (opcionális)
+
 1. **API-kulcs beállítása.** Szerezz NewsAPI.org (vagy kompatibilis) kulcsot, majd add ki a
    `export NEWSAPI_KEY="<kulcs>"` parancsot. A script az `os.getenv`-en keresztül tölti be a
    titkot, így hiányzó kulcs esetén biztonságosan kilép.
@@ -39,6 +57,20 @@ el a `public/<ASSET>/signal.json` és a kapcsolódó riportokat.
    tolódik ki, így a `news_feed.py` nem dolgozik lejárt sentimenttel.
 4. **Eredmény validálása.** A terminálon megjelenik az új score/bias páros; opcionálisan nézd meg
    a fájlt, hogy a headline releváns-e. A pipeline következő `analysis.py` futása már ezt használja.
+
+#### Hogyan tedd automatává
+
+- **Ütemezett futtatás.** A scriptet futtathatod cronból vagy bármelyik schedulerből (pl. systemd
+  timer). Példa cron bejegyzés, ami 15 percenként frissít, ha elérhető új hír::
+
+      */15 * * * * NEWSAPI_KEY=... /usr/bin/python /path/to/repo/scripts/update_usdjpy_sentiment.py --expires-minutes 60 >> /var/log/usdjpy_sentiment.log 2>&1
+
+- **Hibafigyelés.** A script nem írja felül a meglévő fájlt, ha nincs találat; ilyenkor kilép
+  hiba nélkül (exit code 3) és a korábbi sentiment marad érvényben egészen a lejáratig.
+- **Kézi override kompatibilitás.** Ha az automata futás közben manuálisan kell módosítanod a
+  sentimentet (például mert egy headline-at másképp értékelsz), egyszerűen szerkeszd a
+  `news_sentiment.json` fájlt; a következő automatikus futás csak akkor írja felül, ha új
+  releváns cikket talál.
 
 ### Manuális override
 
