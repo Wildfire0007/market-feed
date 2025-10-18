@@ -35,7 +35,9 @@ from usdjpy_sentiment import DEFAULT_MIN_INTERVAL, SENTIMENT_FILENAME, refresh_u
 
 PUBLIC_DIR = Path(os.getenv("PUBLIC_DIR", "public"))
 
-_AUTO_REFRESH_DEFAULT = "1"
+# Disable automatic sentiment refresh by default; operators can opt-in via
+# ``USDJPY_SENTIMENT_AUTO=1`` when a live news API is available.
+_AUTO_REFRESH_DEFAULT = "0"
 _AUTO_REFRESH_FLAG = os.getenv("USDJPY_SENTIMENT_AUTO", _AUTO_REFRESH_DEFAULT).lower()
 AUTO_REFRESH_ENABLED = _AUTO_REFRESH_FLAG not in {"0", "false", "off", "no"}
 
