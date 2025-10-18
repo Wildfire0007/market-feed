@@ -23,6 +23,14 @@ ANCHOR_STATE_PATH = os.path.join(PUBLIC_DIR, "_active_anchor.json")
 def _ensure_dir(path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
 
 def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
     if not ts:
@@ -107,13 +115,22 @@ def record_anchor(
         should_update = True
 
     if should_update:
-        state[asset_key] = {
+        payload: Dict[str, Any] = {
             "side": side_norm,
             "price": price,
             "timestamp": ts,
         }
         if extras:
-            state[asset_key].update(extras)
+            payload.update(extras)
+        payload.setdefault("entry_price", payload.get("price"))
+        payload.setdefault("trail_log", [])
+        payload.setdefault("partial_exits", [])
+        payload.setdefault("max_favorable_excursion", 0.0)
+        payload.setdefault("max_adverse_excursion", 0.0)
+        if payload.get("initial_risk_abs") is None and extras and extras.get("initial_risk_abs") is not None:
+            payload["initial_risk_abs"] = extras.get("initial_risk_abs")
+        payload["last_update"] = ts
+        state[asset_key] = payload
         save_anchor_state(state, path)
 
     return state
@@ -146,7 +163,42 @@ def update_anchor_metrics(
     asset_key = asset.upper()
     if asset_key not in state:
         return state
-    state[asset_key].update(extras)
+    record = state[asset_key]
+    record.update(extras)
+
+    entry_price = _safe_float(record.get("entry_price") or record.get("price"))
+    current_price = _safe_float(extras.get("current_price") or extras.get("spot_price"))
+    side = (record.get("side") or "").lower()
+    risk_abs = _safe_float(record.get("initial_risk_abs"))
+    timestamp = extras.get("analysis_timestamp") or _utc_now_iso()
+
+    if entry_price is not None and current_price is not None and side in {"buy", "sell"}:
+        diff = current_price - entry_price if side == "buy" else entry_price - current_price
+        record["current_pnl_abs"] = diff
+        if risk_abs and risk_abs > 0:
+            record["current_pnl_r"] = diff / risk_abs
+        max_fav = _safe_float(record.get("max_favorable_excursion")) or 0.0
+        max_adv = _safe_float(record.get("max_adverse_excursion")) or 0.0
+        if diff > max_fav:
+            record["max_favorable_excursion"] = diff
+        if diff < -max_adv:
+            record["max_adverse_excursion"] = -diff
+        trail_entry = {
+            "timestamp": timestamp,
+            "price": current_price,
+            "pnl_abs": diff,
+            "pnl_r": record.get("current_pnl_r"),
+            "p_score": extras.get("p_score", record.get("p_score")),
+        }
+        trail_log = record.get("trail_log")
+        if not isinstance(trail_log, list):
+            trail_log = []
+        trail_log.append(trail_entry)
+        if len(trail_log) > 100:
+            trail_log = trail_log[-100:]
+        record["trail_log"] = trail_log
+
+    record["last_update"] = timestamp
     save_anchor_state(state, path)
     return state
 
