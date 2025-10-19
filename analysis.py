@@ -8,7 +8,7 @@ Kimenet:
   public/analysis.html            — egyszerű HTML kivonat
 """
 
-import os, json
+import os, json, sys
 from copy import deepcopy
 from datetime import datetime, timezone, timedelta
 from datetime import time as dtime
@@ -18,7 +18,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from active_anchor import load_anchor_state, record_anchor, update_anchor_metrics
-from ml_model import log_feature_snapshot, predict_signal_probability
+from ml_model import (
+    log_feature_snapshot,
+    missing_model_artifacts,
+    predict_signal_probability,
+)
 from news_feed import SentimentSignal, load_sentiment
 
 try:  # Optional monitoring utilities; keep analysis resilient if absent.
@@ -3697,6 +3701,7 @@ def analyze(asset: str) -> Dict[str, Any]:
 # ------------------------------- főfolyamat ------------------------------------
 
 def main():
+    missing_models = missing_model_artifacts(ASSETS)
     summary = {
         "ok": True,
         "generated_utc": nowiso(),
@@ -3704,6 +3709,18 @@ def main():
         "latency_flags": [],
         "troubleshooting": list(REFRESH_TIPS),
     }
+    if missing_models:
+        summary["ml_models_missing"] = {
+            asset: str(path) for asset, path in missing_models.items()
+        }
+        missing_list = ", ".join(sorted(missing_models))
+        warning = (
+            "Hiányzó ML modellek: "
+            f"{missing_list} – töltsd fel a public/models/<asset>_gbm.pkl fájlokat "
+            "a valószínűségi score aktiválásához."
+        )
+        summary["troubleshooting"].append(warning)
+        print(f"[analysis] WARN: {warning}", file=sys.stderr)
     for asset in ASSETS:
         try:
             res = analyze(asset)
@@ -3735,3 +3752,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
