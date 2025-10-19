@@ -31,6 +31,11 @@ from typing import Any, Dict, Optional, List, Tuple
 
 import requests
 
+try:
+    import websocket  # type: ignore[import]
+except Exception:  # pragma: no cover - optional dependency
+    websocket = None
+
 OUT_DIR  = os.getenv("OUT_DIR", "public")
 API_KEY_RAW = os.getenv("TWELVEDATA_API_KEY", "")
 API_KEY  = API_KEY_RAW.strip() if API_KEY_RAW else ""
@@ -45,6 +50,13 @@ REALTIME_FLAG = os.getenv("TD_REALTIME_SPOT", "").lower() in {"1", "true", "yes"
 REALTIME_INTERVAL = float(os.getenv("TD_REALTIME_INTERVAL", "5"))
 REALTIME_DURATION = float(os.getenv("TD_REALTIME_DURATION", "60"))
 REALTIME_ASSETS_ENV = os.getenv("TD_REALTIME_ASSETS", "")
+REALTIME_WS_URL = os.getenv("TD_REALTIME_WS_URL", "")
+REALTIME_WS_SUBSCRIBE = os.getenv("TD_REALTIME_WS_SUBSCRIBE", "")
+REALTIME_WS_PRICE_FIELD = os.getenv("TD_REALTIME_WS_PRICE_FIELD", "price")
+REALTIME_WS_TS_FIELD = os.getenv("TD_REALTIME_WS_TS_FIELD", "timestamp")
+REALTIME_WS_MAX_SAMPLES = int(os.getenv("TD_REALTIME_WS_MAX_SAMPLES", "120"))
+REALTIME_WS_TIMEOUT = float(os.getenv("TD_REALTIME_WS_TIMEOUT", str(max(REALTIME_DURATION, 30.0))))
+REALTIME_WS_ENABLED = bool(REALTIME_WS_URL and websocket is not None)
 
 
 class AdaptiveRateLimiter:
@@ -212,6 +224,15 @@ def _iso_from_td_ts(ts: Any) -> Optional[str]:
                 return ts
     return None
 
+
+def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
 def td_time_series(symbol: str, interval: str, outputsize: int = 500,
                    exchange: Optional[str] = None, order: str = "desc") -> Dict[str, Any]:
     """Hibatűrő time_series (hiba esetén ok:false + üres values)."""
@@ -317,6 +338,232 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
         "price_usd": price,
         "utc": utc or now_utc(),
     }
+
+
+def _extract_field(payload: Any, path: str) -> Optional[Any]:
+    if not path:
+        return None
+    current = payload
+    for segment in path.split('.'):
+        if segment == "":
+            continue
+        while '[' in segment:
+            bracket = segment.find('[')
+            attr = segment[:bracket]
+            remainder = segment[bracket + 1:]
+            if attr:
+                if not isinstance(current, dict):
+                    return None
+                current = current.get(attr)
+            if not isinstance(current, (list, tuple)):
+                return None
+            end = remainder.find(']')
+            if end == -1:
+                return None
+            index_str = remainder[:end]
+            try:
+                index = int(index_str)
+            except ValueError:
+                return None
+            if index >= len(current) or index < -len(current):
+                return None
+            current = current[index]
+            segment = remainder[end + 1:]
+            if not segment:
+                break
+        if segment:
+            if not isinstance(current, dict):
+                return None
+            current = current.get(segment)
+        if current is None:
+            return None
+    return current
+
+
+def _collect_http_frames(
+    symbol_cycle: List[Tuple[str, Optional[str]]],
+    deadline: float,
+    interval: float,
+) -> List[Dict[str, Any]]:
+    frames: List[Dict[str, Any]] = []
+    while time.time() < deadline:
+        for symbol, exchange in symbol_cycle:
+            try:
+                quote = td_quote(symbol, exchange)
+            except Exception:
+                continue
+            price = quote.get("price")
+            if price is None:
+                continue
+            utc_ts = quote.get("utc") or quote.get("retrieved_at_utc") or now_utc()
+            retrieved = now_utc()
+            latency: Optional[float] = None
+            parsed_spot = _parse_iso_utc(utc_ts)
+            parsed_retrieved = _parse_iso_utc(retrieved)
+            if parsed_spot and parsed_retrieved:
+                latency = max(0.0, (parsed_retrieved - parsed_spot).total_seconds())
+            frames.append(
+                {
+                    "price": price,
+                    "utc": utc_ts,
+                    "retrieved_at_utc": retrieved,
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "latency_seconds": latency,
+                }
+            )
+            break
+        time.sleep(interval)
+    return frames
+
+
+def _collect_ws_frames(
+    asset: str,
+    symbol_cycle: List[Tuple[str, Optional[str]]],
+    deadline: float,
+) -> List[Dict[str, Any]]:
+    if not REALTIME_WS_ENABLED:
+        return []
+    symbol = symbol_cycle[0][0] if symbol_cycle else asset
+    exchange = symbol_cycle[0][1] if symbol_cycle else None
+    frames: List[Dict[str, Any]] = []
+    timeout = max(1.0, min(REALTIME_WS_TIMEOUT, 300.0))
+    try:
+        ws = websocket.create_connection(REALTIME_WS_URL, timeout=timeout)
+    except Exception:
+        return []
+    try:
+        subscribe = REALTIME_WS_SUBSCRIBE.strip()
+        if subscribe:
+            try:
+                ws.send(subscribe.format(asset=asset, symbol=symbol, exchange=exchange or ""))
+            except Exception:
+                pass
+        ws.settimeout(max(1.0, min(REALTIME_INTERVAL, 15.0)))
+        while time.time() < deadline and len(frames) < REALTIME_WS_MAX_SAMPLES:
+            try:
+                raw = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                continue
+            except Exception:
+                break
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                continue
+            price_val = _extract_field(payload, REALTIME_WS_PRICE_FIELD)
+            if price_val is None:
+                continue
+            try:
+                price = float(price_val)
+            except (TypeError, ValueError):
+                continue
+            ts_val = _extract_field(payload, REALTIME_WS_TS_FIELD)
+            utc_ts: Optional[str] = None
+            if ts_val is not None:
+                if isinstance(ts_val, (int, float)):
+                    try:
+                        utc_ts = datetime.fromtimestamp(float(ts_val), timezone.utc).replace(microsecond=0).isoformat()
+                    except Exception:
+                        utc_ts = None
+                else:
+                    utc_ts = str(ts_val)
+            retrieved = now_utc()
+            latency: Optional[float] = None
+            parsed_spot = _parse_iso_utc(utc_ts) if utc_ts else None
+            parsed_retrieved = _parse_iso_utc(retrieved)
+            if parsed_spot and parsed_retrieved:
+                latency = max(0.0, (parsed_retrieved - parsed_spot).total_seconds())
+            frames.append(
+                {
+                    "price": price,
+                    "utc": utc_ts or retrieved,
+                    "retrieved_at_utc": retrieved,
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "latency_seconds": latency,
+                    "raw": payload,
+                }
+            )
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+    return frames
+
+
+def collect_realtime_spot(
+    asset: str,
+    attempts: List[Tuple[str, Optional[str]]],
+    out_dir: str,
+) -> None:
+    if not REALTIME_FLAG:
+        return
+    allowed_assets = {
+        a.strip().upper()
+        for a in REALTIME_ASSETS_ENV.split(",")
+        if a.strip()
+    }
+    if allowed_assets and asset.upper() not in allowed_assets:
+        return
+
+    ensure_dir(out_dir)
+    symbol_cycle = list(attempts) if attempts else []
+    if not symbol_cycle:
+        return
+
+    interval = max(0.5, REALTIME_INTERVAL)
+    frames: List[Dict[str, Any]] = []
+    transport: Optional[str] = None
+
+    deadline = time.time() + max(REALTIME_DURATION, REALTIME_INTERVAL)
+    if REALTIME_WS_ENABLED:
+        frames = _collect_ws_frames(asset, symbol_cycle, deadline)
+        if frames:
+            transport = "websocket"
+
+    if not frames:
+        deadline_http = time.time() + max(REALTIME_DURATION, REALTIME_INTERVAL)
+        frames = _collect_http_frames(symbol_cycle, deadline_http, interval)
+        if frames:
+            transport = "http"
+
+    if not frames:
+        return
+
+    prices = [float(frame["price"]) for frame in frames if frame.get("price") is not None]
+    latencies = [float(lat) for lat in (frame.get("latency_seconds") for frame in frames) if lat is not None]
+    stats: Dict[str, Any] = {
+        "samples": len(frames),
+        "min_price": min(prices) if prices else None,
+        "max_price": max(prices) if prices else None,
+        "mean_price": sum(prices) / len(prices) if prices else None,
+        "latency_avg": sum(latencies) / len(latencies) if latencies else None,
+        "latency_max": max(latencies) if latencies else None,
+    }
+    if latencies:
+        lat_sorted = sorted(latencies)
+        stats["latency_median"] = lat_sorted[len(lat_sorted) // 2]
+        stats["latency_latest"] = frames[-1].get("latency_seconds")
+
+    last_frame = frames[-1]
+    payload = {
+        "asset": asset,
+        "ok": True,
+        "transport": transport or ("websocket" if REALTIME_WS_ENABLED else "http"),
+        "retrieved_at_utc": last_frame.get("retrieved_at_utc") or now_utc(),
+        "price": last_frame.get("price"),
+        "utc": last_frame.get("utc"),
+        "frames": frames,
+        "statistics": stats,
+        "source": "websocket" if transport == "websocket" else "rest",
+    }
+    if transport == "websocket" and isinstance(last_frame.get("raw"), dict):
+        payload["raw_last_frame"] = last_frame["raw"]
+    save_json(os.path.join(out_dir, "spot_realtime.json"), payload)
 
 # ─────────────────────── több-szimbólumos fallback ───────────────────────
 
@@ -425,6 +672,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     # 1) Spot (quote → 5m close fallback), több tickerrel
     spot = try_symbols(attempts, lambda s, ex: td_spot_with_fallback(s, ex))
     save_json(os.path.join(adir, "spot.json"), spot)
+    collect_realtime_spot(asset, attempts, adir)
     time.sleep(TD_PAUSE)
 
     # 2) OHLC (1m / 5m / 1h / 4h) – az első sikeres tickerrel
@@ -487,6 +735,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
