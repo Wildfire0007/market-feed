@@ -21,6 +21,24 @@ from active_anchor import load_anchor_state, record_anchor, update_anchor_metric
 from ml_model import log_feature_snapshot, predict_signal_probability
 from news_feed import SentimentSignal, load_sentiment
 
+try:  # Optional monitoring utilities; keep analysis resilient if absent.
+    from reports.trade_journal import record_signal_event
+except Exception:  # pragma: no cover - optional dependency guard
+    def record_signal_event(*_args, **_kwargs):
+        return None
+
+try:
+    from reports.monitoring import update_signal_health_report
+except Exception:  # pragma: no cover - optional dependency guard
+    def update_signal_health_report(*_args, **_kwargs):
+        return None
+
+try:
+    from reports.backtester import update_live_validation
+except Exception:  # pragma: no cover - optional dependency guard
+    def update_live_validation(*_args, **_kwargs):
+        return None
+
 try:
     from volatility_metrics import load_volatility_overlay
 except Exception:  # pragma: no cover - optional helper
@@ -3670,6 +3688,11 @@ def analyze(asset: str) -> Dict[str, Any]:
         except Exception:
             pass
     save_json(os.path.join(outdir, "signal.json"), decision_obj)
+    try:
+        record_signal_event(asset, decision_obj)
+    except Exception:
+        # Journaling issues should not break signal generation.
+        pass
     return decision_obj
 # ------------------------------- főfolyamat ------------------------------------
 
@@ -3699,16 +3722,16 @@ def main():
     with open(os.path.join(PUBLIC_DIR, "analysis.html"), "w", encoding="utf-8") as f:
         f.write(html)
 
+    try:
+        update_signal_health_report(Path(PUBLIC_DIR), summary)
+    except Exception:
+        pass
+
+    reports_dir = Path(os.getenv("REPORTS_DIR", "reports"))
+    try:
+        update_live_validation(Path(PUBLIC_DIR), reports_dir)
+    except Exception:
+        pass
+
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
