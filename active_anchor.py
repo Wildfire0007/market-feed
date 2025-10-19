@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
+from statistics import mean
 from typing import Any, Dict, Optional
 
 PUBLIC_DIR = os.getenv("PUBLIC_DIR", "public")
@@ -198,7 +199,34 @@ def update_anchor_metrics(
             trail_log = trail_log[-100:]
         record["trail_log"] = trail_log
 
+        pnl_series = [
+            _safe_float(entry.get("pnl_r"))
+            for entry in trail_log
+            if _safe_float(entry.get("pnl_r")) is not None
+        ]
+        pnl_series = [float(x) for x in pnl_series if x is not None]
+        drift_score = None
+        drift_state = None
+        if len(pnl_series) >= 6:
+            mid = len(pnl_series) // 2
+            first_mean = mean(pnl_series[:mid]) if mid else None
+            last_mean = mean(pnl_series[mid:]) if mid else None
+            if first_mean is not None and last_mean is not None:
+                drift_score = float(last_mean - first_mean)
+                if drift_score < -0.25:
+                    drift_state = "deteriorating"
+                elif drift_score > 0.25:
+                    drift_state = "improving"
+                else:
+                    drift_state = "stable"
+        if drift_state:
+            record["drift_state"] = drift_state
+        if drift_score is not None:
+            record["drift_score"] = drift_score
+        record["drift_last_check"] = timestamp
+
     record["last_update"] = timestamp
+    state[asset_key] = record
     save_anchor_state(state, path)
     return state
 
