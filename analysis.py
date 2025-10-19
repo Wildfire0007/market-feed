@@ -12,6 +12,7 @@ import os, json
 from copy import deepcopy
 from datetime import datetime, timezone, timedelta
 from datetime import time as dtime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -19,6 +20,12 @@ from zoneinfo import ZoneInfo
 from active_anchor import load_anchor_state, record_anchor, update_anchor_metrics
 from ml_model import log_feature_snapshot, predict_signal_probability
 from news_feed import SentimentSignal, load_sentiment
+
+try:
+    from volatility_metrics import load_volatility_overlay
+except Exception:  # pragma: no cover - optional helper
+    def load_volatility_overlay(asset: str, outdir: Path, k1m: Optional[Any] = None) -> Dict[str, Any]:
+        return {}
 
 import pandas as pd
 import numpy as np
@@ -54,6 +61,14 @@ GOLD_HIGH_VOL_WINDOWS = [(6, 30, 21, 30)]  # európai nyitástól US zárásig l
 GOLD_LOW_VOL_TH = 0.0006
 SMT_PENALTY_VALUE = 7
 SMT_REQUIRED_BARS = 2
+SMT_AUTO_CONFIG: Dict[str, Dict[str, Any]] = {
+    "EURUSD": {"reference": "DXY", "relationship": "inverse", "min_bars": 3, "threshold": 0.00015},
+    "USDJPY": {"reference": "DXY", "relationship": "direct", "min_bars": 3, "threshold": 0.00015},
+    "GOLD_CFD": {"reference": "DXY", "relationship": "inverse", "min_bars": 3, "threshold": 0.0002},
+    "USOIL": {"reference": "BRENT", "relationship": "direct", "min_bars": 3, "threshold": 0.00025},
+    "NVDA": {"reference": "QQQ", "relationship": "direct", "min_bars": 2, "threshold": 0.0025},
+    "SRTY": {"reference": "SPY", "relationship": "inverse", "min_bars": 2, "threshold": 0.0015},
+}
 
 # --- Kereskedési/egz. küszöbök (RR/TP) ---
 MIN_R_CORE      = 2.0
@@ -950,7 +965,8 @@ def _sentiment_points_usdjpy(
     weight_pos = float(cfg.get("sentiment_weight_positive", 6.0) or 0.0)
     weight_neg = float(cfg.get("sentiment_weight_negative", 4.0) or 0.0)
     weight = weight_pos if normalized >= 0 else weight_neg
-    return normalized, normalized * weight
+    severity = signal.effective_severity
+    return normalized, normalized * weight * severity
 
 
 def compute_irs_usdjpy(
@@ -1420,6 +1436,25 @@ def as_df_klines(raw: Any) -> pd.DataFrame:
     df = pd.DataFrame(rows).sort_values("time").set_index("time")
     cols = ["open", "high", "low", "close", "volume"]
     return df[cols]
+
+
+def load_tick_order_flow(asset: str, outdir: str) -> Dict[str, Any]:
+    path = os.path.join(outdir, "order_flow_ticks.json")
+    data = load_json(path)
+    if not isinstance(data, dict):
+        return {}
+    metrics: Dict[str, Any] = {}
+    for key in ("delta", "aggressor_ratio", "volume_buy", "volume_sell", "imbalance", "pressure"):
+        value = data.get(key)
+        try:
+            metrics[key] = float(value)
+        except (TypeError, ValueError):
+            continue
+    window = data.get("window_minutes")
+    if isinstance(window, (int, float)):
+        metrics["window_minutes"] = int(window)
+    metrics["source"] = path
+    return metrics
   
 # --- TA: EMA/RSI/ATR, swingek, sweep, BOS, Fib zóna ----------------------------
 
@@ -1461,12 +1496,28 @@ def volume_ratio(df: pd.DataFrame, recent: int, baseline: int) -> Optional[float
     return float(recent_mean / baseline_mean)
 
 
-def compute_order_flow_metrics(k1m: pd.DataFrame, k5m: pd.DataFrame) -> Dict[str, Optional[float]]:
+def compute_order_flow_metrics(
+    k1m: pd.DataFrame,
+    k5m: pd.DataFrame,
+    tick_metrics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Optional[float]]:
     metrics: Dict[str, Optional[float]] = {
         "imbalance": None,
         "pressure": None,
         "delta_volume": None,
+        "aggressor_ratio": None,
     }
+    if tick_metrics:
+        for key in ("imbalance", "pressure", "delta", "delta_volume", "aggressor_ratio"):
+            if key in tick_metrics and tick_metrics.get(key) is not None:
+                mapped_key = "delta_volume" if key in {"delta", "delta_volume"} else key
+                try:
+                    metrics[mapped_key] = float(tick_metrics[key])
+                except (TypeError, ValueError):
+                    continue
+    if tick_metrics and metrics.get("imbalance") is not None and metrics.get("pressure") is not None:
+        return metrics
+
     if k1m.empty or "volume" not in k1m.columns or len(k1m) < ORDER_FLOW_LOOKBACK_MIN:
         return metrics
 
@@ -1494,6 +1545,92 @@ def compute_order_flow_metrics(k1m: pd.DataFrame, k5m: pd.DataFrame) -> Dict[str
             metrics["pressure"] = float(rel * (metrics["pressure"] or 0.0))
 
     return metrics
+
+
+@lru_cache(maxsize=16)
+def _load_reference_dataframe(reference: str) -> pd.DataFrame:
+    base = Path(PUBLIC_DIR)
+    ref_key = reference.upper()
+    candidates = [
+        base / ref_key / "klines_5m.json",
+        base / ref_key / "klines_1m.json",
+        base / "correlation" / f"{ref_key}_klines_5m.json",
+        base / "correlation" / f"{ref_key}.json",
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        data = load_json(str(path))
+        if not data:
+            continue
+        df = as_df_klines(data)
+        if df.empty or "close" not in df.columns:
+            continue
+        close = df["close"].astype(float)
+        if close.empty:
+            continue
+        if len(close) >= 10:
+            deltas = close.index.to_series().diff().dropna()
+            if not deltas.empty and deltas.median() <= pd.Timedelta(minutes=1, seconds=30):
+                close = close.resample("5T").last().dropna()
+        return close.to_frame(name="close")
+    return pd.DataFrame(columns=["close"])
+
+
+def _auto_smt_penalty(asset: str, k5m: pd.DataFrame) -> Tuple[int, Optional[str]]:
+    cfg = SMT_AUTO_CONFIG.get(asset.upper())
+    if not cfg:
+        return 0, None
+    if k5m.empty or "close" not in k5m.columns:
+        return 0, None
+    reference = cfg.get("reference")
+    if not reference:
+        return 0, None
+    ref_df = _load_reference_dataframe(str(reference))
+    if ref_df.empty or "close" not in ref_df.columns:
+        return 0, None
+
+    asset_returns = k5m["close"].astype(float).pct_change()
+    ref_returns = ref_df["close"].astype(float).pct_change()
+    combined = pd.concat(
+        [asset_returns.rename("asset"), ref_returns.rename("reference")],
+        axis=1,
+        join="inner",
+    ).dropna()
+    if combined.empty:
+        return 0, None
+    window = int(cfg.get("window", max(SMT_REQUIRED_BARS * 3, 6)))
+    combined = combined.tail(window)
+    threshold = abs(float(cfg.get("threshold", 0.0) or 0.0))
+    min_bars = max(int(cfg.get("min_bars", SMT_REQUIRED_BARS)), 1)
+    relationship = str(cfg.get("relationship", "direct")).lower()
+
+    diverging = 0
+    considered = 0
+    last_significant_direction = None
+    for _, row in combined.iterrows():
+        a_ret = float(row["asset"])
+        r_ret = float(row["reference"])
+        if not np.isfinite(a_ret) or not np.isfinite(r_ret):
+            continue
+        if abs(a_ret) < threshold and abs(r_ret) < threshold:
+            continue
+        considered += 1
+        sign_asset = np.sign(a_ret)
+        sign_ref = np.sign(r_ret)
+        if relationship == "inverse":
+            diverge_now = sign_asset == sign_ref and sign_asset != 0 and sign_ref != 0
+        else:
+            diverge_now = sign_asset != sign_ref and sign_asset != 0 and sign_ref != 0
+        if diverge_now:
+            diverging += 1
+            last_significant_direction = "bullish" if sign_asset > 0 else "bearish"
+    if considered >= min_bars and diverging >= min_bars:
+        direction = last_significant_direction or "divergence"
+        note = f"SMT divergencia auto ({reference}, {direction})"
+        return SMT_PENALTY_VALUE, note
+    return 0, None
+
 
 def find_swings(df: pd.DataFrame, lb: int = 2) -> pd.DataFrame:
     if df.empty: return df
@@ -1784,9 +1921,16 @@ def ema_cross_recent(short: pd.Series, long: pd.Series, bars: int = MOMENTUM_BAR
             return True
     return False
 
-def smt_penalty(asset: str) -> Tuple[int, Optional[str]]:
-    path = os.path.join(PUBLIC_DIR, asset, "smt.json")
-    data = load_json(path)
+def smt_penalty(asset: str, k5m: pd.DataFrame) -> Tuple[int, Optional[str]]:
+    auto_penalty, auto_note = _auto_smt_penalty(asset, k5m)
+    if auto_penalty:
+        return auto_penalty, auto_note
+
+    primary = os.path.join(PUBLIC_DIR, asset, "smt.json")
+    data = load_json(primary)
+    if not data:
+        alt = os.path.join(PUBLIC_DIR, "correlation", f"{asset.upper()}_smt.json")
+        data = load_json(alt)
     if not data:
         return 0, None
     diverging = bool(data.get("divergence"))
@@ -1922,6 +2066,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     avg_delay: float = float(latency_profile.get("ema_delay", 0.0) or 0.0)
     spot = load_json(os.path.join(outdir, "spot.json")) or {}
     spot_realtime = load_json(os.path.join(outdir, "spot_realtime.json")) or {}
+    realtime_stats = spot_realtime.get("statistics") if isinstance(spot_realtime, dict) else {}
     k1m_raw = load_json(os.path.join(outdir, "klines_1m.json"))
     k5m_raw = load_json(os.path.join(outdir, "klines_5m.json"))
     k1h_raw = load_json(os.path.join(outdir, "klines_1h.json"))
@@ -1936,6 +2081,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     realtime_used = False
     realtime_reason: Optional[str] = None
     realtime_confidence: float = 1.0
+    realtime_transport = str(spot_realtime.get("transport") or "http").lower() if isinstance(spot_realtime, dict) else "http"
     if spot:
         spot_price = spot.get("price") if spot.get("price") is not None else spot.get("price_usd")
         spot_utc = spot.get("utc") or spot.get("timestamp") or "-"
@@ -1986,6 +2132,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     avg_delay = float(latency_profile.get("ema_delay", spot_latency_sec or avg_delay) or 0.0)
     if realtime_used:
         base_conf = 0.75 if avg_delay else 0.8
+        if realtime_transport == "websocket":
+            base_conf = 0.9 if avg_delay else 0.95
         if avg_delay and spot_latency_sec is not None:
             base_conf = spot_latency_sec / max(avg_delay, 1.0)
         realtime_confidence = float(min(1.0, max(0.2, base_conf)))
@@ -1996,13 +2144,25 @@ def analyze(asset: str) -> Dict[str, Any]:
         else:
             realtime_confidence = 1.0
 
+    if isinstance(realtime_stats, dict):
+        latency_avg = realtime_stats.get("latency_avg")
+        samples = realtime_stats.get("samples")
+        latency_limit = 90.0 if realtime_transport == "websocket" else 120.0
+        if isinstance(latency_avg, (int, float)) and latency_avg >= 0:
+            realtime_confidence = float(
+                min(realtime_confidence, max(0.2, 1.0 - float(latency_avg) / latency_limit))
+            )
+        if realtime_transport == "websocket" and isinstance(samples, (int, float)) and samples >= 5:
+            realtime_confidence = float(min(1.0, realtime_confidence + 0.05))
+
     display_spot = safe_float(spot_price)
     k1m_closed = ensure_closed_candles(k1m, now)
     k5m_closed = ensure_closed_candles(k5m, now)
     k1h_closed = ensure_closed_candles(k1h, now)
     k4h_closed = ensure_closed_candles(k4h, now)
 
-    order_flow_metrics = compute_order_flow_metrics(k1m_closed, k5m_closed)
+    tick_order_flow = load_tick_order_flow(asset, outdir)
+    order_flow_metrics = compute_order_flow_metrics(k1m_closed, k5m_closed, tick_order_flow)
 
     last5_close: Optional[float] = None
     last5_closed_ts = df_last_timestamp(k5m_closed)
@@ -2103,6 +2263,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                     if sentiment_signal.expires_at
                     else None
                 ),
+                "severity": sentiment_signal.effective_severity,
                 "applied_points": sentiment_applied_points,
                 "normalized_score": irs_metrics.get("sentiment_score"),
             }
@@ -2331,6 +2492,31 @@ def analyze(asset: str) -> Dict[str, Any]:
     atr5 = atr_series_5.iloc[-1]
     rel_atr = float(atr5 / price_for_calc) if (atr5 and price_for_calc) else float("nan")
     atr_threshold = atr_low_threshold(asset)
+    volatility_overlay: Dict[str, Any] = {}
+    atr_overlay_gate = True
+    try:
+        volatility_overlay = load_volatility_overlay(asset, Path(outdir), k1m_closed)
+    except Exception:
+        volatility_overlay = {}
+    overlay_ratio = volatility_overlay.get("implied_realised_ratio")
+    overlay_regime = (volatility_overlay.get("regime") or "").lower()
+    if overlay_ratio is not None:
+        try:
+            overlay_ratio = float(overlay_ratio)
+        except Exception:
+            overlay_ratio = None
+    if overlay_ratio is not None and overlay_ratio > 1.35:
+        # Implied volatility is significantly above realised volatility –
+        # demand a healthier intraday ATR and widen TP projections.
+        atr_threshold *= 1.05
+        if np.isnan(rel_atr) or rel_atr < atr_threshold:
+            atr_overlay_gate = False
+    if overlay_regime in {"suppressed", "compressed", "discount"}:
+        # realised vol is muted – require momentum confirmation later.
+        if np.isnan(rel_atr) or rel_atr < atr_threshold * 1.05:
+            atr_overlay_gate = False
+    if overlay_regime in {"implied_elevated", "implied_extreme"}:
+        atr_threshold *= 0.95
     atr_abs_min = ATR_ABS_MIN.get(asset)
     atr_abs_ok = True
     if atr_abs_min is not None:
@@ -2339,6 +2525,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         except Exception:
             atr_abs_ok = False
     atr_ok = not (np.isnan(rel_atr) or rel_atr < atr_threshold or not atr_abs_ok)
+    if not atr_overlay_gate:
+        atr_ok = False
     if stale_timeframes.get("k5m"):
         atr_ok = False
 
@@ -2349,6 +2537,23 @@ def analyze(asset: str) -> Dict[str, Any]:
         float(rel_atr) if not np.isnan(rel_atr) else float("nan"),
         price_for_calc,
     )
+    volatility_adjustments: List[str] = []
+    if volatility_overlay:
+        try:
+            core_profile = dynamic_tp_profile.setdefault("core", {})
+            mom_profile = dynamic_tp_profile.setdefault("momentum", {})
+            if overlay_ratio is not None and overlay_ratio > 1.35:
+                core_profile["tp1"] = float(core_profile.get("tp1", TP1_R) * 1.08)
+                core_profile["tp2"] = float(core_profile.get("tp2", TP2_R) * 1.1)
+                mom_profile["tp1"] = float(mom_profile.get("tp1", TP1_R_MOMENTUM) * 1.05)
+                mom_profile["tp2"] = float(mom_profile.get("tp2", TP2_R_MOMENTUM) * 1.08)
+                volatility_adjustments.append("Implied/realised vol prémium miatt TP szélesítés")
+            if overlay_regime in {"suppressed", "compressed"}:
+                core_profile["rr"] = float(core_profile.get("rr", CORE_RR_MIN.get(asset, MIN_R_CORE)) * 1.05)
+                mom_profile["rr"] = float(mom_profile.get("rr", MOMENTUM_RR_MIN.get(asset, MIN_R_MOMENTUM)) * 1.05)
+                volatility_adjustments.append("Alacsony realised vol → magasabb RR igény")
+        except Exception:
+            pass
     realtime_jump_flag = False
     if (
         realtime_used
@@ -2555,6 +2760,11 @@ def analyze(asset: str) -> Dict[str, Any]:
         reasons.append("ATR nincs rendben (relatív vagy abszolút küszöb)")
         P -= 8.0
 
+    if volatility_adjustments:
+        for note in volatility_adjustments:
+            if note not in reasons:
+                reasons.append(note)
+
     if fib_ok:
         fib_points = 18.0
         P += fib_points
@@ -2587,6 +2797,18 @@ def analyze(asset: str) -> Dict[str, Any]:
             P -= 4.0
             reasons.append("Order flow ellentétes irányba tolódik (−4)")
 
+    aggressor_ratio = order_flow_metrics.get("aggressor_ratio")
+    if aggressor_ratio is not None and effective_bias in {"long", "short"}:
+        if effective_bias == "long" and aggressor_ratio > 0.6:
+            P += 4.0
+            reasons.append("Aggresszív vevők dominálnak (+4)")
+        elif effective_bias == "short" and aggressor_ratio < -0.6:
+            P += 4.0
+            reasons.append("Aggresszív eladók dominálnak (+4)")
+        elif abs(aggressor_ratio) < 0.2:
+            P -= 2.0
+            reasons.append("Aggresszor arány neutrális (−2)")
+
     stale_penalty = 0.0
     if stale_timeframes.get("k5m"):
         stale_penalty += 22.0
@@ -2606,7 +2828,14 @@ def analyze(asset: str) -> Dict[str, Any]:
         P -= penalty
         reasons.append(f"Realtime megbízhatóság alacsony (−{penalty:.1f})")
 
-    smt_pen, smt_reason = smt_penalty(asset)
+    if anchor_drift_state == "deteriorating":
+        P -= 5.0
+        reasons.append("Anchor trail drift romlik (−5)")
+    elif anchor_drift_state == "improving":
+        P += 3.0
+        reasons.append("Anchor trail drift javul (+3)")
+
+    smt_pen, smt_reason = smt_penalty(asset, k5m_closed)
     if smt_pen and smt_reason:
         P -= smt_pen
         reasons.append(f"SMT büntetés −{smt_pen}% ({smt_reason})")
@@ -2619,8 +2848,14 @@ def analyze(asset: str) -> Dict[str, Any]:
             sentiment_points = -8.0 * sentiment_signal.score
         else:
             sentiment_points = 4.0 * sentiment_signal.score
+        severity = sentiment_signal.effective_severity
+        sentiment_points *= severity
         P += sentiment_points
-        sentiment_msg = f"News sentiment ({sentiment_signal.bias}) {sentiment_signal.score:+.2f}"
+        sentiment_msg = (
+            f"News sentiment ({sentiment_signal.bias}) {sentiment_signal.score:+.2f}"
+        )
+        if severity not in {1.0, 1}:
+            sentiment_msg += f" × severity {severity:.2f}"
         if sentiment_points >= 0:
             reasons.append(f"{sentiment_msg} (+{sentiment_points:.1f})")
         else:
@@ -2660,6 +2895,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     anchor_timestamp = None
     anchor_price_state: Optional[float] = None
     anchor_prev_p: Optional[float] = None
+    anchor_drift_state: Optional[str] = None
+    anchor_drift_score: Optional[float] = None
     if isinstance(anchor_record, dict):
         side_raw = (anchor_record.get("side") or "").lower()
         if side_raw == "buy":
@@ -2669,6 +2906,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         anchor_timestamp = anchor_record.get("timestamp")
         anchor_price_state = safe_float(anchor_record.get("price"))
         anchor_prev_p = safe_float(anchor_record.get("p_score"))
+        anchor_drift_state = anchor_record.get("drift_state")
+        anchor_drift_score = safe_float(anchor_record.get("drift_score"))
     if asset in {"EURUSD", "USDJPY"}:
         liquidity_ok_base = bool(fib_ok)
     elif asset == "SRTY":
@@ -3035,6 +3274,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             missing = list(dict.fromkeys(missing_mom))  # uniq
 
     precision_direction: Optional[str] = None
+    execution_playbook: List[Dict[str, Any]] = []
     if decision in ("buy", "sell"):
         precision_direction = decision
     elif effective_bias == "long":
@@ -3085,6 +3325,56 @@ def analyze(asset: str) -> Dict[str, Any]:
             score_note = f"Precision confidence {precision_plan['confidence']} ({precision_plan['score']})"
             if score_note not in reasons:
                 reasons.append(score_note)
+
+    if decision in ("buy", "sell") and entry is not None and sl is not None:
+        direction_label = "Long" if decision == "buy" else "Short"
+        execution_playbook.append(
+            {
+                "step": "entry",
+                "description": f"{direction_label} belépő {entry:.5f} környékén",
+                "risk_abs": last_computed_risk,
+                "confidence": realtime_confidence,
+            }
+        )
+        if precision_plan:
+            window = precision_plan.get("entry_window")
+            if (
+                isinstance(window, (list, tuple))
+                and len(window) == 2
+                and all(isinstance(v, (int, float)) for v in window if v is not None)
+            ):
+                execution_playbook.append(
+                    {
+                        "step": "scalp_window",
+                        "description": f"Precision belépő zóna {window[0]:.5f}–{window[1]:.5f}",
+                        "confidence": precision_plan.get("confidence"),
+                    }
+                )
+        if tp1 is not None:
+            execution_playbook.append(
+                {
+                    "step": "tp1",
+                    "description": f"50% pozíció zárása TP1-n {tp1:.5f}",
+                    "rr": current_tp1_mult,
+                }
+            )
+        if tp2 is not None:
+            execution_playbook.append(
+                {
+                    "step": "tp2",
+                    "description": f"Fennmaradó pozíció célár TP2 {tp2:.5f}",
+                    "rr": current_tp2_mult,
+                }
+            )
+        if momentum_trailing_plan:
+            execution_playbook.append(
+                {
+                    "step": "trailing",
+                    "description": "Momentum trail aktiválás a jelzett R-szinten",
+                    "trigger_rr": momentum_trailing_plan.get("activation_rr"),
+                    "lock_ratio": momentum_trailing_plan.get("lock_ratio"),
+                }
+            )
 
     # 9) Session override + mentés: signal.json
     if latency_flags:
@@ -3168,6 +3458,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             "fallback_used": spot_fallback_used,
             "confidence": realtime_confidence,
             "avg_latency_profile": avg_delay if avg_delay else None,
+            "realtime_stats": realtime_stats if realtime_stats else None,
         },
         "signal": decision,
         "probability": int(P),
@@ -3189,6 +3480,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "session_info": session_meta,
         "diagnostics": diagnostics_payload(tf_meta, source_files, latency_flags),
         "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else [])) or ["no signal"],
+        "realtime_transport": realtime_transport,
     }
     decision_obj["ema21_slope_1h"] = regime_slope_signed
     decision_obj["ema21_slope_threshold"] = EMA_SLOPE_TH_ASSET.get(asset, EMA_SLOPE_TH_DEFAULT)
@@ -3202,6 +3494,10 @@ def analyze(asset: str) -> Dict[str, Any]:
     decision_obj["momentum_liquidity_ok"] = momentum_liquidity_ok
     decision_obj["dynamic_tp_profile"] = dynamic_tp_profile
     decision_obj["order_flow_metrics"] = order_flow_metrics
+    if volatility_overlay:
+        decision_obj["volatility_overlay"] = volatility_overlay
+    if tick_order_flow:
+        decision_obj["order_flow_tick_snapshot"] = tick_order_flow
     if precision_plan:
         decision_obj["precision_plan"] = precision_plan
     if sentiment_signal:
@@ -3213,6 +3509,11 @@ def analyze(asset: str) -> Dict[str, Any]:
             sentiment_payload["headline"] = sentiment_signal.headline
         if sentiment_signal.expires_at:
             sentiment_payload["expires_at"] = sentiment_signal.expires_at.isoformat()
+        sentiment_payload["severity"] = sentiment_signal.effective_severity
+        if sentiment_signal.category:
+            sentiment_payload["category"] = sentiment_signal.category
+        if sentiment_signal.source:
+            sentiment_payload["source"] = str(sentiment_signal.source)
         if sentiment_applied_points is not None:
             sentiment_payload["applied_points"] = sentiment_applied_points
         if sentiment_normalized is not None:
@@ -3220,6 +3521,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         decision_obj["news_sentiment"] = sentiment_payload
     if momentum_trailing_plan:
         decision_obj["momentum_trailing_plan"] = momentum_trailing_plan
+    if execution_playbook:
+        decision_obj["execution_playbook"] = execution_playbook
     decision_obj["invalid_levels"] = {
         "buy": invalid_level_buy,
         "sell": invalid_level_sell,
@@ -3237,8 +3540,12 @@ def analyze(asset: str) -> Dict[str, Any]:
         "momentum_vol_ratio": momentum_vol_ratio or 0.0,
         "order_flow_imbalance": order_flow_metrics.get("imbalance") or 0.0,
         "order_flow_pressure": order_flow_metrics.get("pressure") or 0.0,
+        "order_flow_aggressor": order_flow_metrics.get("aggressor_ratio") or 0.0,
         "news_sentiment": sentiment_signal.score if sentiment_signal else 0.0,
+        "news_event_severity": sentiment_signal.effective_severity if sentiment_signal else 0.0,
         "realtime_confidence": realtime_confidence,
+        "volatility_ratio": float(overlay_ratio) if (overlay_ratio is not None and np.isfinite(float(overlay_ratio))) else 0.0,
+        "volatility_regime_flag": 1.0 if overlay_regime in {"implied_elevated", "implied_extreme"} else 0.0,
     }
     ml_probability = predict_signal_probability(asset, ml_features)
     if ml_probability is not None:
@@ -3275,6 +3582,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         "realtime_confidence": realtime_confidence,
         "avg_latency_profile": avg_delay if avg_delay else None,
     }
+    if realtime_stats:
+        active_position_meta["realtime_stats"] = realtime_stats
     if anchor_bias:
         active_position_meta["anchor_side"] = anchor_bias
     if anchor_price_state is not None:
@@ -3283,10 +3592,16 @@ def analyze(asset: str) -> Dict[str, Any]:
         active_position_meta["anchor_timestamp"] = anchor_timestamp
     if anchor_prev_p is not None:
         active_position_meta["previous_p_score"] = anchor_prev_p
+    if anchor_drift_state:
+        active_position_meta["anchor_drift_state"] = anchor_drift_state
+    if anchor_drift_score is not None:
+        active_position_meta["anchor_drift_score"] = anchor_drift_score
     if momentum_trailing_plan:
         active_position_meta["momentum_trailing_plan"] = momentum_trailing_plan
     if precision_plan:
         active_position_meta["precision_plan"] = precision_plan
+    if execution_playbook:
+        active_position_meta["execution_playbook"] = execution_playbook
     decision_obj["active_position_meta"] = active_position_meta
     if intervention_summary:
         decision_obj["intervention_watch"] = intervention_summary
@@ -3298,6 +3613,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "rel_atr": rel_atr if (rel_atr is not None and not np.isnan(rel_atr)) else None,
         "analysis_timestamp": decision_obj["retrieved_at_utc"],
         "realtime_confidence": realtime_confidence,
+        "realtime_transport": realtime_transport,
         "dynamic_tp_regime": dynamic_tp_profile.get("regime"),
         "order_flow_imbalance": order_flow_metrics.get("imbalance"),
         "order_flow_pressure": order_flow_metrics.get("pressure"),
@@ -3308,6 +3624,17 @@ def analyze(asset: str) -> Dict[str, Any]:
     if precision_plan:
         anchor_metrics_payload["precision_score"] = precision_plan.get("score")
         anchor_metrics_payload["precision_plan"] = precision_plan
+    if volatility_overlay:
+        anchor_metrics_payload["volatility_overlay"] = volatility_overlay
+    if tick_order_flow:
+        anchor_metrics_payload["order_flow_tick"] = tick_order_flow
+    if anchor_drift_state:
+        anchor_metrics_payload["anchor_drift_state"] = anchor_drift_state
+    if anchor_drift_score is not None:
+        anchor_metrics_payload["anchor_drift_score"] = anchor_drift_score
+    if sentiment_signal:
+        anchor_metrics_payload["news_sentiment"] = sentiment_signal.score
+        anchor_metrics_payload["news_sentiment_severity"] = sentiment_signal.effective_severity
 
     global ANCHOR_STATE_CACHE
     if decision in ("buy", "sell"):
@@ -3374,6 +3701,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
