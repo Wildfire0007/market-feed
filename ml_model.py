@@ -58,7 +58,7 @@ MODEL_FEATURES: List[str] = [
     "order_flow_pressure",
     "order_flow_aggressor",
     "news_sentiment",
-    "order_flow_aggressor",
+    "news_event_severity",
     "realtime_confidence",
     "volatility_ratio",
     "volatility_regime_flag",
@@ -241,6 +241,18 @@ def log_feature_snapshot(asset: str, features: Dict[str, Any]) -> Path:
         df.to_csv(path, mode="a", header=False, index=False)
     else:
         df.to_csv(path, index=False)
+
+    try:
+        from reports.feature_monitor import update_feature_drift_report
+
+        try:
+            update_feature_drift_report(asset, path, features)
+        except Exception:
+            # Feature monitor issues should not break the analysis pipeline.
+            pass
+    except Exception:
+        # Optional dependency missing (e.g. module not packaged yet).
+        pass
     return path
 
 
