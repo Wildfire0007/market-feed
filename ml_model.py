@@ -56,8 +56,12 @@ MODEL_FEATURES: List[str] = [
     "momentum_vol_ratio",
     "order_flow_imbalance",
     "order_flow_pressure",
+    "order_flow_aggressor",
     "news_sentiment",
+    "order_flow_aggressor",
     "realtime_confidence",
+    "volatility_ratio",
+    "volatility_regime_flag",
 ]
 
 
@@ -78,6 +82,85 @@ def _vectorise(features: Dict[str, Any]) -> np.ndarray:
 
 def _model_path(asset: str) -> Path:
     return MODEL_DIR / f"{asset.upper()}_gbm.pkl"
+
+def _stack_config_path(asset: str) -> Path:
+    return MODEL_DIR / f"{asset.upper()}_stack.json"
+
+
+def _load_stack_config(asset: str) -> Optional[Dict[str, Any]]:
+    path = _stack_config_path(asset)
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _apply_stack(
+    base_probability: Optional[float],
+    features: Dict[str, Any],
+    config: Optional[Dict[str, Any]],
+) -> Optional[float]:
+    if config is None:
+        return base_probability
+    method = (config.get("method") or "average").lower()
+    components = config.get("components") or {}
+    defaults = config.get("defaults") or {}
+
+    values: Dict[str, float] = {}
+    if base_probability is not None:
+        values["gbm"] = float(base_probability)
+    for name, meta in components.items():
+        if isinstance(meta, dict) and meta.get("source") == "feature":
+            feature_name = meta.get("name") or name
+            try:
+                values[name] = float(features.get(feature_name, defaults.get(name, 0.0)))
+            except (TypeError, ValueError):
+                values[name] = float(defaults.get(name, 0.0))
+        elif isinstance(meta, dict) and meta.get("source") == "constant":
+            try:
+                values[name] = float(meta.get("value", defaults.get(name, 0.0)))
+            except (TypeError, ValueError):
+                values[name] = float(defaults.get(name, 0.0))
+
+    if not values:
+        return base_probability
+
+    if method == "logistic":
+        bias = float(config.get("bias", 0.0))
+        weights = config.get("weights") or {}
+        z = bias
+        for key, weight in weights.items():
+            try:
+                z += float(weight) * float(values.get(key, defaults.get(key, 0.0)))
+            except (TypeError, ValueError):
+                continue
+        try:
+            return 1.0 / (1.0 + np.exp(-z))
+        except OverflowError:
+            return float(z > 0)
+
+    if method == "weighted_average":
+        total_weight = 0.0
+        weighted_sum = 0.0
+        for key, weight in (config.get("weights") or {}).items():
+            if key not in values:
+                continue
+            try:
+                w = float(weight)
+            except (TypeError, ValueError):
+                continue
+            total_weight += w
+            weighted_sum += w * float(values[key])
+        if total_weight > 0:
+            return weighted_sum / total_weight
+
+    # Fallback simple average
+    return sum(values.values()) / len(values)
+
 
 
 def predict_signal_probability(asset: str, features: Dict[str, Any]) -> Optional[float]:
@@ -130,13 +213,16 @@ def predict_signal_probability(asset: str, features: Dict[str, Any]) -> Optional
         proba = clf.predict_proba(vector)
     except Exception:
         return None
+    base_probability: Optional[float] = None
     if isinstance(proba, Iterable):
         arr = np.asarray(proba)
         if arr.ndim == 2 and arr.shape[1] >= 2:
-            return float(arr[0, 1])
-        if arr.ndim == 1 and arr.size:
-            return float(arr[-1])
-    return None
+            base_probability = float(arr[0, 1])
+        elif arr.ndim == 1 and arr.size:
+            base_probability = float(arr[-1])
+
+    stack_config = _load_stack_config(asset)
+    return _apply_stack(base_probability, features, stack_config)
 
 
 def log_feature_snapshot(asset: str, features: Dict[str, Any]) -> Path:
