@@ -87,6 +87,18 @@ def _stack_config_path(asset: str) -> Path:
     return MODEL_DIR / f"{asset.upper()}_stack.json"
 
 
+def missing_model_artifacts(assets: Iterable[str]) -> Dict[str, Path]:
+    """Return a mapping of assets without an on-disk gradient boosting model."""
+
+    missing: Dict[str, Path] = {}
+    for asset in assets:
+        symbol = str(asset).upper()
+        path = _model_path(symbol)
+        if not path.exists():
+            missing[symbol] = path
+    return missing
+    
+
 def _load_stack_config(asset: str) -> Optional[Dict[str, Any]]:
     path = _stack_config_path(asset)
     if not path.exists():
@@ -278,4 +290,5 @@ __all__ = [
     "predict_signal_probability",
     "log_feature_snapshot",
     "export_feature_schema",
+    "missing_model_artifacts",
 ]
