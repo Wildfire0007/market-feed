@@ -1582,6 +1582,183 @@ def micro_bos_with_retest(k1m: pd.DataFrame, k5m: pd.DataFrame, direction: str) 
         return False
     return retest_level(k5m, direction, MOMENTUM_BOS_LB)
 
+
+def _recent_liquidity_levels(
+    df: pd.DataFrame,
+    direction: str,
+    lookback: int = 30,
+) -> List[float]:
+    if df.empty:
+        return []
+    window = df.tail(max(lookback + 5, 10))
+    swings = find_swings(window, lb=1)
+    levels: List[float] = []
+    if direction == "buy":
+        lows = swings[swings.get("swing_lo", False)]
+        levels = lows["low"].dropna().astype(float).tolist()
+    elif direction == "sell":
+        highs = swings[swings.get("swing_hi", False)]
+        levels = highs["high"].dropna().astype(float).tolist()
+    return levels[-5:]
+
+
+def _confidence_from_score(score: float) -> str:
+    if score >= 75:
+        return "high"
+    if score >= 55:
+        return "medium"
+    return "low"
+
+
+def compute_precision_entry(
+    asset: str,
+    direction: str,
+    k1m: pd.DataFrame,
+    k5m: pd.DataFrame,
+    price_now: Optional[float],
+    atr5: Optional[float],
+    order_flow_metrics: Dict[str, Optional[float]],
+) -> Dict[str, Any]:
+    plan: Dict[str, Any] = {
+        "asset": asset,
+        "direction": direction,
+        "score": 0.0,
+        "confidence": "low",
+        "entry": None,
+        "entry_window": None,
+        "stop_loss": None,
+        "take_profit_1": None,
+        "take_profit_2": None,
+        "risk": None,
+        "liquidity_levels": [],
+        "factors": [],
+    }
+
+    if direction not in {"buy", "sell"}:
+        plan["factors"].append("direction unsupported")
+        return plan
+    if price_now is None or not np.isfinite(price_now):
+        plan["factors"].append("price unavailable")
+        return plan
+    if k1m.empty:
+        plan["factors"].append("1m dataset empty")
+        return plan
+
+    base_price = float(price_now)
+    atr1m_series = atr(k1m, period=14)
+    atr1m = float(atr1m_series.iloc[-1]) if not atr1m_series.empty else None
+    liquidity_levels = _recent_liquidity_levels(k1m, "buy" if direction == "buy" else "sell")
+    plan["liquidity_levels"] = liquidity_levels
+    if not liquidity_levels:
+        plan["factors"].append("no nearby liquidity levels detected")
+
+    score = 40.0
+    factors: List[str] = []
+
+    imb = order_flow_metrics.get("imbalance")
+    if imb is not None:
+        if direction == "buy" and imb > ORDER_FLOW_IMBALANCE_TH:
+            score += 12.0
+            factors.append(f"order flow imbalance +{imb:.2f}")
+        elif direction == "sell" and imb < -ORDER_FLOW_IMBALANCE_TH:
+            score += 12.0
+            factors.append(f"order flow imbalance {imb:.2f}")
+
+    pressure = order_flow_metrics.get("pressure")
+    if pressure is not None:
+        if direction == "buy" and pressure > ORDER_FLOW_PRESSURE_TH:
+            score += 10.0
+            factors.append(f"order flow pressure +{pressure:.2f}")
+        elif direction == "sell" and pressure < -ORDER_FLOW_PRESSURE_TH:
+            score += 10.0
+            factors.append(f"order flow pressure {pressure:.2f}")
+
+    if micro_bos_with_retest(k1m, k5m, direction):
+        score += 12.0
+        factors.append("micro BOS + retest confirmed")
+
+    if atr1m is not None and atr1m > 0:
+        score += 6.0
+        factors.append(f"ATR1m {atr1m:.4f}")
+
+    if atr5 is not None and np.isfinite(atr5) and atr5 > 0:
+        score += 6.0
+        factors.append(f"ATR5m {float(atr5):.4f}")
+
+    entry_level: Optional[float] = None
+    if liquidity_levels:
+        liquidity_levels_sorted = sorted(
+            liquidity_levels,
+            key=lambda lvl: abs(base_price - float(lvl)),
+        )
+        entry_level = float(liquidity_levels_sorted[0])
+        distance = abs(base_price - entry_level)
+        tolerance = max(atr1m or 0.0, (float(atr5) if atr5 else 0.0) * 0.6)
+        if tolerance > 0 and distance <= tolerance * 1.2:
+            score += 10.0
+            factors.append("price near liquidity pocket")
+    else:
+        entry_level = base_price
+
+    if direction == "buy" and entry_level > base_price:
+        entry_level = base_price
+    if direction == "sell" and entry_level < base_price:
+        entry_level = base_price
+
+    score = max(0.0, min(100.0, score))
+    plan["score"] = round(score, 2)
+    plan["confidence"] = _confidence_from_score(score)
+    plan["factors"].extend(factors)
+    plan["entry"] = entry_level
+
+    risk_buffer_candidates = [
+        value
+        for value in [atr1m, (float(atr5) if atr5 else None)]
+        if value is not None and np.isfinite(value) and value > 0
+    ]
+    if not risk_buffer_candidates:
+        risk_buffer = abs(base_price * 0.001)
+    else:
+        risk_buffer = max(risk_buffer_candidates) * 1.2
+
+    if direction == "buy":
+        stop_loss = entry_level - risk_buffer if entry_level is not None else None
+        tp1 = entry_level + risk_buffer * TP1_R if entry_level is not None else None
+        tp2 = entry_level + risk_buffer * TP2_R if entry_level is not None else None
+        entry_window = (
+            entry_level - risk_buffer * 0.4,
+            entry_level + risk_buffer * 0.2,
+        ) if entry_level is not None else None
+    else:
+        stop_loss = entry_level + risk_buffer if entry_level is not None else None
+        tp1 = entry_level - risk_buffer * TP1_R if entry_level is not None else None
+        tp2 = entry_level - risk_buffer * TP2_R if entry_level is not None else None
+        entry_window = (
+            entry_level - risk_buffer * 0.2,
+            entry_level + risk_buffer * 0.4,
+        ) if entry_level is not None else None
+
+    plan["risk"] = risk_buffer if np.isfinite(risk_buffer) else None
+    plan["stop_loss"] = stop_loss
+    plan["take_profit_1"] = tp1
+    plan["take_profit_2"] = tp2
+    plan["entry_window"] = entry_window
+
+    if entry_window is not None:
+        plan["entry_window"] = tuple(float(x) for x in entry_window)
+    if stop_loss is not None and not np.isfinite(stop_loss):
+        plan["stop_loss"] = None
+    if tp1 is not None and not np.isfinite(tp1):
+        plan["take_profit_1"] = None
+    if tp2 is not None and not np.isfinite(tp2):
+        plan["take_profit_2"] = None
+
+    if plan["confidence"] == "low":
+        plan["factors"].append("precision confidence low")
+
+    return plan
+
+
 def ema_cross_recent(short: pd.Series, long: pd.Series, bars: int = MOMENTUM_BARS, direction: str = "long") -> bool:
     if short.empty or long.empty or len(short) < bars + 2 or len(long) < bars + 2:
         return False
@@ -2701,6 +2878,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     last_computed_risk: Optional[float] = None
     current_tp1_mult = core_tp1_mult
     current_tp2_mult = core_tp2_mult
+    precision_plan: Optional[Dict[str, Any]] = None
 
     def compute_levels(decision_side: str, rr_required: float, tp1_mult: float = TP1_R, tp2_mult: float = TP2_R):
         nonlocal entry, sl, tp1, tp2, rr, missing, min_stoploss_ok, tp1_net_pct_value, last_computed_risk, current_tp1_mult, current_tp2_mult
@@ -2856,6 +3034,58 @@ def analyze(asset: str) -> Dict[str, Any]:
             required_list = list(mom_required)
             missing = list(dict.fromkeys(missing_mom))  # uniq
 
+    precision_direction: Optional[str] = None
+    if decision in ("buy", "sell"):
+        precision_direction = decision
+    elif effective_bias == "long":
+        precision_direction = "buy"
+    elif effective_bias == "short":
+        precision_direction = "sell"
+
+    if precision_direction:
+        atr5_value = float(atr5) if atr5 is not None and np.isfinite(float(atr5)) else None
+        precision_plan = compute_precision_entry(
+            asset,
+            precision_direction,
+            k1m_closed,
+            k5m_closed,
+            price_for_calc,
+            atr5_value,
+            order_flow_metrics,
+        )
+
+    def _fmt_price(value: Optional[float]) -> str:
+        if value is None or not np.isfinite(value):
+            return "n/a"
+        v = float(value)
+        if abs(v) >= 1000:
+            decimals = 1
+        elif abs(v) >= 100:
+            decimals = 2
+        elif abs(v) >= 10:
+            decimals = 3
+        else:
+            decimals = 4
+        return f"{v:.{decimals}f}"
+
+    if (
+        decision in ("buy", "sell")
+        and precision_plan
+        and precision_plan.get("entry_window")
+        and precision_plan.get("stop_loss") is not None
+    ):
+        window = precision_plan["entry_window"]
+        stop_loss = precision_plan.get("stop_loss")
+        note = (
+            f"Precision plan: entry {_fmt_price(window[0])}–{_fmt_price(window[1])}, SL {_fmt_price(stop_loss)}"
+        )
+        if note not in reasons:
+            reasons.append(note)
+        if precision_plan.get("confidence") in {"high", "medium"}:
+            score_note = f"Precision confidence {precision_plan['confidence']} ({precision_plan['score']})"
+            if score_note not in reasons:
+                reasons.append(score_note)
+
     # 9) Session override + mentés: signal.json
     if latency_flags:
         for flag in latency_flags:
@@ -2972,6 +3202,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     decision_obj["momentum_liquidity_ok"] = momentum_liquidity_ok
     decision_obj["dynamic_tp_profile"] = dynamic_tp_profile
     decision_obj["order_flow_metrics"] = order_flow_metrics
+    if precision_plan:
+        decision_obj["precision_plan"] = precision_plan
     if sentiment_signal:
         sentiment_payload = {
             "score": sentiment_signal.score,
@@ -3053,6 +3285,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         active_position_meta["previous_p_score"] = anchor_prev_p
     if momentum_trailing_plan:
         active_position_meta["momentum_trailing_plan"] = momentum_trailing_plan
+    if precision_plan:
+        active_position_meta["precision_plan"] = precision_plan
     decision_obj["active_position_meta"] = active_position_meta
     if intervention_summary:
         decision_obj["intervention_watch"] = intervention_summary
@@ -3070,6 +3304,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         "current_price": price_for_calc,
         "spot_price": display_spot,
     }
+
+    if precision_plan:
+        anchor_metrics_payload["precision_score"] = precision_plan.get("score")
+        anchor_metrics_payload["precision_plan"] = precision_plan
 
     global ANCHOR_STATE_CACHE
     if decision in ("buy", "sell"):
@@ -3136,6 +3374,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
