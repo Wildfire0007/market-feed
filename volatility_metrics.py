@@ -5,15 +5,24 @@ combines optional JSON metrics (generated offline) with realised volatility
 estimates computed from the latest one minute candles.  The overlay is designed
 so that callers can adjust risk parameters when implied volatility departs from
 recent realised behaviour.
+
+When executed as a script (``python -m volatility_metrics``) the module
+generates fresh overlay snapshots for every configured asset so that
+``analysis.py`` always finds up-to-date realised volatility estimates between
+the trading and analysis stages.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
+import os
+import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -97,6 +106,65 @@ def _compute_realised_vol(k1m: Optional[pd.DataFrame], window: int = 120) -> Opt
     return float(std)
 
 
+PUBLIC_DIR = Path(os.getenv("PUBLIC_DIR", "public"))
+DEFAULT_OVERLAY_FILENAME = "vol_overlay.json"
+
+
+def _load_klines_frame(asset_dir: Path) -> Optional[pd.DataFrame]:
+    path = asset_dir / "klines_1m.json"
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except Exception:
+        return None
+
+    values: Optional[List[Dict[str, Any]]]
+    if isinstance(payload, dict):
+        raw_values = payload.get("values") or payload.get("data")
+        values = raw_values if isinstance(raw_values, list) else None
+    elif isinstance(payload, list):
+        values = payload
+    else:
+        values = None
+
+    if not values:
+        return None
+
+    try:
+        frame = pd.DataFrame(values)
+    except Exception:
+        return None
+
+    if frame.empty:
+        return None
+
+    frame = frame.rename(columns={str(col): str(col).lower() for col in frame.columns})
+    if "close" not in frame.columns:
+        return None
+
+    for column in ("datetime", "time", "timestamp"):
+        if column in frame.columns:
+            try:
+                frame[column] = pd.to_datetime(frame[column], errors="coerce", utc=True)
+            except Exception:
+                continue
+            frame = frame.sort_values(column)
+            break
+
+    return frame
+
+
+def _write_json(path: Path, payload: Dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+    tmp_path.replace(path)
+    return path
+
+
 def load_volatility_overlay(
     asset: str,
     outdir: Path,
@@ -157,4 +225,131 @@ def load_volatility_overlay(
     return data
 
 
-__all__ = ["load_volatility_overlay"]
+def generate_overlay_snapshot(
+    asset: str,
+    public_dir: Path = PUBLIC_DIR,
+    realised_window: int = 120,
+    output_filename: str = DEFAULT_OVERLAY_FILENAME,
+    write: bool = True,
+) -> Optional[Dict[str, Any]]:
+    """Create a volatility overlay snapshot for ``asset``.
+
+    The helper loads the latest one minute candles, combines them with the
+    implied metrics (if available) and optionally persists a JSON file that can
+    be consumed by downstream tooling.
+    """
+
+    asset_dir = Path(public_dir) / asset.upper()
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    k1m = _load_klines_frame(asset_dir)
+    overlay = load_volatility_overlay(asset, asset_dir, k1m, realised_window)
+    snapshot: Dict[str, Any] = dict(overlay)
+    snapshot.update(
+        {
+            "asset": asset.upper(),
+            "generated_at_utc": datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat(),
+        }
+    )
+    if k1m is not None:
+        snapshot["samples"] = int(k1m.shape[0])
+    if write:
+        output_path = asset_dir / output_filename
+        _write_json(output_path, snapshot)
+        snapshot["output_path"] = str(output_path)
+    return snapshot
+
+
+def _infer_assets(explicit: Optional[List[str]]) -> List[str]:
+    if explicit:
+        return [str(asset).upper() for asset in explicit if asset]
+    try:
+        from Trading import ASSETS as TRADING_ASSETS  # type: ignore
+
+        return [str(asset).upper() for asset in TRADING_ASSETS.keys()]
+    except Exception:
+        try:
+            directories = [
+                path.name
+                for path in PUBLIC_DIR.iterdir()
+                if path.is_dir()
+            ]
+        except FileNotFoundError:
+            return []
+        return sorted({name.upper() for name in directories})
+
+
+def cli(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Generate volatility overlays")
+    parser.add_argument(
+        "--assets",
+        nargs="*",
+        help="Assets to process (default: Trading.ASSETS or public directory)",
+    )
+    parser.add_argument(
+        "--public-dir",
+        default=str(PUBLIC_DIR),
+        help="Directory containing the public artefacts",
+    )
+    parser.add_argument(
+        "--window",
+        type=int,
+        default=120,
+        help="Realised volatility window in minutes",
+    )
+    parser.add_argument(
+        "--output",
+        default=DEFAULT_OVERLAY_FILENAME,
+        help="Overlay JSON filename to write per asset",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compute overlays without writing files",
+    )
+    args = parser.parse_args(argv)
+
+    public_dir = Path(args.public_dir)
+    assets = _infer_assets(args.assets)
+    if not assets:
+        print("No assets detected for volatility overlay generation", file=sys.stderr)
+        return 1
+
+    exit_code = 0
+    for asset in assets:
+        try:
+            snapshot = generate_overlay_snapshot(
+                asset,
+                public_dir=public_dir,
+                realised_window=max(1, int(args.window)),
+                output_filename=args.output,
+                write=not args.dry_run,
+            )
+        except Exception as exc:  # pragma: no cover - defensive guard
+            print(f"Failed to build overlay for {asset}: {exc}", file=sys.stderr)
+            exit_code = 2
+            continue
+
+        if snapshot is None:
+            print(f"Skipping {asset}: missing candle data", file=sys.stderr)
+            continue
+
+        ratio = snapshot.get("implied_realised_ratio")
+        regime = snapshot.get("regime")
+        extra = f" ratio={ratio:.2f}" if isinstance(ratio, (int, float)) else ""
+        target = snapshot.get("output_path") if snapshot.get("output_path") else "(dry-run)"
+        print(f"Overlay for {asset} -> {target} [{regime}{extra}]")
+
+    return exit_code
+
+
+__all__ = [
+    "load_volatility_overlay",
+    "generate_overlay_snapshot",
+    "cli",
+]
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entrypoint
+    sys.exit(cli())
