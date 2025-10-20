@@ -2186,6 +2186,26 @@ def analyze(asset: str) -> Dict[str, Any]:
     tick_order_flow = load_tick_order_flow(asset, outdir)
     order_flow_metrics = compute_order_flow_metrics(k1m_closed, k5m_closed, tick_order_flow)
 
+    anchor_state = current_anchor_state()
+    anchor_record = anchor_state.get(asset.upper()) if isinstance(anchor_state, dict) else None
+    anchor_bias = None
+    anchor_timestamp = None
+    anchor_price_state: Optional[float] = None
+    anchor_prev_p: Optional[float] = None
+    anchor_drift_state: Optional[str] = None
+    anchor_drift_score: Optional[float] = None
+    if isinstance(anchor_record, dict):
+        side_raw = (anchor_record.get("side") or "").lower()
+        if side_raw == "buy":
+            anchor_bias = "long"
+        elif side_raw == "sell":
+            anchor_bias = "short"
+        anchor_timestamp = anchor_record.get("timestamp")
+        anchor_price_state = safe_float(anchor_record.get("price"))
+        anchor_prev_p = safe_float(anchor_record.get("p_score"))
+        anchor_drift_state = anchor_record.get("drift_state")
+        anchor_drift_score = safe_float(anchor_record.get("drift_score"))
+
     last5_close: Optional[float] = None
     last5_closed_ts = df_last_timestamp(k5m_closed)
     if not k5m_closed.empty:
@@ -2911,25 +2931,6 @@ def analyze(asset: str) -> Dict[str, Any]:
                 "Cash sessionen kívül — ATR nem elég magas a kereskedéshez"
             )
 
-    anchor_state = current_anchor_state()
-    anchor_record = anchor_state.get(asset.upper()) if isinstance(anchor_state, dict) else None
-    anchor_bias = None
-    anchor_timestamp = None
-    anchor_price_state: Optional[float] = None
-    anchor_prev_p: Optional[float] = None
-    anchor_drift_state: Optional[str] = None
-    anchor_drift_score: Optional[float] = None
-    if isinstance(anchor_record, dict):
-        side_raw = (anchor_record.get("side") or "").lower()
-        if side_raw == "buy":
-            anchor_bias = "long"
-        elif side_raw == "sell":
-            anchor_bias = "short"
-        anchor_timestamp = anchor_record.get("timestamp")
-        anchor_price_state = safe_float(anchor_record.get("price"))
-        anchor_prev_p = safe_float(anchor_record.get("p_score"))
-        anchor_drift_state = anchor_record.get("drift_state")
-        anchor_drift_score = safe_float(anchor_record.get("drift_score"))
     if asset in {"EURUSD", "USDJPY"}:
         liquidity_ok_base = bool(fib_ok)
     elif asset == "SRTY":
@@ -3752,4 +3753,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
