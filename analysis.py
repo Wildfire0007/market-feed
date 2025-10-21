@@ -168,6 +168,9 @@ ATR5_MIN_MULT  = 0.5     # min. profit >= 0.5× ATR(5m)
 ATR_VOL_HIGH_REL = 0.002  # 0.20% relatív ATR felett lazítjuk a költség-multit
 
 PRECISION_SCORE_THRESHOLD = 70.0
+PRECISION_FLOW_IMBALANCE_MARGIN = 0.85
+PRECISION_FLOW_PRESSURE_MARGIN = 0.8
+PRECISION_TRIGGER_NEAR_MULT = 0.35
 
 EMA_SLOPE_TH_DEFAULT = 0.0008
 EMA_SLOPE_TH_ASSET = {
@@ -903,18 +906,24 @@ def derive_position_management_note(
     if exit_reasons:
         det = deterioration_messages()
         message = prefix + (
-            f"aktív {anchor_bias} pozíció invalidálódott → teljes zárás szükséges"
+            f"aktív {anchor_bias} pozíció invalidálódott → hard exit szükséges"
         )
         message += " (" + "; ".join(exit_reasons) + ")"
         if det:
             message += " — " + "; ".join(det)
         message += hint_suffix
         exit_signal = {
+            "state": "hard_exit",
+            "severity": "critical",
             "action": "close",
             "reasons": exit_reasons,
             "trigger_price": current_price_val,
             "triggered_at": nowiso(),
         }
+        exit_signal["actions"] = [
+            {"type": "close", "size": 1.0, "urgency": "immediate"}
+        ]
+        exit_signal["category"] = "structural_invalid"
         if anchor_entry is not None and np.isfinite(anchor_entry):
             exit_signal["entry_price"] = anchor_entry
         if anchor_sl is not None and np.isfinite(anchor_sl):
@@ -1028,8 +1037,18 @@ def derive_position_management_note(
         context_parts = list(dict.fromkeys(reversal_reasons + profit_reasons))
         if not context_parts and pscore_collapse and current_p_score is not None:
             context_parts.append(f"P-score {current_p_score:.0f}")
+        exit_actions: List[Dict[str, Any]] = []
+        exit_state = "scale_out"
+        exit_phrase = "profitvédelemként részleges zárás javasolt"
+        if profit_drawdown_ratio is not None and profit_drawdown_ratio >= 0.85:
+            exit_state = "hard_exit"
+            exit_phrase = "profitvédelemként gyors teljes zárás javasolt"
+            exit_actions.append({"type": "close", "size": 1.0, "urgency": "fast"})
+        else:
+            exit_actions.append({"type": "scale_out", "size": 0.5})
+        exit_actions.append({"type": "tighten_stop"})
         message = prefix + (
-            f"aktív {anchor_bias} pozíció piros jelzésben → profitvédelemként teljes zárás javasolt"
+            f"aktív {anchor_bias} pozíció piros jelzésben → {exit_phrase}"
         )
         if context_parts:
             message += " (" + "; ".join(context_parts) + ")"
@@ -1038,14 +1057,17 @@ def derive_position_management_note(
             message += " — " + "; ".join(det)
         message += hint_suffix
         exit_signal = {
-            "action": "close",
+            "state": exit_state,
+            "severity": "high" if exit_state == "hard_exit" else "elevated",
+            "action": "close" if exit_state == "hard_exit" else "scale_out",
             "category": "reversal_guard",
-            "reasons": context_parts,
+            "reasons": context_parts or profit_reasons or reversal_reasons,
             "trigger_price": current_price_val,
             "triggered_at": nowiso(),
             "direction": anchor_bias,
             "signal": current_signal,
         }
+        exit_signal["actions"] = exit_actions
         if anchor_entry is not None and np.isfinite(anchor_entry):
             exit_signal["entry_price"] = anchor_entry
         if anchor_sl is not None and np.isfinite(anchor_sl):
@@ -1065,6 +1087,68 @@ def derive_position_management_note(
         if drift_state:
             exit_signal["drift_state"] = drift_state
         return message, exit_signal
+
+    trail_state: Optional[str] = None
+    trail_reasons: List[str] = []
+    trail_actions: List[Dict[str, Any]] = []
+    if exit_signal is None:
+        trail_log = (anchor_record or {}).get("trail_log") if anchor_record else None
+        pnl_values: List[float] = []
+        trail_times: List[Optional[datetime]] = []
+        if isinstance(trail_log, list) and trail_log:
+            for entry in trail_log[-12:]:
+                pnl_val = safe_float(entry.get("pnl_r"))
+                if pnl_val is None:
+                    pnl_val = safe_float(entry.get("pnl_abs"))
+                    if pnl_val is not None and initial_risk_abs and initial_risk_abs > 0:
+                        pnl_val = pnl_val / initial_risk_abs
+                ts = parse_utc_timestamp(entry.get("timestamp"))
+                if pnl_val is not None and np.isfinite(pnl_val):
+                    pnl_values.append(float(pnl_val))
+                    trail_times.append(ts)
+        if pnl_values:
+            peak = max(pnl_values)
+            latest = pnl_values[-1]
+            drop_from_peak = peak - latest
+            recent_drop = 0.0
+            if len(pnl_values) >= 3:
+                recent_drop = pnl_values[-3] - latest
+            if peak >= 0.8 and drop_from_peak >= 0.45:
+                trail_state = "scale_out"
+                trail_reasons.append(
+                    f"MFE {peak:.2f}R → jelenleg {latest:.2f}R (−{drop_from_peak:.2f}R)"
+                )
+            elif peak >= 0.4 and drop_from_peak >= 0.25:
+                trail_state = "warn"
+                trail_reasons.append(
+                    f"MFE {peak:.2f}R → jelenleg {latest:.2f}R (−{drop_from_peak:.2f}R)"
+                )
+            if recent_drop >= 0.4:
+                note = f"Az utolsó ~3 mérésben {recent_drop:.2f}R visszaadás"
+                if note not in trail_reasons:
+                    trail_reasons.append(note)
+                trail_state = trail_state or "scale_out"
+            if trail_times and len(trail_times) >= 2:
+                t_now = trail_times[-1]
+                t_prev = trail_times[0]
+                if t_now and t_prev:
+                    span_min = (t_now - t_prev).total_seconds() / 60.0
+                    if span_min <= 30 and drop_from_peak >= 0.35:
+                        note = "Gyors profit visszaadás 30 percen belül"
+                        if note not in trail_reasons:
+                            trail_reasons.append(note)
+                        trail_state = trail_state or "scale_out"
+        if trail_state:
+            if trail_state == "scale_out":
+                trail_actions = [
+                    {"type": "scale_out", "size": 0.3},
+                    {"type": "tighten_stop"},
+                ]
+            else:
+                trail_actions = [
+                    {"type": "tighten_stop"},
+                    {"type": "monitor"},
+                ]
 
     if direction == "long":
         if regime_ok and structure_flag == "bos_up":
@@ -1086,6 +1170,30 @@ def derive_position_management_note(
     det_notes = deterioration_messages()
     if det_notes:
         base_message += " — " + "; ".join(det_notes)
+
+    if exit_signal is None and trail_state:
+        exit_signal = {
+            "state": trail_state,
+            "severity": "moderate" if trail_state == "scale_out" else "caution",
+            "action": trail_state,
+            "reasons": trail_reasons,
+            "trigger_price": current_price_val,
+            "triggered_at": nowiso(),
+            "direction": anchor_bias,
+            "signal": current_signal,
+        }
+        exit_signal["category"] = "trail_guard"
+        exit_signal["actions"] = trail_actions
+        if anchor_entry is not None and np.isfinite(anchor_entry):
+            exit_signal["entry_price"] = anchor_entry
+        if current_pnl_r is not None and np.isfinite(current_pnl_r):
+            exit_signal["current_pnl_r"] = current_pnl_r
+        if max_fav_r is not None and np.isfinite(max_fav_r):
+            exit_signal["max_favorable_r"] = max_fav_r
+        if initial_risk_abs is not None and np.isfinite(initial_risk_abs):
+            exit_signal["initial_risk_abs"] = initial_risk_abs
+        if trail_reasons:
+            base_message += " — Exit jelzés: " + "; ".join(trail_reasons)
 
     return (prefix + base_message + hint_suffix, exit_signal) if base_message else (None, exit_signal)
 
@@ -2037,6 +2145,12 @@ def compute_precision_entry(
         "trigger_ready": False,
         "trigger_levels": None,
         "ready_ts": None,
+        "order_flow_ready": False,
+        "order_flow_strength": None,
+        "microstructure_score": None,
+        "trigger_progress": 0.0,
+        "trigger_confidence": 0.0,
+        "trigger_reasons": [],
     }
 
     if direction not in {"buy", "sell"}:
@@ -2061,22 +2175,73 @@ def compute_precision_entry(
     factors: List[str] = []
 
     imb = order_flow_metrics.get("imbalance")
+    flow_conditions: List[bool] = []
+    flow_strength = 0.0
+    flow_reasons: List[str] = []
     if imb is not None:
         if direction == "buy" and imb > ORDER_FLOW_IMBALANCE_TH:
             score += 12.0
+            flow_strength += min(1.0, float(imb) / ORDER_FLOW_IMBALANCE_TH)
             factors.append(f"order flow imbalance +{imb:.2f}")
+            flow_reasons.append(f"imbalance {imb:.2f}")
+            flow_conditions.append(
+                imb >= ORDER_FLOW_IMBALANCE_TH * PRECISION_FLOW_IMBALANCE_MARGIN
+            )
         elif direction == "sell" and imb < -ORDER_FLOW_IMBALANCE_TH:
             score += 12.0
+            flow_strength += min(1.0, abs(float(imb)) / ORDER_FLOW_IMBALANCE_TH)
             factors.append(f"order flow imbalance {imb:.2f}")
+            flow_reasons.append(f"imbalance {imb:.2f}")
+            flow_conditions.append(
+                imb <= -ORDER_FLOW_IMBALANCE_TH * PRECISION_FLOW_IMBALANCE_MARGIN
+            )
+        else:
+            flow_conditions.append(False)
 
     pressure = order_flow_metrics.get("pressure")
     if pressure is not None:
         if direction == "buy" and pressure > ORDER_FLOW_PRESSURE_TH:
             score += 10.0
+            flow_strength += min(1.0, float(pressure) / ORDER_FLOW_PRESSURE_TH)
             factors.append(f"order flow pressure +{pressure:.2f}")
+            flow_reasons.append(f"pressure {pressure:.2f}")
+            flow_conditions.append(
+                pressure >= ORDER_FLOW_PRESSURE_TH * PRECISION_FLOW_PRESSURE_MARGIN
+            )
         elif direction == "sell" and pressure < -ORDER_FLOW_PRESSURE_TH:
             score += 10.0
+            flow_strength += min(1.0, abs(float(pressure)) / ORDER_FLOW_PRESSURE_TH)
             factors.append(f"order flow pressure {pressure:.2f}")
+            flow_reasons.append(f"pressure {pressure:.2f}")
+            flow_conditions.append(
+                pressure <= -ORDER_FLOW_PRESSURE_TH * PRECISION_FLOW_PRESSURE_MARGIN
+            )
+        else:
+            flow_conditions.append(False)
+
+    delta_volume = order_flow_metrics.get("delta_volume")
+    if delta_volume is not None:
+        try:
+            dv = float(delta_volume)
+            if direction == "buy" and dv > 0:
+                flow_strength += min(0.5, abs(dv))
+                flow_reasons.append(f"delta +{dv:.1f}")
+                flow_conditions.append(True)
+            elif direction == "sell" and dv < 0:
+                flow_strength += min(0.5, abs(dv))
+                flow_reasons.append(f"delta {dv:.1f}")
+                flow_conditions.append(True)
+        except (TypeError, ValueError):
+            pass
+
+    flow_ready = bool(flow_conditions) and all(flow_conditions)
+    if flow_conditions:
+        plan["order_flow_strength"] = round(
+            min(2.0, flow_strength / max(len(flow_conditions), 1)), 2
+        )
+    plan["order_flow_ready"] = flow_ready
+    if flow_reasons:
+        plan["trigger_reasons"].extend(flow_reasons)
 
     if micro_bos_with_retest(k1m, k5m, direction):
         score += 12.0
@@ -2111,6 +2276,7 @@ def compute_precision_entry(
         entry_level = base_price
 
     score = max(0.0, min(100.0, score))
+    plan["microstructure_score"] = score
     plan["score"] = round(score, 2)
     plan["confidence"] = _confidence_from_score(score)
     plan["factors"].extend(factors)
@@ -2178,26 +2344,83 @@ def compute_precision_entry(
         plan["trigger_levels"] = trigger_levels
 
     trigger_state = "standby"
-    if (
-        plan.get("entry_window")
-        and entry_level is not None
-        and price_now is not None
-        and np.isfinite(price_now)
-    ):
-        window_lo, window_hi = plan["entry_window"]
+    trigger_progress = 0.0
+    if plan["score_ready"]:
+        trigger_state = "ready"
+        trigger_progress = 0.35
+        if plan["order_flow_ready"]:
+            trigger_state = "arming"
+            trigger_progress = 0.6
+
+    price_val: Optional[float] = None
+    if price_now is not None and np.isfinite(price_now):
         price_val = float(price_now)
+
+    risk_val = None
+    try:
+        risk_raw = plan.get("risk")
+        if risk_raw is not None:
+            risk_val = float(risk_raw)
+    except (TypeError, ValueError):
+        risk_val = None
+    tolerance = (risk_val or 0.0) * PRECISION_TRIGGER_NEAR_MULT
+
+    window_tuple = plan.get("entry_window")
+    if price_val is not None and window_tuple is not None:
+        window_lo, window_hi = float(window_tuple[0]), float(window_tuple[1])
         if direction == "buy":
-            if price_val <= float(entry_level):
+            pivot = float(entry_level) if entry_level is not None else window_lo
+            if price_val <= pivot:
                 trigger_state = "fire"
-            elif price_val <= float(window_hi):
-                trigger_state = "armed"
+                trigger_progress = 1.0
+                plan["trigger_reasons"].append("price hit entry")
+            elif price_val <= window_hi:
+                trigger_state = "arming"
+                trigger_progress = max(trigger_progress, 0.85)
+                plan["trigger_reasons"].append("price inside window")
+            elif tolerance and price_val <= window_hi + tolerance:
+                trigger_progress = max(trigger_progress, 0.7)
+                plan["trigger_reasons"].append("price near window")
         else:
-            if price_val >= float(entry_level):
+            pivot = float(entry_level) if entry_level is not None else window_hi
+            if price_val >= pivot:
                 trigger_state = "fire"
-            elif price_val >= float(window_lo):
-                trigger_state = "armed"
+                trigger_progress = 1.0
+                plan["trigger_reasons"].append("price hit entry")
+            elif price_val >= window_lo:
+                trigger_state = "arming"
+                trigger_progress = max(trigger_progress, 0.85)
+                plan["trigger_reasons"].append("price inside window")
+            elif tolerance and price_val >= window_lo - tolerance:
+                trigger_progress = max(trigger_progress, 0.7)
+                plan["trigger_reasons"].append("price near window")
+    elif price_val is not None and entry_level is not None:
+        pivot = float(entry_level)
+        if direction == "buy" and price_val <= pivot:
+            trigger_state = "fire"
+            trigger_progress = 1.0
+            plan["trigger_reasons"].append("price hit entry")
+        elif direction == "sell" and price_val >= pivot:
+            trigger_state = "fire"
+            trigger_progress = 1.0
+            plan["trigger_reasons"].append("price hit entry")
+
     plan["trigger_state"] = trigger_state
-    plan["trigger_ready"] = trigger_state in {"armed", "fire"}
+    plan["trigger_ready"] = trigger_state in {"arming", "fire"}
+    plan["trigger_progress"] = round(min(max(trigger_progress, 0.0), 1.0), 3)
+
+    score_conf = min(1.0, score / 100.0) if score else 0.0
+    flow_strength = plan.get("order_flow_strength") or 0.0
+    try:
+        flow_conf = min(1.0, float(flow_strength))
+    except (TypeError, ValueError):
+        flow_conf = 0.0
+    plan["trigger_confidence"] = round(
+        min(1.0, (score_conf + flow_conf + plan["trigger_progress"]) / 3.0), 3
+    )
+
+    if plan["trigger_reasons"]:
+        plan["trigger_reasons"] = list(dict.fromkeys(plan["trigger_reasons"]))
 
     ready_ts: Optional[str] = None
     try:
@@ -3453,8 +3676,12 @@ def analyze(asset: str) -> Dict[str, Any]:
     current_tp2_mult = core_tp2_mult
     precision_plan: Optional[Dict[str, Any]] = None
     precision_ready_for_entry = False
+    precision_flow_ready = False
+    precision_trigger_ready = False
     precision_trigger_state: Optional[str] = None
     precision_gate_label = f"precision_score>={int(PRECISION_SCORE_THRESHOLD)}"
+    precision_flow_gate_label = "precision_flow_alignment"
+    precision_trigger_gate_label = "precision_trigger_sync"
 
     def compute_levels(decision_side: str, rr_required: float, tp1_mult: float = TP1_R, tp2_mult: float = TP2_R):
         nonlocal entry, sl, tp1, tp2, rr, missing, min_stoploss_ok, tp1_net_pct_value, last_computed_risk, current_tp1_mult, current_tp2_mult
@@ -3641,15 +3868,30 @@ def analyze(asset: str) -> Dict[str, Any]:
         precision_plan["score_ready"] = bool(precision_plan.get("score_ready") or precision_ready_for_entry)
         precision_trigger_state = str(precision_plan.get("trigger_state") or "standby")
         precision_plan["trigger_state"] = precision_trigger_state
-        precision_plan["trigger_ready"] = bool(
-            precision_plan.get("trigger_ready") or precision_trigger_state in {"armed", "fire"}
+        precision_flow_ready = bool(precision_plan.get("order_flow_ready"))
+        precision_trigger_ready = bool(
+            precision_plan.get("trigger_ready")
+            or precision_trigger_state in {"arming", "fire"}
         )
+        precision_plan["trigger_ready"] = precision_trigger_ready
         if precision_plan.get("trigger_levels") is None:
             precision_plan["trigger_levels"] = {}
         if precision_gate_label not in required_list:
             required_list.append(precision_gate_label)
         if not precision_ready_for_entry and precision_gate_label not in missing:
             missing.append(precision_gate_label)
+        if precision_flow_gate_label not in required_list:
+            required_list.append(precision_flow_gate_label)
+        if not precision_flow_ready and precision_flow_gate_label not in missing:
+            missing.append(precision_flow_gate_label)
+        if precision_trigger_gate_label not in required_list:
+            required_list.append(precision_trigger_gate_label)
+        if not precision_trigger_ready and precision_trigger_gate_label not in missing:
+            missing.append(precision_trigger_gate_label)
+        if precision_flow_ready:
+            missing = [item for item in missing if item != precision_flow_gate_label]
+        if precision_trigger_ready:
+            missing = [item for item in missing if item != precision_trigger_gate_label]
 
     if precision_plan:
         if not precision_ready_for_entry:
@@ -3662,15 +3904,33 @@ def analyze(asset: str) -> Dict[str, Any]:
                 decision = "no entry"
                 entry = sl = tp1 = tp2 = rr = None
         else:
-            other_missing = [item for item in missing if item != precision_gate_label]
+            other_missing = [
+                item
+                for item in missing
+                if item not in {precision_gate_label, precision_flow_gate_label, precision_trigger_gate_label}
+            ]
+            if decision in ("buy", "sell"):
+                if not precision_flow_ready:
+                    flow_note = "Precision belépő: order flow megerősítésre vár"
+                    if flow_note not in reasons:
+                        reasons.append(flow_note)
+                    decision = "precision_ready"
+                    entry = sl = tp1 = tp2 = rr = None
+                elif precision_trigger_state != "fire":
+                    arming_note = "Precision belépő: trigger ablak aktív"
+                    if arming_note not in reasons:
+                        reasons.append(arming_note)
+                    decision = "precision_arming"
+                    entry = sl = tp1 = tp2 = rr = None
             if (
                 decision == "no entry"
-                and precision_trigger_state in {"armed", "fire"}
+                and precision_trigger_state in {"arming", "fire"}
+                and precision_flow_ready
                 and not other_missing
             ):
-                decision = "precision_armed"
+                decision = "precision_arming"
                 entry = sl = tp1 = tp2 = rr = None
-                armed_note = "Precision trigger armed — limit order watch"
+                armed_note = "Precision trigger kész → limit figyelés"
                 if armed_note not in reasons:
                     reasons.append(armed_note)
 
@@ -3784,6 +4044,11 @@ def analyze(asset: str) -> Dict[str, Any]:
             "score_threshold": precision_plan.get("score_threshold", PRECISION_SCORE_THRESHOLD),
             "score_ready": precision_plan.get("score_ready"),
             "trigger_ready": precision_plan.get("trigger_ready"),
+            "order_flow_ready": precision_plan.get("order_flow_ready"),
+            "order_flow_strength": precision_plan.get("order_flow_strength"),
+            "trigger_progress": precision_plan.get("trigger_progress"),
+            "trigger_confidence": precision_plan.get("trigger_confidence"),
+            "reasons": precision_plan.get("trigger_reasons") or None,
         }
         execution_playbook.append(trigger_step)
 
@@ -3875,6 +4140,24 @@ def analyze(asset: str) -> Dict[str, Any]:
     if precision_plan:
         precision_score_value = safe_float(precision_plan.get("score")) or 0.0
 
+    precision_trigger_confidence = 0.0
+    precision_trigger_ready_value = 0.0
+    precision_trigger_arming_value = 0.0
+    precision_trigger_fire_value = 0.0
+    if precision_trigger_state:
+        state_norm = precision_trigger_state.lower()
+        if state_norm in {"ready", "arming", "fire"}:
+            precision_trigger_ready_value = 1.0
+        if state_norm == "arming":
+            precision_trigger_arming_value = 1.0
+        if state_norm == "fire":
+            precision_trigger_fire_value = 1.0
+    if precision_plan:
+        precision_trigger_confidence = safe_float(
+            precision_plan.get("trigger_confidence")
+        ) or 0.0
+    precision_order_flow_value = 1.0 if precision_flow_ready else 0.0
+
     momentum_trail_activation = 0.0
     momentum_trail_lock = 0.0
     momentum_trail_price = 0.0
@@ -3917,6 +4200,11 @@ def analyze(asset: str) -> Dict[str, Any]:
         if overlay_regime in {"implied_elevated", "implied_extreme"}
         else 0.0,
         "precision_score": precision_score_value,
+        "precision_trigger_ready": precision_trigger_ready_value,
+        "precision_trigger_arming": precision_trigger_arming_value,
+        "precision_trigger_fire": precision_trigger_fire_value,
+        "precision_trigger_confidence": precision_trigger_confidence,
+        "precision_order_flow_ready": precision_order_flow_value,
         "momentum_trail_activation_rr": momentum_trail_activation,
         "momentum_trail_lock_ratio": momentum_trail_lock,
         "momentum_trail_price": momentum_trail_price,
@@ -4151,6 +4439,11 @@ def analyze(asset: str) -> Dict[str, Any]:
             "score_threshold": precision_plan.get("score_threshold", PRECISION_SCORE_THRESHOLD),
             "score_ready": precision_plan.get("score_ready"),
             "trigger_ready": precision_plan.get("trigger_ready"),
+            "order_flow_ready": precision_plan.get("order_flow_ready"),
+            "order_flow_strength": precision_plan.get("order_flow_strength"),
+            "trigger_progress": precision_plan.get("trigger_progress"),
+            "trigger_confidence": precision_plan.get("trigger_confidence"),
+            "reasons": precision_plan.get("trigger_reasons"),
         }
         active_position_meta["precision_trigger"] = trigger_meta
     if execution_playbook:
@@ -4194,6 +4487,11 @@ def analyze(asset: str) -> Dict[str, Any]:
             "score_threshold": precision_plan.get("score_threshold", PRECISION_SCORE_THRESHOLD),
             "score_ready": precision_plan.get("score_ready"),
             "trigger_ready": precision_plan.get("trigger_ready"),
+            "order_flow_ready": precision_plan.get("order_flow_ready"),
+            "order_flow_strength": precision_plan.get("order_flow_strength"),
+            "trigger_progress": precision_plan.get("trigger_progress"),
+            "trigger_confidence": precision_plan.get("trigger_confidence"),
+            "reasons": precision_plan.get("trigger_reasons"),
         }
     if volatility_overlay:
         anchor_metrics_payload["volatility_overlay"] = volatility_overlay
@@ -4301,6 +4599,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
