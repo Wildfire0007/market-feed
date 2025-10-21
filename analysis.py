@@ -3860,10 +3860,109 @@ def analyze(asset: str) -> Dict[str, Any]:
     if position_note and position_note not in reasons:
         reasons.append(position_note)
 
+    structure_flip_flag_value = 0.0
+    if anchor_bias == "long" and structure_flag == "bos_down":
+        structure_flip_flag_value = 1.0
+    elif anchor_bias == "short" and structure_flag == "bos_up":
+        structure_flip_flag_value = 1.0
+    elif anchor_bias is None:
+        if effective_bias == "long" and structure_flag == "bos_down":
+            structure_flip_flag_value = 1.0
+        elif effective_bias == "short" and structure_flag == "bos_up":
+            structure_flip_flag_value = 1.0
+
+    precision_score_value = 0.0
+    if precision_plan:
+        precision_score_value = safe_float(precision_plan.get("score")) or 0.0
+
+    momentum_trail_activation = 0.0
+    momentum_trail_lock = 0.0
+    momentum_trail_price = 0.0
+    if momentum_trailing_plan:
+        activation = safe_float(momentum_trailing_plan.get("activation_rr"))
+        lock_ratio = safe_float(momentum_trailing_plan.get("lock_ratio"))
+        trail_price = safe_float(momentum_trailing_plan.get("trail_price"))
+        if activation is not None and np.isfinite(activation):
+            momentum_trail_activation = float(activation)
+        if lock_ratio is not None and np.isfinite(lock_ratio):
+            momentum_trail_lock = float(lock_ratio)
+        if trail_price is not None and np.isfinite(trail_price):
+            momentum_trail_price = float(trail_price)
+
+    rel_atr_value = 0.0
+    if rel_atr is not None:
+        try:
+            if not np.isnan(rel_atr):
+                rel_atr_value = float(rel_atr)
+        except TypeError:
+            pass
+
+    ml_features = {
+        "p_score": P,
+        "rel_atr": rel_atr_value,
+        "ema21_slope": regime_slope_signed,
+        "bias_long": 1.0 if effective_bias == "long" else 0.0,
+        "bias_short": 1.0 if effective_bias == "short" else 0.0,
+        "momentum_vol_ratio": momentum_vol_ratio or 0.0,
+        "order_flow_imbalance": order_flow_metrics.get("imbalance") or 0.0,
+        "order_flow_pressure": order_flow_metrics.get("pressure") or 0.0,
+        "order_flow_aggressor": order_flow_metrics.get("aggressor_ratio") or 0.0,
+        "news_sentiment": sentiment_signal.score if sentiment_signal else 0.0,
+        "news_event_severity": sentiment_signal.effective_severity if sentiment_signal else 0.0,
+        "realtime_confidence": realtime_confidence,
+        "volatility_ratio": float(overlay_ratio)
+        if (overlay_ratio is not None and np.isfinite(float(overlay_ratio)))
+        else 0.0,
+        "volatility_regime_flag": 1.0
+        if overlay_regime in {"implied_elevated", "implied_extreme"}
+        else 0.0,
+        "precision_score": precision_score_value,
+        "momentum_trail_activation_rr": momentum_trail_activation,
+        "momentum_trail_lock_ratio": momentum_trail_lock,
+        "momentum_trail_price": momentum_trail_price,
+        "structure_flip_flag": structure_flip_flag_value,
+    }
+
+    ml_prediction = predict_signal_probability(asset, ml_features)
+    ml_probability = ml_prediction.probability
+    ml_probability_raw = ml_prediction.raw_probability
+    ml_threshold = ml_prediction.threshold
+
+    combined_probability = P / 100.0
+    if ml_probability is not None:
+        combined_probability = min(
+            1.0, max(0.0, 0.6 * (P / 100.0) + 0.4 * ml_probability)
+        )
+
+    ml_confidence_block = False
+    if (
+        decision in ("buy", "sell")
+        and ml_probability is not None
+        and ml_threshold is not None
+        and ml_probability < ml_threshold
+    ):
+        ml_confidence_block = True
+        if "ml_confidence" not in missing:
+            missing.append("ml_confidence")
+        reason_ml = (
+            f"ML valószínűség {ml_probability:.1%} a küszöb ({ml_threshold:.1%}) alatt"
+        )
+        if reason_ml not in reasons:
+            reasons.append(reason_ml)
+        decision = "no entry"
+        entry = sl = tp1 = tp2 = rr = None
+        execution_playbook = []
+        momentum_trailing_plan = None
+
+    missing = list(dict.fromkeys(missing))
+
+    analysis_timestamp = nowiso()
+    probability_percent = int(max(0, min(100, round(combined_probability * 100))))
+
     decision_obj = {
         "asset": asset,
         "ok": True,
-        "retrieved_at_utc": nowiso(),
+        "retrieved_at_utc": analysis_timestamp,
         "source": "Twelve Data (lokális JSON)",
         "spot": {
             "price": display_spot,
@@ -3877,9 +3976,13 @@ def analyze(asset: str) -> Dict[str, Any]:
             "realtime_stats": realtime_stats if realtime_stats else None,
         },
         "signal": decision,
-        "probability": int(P),
+        "probability": probability_percent,
         "probability_raw": int(P),
-        "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": (round(rr,2) if rr else None),
+        "entry": entry,
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "rr": (round(rr, 2) if rr else None),
         "leverage": lev,
         "stale_timeframes": dict(stale_timeframes),
         "biases": {
@@ -3895,9 +3998,26 @@ def analyze(asset: str) -> Dict[str, Any]:
         },
         "session_info": session_meta,
         "diagnostics": diagnostics_payload(tf_meta, source_files, latency_flags),
-        "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else [])) or ["no signal"],
+        "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else []))
+        or ["no signal"],
         "realtime_transport": realtime_transport,
     }
+    decision_obj["probability_model"] = (
+        float(ml_probability) if ml_probability is not None else None
+    )
+    decision_obj["probability_model_raw"] = (
+        float(ml_probability_raw) if ml_probability_raw is not None else None
+    )
+    decision_obj["probability_calibrated"] = (
+        float(ml_probability) if ml_probability is not None else None
+    )
+    decision_obj["probability_threshold"] = (
+        float(ml_threshold) if ml_threshold is not None else None
+    )
+    if ml_prediction.metadata:
+        decision_obj["probability_stack"] = ml_prediction.metadata
+    if ml_confidence_block:
+        decision_obj["ml_confidence_blocked"] = True
     decision_obj["ema21_slope_1h"] = regime_slope_signed
     decision_obj["ema21_slope_threshold"] = EMA_SLOPE_TH_ASSET.get(asset, EMA_SLOPE_TH_DEFAULT)
     decision_obj["ema21_relation_1h"] = ema21_relation
@@ -3949,30 +4069,18 @@ def analyze(asset: str) -> Dict[str, Any]:
     if exit_signal:
         decision_obj["position_exit_signal"] = exit_signal
 
-    ml_features = {
-        "p_score": P,
-        "rel_atr": float(rel_atr) if not np.isnan(rel_atr) else 0.0,
-        "ema21_slope": regime_slope_signed,
-        "bias_long": 1.0 if effective_bias == "long" else 0.0,
-        "bias_short": 1.0 if effective_bias == "short" else 0.0,
-        "momentum_vol_ratio": momentum_vol_ratio or 0.0,
-        "order_flow_imbalance": order_flow_metrics.get("imbalance") or 0.0,
-        "order_flow_pressure": order_flow_metrics.get("pressure") or 0.0,
-        "order_flow_aggressor": order_flow_metrics.get("aggressor_ratio") or 0.0,
-        "news_sentiment": sentiment_signal.score if sentiment_signal else 0.0,
-        "news_event_severity": sentiment_signal.effective_severity if sentiment_signal else 0.0,
-        "realtime_confidence": realtime_confidence,
-        "volatility_ratio": float(overlay_ratio) if (overlay_ratio is not None and np.isfinite(float(overlay_ratio))) else 0.0,
-        "volatility_regime_flag": 1.0 if overlay_regime in {"implied_elevated", "implied_extreme"} else 0.0,
+    snapshot_metadata = {
+        "analysis_timestamp": analysis_timestamp,
+        "signal": decision,
+        "mode": mode,
+        "probability_calibrated": float(ml_probability)
+        if ml_probability is not None
+        else None,
+        "probability_threshold": float(ml_threshold)
+        if ml_threshold is not None
+        else None,
     }
-    ml_probability = predict_signal_probability(asset, ml_features)
-    if ml_probability is not None:
-        combined = min(1.0, max(0.0, 0.6 * (P / 100.0) + 0.4 * ml_probability))
-        decision_obj["probability_model"] = ml_probability
-        decision_obj["probability"] = int(round(combined * 100))
-    else:
-        decision_obj["probability"] = int(P)
-    log_feature_snapshot(asset, ml_features)
+    log_feature_snapshot(asset, ml_features, metadata=snapshot_metadata)
     active_position_meta = {
         "ema21_slope_abs": regime_val,
         "ema21_slope_signed": regime_slope_signed,
@@ -3996,6 +4104,15 @@ def analyze(asset: str) -> Dict[str, Any]:
         "invalid_level_buy": invalid_level_buy,
         "invalid_buffer_abs": float(invalid_buffer) if invalid_buffer is not None else None,
         "p_score": int(P),
+        "probability_calibrated": float(ml_probability)
+        if ml_probability is not None
+        else None,
+        "probability_threshold": float(ml_threshold)
+        if ml_threshold is not None
+        else None,
+        "probability_model_raw": float(ml_probability_raw)
+        if ml_probability_raw is not None
+        else None,
         "tp_profile": {"tp1_r": current_tp1_mult, "tp2_r": current_tp2_mult},
         "realtime_confidence": realtime_confidence,
         "avg_latency_profile": avg_delay if avg_delay else None,
@@ -4184,6 +4301,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
