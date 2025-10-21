@@ -32,6 +32,11 @@ from typing import Any, Dict, Optional, List, Tuple
 import requests
 
 try:
+    from active_anchor import update_anchor_metrics
+except Exception:  # pragma: no cover - optional dependency path
+    update_anchor_metrics = None
+
+try:
     import websocket  # type: ignore[import]
 except Exception:  # pragma: no cover - optional dependency
     websocket = None
@@ -563,6 +568,22 @@ def collect_realtime_spot(
     }
     if transport == "websocket" and isinstance(last_frame.get("raw"), dict):
         payload["raw_last_frame"] = last_frame["raw"]
+
+    if update_anchor_metrics and payload.get("price") is not None:
+        anchor_extras = {
+            "current_price": payload.get("price"),
+            "spot_price": payload.get("price"),
+            "analysis_timestamp": payload.get("retrieved_at_utc"),
+            "realtime_transport": payload.get("transport"),
+            "realtime_samples": stats.get("samples") if isinstance(stats, dict) else None,
+            "realtime_latency": stats.get("latency_latest") if isinstance(stats, dict) else None,
+            "realtime_source": payload.get("source"),
+            "realtime_price_utc": payload.get("utc"),
+        }
+        try:
+            update_anchor_metrics(asset, anchor_extras)
+        except Exception:
+            pass
     save_json(os.path.join(out_dir, "spot_realtime.json"), payload)
 
 # ─────────────────────── több-szimbólumos fallback ───────────────────────
@@ -735,6 +756,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
