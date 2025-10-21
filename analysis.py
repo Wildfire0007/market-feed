@@ -167,6 +167,8 @@ COST_MULT_HIGH_VOL = 1.3
 ATR5_MIN_MULT  = 0.5     # min. profit >= 0.5× ATR(5m)
 ATR_VOL_HIGH_REL = 0.002  # 0.20% relatív ATR felett lazítjuk a költség-multit
 
+PRECISION_SCORE_THRESHOLD = 70.0
+
 EMA_SLOPE_TH_DEFAULT = 0.0008
 EMA_SLOPE_TH_ASSET = {
     "EURUSD": 0.0006,
@@ -2029,6 +2031,12 @@ def compute_precision_entry(
         "risk": None,
         "liquidity_levels": [],
         "factors": [],
+        "score_threshold": PRECISION_SCORE_THRESHOLD,
+        "score_ready": False,
+        "trigger_state": "standby",
+        "trigger_ready": False,
+        "trigger_levels": None,
+        "ready_ts": None,
     }
 
     if direction not in {"buy", "sell"}:
@@ -2149,6 +2157,71 @@ def compute_precision_entry(
         plan["take_profit_1"] = None
     if tp2 is not None and not np.isfinite(tp2):
         plan["take_profit_2"] = None
+
+    trigger_levels: Dict[str, float] = {}
+    window_tuple = plan.get("entry_window")
+    if window_tuple is not None:
+        window_lo, window_hi = window_tuple
+        trigger_levels["window_low"] = float(window_lo)
+        trigger_levels["window_high"] = float(window_hi)
+        if entry_level is not None:
+            trigger_levels["fire"] = float(entry_level)
+        if direction == "buy":
+            trigger_levels["arm"] = float(window_hi)
+            trigger_levels["disarm"] = float(window_lo)
+        else:
+            trigger_levels["arm"] = float(window_lo)
+            trigger_levels["disarm"] = float(window_hi)
+    elif entry_level is not None:
+        trigger_levels["fire"] = float(entry_level)
+    if trigger_levels:
+        plan["trigger_levels"] = trigger_levels
+
+    trigger_state = "standby"
+    if (
+        plan.get("entry_window")
+        and entry_level is not None
+        and price_now is not None
+        and np.isfinite(price_now)
+    ):
+        window_lo, window_hi = plan["entry_window"]
+        price_val = float(price_now)
+        if direction == "buy":
+            if price_val <= float(entry_level):
+                trigger_state = "fire"
+            elif price_val <= float(window_hi):
+                trigger_state = "armed"
+        else:
+            if price_val >= float(entry_level):
+                trigger_state = "fire"
+            elif price_val >= float(window_lo):
+                trigger_state = "armed"
+    plan["trigger_state"] = trigger_state
+    plan["trigger_ready"] = trigger_state in {"armed", "fire"}
+
+    ready_ts: Optional[str] = None
+    try:
+        idx = k1m.index
+        if isinstance(idx, pd.DatetimeIndex) and len(idx) > 0:
+            tail = idx[-min(3, len(idx)):].sort_values()
+            median_pos = len(tail) // 2
+            candidate = pd.Timestamp(tail[median_pos])
+            if candidate.tzinfo is None:
+                candidate = candidate.tz_localize(timezone.utc)
+            else:
+                candidate = candidate.tz_convert(timezone.utc)
+            ready_ts = (
+                candidate.floor("S").isoformat().replace("+00:00", "Z")
+            )
+    except Exception:
+        ready_ts = None
+    plan["ready_ts"] = ready_ts
+
+    try:
+        plan_score = float(plan.get("score") or 0.0)
+    except (TypeError, ValueError):
+        plan_score = 0.0
+    plan["score_ready"] = plan_score >= PRECISION_SCORE_THRESHOLD
 
     if plan["confidence"] == "low":
         plan["factors"].append("precision confidence low")
@@ -3379,6 +3452,9 @@ def analyze(asset: str) -> Dict[str, Any]:
     current_tp1_mult = core_tp1_mult
     current_tp2_mult = core_tp2_mult
     precision_plan: Optional[Dict[str, Any]] = None
+    precision_ready_for_entry = False
+    precision_trigger_state: Optional[str] = None
+    precision_gate_label = f"precision_score>={int(PRECISION_SCORE_THRESHOLD)}"
 
     def compute_levels(decision_side: str, rr_required: float, tp1_mult: float = TP1_R, tp2_mult: float = TP2_R):
         nonlocal entry, sl, tp1, tp2, rr, missing, min_stoploss_ok, tp1_net_pct_value, last_computed_risk, current_tp1_mult, current_tp2_mult
@@ -3555,6 +3631,49 @@ def analyze(asset: str) -> Dict[str, Any]:
             order_flow_metrics,
         )
 
+    if precision_plan:
+        precision_plan.setdefault("score_threshold", PRECISION_SCORE_THRESHOLD)
+        try:
+            precision_score_val = float(precision_plan.get("score") or 0.0)
+        except (TypeError, ValueError):
+            precision_score_val = 0.0
+        precision_ready_for_entry = precision_score_val >= PRECISION_SCORE_THRESHOLD
+        precision_plan["score_ready"] = bool(precision_plan.get("score_ready") or precision_ready_for_entry)
+        precision_trigger_state = str(precision_plan.get("trigger_state") or "standby")
+        precision_plan["trigger_state"] = precision_trigger_state
+        precision_plan["trigger_ready"] = bool(
+            precision_plan.get("trigger_ready") or precision_trigger_state in {"armed", "fire"}
+        )
+        if precision_plan.get("trigger_levels") is None:
+            precision_plan["trigger_levels"] = {}
+        if precision_gate_label not in required_list:
+            required_list.append(precision_gate_label)
+        if not precision_ready_for_entry and precision_gate_label not in missing:
+            missing.append(precision_gate_label)
+
+    if precision_plan:
+        if not precision_ready_for_entry:
+            if decision in ("buy", "sell"):
+                score_note = (
+                    f"Precision score {precision_score_val:.2f} < {PRECISION_SCORE_THRESHOLD:.0f}"
+                )
+                if score_note not in reasons:
+                    reasons.append(score_note)
+                decision = "no entry"
+                entry = sl = tp1 = tp2 = rr = None
+        else:
+            other_missing = [item for item in missing if item != precision_gate_label]
+            if (
+                decision == "no entry"
+                and precision_trigger_state in {"armed", "fire"}
+                and not other_missing
+            ):
+                decision = "precision_armed"
+                entry = sl = tp1 = tp2 = rr = None
+                armed_note = "Precision trigger armed — limit order watch"
+                if armed_note not in reasons:
+                    reasons.append(armed_note)
+
     def _fmt_price(value: Optional[float]) -> str:
         if value is None or not np.isfinite(value):
             return "n/a"
@@ -3636,6 +3755,37 @@ def analyze(asset: str) -> Dict[str, Any]:
                     "lock_ratio": momentum_trailing_plan.get("lock_ratio"),
                 }
             )
+
+    if precision_plan:
+        window_payload: Optional[List[float]] = None
+        window = precision_plan.get("entry_window")
+        if isinstance(window, (list, tuple)) and len(window) == 2:
+            try:
+                window_payload = [float(window[0]), float(window[1])]
+            except (TypeError, ValueError):
+                window_payload = None
+        trigger_levels_raw = precision_plan.get("trigger_levels") or {}
+        trigger_levels_payload: Dict[str, Any] = {}
+        if isinstance(trigger_levels_raw, dict):
+            for key, value in trigger_levels_raw.items():
+                try:
+                    trigger_levels_payload[key] = float(value) if value is not None else None
+                except (TypeError, ValueError):
+                    trigger_levels_payload[key] = value
+        trigger_state_payload = precision_plan.get("trigger_state") or "standby"
+        trigger_step = {
+            "step": "precision_trigger",
+            "state": trigger_state_payload,
+            "description": f"Precision trigger: {trigger_state_payload}",
+            "entry_window": window_payload,
+            "trigger_levels": trigger_levels_payload or None,
+            "ready_ts": precision_plan.get("ready_ts"),
+            "score": precision_plan.get("score"),
+            "score_threshold": precision_plan.get("score_threshold", PRECISION_SCORE_THRESHOLD),
+            "score_ready": precision_plan.get("score_ready"),
+            "trigger_ready": precision_plan.get("trigger_ready"),
+        }
+        execution_playbook.append(trigger_step)
 
     # 9) Session override + mentés: signal.json
     if latency_flags:
@@ -3868,6 +4018,24 @@ def analyze(asset: str) -> Dict[str, Any]:
         active_position_meta["momentum_trailing_plan"] = momentum_trailing_plan
     if precision_plan:
         active_position_meta["precision_plan"] = precision_plan
+        window_payload: Optional[List[float]] = None
+        window_raw = precision_plan.get("entry_window")
+        if isinstance(window_raw, (list, tuple)) and len(window_raw) == 2:
+            try:
+                window_payload = [float(window_raw[0]), float(window_raw[1])]
+            except (TypeError, ValueError):
+                window_payload = None
+        trigger_meta = {
+            "state": precision_plan.get("trigger_state"),
+            "ready_ts": precision_plan.get("ready_ts"),
+            "entry_window": window_payload,
+            "trigger_levels": precision_plan.get("trigger_levels"),
+            "score": precision_plan.get("score"),
+            "score_threshold": precision_plan.get("score_threshold", PRECISION_SCORE_THRESHOLD),
+            "score_ready": precision_plan.get("score_ready"),
+            "trigger_ready": precision_plan.get("trigger_ready"),
+        }
+        active_position_meta["precision_trigger"] = trigger_meta
     if execution_playbook:
         active_position_meta["execution_playbook"] = execution_playbook
     if exit_signal:
@@ -3894,6 +4062,22 @@ def analyze(asset: str) -> Dict[str, Any]:
     if precision_plan:
         anchor_metrics_payload["precision_score"] = precision_plan.get("score")
         anchor_metrics_payload["precision_plan"] = precision_plan
+        window_raw = precision_plan.get("entry_window")
+        window_payload: Optional[List[float]] = None
+        if isinstance(window_raw, (list, tuple)) and len(window_raw) == 2:
+            try:
+                window_payload = [float(window_raw[0]), float(window_raw[1])]
+            except (TypeError, ValueError):
+                window_payload = None
+        anchor_metrics_payload["precision_trigger"] = {
+            "state": precision_plan.get("trigger_state"),
+            "ready_ts": precision_plan.get("ready_ts"),
+            "entry_window": window_payload,
+            "trigger_levels": precision_plan.get("trigger_levels"),
+            "score_threshold": precision_plan.get("score_threshold", PRECISION_SCORE_THRESHOLD),
+            "score_ready": precision_plan.get("score_ready"),
+            "trigger_ready": precision_plan.get("trigger_ready"),
+        }
     if volatility_overlay:
         anchor_metrics_payload["volatility_overlay"] = volatility_overlay
     if tick_order_flow:
@@ -4000,6 +4184,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
