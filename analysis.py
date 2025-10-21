@@ -757,6 +757,443 @@ def format_atr_hint(asset: str, atr_value: Optional[float]) -> Optional[str]:
     return f"1h ATR ≈ {atr_value:.2f}"
 
 
+def format_price_compact(value: Optional[float]) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not np.isfinite(numeric):
+        return "n/a"
+    abs_val = abs(numeric)
+    if abs_val >= 1000:
+        decimals = 1
+    elif abs_val >= 100:
+        decimals = 2
+    elif abs_val >= 10:
+        decimals = 3
+    else:
+        decimals = 4
+    return f"{numeric:.{decimals}f}"
+
+
+def translate_gate_label(label: str) -> str:
+    normalized = (label or "").strip().lower()
+    base_map = {
+        "session": "Piac zárva – várj a kereskedési ablakra.",
+        "regime": "Trend filter nem támogatja az irányt.",
+        "bias": "Nincs egyértelmű bias – várj megerősítésre.",
+        "atr": "ATR feltétel nem teljesült – volatilitás nem megfelelő.",
+        "liquidity": "Forgalmi feltételek nem teljesültek – várj nagyobb volumenre.",
+        "order_flow": "Order flow nincs összhangban a belépővel.",
+        "order_flow_pressure": "Order flow nyomás gyenge – várj további erősítésre.",
+        "momentum_trigger": "Momentum trigger még nem aktív.",
+        "bos5m": "5m struktúra nem erősíti meg a setupot.",
+        "tp_min_profit": "TP1 távolság túl kicsi – keress jobb kockázat/hozam arányt.",
+        "min_stoploss": "Stop távolság túl kicsi – szélesítsd a védelmi sávot.",
+        "intervention_watch": "Intervention Watch tiltja az új belépőt.",
+        "ml_confidence": "ML valószínűség alacsony – belépő blokkolva.",
+        "precision_flow_alignment": "Precision belépő: order flow megerősítés hiányzik.",
+        "precision_trigger_sync": "Precision belépő: trigger szinkronra vár.",
+    }
+    if normalized in base_map:
+        return base_map[normalized]
+    if normalized.startswith("rr_math>="):
+        threshold = label.split(">=", 1)[1]
+        return f"RR arány nem éri el a {threshold} célt."
+    if normalized.startswith("tp1_net>="):
+        threshold = label.split(">=", 1)[1]
+        return f"TP1 nettó profit érje el a {threshold} küszöböt."
+    if normalized.startswith("precision_score>="):
+        threshold = label.split(">=", 1)[1]
+        return f"Precision score érje el a {threshold} szintet."
+    return label
+
+
+def translate_urgency(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    mapping = {
+        "immediate": "azonnal",
+        "fast": "sürgősen",
+        "normal": "normál ütemben",
+        "monitor": "folyamatos megfigyeléssel",
+    }
+    return mapping.get(str(value).lower(), str(value))
+
+
+def translate_severity(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    mapping = {
+        "critical": "kritikus",
+        "high": "magas",
+        "elevated": "emelt",
+        "moderate": "mérsékelt",
+        "caution": "figyelmeztetés",
+        "info": "információs",
+    }
+    return mapping.get(str(value).lower(), str(value))
+
+
+def short_text(text: str, limit: int = 160) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def build_action_plan(
+    asset: str,
+    decision: str,
+    session_meta: Optional[Dict[str, Any]],
+    entry: Optional[float],
+    sl: Optional[float],
+    tp1: Optional[float],
+    tp2: Optional[float],
+    rr: Optional[float],
+    leverage: Optional[float],
+    probability: Optional[int],
+    precision_plan: Optional[Dict[str, Any]],
+    execution_playbook: Optional[List[Dict[str, Any]]],
+    position_note: Optional[str],
+    exit_signal: Optional[Dict[str, Any]],
+    missing: Optional[List[str]],
+    reasons: Optional[List[str]],
+    last_computed_risk: Optional[float],
+    momentum_trailing_plan: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    session_meta = session_meta or {}
+    execution_playbook = execution_playbook or []
+    blockers_raw = [str(item) for item in (missing or []) if item]
+    blockers: List[str] = []
+    for raw in blockers_raw:
+        translated = translate_gate_label(raw)
+        if translated not in blockers:
+            blockers.append(translated)
+
+    priority_rank = {"low": 0, "medium": 1, "high": 2}
+    status_rank = {
+        "standby": 0,
+        "await_session": 1,
+        "monitor_trigger": 2,
+        "execute_entry": 3,
+        "manage_position": 4,
+    }
+    current_priority = "low"
+    current_status = "standby"
+
+    plan: Dict[str, Any] = {
+        "status": current_status,
+        "priority": current_priority,
+        "summary": "",
+        "steps": [],
+        "blockers": blockers,
+        "blockers_raw": blockers_raw,
+        "notes": [],
+        "context": {
+            "asset": asset,
+            "decision": decision,
+            "probability": probability,
+            "session_open": bool(session_meta.get("open")),
+            "session_entry_open": bool(session_meta.get("entry_open")),
+            "session_status": session_meta.get("status"),
+        },
+    }
+
+    if session_meta.get("next_open_utc"):
+        plan["context"]["next_session_open_utc"] = session_meta.get("next_open_utc")
+
+    notes: List[str] = []
+    summary_parts: List[str] = []
+    order_counter = 1
+
+    def add_note(text: Optional[str]) -> None:
+        if not text:
+            return
+        note_clean = text.strip()
+        if note_clean and note_clean not in notes:
+            notes.append(note_clean)
+
+    def add_step(
+        category: str,
+        instruction: Optional[str],
+        *,
+        source: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        nonlocal order_counter
+        if not instruction:
+            return
+        step: Dict[str, Any] = {
+            "order": order_counter,
+            "category": category,
+            "instruction": instruction,
+        }
+        if source:
+            step["source"] = source
+        if extra:
+            for key, value in extra.items():
+                if value is not None:
+                    step[key] = value
+        plan["steps"].append(step)
+        order_counter += 1
+
+    def update_state(new_status: str, new_priority: str) -> None:
+        nonlocal current_status, current_priority
+        if status_rank.get(new_status, 0) > status_rank.get(current_status, 0):
+            current_status = new_status
+            current_priority = new_priority
+        elif status_rank.get(new_status, 0) == status_rank.get(current_status, 0):
+            if priority_rank.get(new_priority, 0) > priority_rank.get(current_priority, 0):
+                current_priority = new_priority
+
+    session_open = bool(session_meta.get("open"))
+    entry_open = bool(session_meta.get("entry_open"))
+    next_open = session_meta.get("next_open_utc")
+
+    if probability is not None:
+        add_note(f"Összesített valószínűség: {probability}%.")
+    if leverage is not None:
+        add_note(f"Ajánlott tőkeáttétel: ×{float(leverage):.1f}.")
+
+    if rr is not None and np.isfinite(rr):
+        add_note(f"Célzott RR: {float(rr):.2f}R.")
+
+    risk_pct: Optional[float] = None
+    if last_computed_risk is not None and entry is not None:
+        try:
+            risk_pct = abs(float(last_computed_risk)) / abs(float(entry)) * 100.0
+        except (ZeroDivisionError, TypeError, ValueError):
+            risk_pct = None
+    if risk_pct is not None and np.isfinite(risk_pct):
+        add_note(
+            f"Belépő–stop távolság ≈ {risk_pct:.2f}% ({abs(float(last_computed_risk)):.5f} ár)."
+        )
+        add_note(f"Maximális számla kockázat: {MAX_RISK_PCT:.1f}%.")
+
+    if momentum_trailing_plan:
+        activation = momentum_trailing_plan.get("activation_rr")
+        lock_ratio = momentum_trailing_plan.get("lock_ratio")
+        if activation is not None:
+            add_note(
+                f"Momentum trail aktiválás: {float(activation):.2f}R, lock {float(lock_ratio or 0) * 100:.0f}%"
+            )
+
+    if precision_plan:
+        score = precision_plan.get("score")
+        threshold = precision_plan.get("score_threshold") or PRECISION_SCORE_THRESHOLD
+        confidence = precision_plan.get("confidence")
+        trigger_state = precision_plan.get("trigger_state")
+        if score is not None:
+            add_note(
+                f"Precision score: {float(score):.2f} / küszöb {float(threshold):.0f}."
+            )
+        if confidence:
+            add_note(f"Precision confidence: {confidence}.")
+        if trigger_state:
+            add_note(f"Precision trigger állapot: {trigger_state}.")
+
+    if position_note:
+        add_note(position_note)
+
+    for item in (reasons or [])[:6]:
+        add_note(item)
+
+    if exit_signal:
+        severity_label = translate_severity(exit_signal.get("severity")) or ""
+        state_label = str(exit_signal.get("state") or exit_signal.get("action") or "")
+        state_map = {
+            "hard_exit": "hard exit",
+            "scale_out": "részleges zárás",
+            "warn": "figyelmeztetés",
+            "trail_guard": "trail védelem",
+        }
+        state_display = state_map.get(state_label, state_label.replace("_", " "))
+        direction = exit_signal.get("direction")
+        summary_parts.append(
+            short_text(
+                f"{severity_label.capitalize() if severity_label else 'Exit'} jelzés: {state_display}"
+                + (f" ({direction})" if direction else "")
+            )
+        )
+        exit_actions = exit_signal.get("actions") or []
+
+        def describe_exit_action(action: Dict[str, Any]) -> str:
+            action_type = str(action.get("type") or "").lower()
+            size = action.get("size")
+            urgency = translate_urgency(action.get("urgency"))
+            extra_parts: List[str] = []
+            if urgency:
+                extra_parts.append(f"sürgősség: {urgency}")
+            if action_type == "close":
+                if size is None or float(size) >= 0.999:
+                    base = "Zárd a teljes pozíciót"
+                else:
+                    base = f"Zárd a pozíció {float(size) * 100:.0f}%-át"
+            elif action_type == "scale_out":
+                pct = float(size) * 100 if size is not None else 50.0
+                base = f"Realizálj {pct:.0f}% pozíciót"
+            elif action_type == "tighten_stop":
+                if direction == "long":
+                    base = "Húzd a stop-loss-t a legutóbbi swing low alá"
+                elif direction == "short":
+                    base = "Húzd a stop-loss-t a legutóbbi swing high fölé"
+                else:
+                    base = "Szorítsd a stop-loss sávot a legfrissebb struktúra mögé"
+            elif action_type == "monitor":
+                base = "Fokozott monitorozás 5m/1m idősíkon"
+            else:
+                base = f"Hajtsd végre a(z) {action_type} műveletet"
+            if extra_parts:
+                base += " (" + ", ".join(extra_parts) + ")"
+            return base
+
+        for action in exit_actions:
+            add_step(
+                "exit",
+                describe_exit_action(action),
+                source="position_exit_signal",
+                extra={k: v for k, v in action.items() if v is not None},
+            )
+        if exit_signal.get("reasons"):
+            for reason in exit_signal.get("reasons", [])[:4]:
+                add_note(reason)
+        update_state(
+            "manage_position",
+            "high"
+            if (exit_signal.get("severity") in {"critical", "high"} or exit_signal.get("action") == "close")
+            else "medium",
+        )
+
+    entry_present = any((step or {}).get("step") == "entry" for step in execution_playbook)
+
+    if execution_playbook:
+        for pb_step in execution_playbook:
+            description = pb_step.get("description")
+            if not description:
+                continue
+            category = str(pb_step.get("step") or "playbook")
+            extra = {
+                key: pb_step.get(key)
+                for key in (
+                    "risk_abs",
+                    "confidence",
+                    "rr",
+                    "trigger_rr",
+                    "lock_ratio",
+                    "entry_window",
+                    "trigger_levels",
+                )
+                if pb_step.get(key) is not None
+            }
+            add_step(category, description, source="execution_playbook", extra=extra)
+
+    if decision in {"buy", "sell"} and entry is not None and sl is not None:
+        direction_label = "long" if decision == "buy" else "short"
+        summary_text = f"Új {direction_label} setup kész ({probability}% valószínűség)"
+        if not entry_open:
+            summary_text += " – belépési ablak zárva"
+        summary_parts.append(short_text(summary_text))
+        stop_instruction = (
+            "Stop-loss szint: "
+            + format_price_compact(sl)
+            + (" (long)" if decision == "buy" else " (short)")
+        )
+        add_step(
+            "risk",
+            stop_instruction,
+            source="levels",
+            extra={"stop_loss": float(sl)},
+        )
+        update_state("execute_entry" if entry_open else "await_session", "high" if entry_open else "medium")
+        if not entry_present:
+            add_step(
+                "entry",
+                f"Nyiss {direction_label} pozíciót {format_price_compact(entry)} környékén.",
+                source="levels",
+                extra={"entry_price": float(entry)},
+            )
+        if tp1 is not None:
+            add_step(
+                "take_profit",
+                f"TP1: {format_price_compact(tp1)} (részleges zárás).",
+                source="levels",
+                extra={"tp1": float(tp1)},
+            )
+        if tp2 is not None:
+            add_step(
+                "take_profit",
+                f"TP2: {format_price_compact(tp2)} (végcél).",
+                source="levels",
+                extra={"tp2": float(tp2)},
+            )
+
+    precision_state = str((precision_plan or {}).get("trigger_state") or "")
+    precision_direction = (precision_plan or {}).get("direction")
+    if decision in {"precision_ready", "precision_arming"} and precision_plan:
+        label = "Precision trigger előkészítés"
+        if decision == "precision_arming":
+            label = "Precision trigger aktív"
+        summary_parts.append(short_text(label))
+        window = precision_plan.get("entry_window")
+        if isinstance(window, (list, tuple)) and len(window) == 2:
+            add_step(
+                "precision_window",
+                (
+                    f"Figyeld a {'long' if precision_direction == 'buy' else 'short' if precision_direction == 'sell' else 'trade'} belépő zónát"
+                    f" {format_price_compact(window[0])}–{format_price_compact(window[1])}."
+                ),
+                source="precision",
+                extra={"entry_window": list(window)},
+            )
+        if precision_plan.get("stop_loss") is not None:
+            add_step(
+                "precision_stop",
+                f"Precision SL előkészítése: {format_price_compact(precision_plan['stop_loss'])}.",
+                source="precision",
+                extra={"stop_loss": float(precision_plan["stop_loss"])},
+            )
+        trigger_levels = precision_plan.get("trigger_levels") or {}
+        if trigger_levels:
+            add_step(
+                "precision_trigger",
+                "Aktiváld az árriasztást a precision trigger szintekre.",
+                source="precision",
+                extra={"trigger_levels": trigger_levels},
+            )
+        update_state("monitor_trigger", "high" if decision == "precision_arming" else "medium")
+
+    if precision_state:
+        plan["context"]["precision_state"] = precision_state
+    if precision_direction:
+        plan["context"]["precision_direction"] = precision_direction
+
+    if not summary_parts:
+        if decision == "no entry":
+            if blockers:
+                summary_parts.append("Nincs belépő – dolgozd le a hiányzó feltételeket.")
+            else:
+                summary_parts.append("Nincs belépő – figyeld a következő megerősítést.")
+        elif exit_signal:
+            summary_parts.append("Pozíció menedzsment folyamatban.")
+        else:
+            summary_parts.append(f"Állapot: {decision}")
+
+    if (decision in {"buy", "sell", "precision_ready", "precision_arming"}) and not entry_open:
+        session_msg = "Belépési ablak zárva – várj a megnyitásig."
+        if next_open:
+            session_msg += f" Következő nyitás: {next_open}."
+        add_step("session", session_msg, source="session", extra={"next_open_utc": next_open})
+
+    plan["summary"] = " | ".join(summary_parts)
+    plan["notes"] = notes
+    update_state(current_status, current_priority)
+    plan["status"] = current_status
+    plan["priority"] = current_priority
+    return plan
+
+
 def derive_position_management_note(
     asset: str,
     session_meta: Dict[str, Any],
@@ -4357,6 +4794,29 @@ def analyze(asset: str) -> Dict[str, Any]:
     if exit_signal:
         decision_obj["position_exit_signal"] = exit_signal
 
+    action_plan = build_action_plan(
+        asset=asset,
+        decision=decision,
+        session_meta=session_meta,
+        entry=entry,
+        sl=sl,
+        tp1=tp1,
+        tp2=tp2,
+        rr=rr,
+        leverage=lev,
+        probability=probability_percent,
+        precision_plan=precision_plan,
+        execution_playbook=execution_playbook,
+        position_note=position_note,
+        exit_signal=exit_signal,
+        missing=decision_obj.get("gates", {}).get("missing", []),
+        reasons=decision_obj.get("reasons"),
+        last_computed_risk=last_computed_risk,
+        momentum_trailing_plan=momentum_trailing_plan,
+    )
+    if action_plan:
+        decision_obj["action_plan"] = action_plan
+
     snapshot_metadata = {
         "analysis_timestamp": analysis_timestamp,
         "signal": decision,
@@ -4446,6 +4906,8 @@ def analyze(asset: str) -> Dict[str, Any]:
             "reasons": precision_plan.get("trigger_reasons"),
         }
         active_position_meta["precision_trigger"] = trigger_meta
+    if action_plan:
+        active_position_meta["action_plan"] = action_plan
     if execution_playbook:
         active_position_meta["execution_playbook"] = execution_playbook
     if exit_signal:
@@ -4599,6 +5061,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
