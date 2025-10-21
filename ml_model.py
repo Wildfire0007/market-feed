@@ -14,11 +14,13 @@ labelling.
 
 from __future__ import annotations
 
-import os
 import json
+import math
+import os
 import warnings
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -62,7 +64,44 @@ MODEL_FEATURES: List[str] = [
     "realtime_confidence",
     "volatility_ratio",
     "volatility_regime_flag",
+    "precision_score",
+    "precision_trigger_ready",
+    "precision_trigger_arming",
+    "precision_trigger_fire",
+    "precision_trigger_confidence",
+    "precision_order_flow_ready",
+    "structure_flip_flag",
+    "momentum_trail_activation_rr",
+    "momentum_trail_lock_ratio",
+    "momentum_trail_price",
 ]
+
+
+@dataclass
+class ProbabilityPrediction:
+    """Container describing the calibrated probability output.
+
+    Attributes
+    ----------
+    probability:
+        Final calibrated probability after stacking and calibration.  ``None``
+        when no model artefact is present.
+    raw_probability:
+        Direct model probability prior to stacking/calibration.  Useful for
+        debugging and drift monitoring.
+    threshold:
+        Asset specific decision boundary, if available from the calibration
+        manifest.
+    metadata:
+        Auxiliary diagnostics about the scoring pipeline (e.g. applied
+        calibration method).  The structure is intentionally loose so callers
+        can simply serialise it alongside analysis diagnostics.
+    """
+
+    probability: Optional[float] = None
+    raw_probability: Optional[float] = None
+    threshold: Optional[float] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 def _ensure_parent(path: Path) -> None:
@@ -87,6 +126,10 @@ def _stack_config_path(asset: str) -> Path:
     return MODEL_DIR / f"{asset.upper()}_stack.json"
 
 
+def _calibration_path(asset: str) -> Path:
+    return MODEL_DIR / f"{asset.upper()}_calibration.json"
+
+
 def missing_model_artifacts(assets: Iterable[str]) -> Dict[str, Path]:
     """Return a mapping of assets without an on-disk gradient boosting model."""
 
@@ -109,6 +152,198 @@ def _load_stack_config(asset: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
     return data if isinstance(data, dict) else None
+
+
+def _load_calibration(asset: str) -> Optional[Dict[str, Any]]:
+    path = _calibration_path(asset)
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _logit(value: float, epsilon: float = 1e-6) -> float:
+    clipped = min(max(value, epsilon), 1.0 - epsilon)
+    return math.log(clipped / (1.0 - clipped))
+
+
+def _sigmoid(value: float) -> float:
+    try:
+        return 1.0 / (1.0 + math.exp(-value))
+    except OverflowError:
+        return float(value > 0)
+
+
+def _piecewise_linear(x: float, points: List[Tuple[float, float]]) -> float:
+    if not points:
+        return x
+    points = sorted(points, key=lambda item: item[0])
+    xs, ys = zip(*points)
+    if x <= xs[0]:
+        return ys[0]
+    if x >= xs[-1]:
+        return ys[-1]
+    for idx in range(1, len(points)):
+        x0, y0 = points[idx - 1]
+        x1, y1 = points[idx]
+        if x0 <= x <= x1:
+            if x1 == x0:
+                return y1
+            weight = (x - x0) / (x1 - x0)
+            return y0 + weight * (y1 - y0)
+    return ys[-1]
+
+
+def _apply_calibration(
+    probability: Optional[float],
+    raw_probability: Optional[float],
+    features: Dict[str, Any],
+    config: Optional[Dict[str, Any]],
+) -> Tuple[Optional[float], Dict[str, Any]]:
+    if config is None:
+        return probability, {}
+
+    method = str(config.get("method", "platt")).lower()
+    base = probability if probability is not None else raw_probability
+    if base is None:
+        return probability, {"method": method, "applied": False}
+
+    calibrated = base
+    details: Dict[str, Any] = {"method": method, "applied": True}
+
+    if method in {"platt", "logistic"}:
+        params = config.get("parameters") or {}
+        slope = float(params.get("slope", 1.0) or 1.0)
+        intercept = float(params.get("intercept", 0.0) or 0.0)
+        domain = str(params.get("domain", "probability")).lower()
+        details["parameters"] = {"slope": slope, "intercept": intercept, "domain": domain}
+
+        if domain == "logit":
+            transformed = slope * _logit(base) + intercept
+        else:
+            transformed = slope * base + intercept
+        calibrated = _sigmoid(transformed)
+
+        blend = float(config.get("blend", 1.0) or 1.0)
+        if 0.0 <= blend < 1.0:
+            calibrated = blend * calibrated + (1.0 - blend) * base
+            details["blend"] = blend
+
+    elif method in {"isotonic", "piecewise"}:
+        raw_points = (
+            config.get("points")
+            or config.get("table")
+            or config.get("pairs")
+            or config.get("mapping")
+        )
+        points: List[Tuple[float, float]] = []
+        if isinstance(raw_points, list):
+            for item in raw_points:
+                if not isinstance(item, (list, tuple)) or len(item) < 2:
+                    continue
+                try:
+                    x_val = float(item[0])
+                    y_val = float(item[1])
+                except (TypeError, ValueError):
+                    continue
+                points.append((x_val, min(max(y_val, 0.0), 1.0)))
+        calibrated = _piecewise_linear(base, points) if points else base
+        details["points"] = points
+    else:
+        details["applied"] = False
+        return probability, details
+
+    calibrated = min(max(calibrated, 0.0), 1.0)
+    return calibrated, details
+
+
+def _determine_threshold(
+    config: Optional[Dict[str, Any]], features: Dict[str, Any]
+) -> Tuple[Optional[float], Dict[str, Any]]:
+    if config is None:
+        return None, {}
+    thresholds = config.get("thresholds")
+    if not isinstance(thresholds, dict):
+        return None, {}
+
+    meta: Dict[str, Any] = {"available": thresholds}
+    try:
+        threshold = float(thresholds.get("default"))
+    except (TypeError, ValueError):
+        threshold = None
+    if threshold is None:
+        return None, meta
+
+    selection = "default"
+    bias_long = float(features.get("bias_long", 0.0) or 0.0)
+    bias_short = float(features.get("bias_short", 0.0) or 0.0)
+    if bias_long > bias_short:
+        value = thresholds.get("long")
+        if value is not None:
+            try:
+                threshold = float(value)
+                selection = "long"
+            except (TypeError, ValueError):
+                pass
+    elif bias_short > bias_long:
+        value = thresholds.get("short")
+        if value is not None:
+            try:
+                threshold = float(value)
+                selection = "short"
+            except (TypeError, ValueError):
+                pass
+
+    overrides_meta: List[Dict[str, Any]] = []
+    overrides = config.get("feature_thresholds")
+    if isinstance(overrides, list):
+        for override in overrides:
+            if not isinstance(override, dict):
+                continue
+            feature = override.get("feature")
+            if not feature:
+                continue
+            value = features.get(feature)
+            if value is None:
+                continue
+            try:
+                value_float = float(value)
+            except (TypeError, ValueError):
+                continue
+            min_val = override.get("min")
+            max_val = override.get("max")
+            if min_val is not None:
+                try:
+                    if value_float < float(min_val):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+            if max_val is not None:
+                try:
+                    if value_float > float(max_val):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+            try:
+                threshold = float(override.get("threshold", threshold))
+            except (TypeError, ValueError):
+                continue
+            overrides_meta.append(
+                {
+                    "feature": feature,
+                    "value": value_float,
+                    "threshold": threshold,
+                }
+            )
+            selection = f"override:{feature}"
+    meta["selection"] = selection
+    if overrides_meta:
+        meta["overrides"] = overrides_meta
+    return threshold, meta
 
 
 def _apply_stack(
@@ -175,23 +410,13 @@ def _apply_stack(
 
 
 
-def predict_signal_probability(asset: str, features: Dict[str, Any]) -> Optional[float]:
-    """Returns the model probability (0..1) for the provided snapshot.
+def predict_signal_probability(asset: str, features: Dict[str, Any]) -> ProbabilityPrediction:
+    """Return calibrated probability estimates for an analysis snapshot."""
 
-    Parameters
-    ----------
-    asset: str
-        Instrument identifier.  Used to locate the persisted model artifact.
-    features: Dict[str, Any]
-        Feature dictionary; missing keys are imputed with zero.
-
-    Returns
-    -------
-    Optional[float]
-        ``None`` if no trained model is available, otherwise the probability
-        that the analysed setup will finish in profit.
-    """
-    
+    metadata: Dict[str, Any] = {
+        "asset": asset,
+    }
+   
     if load is None or _SKLEARN_IMPORT_ERROR is not None:
         global _JOBLIB_WARNING_EMITTED, _SKLEARN_WARNING_EMITTED
         if _JOBLIB_IMPORT_ERROR is not None and not _JOBLIB_WARNING_EMITTED:
@@ -208,23 +433,31 @@ def predict_signal_probability(asset: str, features: Dict[str, Any]) -> Optional
                 RuntimeWarning,
             )
             _SKLEARN_WARNING_EMITTED = True
-        return None
+        metadata["unavailable_reason"] = "sklearn_missing"
+        return ProbabilityPrediction(metadata=metadata)
     
     model_file = _model_path(asset)
     if not model_file.exists():
-        return None
+        metadata["unavailable_reason"] = "model_missing"
+        return ProbabilityPrediction(metadata=metadata)
 
-    clf = load(model_file)
+    try:
+        clf = load(model_file)
+    except Exception as exc:  # pragma: no cover - corrupted artefacts
+        metadata["unavailable_reason"] = f"model_load_error:{exc}"
+        return ProbabilityPrediction(metadata=metadata)
+
     if not isinstance(clf, GradientBoostingClassifier):
-        # The artifact exists but is not a GBM; avoid crashing the analysis and
-        # signal that the model should be rebuilt.
-        return None
+        metadata["unavailable_reason"] = "model_type_mismatch"
+        return ProbabilityPrediction(metadata=metadata)
 
     vector = _vectorise(features).reshape(1, -1)
     try:
         proba = clf.predict_proba(vector)
-    except Exception:
-        return None
+    except Exception as exc:  # pragma: no cover - scoring edge cases
+        metadata["unavailable_reason"] = f"predict_error:{exc}"
+        return ProbabilityPrediction(metadata=metadata)
+        
     base_probability: Optional[float] = None
     if isinstance(proba, Iterable):
         arr = np.asarray(proba)
@@ -234,10 +467,44 @@ def predict_signal_probability(asset: str, features: Dict[str, Any]) -> Optional
             base_probability = float(arr[-1])
 
     stack_config = _load_stack_config(asset)
-    return _apply_stack(base_probability, features, stack_config)
+    stacked_probability = _apply_stack(base_probability, features, stack_config)
+
+    if base_probability is not None:
+        metadata["raw_probability"] = base_probability
+    if stacked_probability is not None and stacked_probability != base_probability:
+        metadata["stacked_probability"] = stacked_probability
+
+    if stack_config:
+        metadata["stack"] = {
+            "method": stack_config.get("method", "average"),
+            "components": list((stack_config.get("components") or {}).keys()),
+        }
+
+    calibration_config = _load_calibration(asset)
+    calibrated_probability, calibration_meta = _apply_calibration(
+        stacked_probability,
+        base_probability,
+        features,
+        calibration_config,
+    )
+    if calibration_meta:
+        metadata["calibration"] = calibration_meta
+
+    threshold, threshold_meta = _determine_threshold(calibration_config, features)
+    if threshold_meta:
+        metadata["threshold"] = threshold_meta
+
+    return ProbabilityPrediction(
+        probability=calibrated_probability,
+        raw_probability=base_probability,
+        threshold=threshold,
+        metadata=metadata,
+    )
 
 
-def log_feature_snapshot(asset: str, features: Dict[str, Any]) -> Path:
+def log_feature_snapshot(
+    asset: str, features: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None
+) -> Path:
     """Appends the feature vector to a CSV file for future labelling.
 
     The CSV structure matches ``MODEL_FEATURES`` and always contains a header.
@@ -254,6 +521,20 @@ def log_feature_snapshot(asset: str, features: Dict[str, Any]) -> Path:
     else:
         df.to_csv(path, index=False)
 
+    if metadata:
+        meta_path = path.with_suffix(path.suffix + ".meta.jsonl")
+        try:
+            record = {
+                "asset": asset,
+                "metadata": metadata,
+            }
+            with meta_path.open("a", encoding="utf-8") as meta_fh:
+                json.dump(record, meta_fh, ensure_ascii=False)
+                meta_fh.write("\n")
+        except Exception:
+            # Metadata logging should never block the analysis pipeline.
+            pass
+            
     try:
         from reports.feature_monitor import update_feature_drift_report
 
@@ -287,6 +568,7 @@ def export_feature_schema() -> Path:
 
 __all__ = [
     "MODEL_FEATURES",
+    "ProbabilityPrediction",
     "predict_signal_probability",
     "log_feature_snapshot",
     "export_feature_schema",
