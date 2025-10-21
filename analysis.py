@@ -765,16 +765,21 @@ def derive_position_management_note(
     current_p_score: Optional[float],
     current_rel_atr: Optional[float],
     current_atr5: Optional[float],
-) -> Optional[str]:
+    current_price: Optional[float],
+    invalid_level_buy: Optional[float],
+    invalid_level_sell: Optional[float],
+    invalid_buffer_abs: Optional[float],
+    current_signal: Optional[str],
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     if not session_meta.get("open"):
-        return None
+        return None, None
     if session_meta.get("status") in {"maintenance", "closed_out_of_hours"}:
-        return None
+        return None, None
 
     monitor_only = not session_meta.get("entry_open")
     anchor_active = anchor_bias in {"long", "short"}
     if not monitor_only and not anchor_active:
-        return None
+        return None, None
 
     bias = effective_bias or "neutral"
 
@@ -822,10 +827,243 @@ def derive_position_management_note(
         det = deterioration_messages()
         if det:
             base += " — " + "; ".join(det)
-        return base + hint_suffix
+        return base + hint_suffix, None
 
     direction = anchor_bias or bias
     base_message: Optional[str]
+    exit_signal: Optional[Dict[str, Any]] = None
+
+    current_price_val = safe_float(current_price)
+    anchor_sl = safe_float((anchor_record or {}).get("stop_loss")) if anchor_record else None
+    anchor_entry = safe_float((anchor_record or {}).get("entry_price") or (anchor_record or {}).get("price"))
+    invalid_buy_val = safe_float(invalid_level_buy)
+    invalid_sell_val = safe_float(invalid_level_sell)
+    invalid_buffer_val = safe_float(invalid_buffer_abs)
+    initial_risk_abs = safe_float((anchor_record or {}).get("initial_risk_abs"))
+    max_fav_abs = safe_float((anchor_record or {}).get("max_favorable_excursion"))
+    current_pnl_abs = safe_float((anchor_record or {}).get("current_pnl_abs"))
+    current_pnl_r = safe_float((anchor_record or {}).get("current_pnl_r"))
+    drift_state = (anchor_record or {}).get("drift_state") or (anchor_record or {}).get("anchor_drift_state")
+
+    if (
+        current_pnl_abs is None
+        and anchor_entry is not None
+        and current_price_val is not None
+        and anchor_bias in {"long", "short"}
+    ):
+        if anchor_bias == "long":
+            current_pnl_abs = current_price_val - anchor_entry
+        else:
+            current_pnl_abs = anchor_entry - current_price_val
+
+    max_fav_r: Optional[float] = None
+    if initial_risk_abs and initial_risk_abs > 0:
+        if max_fav_abs is not None:
+            max_fav_r = max_fav_abs / initial_risk_abs
+        if current_pnl_r is None and current_pnl_abs is not None:
+            current_pnl_r = current_pnl_abs / initial_risk_abs
+
+    profit_drawdown_ratio: Optional[float] = None
+    if max_fav_abs is not None and max_fav_abs > 0 and current_pnl_abs is not None:
+        profit_drawdown_ratio = (max_fav_abs - current_pnl_abs) / max_fav_abs
+
+    tolerance = 0.0
+    if current_atr5 is not None and np.isfinite(current_atr5) and current_atr5 > 0:
+        tolerance = max(tolerance, float(current_atr5) * 0.25)
+    if invalid_buffer_val is not None and np.isfinite(invalid_buffer_val) and invalid_buffer_val > 0:
+        tolerance = max(tolerance, float(invalid_buffer_val) * 0.15)
+    if anchor_entry is not None and np.isfinite(anchor_entry):
+        tolerance = max(tolerance, abs(anchor_entry) * 0.00015)
+
+    def _triggered(price: Optional[float], side: str) -> bool:
+        if price is None or not np.isfinite(price) or current_price_val is None:
+            return False
+        if side == "long":
+            return current_price_val <= price + tolerance
+        if side == "short":
+            return current_price_val >= price - tolerance
+        return False
+
+    exit_reasons: List[str] = []
+
+    if anchor_active and current_price_val is not None:
+        if anchor_bias == "long":
+            if _triggered(anchor_sl, "long"):
+                exit_reasons.append("stop-loss zóna sérült")
+            if _triggered(invalid_buy_val, "long"):
+                exit_reasons.append("strukturális invalid szint elesett")
+        elif anchor_bias == "short":
+            if _triggered(anchor_sl, "short"):
+                exit_reasons.append("stop-loss zóna sérült")
+            if _triggered(invalid_sell_val, "short"):
+                exit_reasons.append("strukturális invalid szint elesett")
+
+    if exit_reasons:
+        det = deterioration_messages()
+        message = prefix + (
+            f"aktív {anchor_bias} pozíció invalidálódott → teljes zárás szükséges"
+        )
+        message += " (" + "; ".join(exit_reasons) + ")"
+        if det:
+            message += " — " + "; ".join(det)
+        message += hint_suffix
+        exit_signal = {
+            "action": "close",
+            "reasons": exit_reasons,
+            "trigger_price": current_price_val,
+            "triggered_at": nowiso(),
+        }
+        if anchor_entry is not None and np.isfinite(anchor_entry):
+            exit_signal["entry_price"] = anchor_entry
+        if anchor_sl is not None and np.isfinite(anchor_sl):
+            exit_signal["stop_loss"] = anchor_sl
+        exit_signal["direction"] = anchor_bias
+        if det:
+            exit_signal["deterioration"] = det
+        return message, exit_signal
+
+    signal_norm = (current_signal or "").strip().lower()
+    red_signal = signal_norm in {"no entry", "no"}
+
+    structure_flip = False
+    bias_flip = False
+    reversal_reasons: List[str] = []
+    reversal_strength = 0.0
+
+    if anchor_bias == "long" and structure_flag == "bos_down":
+        structure_flip = True
+        reversal_strength += 1.0
+        reversal_reasons.append("5m struktúra lefelé fordult")
+    elif anchor_bias == "short" and structure_flag == "bos_up":
+        structure_flip = True
+        reversal_strength += 1.0
+        reversal_reasons.append("5m struktúra felfelé fordult")
+
+    if anchor_bias == "long" and bias == "short":
+        bias_flip = True
+        reversal_strength += 1.0
+        reversal_reasons.append("Bias short-ra fordult")
+    elif anchor_bias == "short" and bias == "long":
+        bias_flip = True
+        reversal_strength += 1.0
+        reversal_reasons.append("Bias long-ra fordult")
+
+    regime_break = not regime_ok
+    if regime_break:
+        reversal_strength += 1.0
+        reversal_reasons.append("Trend filter kikapcsolt")
+
+    drift_deteriorating = (drift_state == "deteriorating")
+    if drift_deteriorating:
+        reversal_strength += 1.0
+        reversal_reasons.append("Anchor drift romlik")
+
+    pscore_collapse = current_p_score is not None and current_p_score <= 35
+    if pscore_collapse:
+        reversal_reasons.append(f"P-score {current_p_score:.0f}")
+
+    profit_risk = False
+    profit_reasons: List[str] = []
+    if max_fav_r is not None and max_fav_r >= 0.6:
+        if current_pnl_r is not None and current_pnl_r <= max_fav_r * 0.35:
+            profit_risk = True
+        if current_pnl_r is not None and current_pnl_r <= 0.0:
+            profit_risk = True
+        if profit_drawdown_ratio is not None and profit_drawdown_ratio >= 0.65:
+            profit_risk = True
+    if current_pnl_r is not None and current_pnl_r <= -0.7:
+        profit_risk = True
+
+    if profit_risk:
+        if max_fav_r is not None and current_pnl_r is not None:
+            if current_pnl_r >= 0:
+                profit_reasons.append(f"MFE {max_fav_r:.2f}R → most {current_pnl_r:.2f}R")
+                if (
+                    profit_drawdown_ratio is not None
+                    and profit_drawdown_ratio >= 0.0
+                    and max_fav_r >= 0.6
+                ):
+                    pct = max(0.0, min(100.0, profit_drawdown_ratio * 100.0))
+                    if pct >= 50.0:
+                        profit_reasons.append(f"profit {pct:.0f}% visszaadva")
+            else:
+                profit_reasons.append(
+                    f"MFE {max_fav_r:.2f}R után pozíció {current_pnl_r:.2f}R"
+                )
+                if profit_drawdown_ratio is not None and profit_drawdown_ratio > 1.0:
+                    profit_reasons.append("Profit teljesen elolvadt")
+        elif max_fav_abs is not None and current_pnl_abs is not None:
+            if current_pnl_abs >= 0:
+                profit_reasons.append(
+                    f"MFE {max_fav_abs:.1f} → most {current_pnl_abs:.1f}"
+                )
+                if (
+                    profit_drawdown_ratio is not None
+                    and profit_drawdown_ratio >= 0.0
+                    and max_fav_abs > 0
+                ):
+                    pct = max(0.0, min(100.0, profit_drawdown_ratio * 100.0))
+                    if pct >= 50.0:
+                        profit_reasons.append(f"profit {pct:.0f}% visszaadva")
+            else:
+                profit_reasons.append(
+                    f"MFE {max_fav_abs:.1f} után pozíció {current_pnl_abs:.1f}"
+                )
+                if profit_drawdown_ratio is not None and profit_drawdown_ratio > 1.0:
+                    profit_reasons.append("Profit teljesen elolvadt")
+        elif current_pnl_r is not None:
+            profit_reasons.append(f"aktuális PnL {current_pnl_r:.2f}R")
+
+    strong_reversal = (structure_flip and bias_flip) or reversal_strength >= 2.0
+    profit_guard_trigger = structure_flip and profit_risk
+
+    if (
+        anchor_active
+        and red_signal
+        and (strong_reversal or profit_guard_trigger)
+        and (profit_risk or pscore_collapse)
+    ):
+        context_parts = list(dict.fromkeys(reversal_reasons + profit_reasons))
+        if not context_parts and pscore_collapse and current_p_score is not None:
+            context_parts.append(f"P-score {current_p_score:.0f}")
+        message = prefix + (
+            f"aktív {anchor_bias} pozíció piros jelzésben → profitvédelemként teljes zárás javasolt"
+        )
+        if context_parts:
+            message += " (" + "; ".join(context_parts) + ")"
+        det = deterioration_messages()
+        if det:
+            message += " — " + "; ".join(det)
+        message += hint_suffix
+        exit_signal = {
+            "action": "close",
+            "category": "reversal_guard",
+            "reasons": context_parts,
+            "trigger_price": current_price_val,
+            "triggered_at": nowiso(),
+            "direction": anchor_bias,
+            "signal": current_signal,
+        }
+        if anchor_entry is not None and np.isfinite(anchor_entry):
+            exit_signal["entry_price"] = anchor_entry
+        if anchor_sl is not None and np.isfinite(anchor_sl):
+            exit_signal["stop_loss"] = anchor_sl
+        if max_fav_abs is not None and np.isfinite(max_fav_abs):
+            exit_signal["max_favorable_abs"] = max_fav_abs
+        if max_fav_r is not None and np.isfinite(max_fav_r):
+            exit_signal["max_favorable_r"] = max_fav_r
+        if current_pnl_abs is not None and np.isfinite(current_pnl_abs):
+            exit_signal["current_pnl_abs"] = current_pnl_abs
+        if current_pnl_r is not None and np.isfinite(current_pnl_r):
+            exit_signal["current_pnl_r"] = current_pnl_r
+        if profit_drawdown_ratio is not None and np.isfinite(profit_drawdown_ratio):
+            exit_signal["profit_drawdown_ratio"] = profit_drawdown_ratio
+        if current_p_score is not None and np.isfinite(current_p_score):
+            exit_signal["p_score"] = current_p_score
+        if drift_state:
+            exit_signal["drift_state"] = drift_state
+        return message, exit_signal
+
     if direction == "long":
         if regime_ok and structure_flag == "bos_up":
             base_message = "long trend aktív → pozíció tartható, SL igazítás az 1h swing alatt"
@@ -847,7 +1085,7 @@ def derive_position_management_note(
     if det_notes:
         base_message += " — " + "; ".join(det_notes)
 
-    return prefix + base_message + hint_suffix if base_message else None
+    return (prefix + base_message + hint_suffix, exit_signal) if base_message else (None, exit_signal)
 
 def atr_low_threshold(asset: str) -> float:
     h, m = now_utctime_hm()
@@ -3450,7 +3688,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     elif bos5m_long:
         structure_flag = "bos_up"
 
-    position_note = derive_position_management_note(
+    position_note, exit_signal = derive_position_management_note(
         asset,
         session_meta,
         regime_ok,
@@ -3463,6 +3701,11 @@ def analyze(asset: str) -> Dict[str, Any]:
         P,
         (rel_atr if (rel_atr is not None and not np.isnan(rel_atr)) else None),
         (float(atr5) if atr5 is not None and np.isfinite(float(atr5)) else None),
+        price_for_calc,
+        invalid_level_buy,
+        invalid_level_sell,
+        (float(invalid_buffer) if invalid_buffer is not None else None),
+        decision,
     )
     if position_note and position_note not in reasons:
         reasons.append(position_note)
@@ -3553,6 +3796,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     decision_obj["invalid_buffer_abs"] = float(invalid_buffer) if invalid_buffer is not None else None
     if position_note:
         decision_obj["position_management"] = position_note
+    if exit_signal:
+        decision_obj["position_exit_signal"] = exit_signal
 
     ml_features = {
         "p_score": P,
@@ -3625,6 +3870,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         active_position_meta["precision_plan"] = precision_plan
     if execution_playbook:
         active_position_meta["execution_playbook"] = execution_playbook
+    if exit_signal:
+        active_position_meta["exit_signal"] = exit_signal
     decision_obj["active_position_meta"] = active_position_meta
     if intervention_summary:
         decision_obj["intervention_watch"] = intervention_summary
@@ -3753,5 +4000,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
