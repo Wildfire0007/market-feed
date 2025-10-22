@@ -2805,11 +2805,20 @@ def analyze(asset: str) -> Dict[str, Any]:
     avg_delay: float = float(latency_profile.get("ema_delay", 0.0) or 0.0)
     spot = load_json(os.path.join(outdir, "spot.json")) or {}
     spot_realtime = load_json(os.path.join(outdir, "spot_realtime.json")) or {}
+    spot_meta = spot if isinstance(spot, dict) else {}
     realtime_stats = spot_realtime.get("statistics") if isinstance(spot_realtime, dict) else {}
     k1m_raw = load_json(os.path.join(outdir, "klines_1m.json"))
     k5m_raw = load_json(os.path.join(outdir, "klines_5m.json"))
     k1h_raw = load_json(os.path.join(outdir, "klines_1h.json"))
     k4h_raw = load_json(os.path.join(outdir, "klines_4h.json"))
+
+    def _ensure_meta(obj: Optional[Any]) -> Dict[str, Any]:
+        return obj if isinstance(obj, dict) else {}
+
+    k1m_meta = _ensure_meta(load_json(os.path.join(outdir, "klines_1m_meta.json")))
+    k5m_meta = _ensure_meta(load_json(os.path.join(outdir, "klines_5m_meta.json")))
+    k1h_meta = _ensure_meta(load_json(os.path.join(outdir, "klines_1h_meta.json")))
+    k4h_meta = _ensure_meta(load_json(os.path.join(outdir, "klines_4h_meta.json")))
 
     k1m, k5m, k1h, k4h = as_df_klines(k1m_raw), as_df_klines(k5m_raw), as_df_klines(k1h_raw), as_df_klines(k4h_raw)
 
@@ -2939,9 +2948,10 @@ def analyze(asset: str) -> Dict[str, Any]:
     elif spot_stale_reason:
         spot_issue_initial = spot_stale_reason
 
-    spot_source = "quote_realtime" if realtime_used else "quote"
-    spot_fallback_used = False
+    spot_source = str(spot_meta.get("source") or ("quote_realtime" if realtime_used else "quote"))
+    spot_fallback_used = bool(spot_meta.get("fallback_used"))
     spot_latency_notes: List[str] = []
+    fallback_latency: Optional[int] = spot_latency_sec if spot_fallback_used else None
     if (spot_price is None or spot_stale_reason) and last5_close is not None:
         spot_fallback_used = True
         spot_source = "kline_5m_close"
@@ -2953,21 +2963,37 @@ def analyze(asset: str) -> Dict[str, Any]:
         spot_retrieved = to_utc_iso(now)
         if spot_ts:
             delta = now - spot_ts
-            spot_latency_sec = 0 if delta.total_seconds() < 0 else int(delta.total_seconds())
+            fallback_latency = 0 if delta.total_seconds() < 0 else int(delta.total_seconds())
+            spot_latency_sec = fallback_latency
         else:
             spot_latency_sec = None
-        spot_stale_reason = None
+        if fallback_latency is not None and fallback_latency > spot_max_age:
+            limit_min = spot_max_age // 60
+            delay_min = fallback_latency // 60
+            spot_stale_reason = (
+                f"Spot fallback stale: {delay_min} min behind (limit {limit_min} min)"
+            )
+        elif fallback_latency is not None:
+            spot_stale_reason = None
+        else:
+            spot_stale_reason = spot_stale_reason or "Spot fallback timestamp missing"
 
     if spot_fallback_used:
         if spot_issue_initial:
-            spot_latency_notes.append(
-                f"spot: {spot_issue_initial.lower()} — 5m zárt gyertya árát használjuk"
-            )
+            note = f"spot: {spot_issue_initial.lower()} — 5m zárt gyertya árát használjuk"
         else:
-            spot_latency_notes.append("spot: 5m zárt gyertya árát használjuk")
+            note = "spot: 5m zárt gyertya árát használjuk"
+        if fallback_latency is not None:
+            note += f" ({fallback_latency // 60} perc késés)"
+        spot_latency_notes.append(note)
         realtime_confidence = min(realtime_confidence, 0.4)
     elif realtime_used and realtime_reason:
         spot_latency_notes.append("spot: realtime feed aktív")
+    elif isinstance(spot_realtime, dict) and spot_realtime.get("forced"):
+        force_note = "spot: realtime mintavétel kényszerítve"
+        if spot_realtime.get("force_reason"):
+            force_note += f" ({spot_realtime.get('force_reason')})"
+        spot_latency_notes.append(force_note)
 
     analysis_now = datetime.now(timezone.utc)
 
@@ -3033,6 +3059,19 @@ def analyze(asset: str) -> Dict[str, Any]:
     latency_flags: List[str] = []
     latency_flags.extend(spot_latency_notes)
     stale_timeframes: Dict[str, bool] = {key: False for key in expected_delays}
+    if spot_meta.get("freshness_violation") and spot_latency_sec is not None:
+        limit_sec = spot_meta.get("freshness_limit_seconds") or spot_max_age
+        limit_min = int(limit_sec // 60) if limit_sec else 0
+        delay_min = spot_latency_sec // 60
+        msg = f"spot: trading fetch latency {delay_min} perc (limit {limit_min} perc)"
+        if msg not in latency_flags:
+            latency_flags.append(msg)
+    timeframe_meta_lookup = {
+        "k1m": k1m_meta,
+        "k5m": k5m_meta,
+        "k1h": k1h_meta,
+        "k4h": k4h_meta,
+    }
     tf_inputs = [
         ("k1m", k1m, k1m_closed, os.path.join(outdir, "klines_1m.json")),
         ("k5m", k5m, k5m_closed, os.path.join(outdir, "klines_5m.json")),
@@ -3040,6 +3079,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         ("k4h", k4h, k4h_closed, os.path.join(outdir, "klines_4h.json")),
     ]
     for key, df_full, df_closed, path in tf_inputs:
+        meta_info = timeframe_meta_lookup.get(key, {})
         last_raw = df_last_timestamp(df_full)
         last_closed = df_last_timestamp(df_closed)
         latency_sec = None
@@ -3062,6 +3102,11 @@ def analyze(asset: str) -> Dict[str, Any]:
             "expected_max_delay_seconds": expected_delays.get(key),
             "source_mtime_utc": file_mtime(path),
             "stale_for_signals": stale_timeframes.get(key, False),
+            "freshness_limit_seconds": meta_info.get("freshness_limit_seconds"),
+            "freshness_violation": bool(meta_info.get("freshness_violation")),
+            "freshness_retries": meta_info.get("freshness_retries"),
+            "used_symbol": meta_info.get("used_symbol"),
+            "used_exchange": meta_info.get("used_exchange"),
         }
 
     tf_meta["spot"] = {
@@ -3072,9 +3117,20 @@ def analyze(asset: str) -> Dict[str, Any]:
         "source": spot_source,
         "fallback_used": spot_fallback_used,
         "realtime_override": realtime_used,
+        "freshness_limit_seconds": spot_meta.get("freshness_limit_seconds") or spot_max_age,
+        "freshness_retries": spot_meta.get("freshness_retries"),
+        "freshness_violation": bool(spot_stale_reason),
+        "freshness_violation_meta": bool(spot_meta.get("freshness_violation")),
+        "used_symbol": spot_meta.get("used_symbol"),
+        "used_exchange": spot_meta.get("used_exchange"),
     }
     if spot_issue_initial:
         tf_meta["spot"]["original_issue"] = spot_issue_initial
+    if isinstance(spot_realtime, dict):
+        if spot_realtime.get("forced"):
+            tf_meta["spot"]["realtime_forced"] = True
+        if spot_realtime.get("force_reason"):
+            tf_meta["spot"]["realtime_force_reason"] = spot_realtime.get("force_reason")
     if spot_stale_reason and spot_latency_sec is not None and spot_latency_sec > spot_max_age:
         if spot_latency_sec >= 3600:
             age_hours = spot_latency_sec // 3600
@@ -4809,4 +4865,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
