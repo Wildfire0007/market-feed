@@ -1,8 +1,12 @@
+import os
+import sys
 import unittest
 from typing import Any, Dict
 from unittest import mock
 
 import requests
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import Trading
 
@@ -104,6 +108,39 @@ class CollectRealtimeSpotTests(unittest.TestCase):
         http_mock.assert_called_once()
         self.assertLessEqual(calls["max_samples"], 2)
         self.assertLessEqual(calls["interval"], 2.0)
+
+
+class TDQuotePriceExtractionTests(unittest.TestCase):
+    def test_td_quote_uses_close_when_price_missing(self):
+        payload = {
+            "close": "1.2345",
+            "datetime": "2025-10-22 16:35:00",
+        }
+
+        with mock.patch("Trading.td_get", return_value=payload), \
+             mock.patch("Trading.now_utc", return_value="2025-10-22T16:40:00Z"):
+            result = Trading.td_quote("EUR/USD")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["price"], 1.2345)
+        self.assertEqual(result["price_usd"], 1.2345)
+        self.assertEqual(result["utc"], "2025-10-22T16:35:00+00:00")
+
+    def test_td_quote_rejects_nan_prices(self):
+        payload = {
+            "price": "NaN",
+            "close": None,
+            "datetime": "2025-10-22 16:35:00",
+        }
+
+        with mock.patch("Trading.td_get", return_value=payload), \
+             mock.patch("Trading.now_utc", return_value="2025-10-22T16:40:00Z"):
+            result = Trading.td_quote("EUR/USD")
+
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["price"])
+        self.assertIsNone(result["price_usd"])
+        self.assertEqual(result["utc"], "2025-10-22T16:35:00+00:00")
 
 
 if __name__ == "__main__":
