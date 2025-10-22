@@ -19,6 +19,7 @@ import math
 import os
 import warnings
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -46,6 +47,41 @@ _SKLEARN_WARNING_EMITTED = False
 PUBLIC_DIR = Path(os.getenv("PUBLIC_DIR", "public"))
 MODEL_DIR = PUBLIC_DIR / "models"
 FEATURE_LOG_DIR = PUBLIC_DIR / "ml_features"
+
+FALLBACK_OVERRIDE_FILENAME = "fallback_overrides.json"
+FALLBACK_THRESHOLD_DEFAULT = 0.58
+FALLBACK_THRESHOLD_OVERRIDES: Dict[str, float] = {
+    "EURUSD": 0.56,
+    "USDJPY": 0.57,
+    "GOLD_CFD": 0.59,
+    "USOIL": 0.6,
+    "NVDA": 0.6,
+    "SRTY": 0.61,
+}
+
+DEFAULT_FALLBACK_WEIGHTS: Dict[str, float] = {
+    "ema21_slope": 1.1,
+    "rel_atr": 0.35,
+    "momentum_vol_ratio": 0.35,
+    "order_flow_imbalance": 0.65,
+    "order_flow_pressure": 0.45,
+    "order_flow_aggressor": 0.3,
+    "news_sentiment": 0.8,
+    "news_severity": 0.25,
+    "realtime_confidence": 0.9,
+    "volatility_ratio": -0.45,
+    "volatility_regime_flag": -0.55,
+    "precision_score": 0.35,
+    "precision_trigger_ready": 0.45,
+    "precision_trigger_arming": 0.35,
+    "precision_trigger_fire": 0.95,
+    "precision_trigger_confidence": 0.55,
+    "precision_order_flow_ready": 0.4,
+    "structure_flip_flag": 0.55,
+    "momentum_trail_activation_rr": 0.35,
+    "momentum_trail_lock_ratio": 0.4,
+    "bias_neutral_penalty": -0.55,
+}
 
 # A consistent, minimal feature vector so that models can be re-trained offline
 # without having to reverse engineer implicit column order.
@@ -76,6 +112,279 @@ MODEL_FEATURES: List[str] = [
     "momentum_trail_price",
 ]
 
+
+def _override_config_path() -> Path:
+    raw = os.getenv("FALLBACK_MODEL_FILE")
+    if raw:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = MODEL_DIR / path
+        return path
+    return MODEL_DIR / FALLBACK_OVERRIDE_FILENAME
+
+
+@lru_cache(maxsize=1)
+def _load_fallback_overrides() -> Dict[str, Any]:
+    path = _override_config_path()
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
+def _get_fallback_threshold(asset: str) -> float:
+    overrides = _load_fallback_overrides()
+    thresholds = overrides.get("thresholds") if isinstance(overrides.get("thresholds"), dict) else {}
+    asset_key = asset.upper()
+    if asset_key in thresholds:
+        try:
+            return float(thresholds[asset_key])
+        except (TypeError, ValueError):
+            pass
+    if "default" in thresholds:
+        try:
+            return float(thresholds["default"])
+        except (TypeError, ValueError):
+            pass
+    if asset_key in FALLBACK_THRESHOLD_OVERRIDES:
+        return float(FALLBACK_THRESHOLD_OVERRIDES[asset_key])
+    return FALLBACK_THRESHOLD_DEFAULT
+
+
+def _get_fallback_weights(asset: str) -> Dict[str, float]:
+    weights = dict(DEFAULT_FALLBACK_WEIGHTS)
+    overrides = _load_fallback_overrides()
+    global_weights = overrides.get("weights")
+    if isinstance(global_weights, dict):
+        for key, value in global_weights.items():
+            if key in weights:
+                try:
+                    weights[key] = float(value)
+                except (TypeError, ValueError):
+                    continue
+    asset_weights = overrides.get("asset_weights")
+    if isinstance(asset_weights, dict):
+        asset_override = asset_weights.get(asset.upper())
+        if isinstance(asset_override, dict):
+            for key, value in asset_override.items():
+                if key in weights:
+                    try:
+                        weights[key] = float(value)
+                    except (TypeError, ValueError):
+                        continue
+    return weights
+
+
+def _fallback_probability(
+    asset: str,
+    features: Dict[str, Any],
+    reason: Optional[str] = None,
+) -> Optional[Tuple[float, float, Dict[str, Any]]]:
+    try:
+        base_score = float(features.get("p_score", 50.0))
+    except (TypeError, ValueError):
+        base_score = 50.0
+    if not math.isfinite(base_score):
+        base_score = 50.0
+    base_probability = _clamp(base_score / 100.0, 0.05, 0.95)
+
+    weights = _get_fallback_weights(asset)
+    logit = _logit(base_probability)
+    steps: List[Dict[str, Any]] = []
+
+    def apply(
+        feature_name: str,
+        raw_value: Any,
+        *,
+        key: Optional[str] = None,
+        transform: Optional[Any] = None,
+    ) -> None:
+        nonlocal logit
+        weight_key = key or feature_name
+        weight = weights.get(weight_key)
+        if weight is None or abs(weight) < 1e-9:
+            return
+        try:
+            if transform is None:
+                normalized = float(raw_value or 0.0)
+            else:
+                normalized = float(transform(raw_value))
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(normalized) or abs(normalized) < 1e-9:
+            return
+        delta = weight * normalized
+        logit += delta
+        steps.append(
+            {
+                "feature": feature_name,
+                "weight": weight,
+                "normalized": normalized,
+                "delta": delta,
+            }
+        )
+
+    bias_long = float(features.get("bias_long") or 0.0)
+    bias_short = float(features.get("bias_short") or 0.0)
+    bias_direction = 0.0
+    if bias_long > bias_short and bias_long > 0:
+        bias_direction = 1.0
+    elif bias_short > bias_long and bias_short > 0:
+        bias_direction = -1.0
+
+    if bias_direction == 0.0:
+        penalty = weights.get("bias_neutral_penalty")
+        if penalty:
+            logit += penalty
+            steps.append(
+                {
+                    "feature": "bias_neutral_penalty",
+                    "weight": penalty,
+                    "normalized": 1.0,
+                    "delta": penalty,
+                }
+            )
+
+    apply(
+        "ema21_slope",
+        features.get("ema21_slope"),
+        transform=lambda value: bias_direction
+        * _clamp(float(value or 0.0) / 0.04, -1.5, 1.5),
+    )
+
+    apply(
+        "rel_atr",
+        features.get("rel_atr"),
+        transform=lambda value: _clamp((float(value or 0.0) / 0.002) - 0.2, -1.0, 1.0),
+    )
+
+    apply(
+        "momentum_vol_ratio",
+        features.get("momentum_vol_ratio"),
+        transform=lambda value: _clamp((float(value or 0.0) - 1.0), -1.0, 1.0),
+    )
+
+    def _of_transform(value: Any) -> float:
+        return bias_direction * _clamp(float(value or 0.0), -1.0, 1.0)
+
+    apply("order_flow_imbalance", features.get("order_flow_imbalance"), transform=_of_transform)
+    apply("order_flow_pressure", features.get("order_flow_pressure"), transform=_of_transform)
+    apply("order_flow_aggressor", features.get("order_flow_aggressor"), transform=_of_transform)
+
+    severity = features.get("news_event_severity")
+    try:
+        severity_val = float(severity) if severity is not None else 0.0
+    except (TypeError, ValueError):
+        severity_val = 0.0
+    severity_val = _clamp(severity_val, 0.0, 1.0)
+
+    apply(
+        "news_sentiment",
+        features.get("news_sentiment"),
+        transform=lambda value: _clamp(float(value or 0.0), -1.0, 1.0)
+        * max(severity_val, 0.2),
+    )
+
+    apply(
+        "news_event_severity",
+        severity_val,
+        key="news_severity",
+        transform=lambda value: _clamp(float(value or 0.0) - 0.5, -0.5, 0.5),
+    )
+
+    apply(
+        "realtime_confidence",
+        features.get("realtime_confidence"),
+        transform=lambda value: _clamp((float(value or 0.0) - 0.6) * 1.5, -1.0, 1.0),
+    )
+
+    apply(
+        "volatility_ratio",
+        features.get("volatility_ratio"),
+        transform=lambda value: _clamp((float(value or 1.0) - 1.0), -1.2, 1.2),
+    )
+
+    apply(
+        "volatility_regime_flag",
+        features.get("volatility_regime_flag"),
+        transform=lambda value: float(value or 0.0),
+    )
+
+    apply(
+        "precision_score",
+        features.get("precision_score"),
+        transform=lambda value: _clamp((float(value or 0.0) - 55.0) / 35.0, -1.2, 1.2),
+    )
+
+    apply(
+        "precision_trigger_ready",
+        features.get("precision_trigger_ready"),
+        transform=lambda value: float(value or 0.0),
+    )
+
+    apply(
+        "precision_trigger_arming",
+        features.get("precision_trigger_arming"),
+        transform=lambda value: float(value or 0.0),
+    )
+
+    apply(
+        "precision_trigger_fire",
+        features.get("precision_trigger_fire"),
+        transform=lambda value: float(value or 0.0),
+    )
+
+    apply(
+        "precision_trigger_confidence",
+        features.get("precision_trigger_confidence"),
+        transform=lambda value: _clamp((float(value or 0.0) - 0.55) * 1.4, -1.0, 1.0),
+    )
+
+    apply(
+        "precision_order_flow_ready",
+        features.get("precision_order_flow_ready"),
+        transform=lambda value: float(value or 0.0),
+    )
+
+    apply(
+        "structure_flip_flag",
+        features.get("structure_flip_flag"),
+        transform=lambda value: float(value or 0.0),
+    )
+
+    apply(
+        "momentum_trail_activation_rr",
+        features.get("momentum_trail_activation_rr"),
+        transform=lambda value: _clamp((float(value or 0.0) - 1.0) / 2.5, 0.0, 1.0),
+    )
+
+    apply(
+        "momentum_trail_lock_ratio",
+        features.get("momentum_trail_lock_ratio"),
+        transform=lambda value: _clamp((float(value or 0.0) - 0.4) * 1.2, -0.6, 0.6),
+    )
+
+    probability = _sigmoid(logit)
+    threshold = _get_fallback_threshold(asset)
+
+    meta: Dict[str, Any] = {
+        "base_probability": base_probability,
+        "adjusted_logit": logit,
+        "probability": probability,
+        "threshold": threshold,
+        "steps": steps,
+    }
+    if reason:
+        meta["reason"] = reason
+    return probability, threshold, meta
 
 @dataclass
 class ProbabilityPrediction:
@@ -416,7 +725,23 @@ def predict_signal_probability(asset: str, features: Dict[str, Any]) -> Probabil
     metadata: Dict[str, Any] = {
         "asset": asset,
     }
-   
+
+    def _with_fallback(reason: str) -> ProbabilityPrediction:
+        fallback = _fallback_probability(asset, features, reason=reason)
+        metadata["unavailable_reason"] = reason
+        if fallback is None:
+            metadata["source"] = "unavailable"
+            return ProbabilityPrediction(metadata=metadata)
+        probability, threshold, fallback_meta = fallback
+        metadata["source"] = "fallback"
+        metadata["fallback"] = fallback_meta
+        return ProbabilityPrediction(
+            probability=probability,
+            raw_probability=fallback_meta.get("base_probability"),
+            threshold=threshold,
+            metadata=metadata,
+        )
+        
     if load is None or _SKLEARN_IMPORT_ERROR is not None:
         global _JOBLIB_WARNING_EMITTED, _SKLEARN_WARNING_EMITTED
         if _JOBLIB_IMPORT_ERROR is not None and not _JOBLIB_WARNING_EMITTED:
@@ -433,30 +758,25 @@ def predict_signal_probability(asset: str, features: Dict[str, Any]) -> Probabil
                 RuntimeWarning,
             )
             _SKLEARN_WARNING_EMITTED = True
-        metadata["unavailable_reason"] = "sklearn_missing"
-        return ProbabilityPrediction(metadata=metadata)
+        return _with_fallback("sklearn_missing")
     
     model_file = _model_path(asset)
     if not model_file.exists():
-        metadata["unavailable_reason"] = "model_missing"
-        return ProbabilityPrediction(metadata=metadata)
+        return _with_fallback("model_missing")
 
     try:
         clf = load(model_file)
     except Exception as exc:  # pragma: no cover - corrupted artefacts
-        metadata["unavailable_reason"] = f"model_load_error:{exc}"
-        return ProbabilityPrediction(metadata=metadata)
+        return _with_fallback(f"model_load_error:{exc}")
 
     if not isinstance(clf, GradientBoostingClassifier):
-        metadata["unavailable_reason"] = "model_type_mismatch"
-        return ProbabilityPrediction(metadata=metadata)
+        return _with_fallback("model_type_mismatch")
 
     vector = _vectorise(features).reshape(1, -1)
     try:
         proba = clf.predict_proba(vector)
     except Exception as exc:  # pragma: no cover - scoring edge cases
-        metadata["unavailable_reason"] = f"predict_error:{exc}"
-        return ProbabilityPrediction(metadata=metadata)
+        return _with_fallback(f"predict_error:{exc}")
         
     base_probability: Optional[float] = None
     if isinstance(proba, Iterable):
@@ -494,6 +814,8 @@ def predict_signal_probability(asset: str, features: Dict[str, Any]) -> Probabil
     if threshold_meta:
         metadata["threshold"] = threshold_meta
 
+    metadata["source"] = "sklearn"
+    
     return ProbabilityPrediction(
         probability=calibrated_probability,
         raw_probability=base_probability,
