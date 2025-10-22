@@ -678,7 +678,7 @@ def build_action_plan(
         }
 
     if session_meta.get("next_open_utc"):
-        plan["context"]["next_session_open_utc"] = session_meta.get("next_open_utc"
+        plan["context"]["next_session_open_utc"] = session_meta.get("next_open_utc")
 
     notes: List[str] = []
     summary_parts: List[str] = []
@@ -3699,7 +3699,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         atr_ok = False
 
     momentum_vol_ratio = volume_ratio(k5m_closed, MOMENTUM_VOLUME_RECENT, MOMENTUM_VOLUME_BASE)
-        dynamic_tp_profile = compute_dynamic_tp_profile(
+    dynamic_tp_profile = compute_dynamic_tp_profile(
         asset,
         atr_series_5,
         float(rel_atr) if not np.isnan(rel_atr) else float("nan"),
@@ -5133,6 +5133,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "avg_latency_profile": avg_delay if avg_delay else None,
     }
     if fallback_meta:
+        active_position_meta["probability_fallback"] = fallback_meta
     if realtime_stats:
         active_position_meta["realtime_stats"] = realtime_stats
     if anchor_bias:
@@ -5397,6 +5398,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
