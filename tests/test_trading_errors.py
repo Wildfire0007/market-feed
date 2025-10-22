@@ -1,4 +1,5 @@
 import unittest
+from typing import Any, Dict
 from unittest import mock
 
 import requests
@@ -62,6 +63,47 @@ class CollectHttpFramesTests(unittest.TestCase):
         self.assertEqual(frames, [])
         self.assertLessEqual(mock_quote.call_count, 2)
         sleep_mock.assert_called_once()
+
+
+class CollectRealtimeSpotTests(unittest.TestCase):
+    def test_force_mode_uses_short_http_window(self):
+        calls: Dict[str, Any] = {}
+
+        def fake_http(symbol_cycle, deadline, interval, max_samples):
+            calls.update(
+                {
+                    "symbol_cycle": symbol_cycle,
+                    "deadline": deadline,
+                    "interval": interval,
+                    "max_samples": max_samples,
+                }
+            )
+            return [
+                {
+                    "price": 1.2345,
+                    "utc": "2024-01-01T00:00:00Z",
+                    "retrieved_at_utc": "2024-01-01T00:00:01Z",
+                }
+            ]
+
+        with mock.patch("Trading.REALTIME_FLAG", False), \
+             mock.patch("Trading.REALTIME_WS_ENABLED", False), \
+             mock.patch("Trading.ensure_dir"), \
+             mock.patch("Trading.save_json"), \
+             mock.patch("Trading._collect_http_frames", side_effect=fake_http) as http_mock, \
+             mock.patch("Trading.time.sleep"), \
+             mock.patch("Trading.time.time", return_value=1000.0):
+            Trading.collect_realtime_spot(
+                "EURUSD",
+                [("EUR/USD", "FX")],
+                out_dir="/tmp/out",
+                force=True,
+                reason="spot_fallback",
+            )
+
+        http_mock.assert_called_once()
+        self.assertLessEqual(calls["max_samples"], 2)
+        self.assertLessEqual(calls["interval"], 2.0)
 
 
 if __name__ == "__main__":
