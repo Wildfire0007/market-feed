@@ -194,6 +194,52 @@ def save_json(path: str, obj: Dict[str, Any]) -> None:
         json.dump(obj, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
+
+def _safe_int(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        text = str(value).strip()
+        if not text:
+            return None
+        return int(float(text))
+    except Exception:
+        return None
+
+
+def _td_error_details(payload: Any) -> Tuple[Optional[str], Optional[int]]:
+    """Extract Twelve Data error information from a JSON payload."""
+
+    if not isinstance(payload, dict):
+        return None, None
+
+    def _message_from(data: Dict[str, Any]) -> Optional[str]:
+        message = data.get("message") or data.get("error")
+        return str(message) if message else None
+
+    status = str(payload.get("status") or "").lower()
+    if status == "error":
+        message = _message_from(payload) or "Twelve Data error"
+        return message, _safe_int(payload.get("code"))
+
+    code = _safe_int(payload.get("code"))
+    if code and code not in {0, 200}:
+        message = _message_from(payload) or f"Twelve Data error (code {code})"
+        return message, code
+
+    meta = payload.get("meta")
+    if isinstance(meta, dict):
+        meta_status = str(meta.get("status") or "").lower()
+        meta_code = _safe_int(meta.get("code"))
+        if meta_status == "error" or (meta_code and meta_code not in {0, 200}):
+            message = _message_from(meta) or _message_from(payload) or "Twelve Data error"
+            return message, meta_code
+
+    return None, None
+
+
 def _parse_retry_after(value: Optional[str]) -> Optional[float]:
     if not value:
         return None
@@ -222,12 +268,19 @@ def td_get(path: str, **params) -> Dict[str, Any]:
                 )
             response.raise_for_status()
             data = response.json()
-            if isinstance(data, dict) and data.get("status") == "error":
-                message = data.get("message", "TD error")
+            error_message, error_code = _td_error_details(data)
+            if error_message:
+                if error_code and str(error_code) not in error_message:
+                    message = f"{error_message} (code {error_code})"
+                else:
+                    message = error_message
                 err = RuntimeError(message)
                 last_error = err
-                last_status = response.status_code if response is not None else None
-                throttled = "limit" in message.lower()
+                effective_status = error_code if error_code is not None else (
+                    response.status_code if response is not None else None
+                )
+                last_status = effective_status
+                throttled = (error_code == 429) or ("limit" in message.lower())
                 TD_RATE_LIMITER.record_failure(throttled=throttled)
                 if attempt == TD_MAX_RETRIES:
                     raise err
@@ -407,7 +460,7 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
     if parsed:
         latency_seconds = max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
 
-    return {
+    result: Dict[str, Any] = {
         "asset": symbol,
         "source": "twelvedata:quote+series_fallback",
         "ok": price is not None,
@@ -417,6 +470,14 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
         "utc": utc_iso,
         "latency_seconds": latency_seconds,
     }
+
+    if isinstance(q, dict):
+        if q.get("error"):
+            result["error"] = q.get("error")
+        if q.get("error_fallback"):
+            result["error_fallback"] = q.get("error_fallback")
+
+    return result
 
 
 def _extract_field(payload: Any, path: str) -> Optional[Any]:
@@ -467,7 +528,10 @@ def _collect_http_frames(
 ) -> List[Dict[str, Any]]:
     frames: List[Dict[str, Any]] = []
     sample_cap = max(1, int(max_samples))
+    failure_cycles = 0
+    max_failures = max(2, len(symbol_cycle)) if symbol_cycle else 2
     while time.time() < deadline and len(frames) < sample_cap:
+        cycle_success = False
         for symbol, exchange in symbol_cycle:
             try:
                 quote = td_quote(symbol, exchange)
@@ -493,9 +557,16 @@ def _collect_http_frames(
                     "latency_seconds": latency,
                 }
             )
+            cycle_success = True
             break
         if len(frames) >= sample_cap:
             break
+        if not cycle_success:
+            failure_cycles += 1
+            if not frames and failure_cycles >= max_failures:
+                break
+        else:
+            failure_cycles = 0
         remaining = deadline - time.time()
         if remaining <= 0:
             break
@@ -941,6 +1012,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
