@@ -33,7 +33,7 @@ import os, json, time
 import threading
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple, Callable
 
 import requests
 
@@ -195,6 +195,20 @@ def save_json(path: str, obj: Dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def save_series_payload(out_dir: str, name: str, payload: Dict[str, Any]) -> None:
+    ensure_dir(out_dir)
+    raw: Dict[str, Any] = {"values": []}
+    meta: Dict[str, Any] = {}
+    if isinstance(payload, dict):
+        raw_candidate = payload.get("raw")
+        if isinstance(raw_candidate, dict):
+            raw = raw_candidate
+        meta = {k: v for k, v in payload.items() if k != "raw"}
+    save_json(os.path.join(out_dir, f"{name}.json"), raw)
+    if meta:
+        save_json(os.path.join(out_dir, f"{name}_meta.json"), meta)
+
+
 def _safe_int(value: Any) -> Optional[int]:
     try:
         if value is None:
@@ -205,6 +219,22 @@ def _safe_int(value: Any) -> Optional[int]:
         if not text:
             return None
         return int(float(text))
+    except Exception:
+        return None
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, float):
+            return value
+        if isinstance(value, int):
+            return float(value)
+        text = str(value).strip()
+        if not text:
+            return None
+        return float(text)
     except Exception:
         return None
 
@@ -443,15 +473,18 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
         q = {"ok": False, "error": str(e)}
 
     price = q.get("price") if isinstance(q, dict) else None
-    utc   = q.get("utc") if isinstance(q, dict) else None
+    utc = q.get("utc") if isinstance(q, dict) else None
+    fallback_used = False
 
     if price is None:
         try:
             px, ts = td_last_close(symbol, "5min", exchange)
         except Exception as e:
             px, ts = None, None
-            q["error_fallback"] = str(e)
+            if isinstance(q, dict):
+                q["error_fallback"] = str(e)
         price, utc = px, ts
+        fallback_used = True
 
     retrieved = now_utc()
     utc_iso = utc or retrieved
@@ -460,15 +493,22 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
     if parsed:
         latency_seconds = max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
 
+    source = "twelvedata:quote"
+    if fallback_used:
+        source = "twelvedata:quote+series_fallback"
+
     result: Dict[str, Any] = {
         "asset": symbol,
-        "source": "twelvedata:quote+series_fallback",
+        "source": source,
         "ok": price is not None,
         "retrieved_at_utc": retrieved,
         "price": price,
         "price_usd": price,
         "utc": utc_iso,
         "latency_seconds": latency_seconds,
+        "fallback_used": fallback_used,
+        "used_symbol": symbol,
+        "used_exchange": exchange,
     }
 
     if isinstance(q, dict):
@@ -476,6 +516,10 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
             result["error"] = q.get("error")
         if q.get("error_fallback"):
             result["error_fallback"] = q.get("error_fallback")
+        quote_ts = _parse_iso_utc(q.get("utc") if isinstance(q.get("utc"), str) else q.get("utc"))
+        retrieved_ts = _parse_iso_utc(q.get("retrieved_at_utc")) if isinstance(q.get("retrieved_at_utc"), str) else None
+        if quote_ts and retrieved_ts:
+            result["quote_latency_seconds"] = max(0.0, (retrieved_ts - quote_ts).total_seconds())
 
     return result
 
@@ -664,15 +708,18 @@ def collect_realtime_spot(
     asset: str,
     attempts: List[Tuple[str, Optional[str]]],
     out_dir: str,
+    force: bool = False,
+    reason: Optional[str] = None,
 ) -> None:
-    if not REALTIME_FLAG:
+    realtime_enabled = REALTIME_FLAG or force
+    if not realtime_enabled:
         return
     allowed_assets = {
         a.strip().upper()
         for a in REALTIME_ASSETS_ENV.split(",")
         if a.strip()
     }
-    if allowed_assets and asset.upper() not in allowed_assets:
+    if allowed_assets and asset.upper() not in allowed_assets and not force:
         return
 
     ensure_dir(out_dir)
@@ -685,7 +732,8 @@ def collect_realtime_spot(
     transport: Optional[str] = None
 
     deadline = time.time() + max(REALTIME_DURATION, REALTIME_INTERVAL)
-    if REALTIME_WS_ENABLED:
+    use_ws = REALTIME_WS_ENABLED and REALTIME_FLAG and not force
+    if use_ws:
         frames = _collect_ws_frames(asset, symbol_cycle, deadline)
         if frames:
             transport = "websocket"
@@ -733,6 +781,10 @@ def collect_realtime_spot(
         "statistics": stats,
         "source": "websocket" if transport == "websocket" else "rest",
     }
+    if force:
+        payload["forced"] = True
+        if reason:
+            payload["force_reason"] = reason
     if transport == "websocket" and isinstance(last_frame.get("raw"), dict):
         payload["raw_last_frame"] = last_frame["raw"]
 
@@ -812,16 +864,25 @@ def try_symbols(
             continue
 
         last = result
-        latency_raw = result.get("latency_seconds")
-        latency: Optional[float] = None
-        try:
-            if latency_raw is not None:
-                latency = float(latency_raw)
-        except (TypeError, ValueError):
-            latency = None
+        result.setdefault("used_symbol", sym)
+        if exch is not None and not result.get("used_exchange"):
+            result["used_exchange"] = exch
+
+        latency = _coerce_float(result.get("latency_seconds"))
+        if latency is not None:
+            result["latency_seconds"] = latency
+
+        violation = False
+        if freshness_limit is not None:
+            result["freshness_limit_seconds"] = freshness_limit
+        if freshness_limit is not None and latency is not None:
+            violation = latency > freshness_limit
+            result["freshness_violation"] = bool(violation)
+        elif freshness_limit is not None and "freshness_violation" not in result:
+            result["freshness_violation"] = False
 
         if result.get("ok"):
-            if freshness_limit is None or latency is None or latency <= freshness_limit:
+            if not violation:
                 return result
             if best is None:
                 best = result
@@ -836,6 +897,30 @@ def try_symbols(
     if best is not None:
         return best
     return last or {"ok": False}
+
+
+def fetch_with_freshness(
+    attempts: List[Tuple[str, Optional[str]]],
+    fetch_fn: Callable[[str, Optional[str]], Dict[str, Any]],
+    freshness_limit: Optional[float] = None,
+    max_refreshes: int = 1,
+):
+    result = try_symbols(attempts, fetch_fn, freshness_limit=freshness_limit)
+    retries = 0
+    while (
+        freshness_limit is not None
+        and isinstance(result, dict)
+        and result.get("ok")
+        and result.get("freshness_violation")
+        and retries < max_refreshes
+    ):
+        retries += 1
+        time.sleep(max(TD_RATE_LIMITER.current_delay, 0.2))
+        result = try_symbols(attempts, fetch_fn, freshness_limit=freshness_limit)
+    if isinstance(result, dict):
+        result.setdefault("freshness_violation", bool(result.get("freshness_violation")))
+        result["freshness_retries"] = retries
+    return result
 
 # ───────────────────── 5m EMA9–EMA21 (előzetes jelzés) ───────────────────
 
@@ -894,49 +979,67 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     attempts = _normalize_symbol_attempts(cfg)
 
     # 1) Spot (quote → 5m close fallback), több tickerrel
-    spot = try_symbols(
+    spot = fetch_with_freshness(
         attempts,
         lambda s, ex: td_spot_with_fallback(s, ex),
         freshness_limit=SPOT_FRESHNESS_LIMIT,
+        max_refreshes=1,
     )
+    if isinstance(spot, dict):
+        spot.setdefault("freshness_limit_seconds", SPOT_FRESHNESS_LIMIT)
+    else:
+        spot = {"ok": False, "freshness_limit_seconds": SPOT_FRESHNESS_LIMIT}
     save_json(os.path.join(adir, "spot.json"), spot)
-    collect_realtime_spot(asset, attempts, adir)
+
+    spot_violation = bool(spot.get("freshness_violation")) if isinstance(spot, dict) else False
+    force_reason: Optional[str] = None
+    if not spot.get("ok"):
+        force_reason = "spot_error"
+    elif spot_violation:
+        force_reason = "spot_stale"
+    elif spot.get("fallback_used"):
+        force_reason = "spot_fallback"
+    collect_realtime_spot(asset, attempts, adir, force=bool(force_reason), reason=force_reason)
     time.sleep(TD_PAUSE)
 
     # 2) OHLC (1m / 5m / 1h / 4h) – az első sikeres tickerrel
     def ts(s: str, ex: Optional[str], iv: str):
         return td_time_series(s, iv, 500, ex, "desc")
 
-    k1m = try_symbols(
+    k1m = fetch_with_freshness(
         attempts,
         lambda s, ex: ts(s, ex, "1min"),
         freshness_limit=SERIES_FRESHNESS_LIMITS.get("1min"),
+        max_refreshes=1,
     )
-    save_json(os.path.join(adir, "klines_1m.json"), k1m.get("raw", {"values": []}))
+    save_series_payload(adir, "klines_1m", k1m if isinstance(k1m, dict) else {"ok": False, "raw": {"values": []}})
     time.sleep(TD_PAUSE)
 
-    k5 = try_symbols(
+    k5 = fetch_with_freshness(
         attempts,
         lambda s, ex: ts(s, ex, "5min"),
         freshness_limit=SERIES_FRESHNESS_LIMITS.get("5min"),
+        max_refreshes=1,
     )
-    save_json(os.path.join(adir, "klines_5m.json"), k5.get("raw", {"values": []}))
+    save_series_payload(adir, "klines_5m", k5 if isinstance(k5, dict) else {"ok": False, "raw": {"values": []}})
     time.sleep(TD_PAUSE)
 
-    k1 = try_symbols(
+    k1 = fetch_with_freshness(
         attempts,
         lambda s, ex: ts(s, ex, "1h"),
         freshness_limit=SERIES_FRESHNESS_LIMITS.get("1h"),
+        max_refreshes=1,
     )
-    save_json(os.path.join(adir, "klines_1h.json"), k1.get("raw", {"values": []}))
+    save_series_payload(adir, "klines_1h", k1 if isinstance(k1, dict) else {"ok": False, "raw": {"values": []}})
     time.sleep(TD_PAUSE)
 
-    k4 = try_symbols(
+    k4 = fetch_with_freshness(
         attempts,
         lambda s, ex: ts(s, ex, "4h"),
         freshness_limit=SERIES_FRESHNESS_LIMITS.get("4h"),
+        max_refreshes=1,
     )
-    save_json(os.path.join(adir, "klines_4h.json"), k4.get("raw", {"values": []}))
+    save_series_payload(adir, "klines_4h", k4 if isinstance(k4, dict) else {"ok": False, "raw": {"values": []}})
     time.sleep(TD_PAUSE)
 
     # 3) 5m előzetes jelzés (analysis.py később felülírhatja)
@@ -1012,6 +1115,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
