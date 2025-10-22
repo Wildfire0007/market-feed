@@ -8,7 +8,10 @@ Kimenet:
   public/analysis.html            — egyszerű HTML kivonat
 """
 
-import os, json, sys
+import json
+import logging
+import os
+import sys
 from copy import deepcopy
 from datetime import datetime, timezone, timedelta
 from datetime import time as dtime
@@ -53,44 +56,58 @@ import pandas as pd
 import numpy as np
 
 # --- Elemzendő eszközök ---
-ASSETS = ["EURUSD", "GOLD_CFD", "USDJPY", "USOIL", "NVDA", "SRTY"]
+from config.analysis_settings import (
+    ACTIVE_INVALID_BUFFER_ABS,
+    ASSET_COST_MODEL,
+    ATR5_MIN_MULT,
+    ATR_ABS_MIN,
+    ATR_LOW_TH_ASSET,
+    ATR_LOW_TH_DEFAULT,
+    ATR_VOL_HIGH_REL,
+    ASSETS,
+    COST_MULT_DEFAULT,
+    COST_MULT_HIGH_VOL,
+    CORE_RR_MIN,
+    DEFAULT_COST_MODEL,
+    ENABLE_MOMENTUM_ASSETS,
+    EMA_SLOPE_SIGN_ENFORCED,
+    EMA_SLOPE_TH_ASSET,
+    EMA_SLOPE_TH_DEFAULT,
+    FX_TP_TARGETS,
+    GOLD_HIGH_VOL_WINDOWS,
+    GOLD_LOW_VOL_TH,
+    INTERVENTION_WATCH_DEFAULT,
+    LEVERAGE,
+    MIN_RISK_ABS,
+    MOMENTUM_RR_MIN,
+    NVDA_EXTENDED_ATR_REL,
+    NVDA_MOMENTUM_ATR_REL,
+    SESSION_TIME_RULES,
+    SESSION_WEEKDAYS,
+    SESSION_WINDOWS_UTC,
+    SL_BUFFER_RULES,
+    SMT_AUTO_CONFIG,
+    SMT_PENALTY_VALUE,
+    SMT_REQUIRED_BARS,
+    SPOT_MAX_AGE_SECONDS,
+    SRTY_MOMENTUM_ATR_REL,
+    TP_MIN_ABS,
+    TP_MIN_PCT,
+    TP_NET_MIN_ASSET,
+    TP_NET_MIN_DEFAULT,
+)
+
+LOGGER = logging.getLogger(__name__)
+
+# Az asset-specifikus küszöböket a config/analysis_settings.json állomány
+# szolgáltatja, így új eszköz felvételekor elegendő azt módosítani.
 
 MARKET_TIMEZONE = ZoneInfo("Europe/Berlin")
 
 PUBLIC_DIR = "public"
 
-LEVERAGE = {
-    "EURUSD": 5.0,
-    "USDJPY": 5.0,
-    "GOLD_CFD": 2.0,
-    "USOIL": 2.0,
-    "NVDA": 2.0,
-    "SRTY": 2.0,
-}
-
 MAX_RISK_PCT = 1.8
 FIB_TOL = 0.02
-
-# --- ATR küszöbök ---
-ATR_LOW_TH_DEFAULT = 0.0007   # 0.07%
-ATR_LOW_TH_ASSET = {
-    "EURUSD": 0.0005,  # 0.05%
-    "USDJPY": 0.0005,
-    "NVDA": 0.0012,
-    "SRTY": 0.0015,
-}
-GOLD_HIGH_VOL_WINDOWS = [(6, 30, 21, 30)]  # európai nyitástól US zárásig lazább
-GOLD_LOW_VOL_TH = 0.0006
-SMT_PENALTY_VALUE = 7
-SMT_REQUIRED_BARS = 2
-SMT_AUTO_CONFIG: Dict[str, Dict[str, Any]] = {
-    "EURUSD": {"reference": "DXY", "relationship": "inverse", "min_bars": 3, "threshold": 0.00015},
-    "USDJPY": {"reference": "DXY", "relationship": "direct", "min_bars": 3, "threshold": 0.00015},
-    "GOLD_CFD": {"reference": "DXY", "relationship": "inverse", "min_bars": 3, "threshold": 0.0002},
-    "USOIL": {"reference": "BRENT", "relationship": "direct", "min_bars": 3, "threshold": 0.00025},
-    "NVDA": {"reference": "QQQ", "relationship": "direct", "min_bars": 2, "threshold": 0.0025},
-    "SRTY": {"reference": "SPY", "relationship": "inverse", "min_bars": 2, "threshold": 0.0015},
-}
 
 # --- Kereskedési/egz. küszöbök (RR/TP) ---
 MIN_R_CORE      = 2.0
@@ -100,338 +117,9 @@ TP2_R   = 3.0
 TP1_R_MOMENTUM = 1.5
 TP2_R_MOMENTUM = 2.4
 MIN_STOPLOSS_PCT = 0.01
-TP_NET_MIN_DEFAULT = 0.01
-TP_NET_MIN_ASSET = {
-    "EURUSD": 0.0035,
-    "USDJPY": 0.0030,
-    "GOLD_CFD": 0.0025,
-    "USOIL": 0.0030,
-    "NVDA": 0.0120,
-    "SRTY": 0.0150,
-}
 
-# --- Per-asset TP minimumok, költségek és SL pufferek ---
-TP_MIN_PCT = {        # min. TP1 távolság %-ban (entry-hez képest)
-    "default": 0.0020,  # 0.20%
-    "GOLD_CFD": 0.0025, # 0.25%
-    "USOIL":    0.0030, # 0.30%
-    "EURUSD":   0.0035, # 0.35%
-    "USDJPY":   0.0030, # 0.30%
-    "NVDA":     0.0120, # 1.20%
-    "SRTY":     0.0150, # 1.50%
-}
-TP_MIN_ABS = {        # min. TP1 távolság abszolútban (tick/árjegyzés miatt)
-    "default": 0.50,
-    "GOLD_CFD": 3.0,
-    "USOIL":    0.70,
-    "EURUSD":   0.0015,
-    "USDJPY":   0.20,
-    "NVDA":     4.0,
-    "SRTY":     0.35,
-}
-SL_BUFFER_RULES = {
-    "default": {"atr_mult": 0.2, "abs_min": 0.5},
-    "GOLD_CFD": {"atr_mult": 0.2, "abs_min": 2.0},
-    "USOIL":    {"atr_mult": 0.25, "abs_min": 0.15},
-    "EURUSD":   {"atr_mult": 0.2, "abs_min": 0.0008},
-    "USDJPY":   {"atr_mult": 0.2, "abs_min": 0.10},
-    "NVDA":     {"atr_mult": 0.10, "abs_min": 2.0},
-    "SRTY":     {"atr_mult": 0.12, "abs_min": 0.25},
-}
-MIN_RISK_ABS = {
-    "default": 0.5,
-    "GOLD_CFD": 2.0,
-    "USOIL": 0.15,
-    "EURUSD": 0.0008,
-    "USDJPY": 0.10,
-    "NVDA": 2.0,
-    "SRTY": 0.25,
-}
-
-ACTIVE_INVALID_BUFFER_ABS = {
-    "GOLD_CFD": 2.0,
-    "USOIL": 0.15,
-}
-
-ASSET_COST_MODEL = {
-    "GOLD_CFD": {"type": "pct", "round_trip_pct": 0.0005, "overnight_pct": 0.00035},
-    "USOIL":   {"type": "pct", "round_trip_pct": 0.0008, "overnight_pct": 0.00050},
-    "EURUSD":  {"type": "pip", "round_trip_pips": 1.0, "overnight_pips": 0.6},
-    "USDJPY":  {"type": "pip", "round_trip_pips": 1.0, "overnight_pips": 0.7},
-    "NVDA":    {"type": "pct", "round_trip_pct": 0.0008, "overnight_pct": 0.00040},
-    "SRTY":    {"type": "pct", "round_trip_pct": 0.0010, "overnight_pct": 0.00045},
-}
-DEFAULT_COST_MODEL = {"type": "pct", "round_trip_pct": 0.0010, "overnight_pct": 0.00030}
-COST_MULT_DEFAULT = 1.5
-COST_MULT_HIGH_VOL = 1.3
-ATR5_MIN_MULT  = 0.5     # min. profit >= 0.5× ATR(5m)
-ATR_VOL_HIGH_REL = 0.002  # 0.20% relatív ATR felett lazítjuk a költség-multit
-
-PRECISION_SCORE_THRESHOLD = 70.0
-PRECISION_FLOW_IMBALANCE_MARGIN = 0.85
-PRECISION_FLOW_PRESSURE_MARGIN = 0.8
-PRECISION_TRIGGER_NEAR_MULT = 0.35
-
-EMA_SLOPE_TH_DEFAULT = 0.0008
-EMA_SLOPE_TH_ASSET = {
-    "EURUSD": 0.0006,
-    "USDJPY": 0.0006,
-    "GOLD_CFD": 0.0008,
-    "USOIL": 0.0008,
-    "NVDA": 0.0010,
-    "SRTY": 0.0010,
-}
-EMA_SLOPE_SIGN_ENFORCED = {"EURUSD", "USDJPY", "GOLD_CFD", "USOIL", "NVDA", "SRTY"}
-
-# --- Asset-specifikus ATR és RR küszöbök ---
-ATR_ABS_MIN = {
-    "EURUSD": 0.00035,
-    "USDJPY": 0.20,
-    "GOLD_CFD": 1.8,
-    "USOIL": 0.25,
-    "NVDA": 4.0,
-    "SRTY": 0.35,
-}
-
-CORE_RR_MIN = {
-    "default": MIN_R_CORE,
-    "NVDA": 2.2,
-    "SRTY": 2.5,
-}
-
-MOMENTUM_RR_MIN = {
-    "default": MIN_R_MOMENTUM,
-    "NVDA": 1.6,
-    "SRTY": 1.8,
-}
-
-FX_TP_TARGETS = {
-    "EURUSD": 0.0035,
-    "USDJPY": 0.0030,
-}
-
-NVDA_EXTENDED_ATR_REL = 0.0015
-NVDA_MOMENTUM_ATR_REL = 0.0010
-SRTY_MOMENTUM_ATR_REL = 0.0010
-
-# --- Momentum override ---
-ENABLE_MOMENTUM_ASSETS: set = {"NVDA", "SRTY"}
-MOMENTUM_BARS    = 7             # 5m EMA9–EMA21 legfeljebb 7 baron belüli jel
-MOMENTUM_ATR_REL = 0.0010        # alap momentum ATR küszöb (asset-specifikus felülírás)
-MOMENTUM_BOS_LB  = 15            # szerkezeti töréshez nézett ablak (bar)
-MOMENTUM_VOLUME_RECENT = 6
-MOMENTUM_VOLUME_BASE = 30
-MOMENTUM_VOLUME_RATIO_TH = 1.15
-MOMENTUM_TRAIL_TRIGGER_R = 1.0
-MOMENTUM_TRAIL_LOCK = 0.35
-
-TF_STALE_TOLERANCE = {
-    "k1m": 90,
-    "k5m": 240,
-    "k1h": 900,
-    "k4h": 1800,
-}
-
-CRITICAL_STALE_FRAMES = {
-    "k5m": "5m candles túl régen zártak",
-    "k1h": "1h idősík késik",
-}
-
-LATENCY_PROFILE_FILENAME = "spot_latency_profile.json"
-REALTIME_JUMP_MULT = 1.5
-ORDER_FLOW_LOOKBACK_MIN = 20
-ORDER_FLOW_IMBALANCE_TH = 0.15
-ORDER_FLOW_PRESSURE_TH = 0.08
-
-ANCHOR_STATE_CACHE: Optional[Dict[str, Dict[str, Any]]] = None
-
-
-def current_anchor_state() -> Dict[str, Dict[str, Any]]:
-    global ANCHOR_STATE_CACHE
-    if ANCHOR_STATE_CACHE is None:
-        ANCHOR_STATE_CACHE = load_anchor_state()
-    return ANCHOR_STATE_CACHE
-
-P_SCORE_MIN = 60
-MICRO_BOS_P_BONUS = 8
-ANCHOR_P_SCORE_DELTA_WARN = 12
-ANCHOR_ATR_DROP_RATIO = 0.7
-
-# --- Rezsim és session beállítások ---
-EMA_SLOPE_PERIOD   = 21          # 1h EMA21
-EMA_SLOPE_LOOKBACK = 3           # hány baron mérjük a változást
-EMA_SLOPE_TH       = EMA_SLOPE_TH_DEFAULT      # alap küszöb (ha nincs asset-specifikus)
-
-# UTC idősávok: mind az entry (új belépő) mind a 24/5 megfigyelés számára.
-# "entry": kereskedési (új pozíció) ablakok
-# "monitor": tágabb, eToro-kompatibilis felügyeleti ablakok (24/5, napi szünettel)
-SESSION_WINDOWS_UTC: Dict[str, Dict[str, Optional[List[Tuple[int, int, int, int]]]]] = {
-    "EURUSD": {
-        "entry": [
-            (0, 0, 23, 59),
-        ],
-        "monitor": [
-            (0, 0, 23, 59),
-        ],
-    },
-    "USDJPY": {
-        "entry": [
-            (0, 0, 23, 59),
-        ],
-        "monitor": [
-            (0, 0, 23, 59),
-        ],
-    },
-    # Arany/olaj: szűk entry, de 24/5 kitettség felügyelet (napi 1h karbantartási szünet).
-    "GOLD_CFD": {
-        "entry": [
-            (7, 0, 17, 30),
-            (8, 0, 18, 30),
-        ],
-        "monitor": [
-            (0, 0, 23, 59),
-        ],
-    },
-    "USOIL": {
-        "entry": [
-            (7, 0, 18, 0),
-            (8, 0, 19, 0),
-        ],
-        "monitor": [
-            (0, 0, 23, 59),
-        ],
-    },
-    "NVDA": {
-        "entry": [
-            (13, 30, 20, 0),
-        ],
-        "monitor": [
-            (12, 0, 21, 30),
-        ],
-    },
-    "SRTY": {
-        "entry": [
-            (13, 30, 20, 0),
-        ],
-        "monitor": [
-            (12, 0, 21, 30),
-        ],
-    },
-}
-
-# Spot-adat elavulás küszöbök (másodperc)
-SPOT_MAX_AGE_SECONDS: Dict[str, int] = {
-    "default": 20 * 60,      # 20 perc
-    "GOLD_CFD": 45 * 60,     # 45 perc — lazább, mert cash session
-    "USOIL":    45 * 60,     # 45 perc — CME/NYMEX CFD feed esti szünettel
-    "NVDA":    15 * 60,
-    "SRTY":    15 * 60,
-}
-
-INTERVENTION_CONFIG_FILENAME = "intervention_watch_config.json"
-INTERVENTION_NEWS_FILENAME = "intervention_watch_news_flag.json"
-INTERVENTION_STATE_FILENAME = "intervention_watch_state.json"
-INTERVENTION_SUMMARY_FILENAME = "analysis_summary.json"
-INTERVENTION_P_SCORE_ADD = 15
-
-INTERVENTION_WATCH_DEFAULT: Dict[str, Any] = {
-    "USDJPY": {
-        "intervention_watch": {
-            "big_figures": [150.0, 152.0, 155.0, 160.0, 165.0],
-            "session_primary_utc": ["00:00", "09:00"],
-            "session_secondary_utc": ["18:00", "21:00"],
-            "speed_thresholds_pips_30m": [40, 60, 80],
-            "spike_multiplier_atr5": 1.2,
-            "wick_ratio_trigger": 0.55,
-            "vr_threshold": 1.4,
-            "atr_spike_ratio": 1.6,
-            "sentiment_min_abs": 0.15,
-            "sentiment_weight_positive": 6.0,
-            "sentiment_weight_negative": 4.0,
-            "irs_bands": {
-                "LOW": [0, 39],
-                "ELEVATED": [40, 59],
-                "HIGH": [60, 79],
-                "IMMINENT": [80, 100],
-            },
-            "actions": {
-                "HIGH": {
-                    "block_new_longs": True,
-                    "reduce_long_size_pct": 50,
-                    "p_score_long_add": 15,
-                    "tighten_sl": {"atr5_mult": 0.3, "min_pct": 0.10},
-                },
-                "IMMINENT": {
-                    "force_partial_close_long_pct": 50,
-                    "trailing_sl": {"atr5_mult": 0.5, "min_pct": 0.20},
-                    "allow_new_shorts_after_pullback": {
-                        "pullback_atr5_mult": 0.5,
-                        "rr_min": 2.5,
-                    },
-                    "leverage_cap_jpy_cross": 2,
-                },
-            },
-        }
-    }
-}
-
-# Diagnosztikai tippek — a dashboard / Worker frissítéséhez.
-REFRESH_TIPS = [
-    "Az analysis.py mindig a legutóbbi ZÁRT gyertyával számol (5m: max. ~5 perc késés).",
-    "CI/CD-ben kösd össze a Trading és Analysis futást: az analysis job csak a trading után induljon (needs: trading).",
-    "A kliens kéréséhez adj cache-busting query paramot (pl. ?v=<timestamp>) és no-store cache-control fejlécet.",
-    "Cloudflare Worker stale policy: 5m feedre állítsd 120s-re, hogy hamar átjöjjön az új jel.",
-    "A dashboard stabilizáló (2 azonos jel + 10 perc cooldown) lassíthatja a kártya frissítését — lazítsd, ha realtime kell.",
-]
-
-# Heti naptári korlátozások (Python weekday: hétfő=0 ... vasárnap=6). None = mindig.
-SESSION_WEEKDAYS: Dict[str, Optional[List[int]]] = {
-    "EURUSD": [0, 1, 2, 3, 4, 6],  # hétfő–péntek + vasárnap esti nyitás
-    "USDJPY": [0, 1, 2, 3, 4, 6],
-    "GOLD_CFD": [0, 1, 2, 3, 4, 6],     # vasárnap esti nyitás – szombat zárva
-    "USOIL": [0, 1, 2, 3, 4, 6],        # vasárnap esti nyitás – szombat zárva
-    "NVDA": [0, 1, 2, 3, 4],
-    "SRTY": [0, 1, 2, 3, 4],
-}
-
-
-def _min_of_day(hour: int, minute: int = 0) -> int:
-    return hour * 60 + minute
-
-
-SESSION_TIME_RULES: Dict[str, Dict[str, Any]] = {
-    "EURUSD": {
-        "sunday_open_minute": _min_of_day(21, 5),    # 23:05 CEST → 21:05 UTC
-        "friday_close_minute": _min_of_day(21, 55),   # 23:55 CEST → 21:55 UTC
-        "daily_breaks": [(_min_of_day(22, 0), _min_of_day(22, 5))],
-    },
-    "USDJPY": {
-        "sunday_open_minute": _min_of_day(21, 5),
-        "friday_close_minute": _min_of_day(21, 55),
-        "daily_breaks": [(_min_of_day(22, 0), _min_of_day(22, 5))],
-    },
-    "GOLD_CFD": {
-        "sunday_open_minute": _min_of_day(22, 0),     # 00:00 CEST → 22:00 UTC
-        "friday_close_minute": _min_of_day(20, 30),
-        "daily_breaks": [(_min_of_day(21, 0), _min_of_day(22, 0))],
-    },
-    "USOIL": {
-        "sunday_open_minute": _min_of_day(22, 0),
-        "friday_close_minute": _min_of_day(20, 30),
-        "daily_breaks": [(_min_of_day(21, 0), _min_of_day(22, 0))],
-    },
-    "NVDA": {
-        "sunday_open_minute": _min_of_day(22, 0),
-        "friday_close_minute": _min_of_day(20, 30),
-        "daily_breaks": [(_min_of_day(21, 0), _min_of_day(21, 15))],
-    },
-    "SRTY": {
-        "sunday_open_minute": _min_of_day(22, 0),
-        "friday_close_minute": _min_of_day(20, 30),
-        "daily_breaks": [(_min_of_day(21, 0), _min_of_day(21, 15))],
-    },
-}
-
+# A TP/SL, ATR és session-specifikus határok a fenti importból érkeznek:
+# pl. TP_NET_MIN_ASSET, TP_MIN_PCT, SL_BUFFER_RULES, SESSION_WINDOWS_UTC stb.
 # -------------------------- segédek -----------------------------------
 
 def nowiso() -> str:
@@ -5010,6 +4698,7 @@ def analyze(asset: str) -> Dict[str, Any]:
 # ------------------------------- főfolyamat ------------------------------------
 
 def main():
+    LOGGER.info("Starting analysis run for %d assets", len(ASSETS))
     missing_models = missing_model_artifacts(ASSETS)
     summary = {
         "ok": True,
@@ -5029,7 +4718,7 @@ def main():
             "a valószínűségi score aktiválásához."
         )
         summary["troubleshooting"].append(warning)
-        print(f"[analysis] WARN: {warning}", file=sys.stderr)
+        LOGGER.warning("ml artifacts missing: %s", warning)
     for asset in ASSETS:
         try:
             res = analyze(asset)
@@ -5038,8 +4727,9 @@ def main():
             flags = diag.get("latency_flags") if isinstance(diag, dict) else None
             if flags:
                 summary["latency_flags"].extend(flags)
-        except Exception as e:
-            summary["assets"][asset] = {"asset": asset, "ok": False, "error": str(e)}
+        except Exception as exc:
+            LOGGER.exception("Analysis failed for asset %s", asset)
+            summary["assets"][asset] = {"asset": asset, "ok": False, "error": str(exc)}
     save_json(os.path.join(PUBLIC_DIR, "analysis_summary.json"), summary)
 
     html = "<!doctype html><meta charset='utf-8'><title>Analysis Summary</title>"
@@ -5061,10 +4751,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
