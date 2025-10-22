@@ -728,10 +728,24 @@ def collect_realtime_spot(
         return
 
     interval = max(0.5, REALTIME_INTERVAL)
+    http_max_samples = REALTIME_HTTP_MAX_SAMPLES
+    duration = max(REALTIME_DURATION, interval)
+
+    # Forced realtime collection (pl. spot fallback) should be quick – if the
+    # regular websocket polling is disabled we fall back to a much shorter HTTP
+    # sampling window so the trading pipeline does not block for a full minute
+    # on every asset.  This was the primary reason behind the ~8 perces
+    # futásidő: minden instrumentum 60 másodpercig próbálkozott, miközben a
+    # quote továbbra sem frissült.
+    if force and not REALTIME_FLAG:
+        duration = min(duration, max(interval * 2.0, 6.0))
+        interval = min(interval, 2.0)
+        http_max_samples = max(1, min(http_max_samples, 2))
+
     frames: List[Dict[str, Any]] = []
     transport: Optional[str] = None
 
-    deadline = time.time() + max(REALTIME_DURATION, REALTIME_INTERVAL)
+    deadline = time.time() + duration
     use_ws = REALTIME_WS_ENABLED and REALTIME_FLAG and not force
     if use_ws:
         frames = _collect_ws_frames(asset, symbol_cycle, deadline)
@@ -746,7 +760,7 @@ def collect_realtime_spot(
                 symbol_cycle,
                 deadline_http,
                 interval,
-                REALTIME_HTTP_MAX_SAMPLES,
+                http_max_samples,
             )
             if frames:
                 transport = "http"
@@ -785,6 +799,8 @@ def collect_realtime_spot(
         payload["forced"] = True
         if reason:
             payload["force_reason"] = reason
+        payload["sampling_window_seconds"] = round(duration, 3)
+        payload["sampling_max_samples"] = http_max_samples
     if transport == "websocket" and isinstance(last_frame.get("raw"), dict):
         payload["raw_last_frame"] = last_frame["raw"]
 
@@ -1115,6 +1131,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
