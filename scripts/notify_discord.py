@@ -40,9 +40,10 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from active_anchor import load_anchor_state, touch_anchor
+from config.analysis_settings import ASSETS as CONFIG_ASSETS
 
 PUBLIC_DIR = "public"
-ASSETS = ["EURUSD", "USDJPY", "GOLD_CFD", "USOIL", "NVDA", "SRTY"]
+ASSETS: List[str] = list(CONFIG_ASSETS)
 
 # ---- Active position helper config ----
 TDSTATUS_PATH = f"{PUBLIC_DIR}/tdstatus.json"
