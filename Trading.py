@@ -29,7 +29,7 @@ Környezeti változók:
   TD_REQUEST_CONCURRENCY = "3"   (egyszerre futó TD hívások plafonja)
 """
 
-import os, json, time
+import os, json, time, math
 import threading
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -228,13 +228,18 @@ def _coerce_float(value: Any) -> Optional[float]:
         if value is None:
             return None
         if isinstance(value, float):
+            if math.isnan(value) or math.isinf(value):
+                return None
             return value
         if isinstance(value, int):
             return float(value)
         text = str(value).strip()
         if not text:
             return None
-        return float(text)
+        result = float(text)
+        if math.isnan(result) or math.isinf(result):
+            return None
+        return result
     except Exception:
         return None
 
@@ -429,8 +434,21 @@ def td_quote(symbol: str, exchange: Optional[str] = None) -> Dict[str, Any]:
     if exchange:
         params["exchange"] = exchange
     j = td_get("quote", **params)
-    price = j.get("price")
-    price = float(price) if price not in (None, "") else None
+    price: Optional[float] = None
+    price_candidates = [
+        j.get("price"),
+        j.get("close"),
+        j.get("last"),
+        j.get("last_price"),
+        j.get("bid"),
+        j.get("ask"),
+        j.get("previous_close"),
+    ]
+    for candidate in price_candidates:
+        value = _coerce_float(candidate)
+        if value is not None:
+            price = value
+            break
     ts = j.get("datetime") or j.get("timestamp")
     ts_iso = _iso_from_td_ts(ts) or now_utc()
     return {
@@ -1131,6 +1149,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
