@@ -22,8 +22,10 @@ Környezeti változók:
   TD_REALTIME_SPOT   = "0/1"    (alapértelmezés: 1 — bekapcsolja a valós idejű spot-frissítést)
   TD_REALTIME_INTERVAL = "5"    (realtime ciklus közötti szünet sec)
   TD_REALTIME_DURATION = "60"   (realtime poll futási ideje sec)
+  TD_REALTIME_HTTP_DURATION = "12" (HTTP fallback mintavételezés hossza sec)
   TD_REALTIME_ASSETS = ""       (komma-szeparált lista, üres = mind)
   TD_REALTIME_HTTP_MAX_SAMPLES = "6" (HTTP fallback minták plafonja)
+  TD_REALTIME_HTTP_BACKGROUND = "auto" (HTTP realtime gyűjtés háttérszálon fusson-e)
   TD_REALTIME_WS_IDLE_GRACE = "15"  (WebSocket késlekedési türelem sec)
   TD_MAX_WORKERS      = "3"      (max. párhuzamos eszköz feldolgozás)
   TD_REQUEST_CONCURRENCY = "3"   (egyszerre futó TD hívások plafonja)
@@ -57,6 +59,46 @@ except Exception:  # pragma: no cover - optional helper
     def get_pipeline_log_path(*_args, **_kwargs):
         return None
 
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    raw_str = str(raw).strip()
+    if not raw_str:
+        return default
+    try:
+        return int(float(raw_str))
+    except Exception:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    raw_str = str(raw).strip()
+    if not raw_str:
+        return default
+    try:
+        return float(raw_str)
+    except Exception:
+        return default
+
+
+def _env_flag(name: str) -> Optional[bool]:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    raw_str = str(raw).strip().lower()
+    if not raw_str or raw_str == "auto":
+        return None
+    if raw_str in {"1", "true", "yes", "on"}:
+        return True
+    if raw_str in {"0", "false", "no", "off"}:
+        return False
+    return None
+
 OUT_DIR  = os.getenv("OUT_DIR", "public")
 API_KEY_RAW = os.getenv("TWELVEDATA_API_KEY", "")
 API_KEY  = API_KEY_RAW.strip() if API_KEY_RAW else ""
@@ -80,19 +122,8 @@ REALTIME_WS_IDLE_GRACE = float(os.getenv("TD_REALTIME_WS_IDLE_GRACE", "15"))
 REALTIME_WS_TIMEOUT = float(os.getenv("TD_REALTIME_WS_TIMEOUT", str(max(REALTIME_DURATION, 30.0))))
 REALTIME_WS_ENABLED = bool(REALTIME_WS_URL and websocket is not None)
 REALTIME_HTTP_MAX_SAMPLES = int(os.getenv("TD_REALTIME_HTTP_MAX_SAMPLES", "6"))
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    raw_str = str(raw).strip()
-    if not raw_str:
-        return default
-    try:
-        return int(float(raw_str))
-    except Exception:
-        return default
+REALTIME_HTTP_DURATION = max(1.0, _env_float("TD_REALTIME_HTTP_DURATION", 12.0))
+_REALTIME_HTTP_BACKGROUND_FLAG = _env_flag("TD_REALTIME_HTTP_BACKGROUND")
 
 # ───────────────────────────── Data freshness guards ──────────────────────
 # Align the freshness limits with ``analysis.py`` tolerances so we can fall
@@ -188,6 +219,8 @@ _DEFAULT_REQ_CONCURRENCY = max(1, min(TD_MAX_WORKERS, 3))
 TD_REQUEST_CONCURRENCY = max(1, min(len(ASSETS), _env_int("TD_REQUEST_CONCURRENCY", _DEFAULT_REQ_CONCURRENCY)))
 _REQUEST_SEMAPHORE = threading.Semaphore(TD_REQUEST_CONCURRENCY)
 ANCHOR_LOCK = threading.Lock()
+_REALTIME_BACKGROUND_LOCK = threading.Lock()
+_REALTIME_BACKGROUND_THREADS: List[threading.Thread] = []
 
 # ─────────────────────────────── Segédek ─────────────────────────────────
 
@@ -732,32 +765,28 @@ def _collect_ws_frames(
     return frames
 
 
-def collect_realtime_spot(
+def _collect_realtime_spot_impl(
     asset: str,
-    attempts: List[Tuple[str, Optional[str]]],
+    symbol_cycle: List[Tuple[str, Optional[str]]],
     out_dir: str,
     force: bool = False,
     reason: Optional[str] = None,
 ) -> None:
-    realtime_enabled = REALTIME_FLAG or force
-    if not realtime_enabled:
-        return
-    allowed_assets = {
-        a.strip().upper()
-        for a in REALTIME_ASSETS_ENV.split(",")
-        if a.strip()
-    }
-    if allowed_assets and asset.upper() not in allowed_assets and not force:
-        return
-
-    ensure_dir(out_dir)
-    symbol_cycle = list(attempts) if attempts else []
     if not symbol_cycle:
         return
 
+    ensure_dir(out_dir)
     interval = max(0.5, REALTIME_INTERVAL)
     http_max_samples = REALTIME_HTTP_MAX_SAMPLES
     duration = max(REALTIME_DURATION, interval)
+    http_duration = max(interval, REALTIME_HTTP_DURATION)
+
+    use_ws = REALTIME_WS_ENABLED and REALTIME_FLAG and not force
+    if not use_ws:
+        duration = min(duration, http_duration)
+        if interval > 0:
+            expected_cycles = max(1, int(math.ceil(http_duration / interval)))
+            http_max_samples = max(1, min(http_max_samples, expected_cycles + 1))
 
     # Forced realtime collection (pl. spot fallback) should be quick – if the
     # regular websocket polling is disabled we fall back to a much shorter HTTP
@@ -774,7 +803,6 @@ def collect_realtime_spot(
     transport: Optional[str] = None
 
     deadline = time.time() + duration
-    use_ws = REALTIME_WS_ENABLED and REALTIME_FLAG and not force
     if use_ws:
         frames = _collect_ws_frames(asset, symbol_cycle, deadline)
         if frames:
@@ -849,6 +877,61 @@ def collect_realtime_spot(
         except Exception:
             pass
     save_json(os.path.join(out_dir, "spot_realtime.json"), payload)
+
+
+def collect_realtime_spot(
+    asset: str,
+    attempts: List[Tuple[str, Optional[str]]],
+    out_dir: str,
+    force: bool = False,
+    reason: Optional[str] = None,
+) -> None:
+    realtime_enabled = REALTIME_FLAG or force
+    if not realtime_enabled:
+        return
+
+    allowed_assets = {
+        a.strip().upper()
+        for a in REALTIME_ASSETS_ENV.split(",")
+        if a.strip()
+    }
+    if allowed_assets and asset.upper() not in allowed_assets and not force:
+        return
+
+    symbol_cycle = list(attempts) if attempts else []
+    if not symbol_cycle:
+        return
+
+    use_ws = REALTIME_WS_ENABLED and REALTIME_FLAG and not force
+    run_async = False
+    if not use_ws and not force:
+        if _REALTIME_HTTP_BACKGROUND_FLAG is None or _REALTIME_HTTP_BACKGROUND_FLAG:
+            run_async = True
+
+    if run_async:
+        thread = threading.Thread(
+            target=_collect_realtime_spot_impl,
+            args=(asset, symbol_cycle, out_dir, force, reason),
+            name=f"td-realtime-{asset.lower()}",
+            daemon=False,
+        )
+        thread.start()
+        with _REALTIME_BACKGROUND_LOCK:
+            _REALTIME_BACKGROUND_THREADS.append(thread)
+        return
+
+    _collect_realtime_spot_impl(asset, symbol_cycle, out_dir, force=force, reason=reason)
+
+
+def wait_for_realtime_background() -> None:
+    while True:
+        with _REALTIME_BACKGROUND_LOCK:
+            if not _REALTIME_BACKGROUND_THREADS:
+                break
+            threads = list(_REALTIME_BACKGROUND_THREADS)
+            _REALTIME_BACKGROUND_THREADS.clear()
+        for thread in threads:
+            thread.join()
 
 # ─────────────────────── több-szimbólumos fallback ───────────────────────
 
@@ -1173,6 +1256,7 @@ def main():
         }
         for future in as_completed(futures):
             future.result()
+    wait_for_realtime_background()
     completed_at_dt = datetime.now(timezone.utc)
     duration_seconds = max((completed_at_dt - started_at_dt).total_seconds(), 0.0)
     logger.info("Trading run completed in %.1f seconds", duration_seconds)
@@ -1183,6 +1267,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
