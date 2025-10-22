@@ -788,15 +788,16 @@ def _collect_realtime_spot_impl(
             expected_cycles = max(1, int(math.ceil(http_duration / interval)))
             http_max_samples = max(1, min(http_max_samples, expected_cycles + 1))
 
-    # Forced realtime collection (pl. spot fallback) should be quick – if the
-    # regular websocket polling is disabled we fall back to a much shorter HTTP
+    # Forced realtime collection (pl. spot fallback) should be quick – if we
+    # cannot rely on the websocket path we fall back to a much shorter HTTP
     # sampling window so the trading pipeline does not block for a full minute
     # on every asset.  This was the primary reason behind the ~8 perces
     # futásidő: minden instrumentum 60 másodpercig próbálkozott, miközben a
     # quote továbbra sem frissült.
-    if force and not REALTIME_FLAG:
-        duration = min(duration, max(interval * 2.0, 6.0))
+    if force and not use_ws:
         interval = min(interval, 2.0)
+        quick_window = max(interval * 2.0, 6.0)
+        duration = min(duration, quick_window)
         http_max_samples = max(1, min(http_max_samples, 2))
 
     frames: List[Dict[str, Any]] = []
@@ -1267,6 +1268,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
