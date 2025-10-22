@@ -117,6 +117,64 @@ TP2_R   = 3.0
 TP1_R_MOMENTUM = 1.5
 TP2_R_MOMENTUM = 2.4
 MIN_STOPLOSS_PCT = 0.01
+# Momentum structure check window (5m candles × lookback bars)
+MOMENTUM_BOS_LB = 36
+# Number of recent bars to inspect for EMA cross momentum confirmation
+MOMENTUM_BARS = 12
+# Period used for EMA slope calculations
+EMA_SLOPE_PERIOD = 21
+# Historical window (number of bars) considered for EMA slope thresholds
+EMA_SLOPE_LOOKBACK = 12
+# Baseline EMA slope threshold used when no asset override is configured
+EMA_SLOPE_TH = EMA_SLOPE_TH_DEFAULT
+REFRESH_TIPS = (
+    "Az analysis.py mindig a legutóbbi ZÁRT gyertyával számol (5m: max. ~5 perc késés).",
+    "CI/CD-ben kösd össze a Trading és Analysis futást: az analysis job csak a trading után induljon (needs: trading).",
+    "A kliens kéréséhez adj cache-busting query paramot (pl. ?v=<timestamp>) és no-store cache-control fejlécet.",
+    "Cloudflare Worker stale policy: 5m feedre állítsd 120s-re, hogy hamar átjöjjön az új jel.",
+    "A dashboard stabilizáló (2 azonos jel + 10 perc cooldown) lassíthatja a kártya frissítését — lazítsd, ha realtime kell.",
+    "Hiányzó ML modellek: EURUSD, GOLD_CFD, NVDA, SRTY, USDJPY, USOIL – töltsd fel a public/models/<asset>_gbm.pkl fájlokat a valószínűségi score aktiválásához."
+)
+LATENCY_PROFILE_FILENAME = "latency_profile.json"
+ORDER_FLOW_LOOKBACK_MIN = 120
+ORDER_FLOW_IMBALANCE_TH = 0.6
+ORDER_FLOW_PRESSURE_TH = 0.7
+PRECISION_FLOW_IMBALANCE_MARGIN = 1.1
+PRECISION_FLOW_PRESSURE_MARGIN = 1.1
+PRECISION_SCORE_THRESHOLD = 70.0
+PRECISION_TRIGGER_NEAR_MULT = 0.2
+P_SCORE_MIN = 60.0
+REALTIME_JUMP_MULT = 2.0
+MICRO_BOS_P_BONUS = 8.0
+MOMENTUM_ATR_REL = 0.0006
+MOMENTUM_VOLUME_RECENT = 6
+MOMENTUM_VOLUME_BASE = 30
+MOMENTUM_VOLUME_RATIO_TH = 1.4
+MOMENTUM_TRAIL_TRIGGER_R = 1.2
+MOMENTUM_TRAIL_LOCK = 0.5
+ANCHOR_P_SCORE_DELTA_WARN = 10.0
+ANCHOR_ATR_DROP_RATIO = 0.75
+ANCHOR_STATE_CACHE: Dict[str, Dict[str, Any]] = {}
+TF_STALE_TOLERANCE = {"k1m": 240, "k5m": 900, "k1h": 5400, "k4h": 21600}
+CRITICAL_STALE_FRAMES = {
+    "k1m": "k1m: jelzés korlátozva",
+    "k5m": "k5m: jelzés korlátozva",
+    "k1h": "k1h: jelzés korlátozva",
+    "k4h": "k4h: jelzés korlátozva",
+}
+INTERVENTION_CONFIG_FILENAME = "intervention_watch.json"
+INTERVENTION_STATE_FILENAME = "intervention_state.json"
+INTERVENTION_NEWS_FILENAME = "intervention_news.json"
+INTERVENTION_SUMMARY_FILENAME = "intervention_summary.json"
+INTERVENTION_P_SCORE_ADD = 5.0
+
+
+def current_anchor_state() -> Dict[str, Dict[str, Any]]:
+    """Return the persisted anchor state in a defensive manner."""
+    try:
+        return load_anchor_state()
+    except Exception:
+        return {}
 
 # A TP/SL, ATR és session-specifikus határok a fenti importból érkeznek:
 # pl. TP_NET_MIN_ASSET, TP_MIN_PCT, SL_BUFFER_RULES, SESSION_WINDOWS_UTC stb.
@@ -4751,3 +4809,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
