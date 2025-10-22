@@ -165,6 +165,13 @@ MOMENTUM_TRAIL_TRIGGER_R = 1.2
 MOMENTUM_TRAIL_LOCK = 0.5
 ANCHOR_P_SCORE_DELTA_WARN = 10.0
 ANCHOR_ATR_DROP_RATIO = 0.75
+INTRADAY_EXHAUSTION_PCT = 0.82
+INTRADAY_ATR_EXHAUSTION = 0.75
+INTRADAY_COMPRESSION_TH = 0.45
+INTRADAY_EXPANSION_TH = 1.25
+INTRADAY_BALANCE_LOW = 0.35
+INTRADAY_BALANCE_HIGH = 0.65
+OPENING_RANGE_MINUTES = 45
 ANCHOR_STATE_CACHE: Dict[str, Dict[str, Any]] = {}
 TF_STALE_TOLERANCE = {"k1m": 240, "k5m": 900, "k1h": 5400, "k4h": 21600}
 CRITICAL_STALE_FRAMES = {
@@ -553,6 +560,7 @@ def translate_gate_label(label: str) -> str:
         "ml_confidence": "ML valószínűség alacsony – belépő blokkolva.",
         "precision_flow_alignment": "Precision belépő: order flow megerősítés hiányzik.",
         "precision_trigger_sync": "Precision belépő: trigger szinkronra vár.",
+        "intraday_range_guard": "Intraday range telített – várj visszahúzódásra.",
     }
     if normalized in base_map:
         return base_map[normalized]
@@ -619,9 +627,11 @@ def build_action_plan(
     reasons: Optional[List[str]],
     last_computed_risk: Optional[float],
     momentum_trailing_plan: Optional[Dict[str, Any]],
+    intraday_profile: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     session_meta = session_meta or {}
     execution_playbook = execution_playbook or []
+    intraday_profile = intraday_profile or {}
     blockers_raw = [str(item) for item in (missing or []) if item]
     blockers: List[str] = []
     for raw in blockers_raw:
@@ -658,8 +668,17 @@ def build_action_plan(
         },
     }
 
+    if intraday_profile:
+        plan["context"]["intraday_profile"] = {
+            "range_state": intraday_profile.get("range_state"),
+            "range_position": intraday_profile.get("range_position"),
+            "range_vs_atr": intraday_profile.get("range_vs_atr"),
+            "range_guard": intraday_profile.get("range_guard"),
+            "opening_break": intraday_profile.get("opening_break"),
+        }
+
     if session_meta.get("next_open_utc"):
-        plan["context"]["next_session_open_utc"] = session_meta.get("next_open_utc")
+        plan["context"]["next_session_open_utc"] = session_meta.get("next_open_utc"
 
     notes: List[str] = []
     summary_parts: List[str] = []
@@ -671,6 +690,9 @@ def build_action_plan(
         note_clean = text.strip()
         if note_clean and note_clean not in notes:
             notes.append(note_clean)
+
+    for note in intraday_profile.get("notes", []):
+        add_note(note)
 
     def add_step(
         category: str,
@@ -969,6 +991,7 @@ def derive_position_management_note(
     invalid_level_sell: Optional[float],
     invalid_buffer_abs: Optional[float],
     current_signal: Optional[str],
+    sentiment_signal: Optional[SentimentSignal] = None,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     if not session_meta.get("open"):
         return None, None
@@ -1364,6 +1387,112 @@ def derive_position_management_note(
     det_notes = deterioration_messages()
     if det_notes:
         base_message += " — " + "; ".join(det_notes)
+
+    sentiment_state: Optional[str] = None
+    sentiment_reasons: List[str] = []
+    sentiment_actions: List[Dict[str, Any]] = []
+    sentiment_severity_label: Optional[str] = None
+    if (
+        (exit_signal is None or exit_signal.get("state") != "hard_exit")
+        and anchor_active
+        and sentiment_signal
+        and anchor_bias in {"long", "short"}
+    ):
+        severity = sentiment_signal.effective_severity
+        try:
+            sentiment_score = float(sentiment_signal.score)
+        except (TypeError, ValueError):
+            sentiment_score = 0.0
+        if severity >= 0.55 and sentiment_score:
+            direction_factor = 1.0 if anchor_bias == "long" else -1.0
+            effective_score = sentiment_score * direction_factor
+            if effective_score <= -0.25:
+                base_reason = (
+                    f"Sentiment {sentiment_score:+.2f} ellentétes a {anchor_bias} pozícióval"
+                )
+                sentiment_reasons.append(base_reason)
+                if sentiment_signal.headline:
+                    headline_note = short_text(f"Hír: {sentiment_signal.headline}")
+                    if headline_note not in sentiment_reasons:
+                        sentiment_reasons.append(headline_note)
+                if effective_score <= -0.55 or severity >= 0.85:
+                    sentiment_state = "scale_out"
+                    sentiment_actions = [
+                        {"type": "scale_out", "size": 0.5},
+                        {"type": "tighten_stop"},
+                    ]
+                    sentiment_severity_label = "high" if severity >= 0.85 else "moderate"
+                else:
+                    sentiment_state = "warn"
+                    sentiment_actions = [
+                        {"type": "tighten_stop"},
+                        {"type": "monitor"},
+                    ]
+                    sentiment_severity_label = "moderate" if severity >= 0.7 else "caution"
+
+                if base_message:
+                    base_message += " — Sentiment kockázat: " + "; ".join(sentiment_reasons)
+                else:
+                    base_message = "Sentiment kockázat aktív"
+
+                if exit_signal is None:
+                    exit_signal = {
+                        "state": sentiment_state or "warn",
+                        "severity": sentiment_severity_label or ("high" if severity >= 0.85 else "moderate"),
+                        "action": "scale_out"
+                        if sentiment_state == "scale_out"
+                        else "tighten_stop",
+                        "reasons": list(dict.fromkeys(sentiment_reasons)),
+                        "trigger_price": current_price_val,
+                        "triggered_at": nowiso(),
+                        "direction": anchor_bias,
+                        "signal": current_signal,
+                    }
+                    exit_signal["category"] = "sentiment_risk"
+                    exit_signal["actions"] = sentiment_actions or [
+                        {"type": "tighten_stop"},
+                        {"type": "monitor"},
+                    ]
+                    if anchor_entry is not None and np.isfinite(anchor_entry):
+                        exit_signal["entry_price"] = anchor_entry
+                    if current_pnl_r is not None and np.isfinite(current_pnl_r):
+                        exit_signal["current_pnl_r"] = current_pnl_r
+                    if max_fav_r is not None and np.isfinite(max_fav_r):
+                        exit_signal["max_favorable_r"] = max_fav_r
+                    if initial_risk_abs is not None and np.isfinite(initial_risk_abs):
+                        exit_signal["initial_risk_abs"] = initial_risk_abs
+                else:
+                    existing_reasons = exit_signal.get("reasons") or []
+                    for reason in sentiment_reasons:
+                        if reason not in existing_reasons:
+                            existing_reasons.append(reason)
+                    exit_signal["reasons"] = existing_reasons
+                    if exit_signal.get("state") != "hard_exit" and sentiment_state:
+                        exit_signal["state"] = sentiment_state
+                        exit_signal["action"] = (
+                            "scale_out" if sentiment_state == "scale_out" else "tighten_stop"
+                        )
+                        exit_signal["severity"] = sentiment_severity_label or exit_signal.get("severity")
+                    if sentiment_actions:
+                        exit_actions_existing = exit_signal.setdefault("actions", [])
+                        for action in sentiment_actions:
+                            if action not in exit_actions_existing:
+                                exit_actions_existing.append(action)
+                    if exit_signal.get("category") not in {"structural_invalid"}:
+                        exit_signal["category"] = exit_signal.get("category") or "sentiment_risk"
+
+                if exit_signal is not None:
+                    exit_signal["sentiment_score"] = sentiment_score
+                    exit_signal["sentiment_severity"] = severity
+                    if sentiment_signal.bias:
+                        exit_signal["sentiment_bias"] = sentiment_signal.bias
+                    if sentiment_signal.headline:
+                        headline_short = short_text(sentiment_signal.headline)
+                        headlines = exit_signal.setdefault("headlines", [])
+                        if headline_short not in headlines:
+                            headlines.append(headline_short)
+                    if sentiment_signal.category:
+                        exit_signal.setdefault("sentiment_category", sentiment_signal.category)
 
     if exit_signal is None and trail_state:
         exit_signal = {
@@ -2805,6 +2934,219 @@ def compute_dynamic_tp_profile(
         },
     }
 
+
+def trading_day_bounds(now: datetime, tz: ZoneInfo = MARKET_TIMEZONE) -> Tuple[datetime, datetime]:
+    """Return the UTC bounds of the trading day anchored to ``tz``."""
+
+    local_now = now.astimezone(tz)
+    start_local = datetime(local_now.year, local_now.month, local_now.day, tzinfo=tz)
+    end_local = start_local + timedelta(days=1)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
+
+def compute_intraday_profile(
+    asset: str,
+    k1m: pd.DataFrame,
+    price_now: Optional[float],
+    atr5: Optional[float],
+    now: datetime,
+    tz: ZoneInfo = MARKET_TIMEZONE,
+) -> Dict[str, Any]:
+    """Analyse the current trading day's range structure for intraday context."""
+
+    profile: Dict[str, Any] = {
+        "asset": asset,
+        "timestamp": to_utc_iso(now),
+        "day_start_utc": None,
+        "day_open": None,
+        "day_high": None,
+        "day_low": None,
+        "day_range": None,
+        "range_vs_atr": None,
+        "range_position": None,
+        "range_bias": "unknown",
+        "range_state": "unknown",
+        "range_compression": False,
+        "range_expansion": False,
+        "range_exhaustion_long": False,
+        "range_exhaustion_short": False,
+        "range_guard": {"long": False, "short": False},
+        "opening_range_high": None,
+        "opening_range_low": None,
+        "opening_break": "none",
+        "opening_range_minutes": OPENING_RANGE_MINUTES,
+        "opening_drive_ratio": None,
+        "price_reference": safe_float(price_now),
+        "elapsed_minutes": None,
+        "notes": [],
+    }
+
+    if k1m.empty or not isinstance(k1m.index, pd.DatetimeIndex):
+        profile["notes"].append("Intraday 1m idősor nem érhető el.")
+        return profile
+
+    df = k1m.copy()
+    try:
+        if df.index.tz is None:
+            df = df.tz_localize(timezone.utc)
+        else:
+            df = df.tz_convert(timezone.utc)
+    except Exception:
+        df.index = pd.to_datetime(df.index, utc=True)
+
+    day_start_utc, _ = trading_day_bounds(now, tz)
+    profile["day_start_utc"] = to_utc_iso(day_start_utc)
+
+    mask = (df.index >= day_start_utc) & (df.index <= now)
+    intraday = df.loc[mask]
+    if intraday.empty:
+        intraday = df.tail(24 * 60)
+    if intraday.empty:
+        profile["notes"].append("Intraday ablak üres – nincs napi range.")
+        return profile
+
+    day_open = safe_float(intraday["open"].iloc[0])
+    day_high = safe_float(intraday["high"].max())
+    day_low = safe_float(intraday["low"].min())
+    last_close = safe_float(intraday["close"].iloc[-1])
+    price_ref = profile["price_reference"]
+    if price_ref is None:
+        price_ref = last_close
+    profile["price_reference"] = price_ref
+
+    day_range: Optional[float] = None
+    if day_high is not None and day_low is not None:
+        try:
+            rng = float(day_high) - float(day_low)
+            if np.isfinite(rng) and rng >= 0:
+                day_range = rng
+        except (TypeError, ValueError):
+            day_range = None
+
+    atr_val = safe_float(atr5) if atr5 is not None else None
+    range_vs_atr: Optional[float] = None
+    if day_range is not None and atr_val is not None and atr_val > 0:
+        range_vs_atr = float(day_range) / float(atr_val)
+
+    range_position: Optional[float] = None
+    if (
+        day_range is not None
+        and day_range > 0
+        and price_ref is not None
+        and day_low is not None
+    ):
+        try:
+            ratio = (float(price_ref) - float(day_low)) / float(day_range)
+            range_position = min(1.0, max(0.0, ratio))
+        except (TypeError, ValueError, ZeroDivisionError):
+            range_position = None
+
+    opening_end = min(now, day_start_utc + timedelta(minutes=OPENING_RANGE_MINUTES))
+    opening_slice = intraday.loc[(intraday.index >= day_start_utc) & (intraday.index <= opening_end)]
+    opening_high = safe_float(opening_slice["high"].max()) if not opening_slice.empty else None
+    opening_low = safe_float(opening_slice["low"].min()) if not opening_slice.empty else None
+
+    opening_range = None
+    if opening_high is not None and opening_low is not None:
+        try:
+            diff = float(opening_high) - float(opening_low)
+            if np.isfinite(diff) and diff >= 0:
+                opening_range = diff
+        except (TypeError, ValueError):
+            opening_range = None
+
+    opening_break = "none"
+    tol_up = 1.0002
+    tol_down = 0.9998
+    if opening_high is not None and day_high is not None and day_high > opening_high * tol_up:
+        opening_break = "up"
+    if opening_low is not None and day_low is not None and day_low < opening_low * tol_down:
+        opening_break = "down" if opening_break == "none" else "both"
+
+    opening_drive_ratio = None
+    if opening_range and day_range:
+        try:
+            opening_drive_ratio = min(1.0, max(0.0, opening_range / day_range))
+        except (TypeError, ValueError, ZeroDivisionError):
+            opening_drive_ratio = None
+
+    range_bias = "unknown"
+    if range_position is not None:
+        if range_position >= INTRADAY_BALANCE_HIGH:
+            range_bias = "upper"
+        elif range_position <= INTRADAY_BALANCE_LOW:
+            range_bias = "lower"
+        else:
+            range_bias = "balanced"
+
+    range_state = "normal"
+    range_compression = bool(
+        range_vs_atr is not None and range_vs_atr <= INTRADAY_COMPRESSION_TH
+    )
+    range_expansion = bool(
+        range_vs_atr is not None and range_vs_atr >= INTRADAY_EXPANSION_TH
+    )
+    if range_compression:
+        range_state = "compression"
+    elif range_expansion:
+        range_state = "expansion"
+
+    exhaustion_long = False
+    exhaustion_short = False
+    if range_position is not None:
+        lower_threshold = 1.0 - INTRADAY_EXHAUSTION_PCT
+        meets_atr = range_vs_atr is None or range_vs_atr >= INTRADAY_ATR_EXHAUSTION
+        if range_position >= INTRADAY_EXHAUSTION_PCT and meets_atr:
+            exhaustion_long = True
+        if range_position <= lower_threshold and meets_atr:
+            exhaustion_short = True
+
+    notes: List[str] = []
+    if exhaustion_long:
+        notes.append("Intraday range felső része telített — ne üldözd a csúcsot.")
+    if exhaustion_short:
+        notes.append("Intraday range alsó része telített — csak visszapattanásra lépj.")
+    if range_compression:
+        notes.append("Napi range az ATR 45%-a alatt — valószínű oldalazás.")
+    if range_expansion and range_vs_atr is not None and range_vs_atr >= 1.5:
+        notes.append("Range expanzió >1.5×ATR — agresszív menedzsment indokolt.")
+    if opening_break in {"up", "down", "both"}:
+        notes.append(f"Opening range áttörés iránya: {opening_break}.")
+
+    elapsed_minutes = None
+    try:
+        elapsed = (now - day_start_utc).total_seconds() / 60.0
+        if elapsed >= 0:
+            elapsed_minutes = int(elapsed)
+    except Exception:
+        elapsed_minutes = None
+
+    profile.update(
+        {
+            "day_open": day_open,
+            "day_high": day_high,
+            "day_low": day_low,
+            "day_range": day_range,
+            "range_vs_atr": range_vs_atr,
+            "range_position": range_position,
+            "range_bias": range_bias,
+            "range_state": range_state,
+            "range_compression": range_compression,
+            "range_expansion": range_expansion,
+            "range_exhaustion_long": exhaustion_long,
+            "range_exhaustion_short": exhaustion_short,
+            "range_guard": {"long": exhaustion_long, "short": exhaustion_short},
+            "opening_range_high": opening_high,
+            "opening_range_low": opening_low,
+            "opening_break": opening_break,
+            "opening_drive_ratio": opening_drive_ratio,
+            "elapsed_minutes": elapsed_minutes,
+            "notes": notes,
+        }
+    )
+
+    return profile
+
 # ------------------------------ elemzés egy eszközre ---------------------------
 
 def analyze(asset: str) -> Dict[str, Any]:
@@ -3357,7 +3699,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         atr_ok = False
 
     momentum_vol_ratio = volume_ratio(k5m_closed, MOMENTUM_VOLUME_RECENT, MOMENTUM_VOLUME_BASE)
-    dynamic_tp_profile = compute_dynamic_tp_profile(
+        dynamic_tp_profile = compute_dynamic_tp_profile(
         asset,
         atr_series_5,
         float(rel_atr) if not np.isnan(rel_atr) else float("nan"),
@@ -3380,6 +3722,22 @@ def analyze(asset: str) -> Dict[str, Any]:
                 volatility_adjustments.append("Alacsony realised vol → magasabb RR igény")
         except Exception:
             pass
+
+    intraday_price_ref = display_spot if display_spot is not None else last5_close
+    atr5_for_profile = None
+    try:
+        if atr5 is not None and np.isfinite(float(atr5)):
+            atr5_for_profile = float(atr5)
+    except Exception:
+        atr5_for_profile = None
+    intraday_profile = compute_intraday_profile(
+        asset,
+        k1m_closed,
+        intraday_price_ref,
+        atr5_for_profile,
+        analysis_now,
+    )
+
     realtime_jump_flag = False
     if (
         realtime_used
@@ -3591,6 +3949,34 @@ def analyze(asset: str) -> Dict[str, Any]:
             if note not in reasons:
                 reasons.append(note)
 
+    if isinstance(intraday_profile, dict):
+        range_position = intraday_profile.get("range_position")
+        range_compression = bool(intraday_profile.get("range_compression"))
+        range_expansion = bool(intraday_profile.get("range_expansion"))
+        exhaustion_long = bool(intraday_profile.get("range_exhaustion_long"))
+        exhaustion_short = bool(intraday_profile.get("range_exhaustion_short"))
+        if effective_bias == "long":
+            if exhaustion_long:
+                P -= 7.0
+                reasons.append("Intraday range felső harmada telített (−7.0)")
+            elif range_position is not None and range_position <= INTRADAY_BALANCE_LOW:
+                P += 4.0
+                reasons.append("Ár az intraday range alsó zónájában (+4.0)")
+        elif effective_bias == "short":
+            if exhaustion_short:
+                P -= 7.0
+                reasons.append("Intraday range alsó harmada telített (−7.0)")
+            elif range_position is not None and range_position >= INTRADAY_BALANCE_HIGH:
+                P += 4.0
+                reasons.append("Ár az intraday range felső zónájában (+4.0)")
+
+        if range_compression and not strong_momentum:
+            P -= 5.0
+            reasons.append("Napi range <0.45×ATR — breakout előtt türelem (−5.0)")
+        elif range_expansion and strong_momentum:
+            P += 3.0
+            reasons.append("Range expanzió támogatja a momentumot (+3.0)")
+
     if fib_ok:
         fib_points = 18.0
         P += fib_points
@@ -3688,7 +4074,24 @@ def analyze(asset: str) -> Dict[str, Any]:
             reasons.append(f"{sentiment_msg} ({sentiment_points:.1f})")
 
     P = max(0.0, min(100.0, P))
-  
+
+    range_guard_ok = True
+    range_guard_reason: Optional[str] = None
+    if isinstance(intraday_profile, dict):
+        exhaustion_long = bool(intraday_profile.get("range_exhaustion_long"))
+        exhaustion_short = bool(intraday_profile.get("range_exhaustion_short"))
+        allow_override = bool(
+            intraday_profile.get("range_expansion") and strong_momentum
+        )
+        if effective_bias == "long" and exhaustion_long and not allow_override:
+            range_guard_ok = False
+            range_guard_reason = "Intraday range felső része telített — visszahúzódásra várunk."
+        elif effective_bias == "short" and exhaustion_short and not allow_override:
+            range_guard_ok = False
+            range_guard_reason = "Intraday range alsó része telített — visszapattanásra várunk."
+    if range_guard_reason and range_guard_reason not in reasons:
+        reasons.append(range_guard_reason)
+
     # --- Kapuk (liquidity = Fib zóna VAGY sweep) + session + regime ---
     session_ok_flag, session_meta = session_state(asset)
 
@@ -3795,12 +4198,15 @@ def analyze(asset: str) -> Dict[str, Any]:
     elif asset == "NVDA":
         liquidity_label = "liquidity(fib|retest)"
 
+    range_guard_label = "intraday_range_guard"
+
     core_required = [
         "session",
         "regime",
         "bias",
         "bos5m",
         liquidity_label,
+        range_guard_label,
         "atr",
         f"rr_math>={core_rr_min:.1f}",
         "tp_min_profit",
@@ -3815,6 +4221,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "bos5m":   bool(structure_gate),
         "liquidity": liquidity_ok,
         "atr":     bool(atr_ok),
+        range_guard_label: range_guard_ok,
     }
     base_core_ok = all(v for k, v in conds_core.items() if k != "bos5m")
     bos_gate_ok = conds_core["bos5m"] or micro_bos_active
@@ -3843,6 +4250,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "tp_min_profit",
         "min_stoploss",
         tp_net_label,
+        range_guard_label,
     ]
     missing_mom: List[str] = []
     mom_trigger_desc: Optional[str] = None
@@ -3856,6 +4264,8 @@ def analyze(asset: str) -> Dict[str, Any]:
             missing_mom.append("regime")
         if direction is None:
             missing_mom.append("bias")
+        if not range_guard_ok:
+            missing_mom.append(range_guard_label)
 
         if momentum_vol_ratio is None or momentum_vol_ratio < MOMENTUM_VOLUME_RATIO_TH:
             momentum_liquidity_ok = False
@@ -4114,6 +4524,16 @@ def analyze(asset: str) -> Dict[str, Any]:
             precision_score_val = float(precision_plan.get("score") or 0.0)
         except (TypeError, ValueError):
             precision_score_val = 0.0
+        context_block = precision_plan.setdefault("context", {})
+        if isinstance(context_block, dict) and intraday_profile:
+            context_block.setdefault(
+                "intraday_profile",
+                {
+                    "range_state": intraday_profile.get("range_state"),
+                    "range_position": intraday_profile.get("range_position"),
+                    "range_vs_atr": intraday_profile.get("range_vs_atr"),
+                },
+            )
         precision_ready_for_entry = precision_score_val >= PRECISION_SCORE_THRESHOLD
         precision_plan["score_ready"] = bool(precision_plan.get("score_ready") or precision_ready_for_entry)
         precision_trigger_state = str(precision_plan.get("trigger_state") or "standby")
@@ -4371,6 +4791,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         invalid_level_sell,
         (float(invalid_buffer) if invalid_buffer is not None else None),
         decision,
+        sentiment_signal,
     )
     if position_note and position_note not in reasons:
         reasons.append(position_note)
@@ -4465,6 +4886,30 @@ def analyze(asset: str) -> Dict[str, Any]:
     ml_probability = ml_prediction.probability
     ml_probability_raw = ml_prediction.raw_probability
     ml_threshold = ml_prediction.threshold
+    probability_source = None
+    fallback_meta: Optional[Dict[str, Any]] = None
+    if ml_prediction.metadata:
+        probability_source = ml_prediction.metadata.get("source")
+        meta_reason = ml_prediction.metadata.get("unavailable_reason")
+        raw_fallback = ml_prediction.metadata.get("fallback")
+        if isinstance(raw_fallback, dict):
+            fallback_meta = raw_fallback
+        if fallback_meta and probability_source == "fallback":
+            fallback_reason = fallback_meta.get("reason") or meta_reason
+            reason_map = {
+                "model_missing": "ML fallback: modell hiányzik — heurisztikus pontozás aktív",
+                "sklearn_missing": "ML fallback: scikit-learn hiányzik — heurisztikus pontozás aktív",
+                "model_type_mismatch": "ML fallback: modell típus inkompatibilis",
+            }
+            if isinstance(fallback_reason, str):
+                reason_text = reason_map.get(
+                    fallback_reason,
+                    f"ML fallback aktív ({fallback_reason})",
+                )
+            else:
+                reason_text = "ML fallback aktív"
+            if reason_text not in reasons:
+                reasons.append(reason_text)
 
     combined_probability = P / 100.0
     if ml_probability is not None:
@@ -4540,6 +4985,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         or ["no signal"],
         "realtime_transport": realtime_transport,
     }
+    if probability_source:
+        decision_obj["probability_model_source"] = probability_source
+    if fallback_meta:
+        decision_obj["probability_fallback"] = fallback_meta
     decision_obj["probability_model"] = (
         float(ml_probability) if ml_probability is not None else None
     )
@@ -4568,6 +5017,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     decision_obj["momentum_liquidity_ok"] = momentum_liquidity_ok
     decision_obj["dynamic_tp_profile"] = dynamic_tp_profile
     decision_obj["order_flow_metrics"] = order_flow_metrics
+    decision_obj["intraday_profile"] = intraday_profile
     if volatility_overlay:
         decision_obj["volatility_overlay"] = volatility_overlay
     if tick_order_flow:
@@ -4626,6 +5076,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         reasons=decision_obj.get("reasons"),
         last_computed_risk=last_computed_risk,
         momentum_trailing_plan=momentum_trailing_plan,
+        intraday_profile=intraday_profile,
     )
     if action_plan:
         decision_obj["action_plan"] = action_plan
@@ -4641,6 +5092,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         if ml_threshold is not None
         else None,
     }
+    if probability_source:
+        snapshot_metadata["probability_model_source"] = probability_source
     log_feature_snapshot(asset, ml_features, metadata=snapshot_metadata)
     active_position_meta = {
         "ema21_slope_abs": regime_val,
@@ -4674,10 +5127,12 @@ def analyze(asset: str) -> Dict[str, Any]:
         "probability_model_raw": float(ml_probability_raw)
         if ml_probability_raw is not None
         else None,
+        "probability_model_source": probability_source,
         "tp_profile": {"tp1_r": current_tp1_mult, "tp2_r": current_tp2_mult},
         "realtime_confidence": realtime_confidence,
         "avg_latency_profile": avg_delay if avg_delay else None,
     }
+    if fallback_meta:
     if realtime_stats:
         active_position_meta["realtime_stats"] = realtime_stats
     if anchor_bias:
@@ -4942,6 +5397,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
