@@ -19,7 +19,7 @@ Környezeti változók:
   TD_MAX_RETRIES     = "4"      (újrapróbálkozások száma)
   TD_BACKOFF_BASE    = "0.3"    (exponenciális visszavárás alapja)
   TD_BACKOFF_MAX     = "8"      (exponenciális visszavárás plafonja, sec)
-  TD_REALTIME_SPOT   = "0/1"    (bekapcsolja a valós idejű spot-frissítést)
+  TD_REALTIME_SPOT   = "0/1"    (alapértelmezés: 1 — bekapcsolja a valós idejű spot-frissítést)
   TD_REALTIME_INTERVAL = "5"    (realtime ciklus közötti szünet sec)
   TD_REALTIME_DURATION = "60"   (realtime poll futási ideje sec)
   TD_REALTIME_ASSETS = ""       (komma-szeparált lista, üres = mind)
@@ -27,9 +27,10 @@ Környezeti változók:
   TD_REALTIME_WS_IDLE_GRACE = "15"  (WebSocket késlekedési türelem sec)
   TD_MAX_WORKERS      = "3"      (max. párhuzamos eszköz feldolgozás)
   TD_REQUEST_CONCURRENCY = "3"   (egyszerre futó TD hívások plafonja)
+  PIPELINE_MAX_LAG_SECONDS = "240" (Trading → Analysis log figyelmeztetés küszöbe)
 """
 
-import os, json, time, math
+import os, json, time, math, logging
 import threading
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -47,6 +48,15 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     websocket = None
 
+try:
+    from reports.pipeline_monitor import record_trading_run, get_pipeline_log_path
+except Exception:  # pragma: no cover - optional helper
+    def record_trading_run(*_args, **_kwargs):
+        return None
+
+    def get_pipeline_log_path(*_args, **_kwargs):
+        return None
+
 OUT_DIR  = os.getenv("OUT_DIR", "public")
 API_KEY_RAW = os.getenv("TWELVEDATA_API_KEY", "")
 API_KEY  = API_KEY_RAW.strip() if API_KEY_RAW else ""
@@ -57,7 +67,7 @@ TD_PAUSE_MAX = float(os.getenv("TD_PAUSE_MAX", str(max(TD_PAUSE * 6, 3.0))))
 TD_MAX_RETRIES = int(os.getenv("TD_MAX_RETRIES", "4"))
 TD_BACKOFF_BASE = float(os.getenv("TD_BACKOFF_BASE", str(max(TD_PAUSE, 0.3))))
 TD_BACKOFF_MAX = float(os.getenv("TD_BACKOFF_MAX", "8.0"))
-REALTIME_FLAG = os.getenv("TD_REALTIME_SPOT", "").lower() in {"1", "true", "yes", "on"}
+REALTIME_FLAG = os.getenv("TD_REALTIME_SPOT", "1").lower() in {"1", "true", "yes", "on"}
 REALTIME_INTERVAL = float(os.getenv("TD_REALTIME_INTERVAL", "5"))
 REALTIME_DURATION = float(os.getenv("TD_REALTIME_DURATION", "60"))
 REALTIME_ASSETS_ENV = os.getenv("TD_REALTIME_ASSETS", "")
@@ -90,7 +100,7 @@ def _env_int(name: str, default: int) -> int:
 # values are intentionally generous – if every symbol is stale we still return
 # the least-delayed payload instead of failing the pipeline.
 SERIES_FRESHNESS_LIMITS = {
-    "1min": 60.0 + 240.0,   # 1m candle + 4m tolerance
+    "1min": 180.0 + 240.0,  # 1m candle + 4m tolerance
     "5min": 300.0 + 900.0,  # 5m candle + 15m tolerance
     "1h": 3600.0 + 5400.0,  # 1h candle + 90m tolerance
     "4h": 4 * 3600.0 + 21600.0,  # 4h candle + 6h tolerance
@@ -1135,6 +1145,23 @@ def main():
     if not API_KEY:
         raise SystemExit("TWELVEDATA_API_KEY hiányzik (GitHub Secret).")
     ensure_dir(OUT_DIR)
+    logger = logging.getLogger("market_feed.trading")
+    pipeline_log_path = None
+    try:
+        pipeline_log_path = get_pipeline_log_path()
+    except Exception:
+        pipeline_log_path = None
+    if pipeline_log_path:
+        ensure_dir(str(pipeline_log_path.parent))
+        if not any(getattr(handler, "_pipeline_log", False) for handler in logger.handlers):
+            handler = logging.FileHandler(pipeline_log_path, encoding="utf-8")
+            handler.setFormatter(logging.Formatter("%(asctime)sZ %(levelname)s %(message)s"))
+            handler._pipeline_log = True  # type: ignore[attr-defined]
+            logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+    started_at_dt = datetime.now(timezone.utc)
+    logger.info("Trading run started for %d assets", len(ASSETS))
     if REALTIME_FLAG:
         workers = 1
     else:
@@ -1146,9 +1173,17 @@ def main():
         }
         for future in as_completed(futures):
             future.result()
+    completed_at_dt = datetime.now(timezone.utc)
+    duration_seconds = max((completed_at_dt - started_at_dt).total_seconds(), 0.0)
+    logger.info("Trading run completed in %.1f seconds", duration_seconds)
+    try:
+        record_trading_run(started_at=started_at_dt, completed_at=completed_at_dt, duration_seconds=duration_seconds)
+    except Exception as exc:
+        logger.warning("Failed to record trading pipeline metrics: %s", exc)
 
 if __name__ == "__main__":
     main()
+
 
 
 
