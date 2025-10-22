@@ -25,10 +25,14 @@ Környezeti változók:
   TD_REALTIME_ASSETS = ""       (komma-szeparált lista, üres = mind)
   TD_REALTIME_HTTP_MAX_SAMPLES = "6" (HTTP fallback minták plafonja)
   TD_REALTIME_WS_IDLE_GRACE = "15"  (WebSocket késlekedési türelem sec)
+  TD_MAX_WORKERS      = "3"      (max. párhuzamos eszköz feldolgozás)
+  TD_REQUEST_CONCURRENCY = "3"   (egyszerre futó TD hívások plafonja)
 """
 
 import os, json, time
+import threading
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Optional, List, Tuple
 
 import requests
@@ -67,6 +71,19 @@ REALTIME_WS_TIMEOUT = float(os.getenv("TD_REALTIME_WS_TIMEOUT", str(max(REALTIME
 REALTIME_WS_ENABLED = bool(REALTIME_WS_URL and websocket is not None)
 REALTIME_HTTP_MAX_SAMPLES = int(os.getenv("TD_REALTIME_HTTP_MAX_SAMPLES", "6"))
 
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    raw_str = str(raw).strip()
+    if not raw_str:
+        return default
+    try:
+        return int(float(raw_str))
+    except Exception:
+        return default
+
 # ───────────────────────────── Data freshness guards ──────────────────────
 # Align the freshness limits with ``analysis.py`` tolerances so we can fall
 # back to alternative symbols whenever the primary feed lags behind.  The
@@ -86,25 +103,30 @@ class AdaptiveRateLimiter:
         self.base = max(base_pause, 0.0)
         self.min_pause = max(min_pause, 0.0)
         self.max_pause = max(max_pause, self.min_pause if self.min_pause else 0.0)
-        self.current = max(self.base, self.min_pause)
+        self._current = max(self.base, self.min_pause)
+        self._lock = threading.Lock()
 
     @property
     def current_delay(self) -> float:
-        return self.current
+        with self._lock:
+            return self._current
 
     def wait(self) -> None:
-        if self.current > 0:
-            time.sleep(self.current)
+        delay = self.current_delay
+        if delay > 0:
+            time.sleep(delay)
 
     def record_success(self) -> None:
-        if self.current <= 0:
-            return
-        self.current = max(self.min_pause, self.current * 0.85)
+        with self._lock:
+            if self._current <= 0:
+                return
+            self._current = max(self.min_pause, self._current * 0.85)
 
     def record_failure(self, throttled: bool = False) -> None:
         growth = 1.6 if throttled else 1.3
         baseline = self.base if self.base > 0 else 0.3
-        self.current = min(self.max_pause, max(self.current, baseline) * growth)
+        with self._lock:
+            self._current = min(self.max_pause, max(self._current, baseline) * growth)
 
     def backoff_seconds(self, attempt: int, retry_after: Optional[float] = None) -> float:
         baseline = self.base if self.base > 0 else TD_BACKOFF_BASE
@@ -148,8 +170,14 @@ ASSETS = {
             "SRTY:US",
             "SRTY:NSE",
         ],
-    },
+     },
 }
+
+TD_MAX_WORKERS = max(1, min(len(ASSETS), _env_int("TD_MAX_WORKERS", 3)))
+_DEFAULT_REQ_CONCURRENCY = max(1, min(TD_MAX_WORKERS, 3))
+TD_REQUEST_CONCURRENCY = max(1, min(len(ASSETS), _env_int("TD_REQUEST_CONCURRENCY", _DEFAULT_REQ_CONCURRENCY)))
+_REQUEST_SEMAPHORE = threading.Semaphore(TD_REQUEST_CONCURRENCY)
+ANCHOR_LOCK = threading.Lock()
 
 # ─────────────────────────────── Segédek ─────────────────────────────────
 
@@ -185,12 +213,13 @@ def td_get(path: str, **params) -> Dict[str, Any]:
         TD_RATE_LIMITER.wait()
         response: Optional[requests.Response] = None
         try:
-            response = requests.get(
-                f"{TD_BASE}/{path}",
-                params=params,
-                timeout=30,
-                headers={"User-Agent": "market-feed/td-only/1.0"},
-            )
+            with _REQUEST_SEMAPHORE:
+                response = requests.get(
+                    f"{TD_BASE}/{path}",
+                    params=params,
+                    timeout=30,
+                    headers={"User-Agent": "market-feed/td-only/1.0"},
+                )
             response.raise_for_status()
             data = response.json()
             if isinstance(data, dict) and data.get("status") == "error":
@@ -648,7 +677,8 @@ def collect_realtime_spot(
             "realtime_price_utc": payload.get("utc"),
         }
         try:
-            update_anchor_metrics(asset, anchor_extras)
+            with ANCHOR_LOCK:
+                update_anchor_metrics(asset, anchor_extras)
         except Exception:
             pass
     save_json(os.path.join(out_dir, "spot_realtime.json"), payload)
@@ -855,29 +885,63 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
 
 # ─────────────────────────────── main ─────────────────────────────────────
 
+def _write_error_payload(asset: str, error: Exception) -> None:
+    adir = os.path.join(OUT_DIR, asset)
+    ensure_dir(adir)
+    now = now_utc()
+    reason = f"fetch error: {error}"
+    reason = " ".join(reason.split())
+    save_json(
+        os.path.join(adir, "spot.json"),
+        {
+            "asset": asset,
+            "ok": False,
+            "retrieved_at_utc": now,
+            "price": None,
+            "price_usd": None,
+            "utc": now,
+        },
+    )
+    save_json(
+        os.path.join(adir, "signal.json"),
+        {
+            "asset": asset,
+            "ok": False,
+            "retrieved_at_utc": now,
+            "signal": "no entry",
+            "probability": 0,
+            "reasons": [reason],
+            "spot": {"price": None, "utc": now},
+        },
+    )
+
+
+def _process_asset_guard(asset: str, cfg: Dict[str, Any]) -> None:
+    try:
+        process_asset(asset, cfg)
+    except Exception as error:
+        _write_error_payload(asset, error)
+
+
 def main():
     if not API_KEY:
         raise SystemExit("TWELVEDATA_API_KEY hiányzik (GitHub Secret).")
     ensure_dir(OUT_DIR)
-    for a, cfg in ASSETS.items():
-        try:
-            process_asset(a, cfg)
-        except Exception as e:
-            # Ne álljon meg a pipeline – írjunk minimális signal/spot-ot.
-            adir = os.path.join(OUT_DIR, a)
-            ensure_dir(adir)
-            now = now_utc()
-            save_json(os.path.join(adir, "spot.json"), {
-                "asset": a, "ok": False, "retrieved_at_utc": now, "price": None, "price_usd": None, "utc": now
-            })
-            save_json(os.path.join(adir, "signal.json"), {
-                "asset": a, "ok": False, "retrieved_at_utc": now,
-                "signal": "no entry", "probability": 0, "reasons": [f"fetch error: {e}"],
-                "spot": {"price": None, "utc": now}
-            })
+    if REALTIME_FLAG:
+        workers = 1
+    else:
+        workers = max(1, min(len(ASSETS), TD_MAX_WORKERS))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(_process_asset_guard, asset, cfg): asset
+            for asset, cfg in ASSETS.items()
+        }
+        for future in as_completed(futures):
+            future.result()
 
 if __name__ == "__main__":
     main()
+
 
 
 
