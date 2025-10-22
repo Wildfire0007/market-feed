@@ -63,6 +63,19 @@ REALTIME_WS_MAX_SAMPLES = int(os.getenv("TD_REALTIME_WS_MAX_SAMPLES", "120"))
 REALTIME_WS_TIMEOUT = float(os.getenv("TD_REALTIME_WS_TIMEOUT", str(max(REALTIME_DURATION, 30.0))))
 REALTIME_WS_ENABLED = bool(REALTIME_WS_URL and websocket is not None)
 
+# ───────────────────────────── Data freshness guards ──────────────────────
+# Align the freshness limits with ``analysis.py`` tolerances so we can fall
+# back to alternative symbols whenever the primary feed lags behind.  The
+# values are intentionally generous – if every symbol is stale we still return
+# the least-delayed payload instead of failing the pipeline.
+SERIES_FRESHNESS_LIMITS = {
+    "1min": 60.0 + 240.0,   # 1m candle + 4m tolerance
+    "5min": 300.0 + 900.0,  # 5m candle + 15m tolerance
+    "1h": 3600.0 + 5400.0,  # 1h candle + 90m tolerance
+    "4h": 4 * 3600.0 + 21600.0,  # 4h candle + 6h tolerance
+}
+SPOT_FRESHNESS_LIMIT = float(os.getenv("TD_SPOT_FRESHNESS_LIMIT", "900"))
+
 
 class AdaptiveRateLimiter:
     def __init__(self, base_pause: float, min_pause: float, max_pause: float) -> None:
@@ -254,6 +267,24 @@ def td_time_series(symbol: str, interval: str, outputsize: int = 500,
     try:
         j = td_get("time_series", **params)
         ok = bool(j.get("values"))
+        latest_iso: Optional[str] = None
+        latency_seconds: Optional[float] = None
+        values = j.get("values") or []
+        if values:
+            ts_raw = None
+            top = values[0]
+            if isinstance(top, dict):
+                ts_raw = (
+                    top.get("datetime")
+                    or top.get("timestamp")
+                    or top.get("time")
+                )
+            ts_iso = _iso_from_td_ts(ts_raw)
+            latest_iso = ts_iso
+            parsed = _parse_iso_utc(ts_iso) if ts_iso else None
+            if parsed:
+                latency = (datetime.now(timezone.utc) - parsed).total_seconds()
+                latency_seconds = max(0.0, latency)
         return {
             "used_symbol": symbol,
             "asset": symbol,
@@ -261,6 +292,8 @@ def td_time_series(symbol: str, interval: str, outputsize: int = 500,
             "source": "twelvedata:time_series",
             "ok": ok,
             "retrieved_at_utc": now_utc(),
+            "latest_utc": latest_iso,
+            "latency_seconds": latency_seconds,
             "raw": j if ok else {"values": []},
         }
     except Exception as e:
@@ -334,14 +367,22 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
             q["error_fallback"] = str(e)
         price, utc = px, ts
 
+    retrieved = now_utc()
+    utc_iso = utc or retrieved
+    latency_seconds: Optional[float] = None
+    parsed = _parse_iso_utc(utc_iso)
+    if parsed:
+        latency_seconds = max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
+
     return {
         "asset": symbol,
         "source": "twelvedata:quote+series_fallback",
         "ok": price is not None,
-        "retrieved_at_utc": now_utc(),
+        "retrieved_at_utc": retrieved,
         "price": price,
         "price_usd": price,
-        "utc": utc or now_utc(),
+        "utc": utc_iso,
+        "latency_seconds": latency_seconds,
     }
 
 
@@ -619,19 +660,54 @@ def _normalize_symbol_attempts(cfg: Dict[str, Any]) -> List[Tuple[str, Optional[
     return unique
 
 
-def try_symbols(attempts: List[Tuple[str, Optional[str]]], fetch_fn):
-    """Próbálkozik több tickerrel (szimbólum, tőzsde) sorban; az első ok:true visszatér."""
-    last = None
+def try_symbols(
+    attempts: List[Tuple[str, Optional[str]]],
+    fetch_fn,
+    freshness_limit: Optional[float] = None,
+):
+    """Iterate over symbol candidates and prefer the freshest successful payload."""
+
+    last: Optional[Dict[str, Any]] = None
+    best: Optional[Dict[str, Any]] = None
+    best_latency: Optional[float] = None
+
     for sym, exch in attempts:
         try:
-            r = fetch_fn(sym, exch)
-            last = r
-            if isinstance(r, dict) and r.get("ok"):
-                return r
-        except Exception as e:
-            last = {"ok": False, "error": str(e)}
-        delay = max(TD_RATE_LIMITER.current_delay * 0.5, 0.1)
-        time.sleep(delay)
+            result = fetch_fn(sym, exch)
+        except Exception as exc:
+            last = {"ok": False, "error": str(exc)}
+            time.sleep(max(TD_RATE_LIMITER.current_delay * 0.5, 0.1))
+            continue
+
+        if not isinstance(result, dict):
+            last = {"ok": False, "error": "invalid response"}
+            time.sleep(max(TD_RATE_LIMITER.current_delay * 0.5, 0.1))
+            continue
+
+        last = result
+        latency_raw = result.get("latency_seconds")
+        latency: Optional[float] = None
+        try:
+            if latency_raw is not None:
+                latency = float(latency_raw)
+        except (TypeError, ValueError):
+            latency = None
+
+        if result.get("ok"):
+            if freshness_limit is None or latency is None or latency <= freshness_limit:
+                return result
+            if best is None:
+                best = result
+                best_latency = latency
+            elif latency is not None:
+                if best_latency is None or latency < best_latency:
+                    best = result
+                    best_latency = latency
+
+        time.sleep(max(TD_RATE_LIMITER.current_delay * 0.5, 0.1))
+
+    if best is not None:
+        return best
     return last or {"ok": False}
 
 # ───────────────────── 5m EMA9–EMA21 (előzetes jelzés) ───────────────────
@@ -691,7 +767,11 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     attempts = _normalize_symbol_attempts(cfg)
 
     # 1) Spot (quote → 5m close fallback), több tickerrel
-    spot = try_symbols(attempts, lambda s, ex: td_spot_with_fallback(s, ex))
+    spot = try_symbols(
+        attempts,
+        lambda s, ex: td_spot_with_fallback(s, ex),
+        freshness_limit=SPOT_FRESHNESS_LIMIT,
+    )
     save_json(os.path.join(adir, "spot.json"), spot)
     collect_realtime_spot(asset, attempts, adir)
     time.sleep(TD_PAUSE)
@@ -700,19 +780,35 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     def ts(s: str, ex: Optional[str], iv: str):
         return td_time_series(s, iv, 500, ex, "desc")
 
-    k1m = try_symbols(attempts, lambda s, ex: ts(s, ex, "1min"))
+    k1m = try_symbols(
+        attempts,
+        lambda s, ex: ts(s, ex, "1min"),
+        freshness_limit=SERIES_FRESHNESS_LIMITS.get("1min"),
+    )
     save_json(os.path.join(adir, "klines_1m.json"), k1m.get("raw", {"values": []}))
     time.sleep(TD_PAUSE)
 
-    k5 = try_symbols(attempts, lambda s, ex: ts(s, ex, "5min"))
+    k5 = try_symbols(
+        attempts,
+        lambda s, ex: ts(s, ex, "5min"),
+        freshness_limit=SERIES_FRESHNESS_LIMITS.get("5min"),
+    )
     save_json(os.path.join(adir, "klines_5m.json"), k5.get("raw", {"values": []}))
     time.sleep(TD_PAUSE)
 
-    k1 = try_symbols(attempts, lambda s, ex: ts(s, ex, "1h"))
+    k1 = try_symbols(
+        attempts,
+        lambda s, ex: ts(s, ex, "1h"),
+        freshness_limit=SERIES_FRESHNESS_LIMITS.get("1h"),
+    )
     save_json(os.path.join(adir, "klines_1h.json"), k1.get("raw", {"values": []}))
     time.sleep(TD_PAUSE)
 
-    k4 = try_symbols(attempts, lambda s, ex: ts(s, ex, "4h"))
+    k4 = try_symbols(
+        attempts,
+        lambda s, ex: ts(s, ex, "4h"),
+        freshness_limit=SERIES_FRESHNESS_LIMITS.get("4h"),
+    )
     save_json(os.path.join(adir, "klines_4h.json"), k4.get("raw", {"values": []}))
     time.sleep(TD_PAUSE)
 
@@ -756,6 +852,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
