@@ -23,6 +23,8 @@ Környezeti változók:
   TD_REALTIME_INTERVAL = "5"    (realtime ciklus közötti szünet sec)
   TD_REALTIME_DURATION = "60"   (realtime poll futási ideje sec)
   TD_REALTIME_ASSETS = ""       (komma-szeparált lista, üres = mind)
+  TD_REALTIME_HTTP_MAX_SAMPLES = "6" (HTTP fallback minták plafonja)
+  TD_REALTIME_WS_IDLE_GRACE = "15"  (WebSocket késlekedési türelem sec)
 """
 
 import os, json, time
@@ -60,8 +62,10 @@ REALTIME_WS_SUBSCRIBE = os.getenv("TD_REALTIME_WS_SUBSCRIBE", "")
 REALTIME_WS_PRICE_FIELD = os.getenv("TD_REALTIME_WS_PRICE_FIELD", "price")
 REALTIME_WS_TS_FIELD = os.getenv("TD_REALTIME_WS_TS_FIELD", "timestamp")
 REALTIME_WS_MAX_SAMPLES = int(os.getenv("TD_REALTIME_WS_MAX_SAMPLES", "120"))
+REALTIME_WS_IDLE_GRACE = float(os.getenv("TD_REALTIME_WS_IDLE_GRACE", "15"))
 REALTIME_WS_TIMEOUT = float(os.getenv("TD_REALTIME_WS_TIMEOUT", str(max(REALTIME_DURATION, 30.0))))
 REALTIME_WS_ENABLED = bool(REALTIME_WS_URL and websocket is not None)
+REALTIME_HTTP_MAX_SAMPLES = int(os.getenv("TD_REALTIME_HTTP_MAX_SAMPLES", "6"))
 
 # ───────────────────────────── Data freshness guards ──────────────────────
 # Align the freshness limits with ``analysis.py`` tolerances so we can fall
@@ -430,9 +434,11 @@ def _collect_http_frames(
     symbol_cycle: List[Tuple[str, Optional[str]]],
     deadline: float,
     interval: float,
+    max_samples: int,
 ) -> List[Dict[str, Any]]:
     frames: List[Dict[str, Any]] = []
-    while time.time() < deadline:
+    sample_cap = max(1, int(max_samples))
+    while time.time() < deadline and len(frames) < sample_cap:
         for symbol, exchange in symbol_cycle:
             try:
                 quote = td_quote(symbol, exchange)
@@ -459,7 +465,12 @@ def _collect_http_frames(
                 }
             )
             break
-        time.sleep(interval)
+        if len(frames) >= sample_cap:
+            break
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(interval, remaining))
     return frames
 
 
@@ -486,10 +497,17 @@ def _collect_ws_frames(
             except Exception:
                 pass
         ws.settimeout(max(1.0, min(REALTIME_INTERVAL, 15.0)))
+        idle_grace = max(0.0, REALTIME_WS_IDLE_GRACE)
+        last_progress = time.time()
         while time.time() < deadline and len(frames) < REALTIME_WS_MAX_SAMPLES:
             try:
                 raw = ws.recv()
+                last_progress = time.time()
             except websocket.WebSocketTimeoutException:
+                if idle_grace == 0.0:
+                    break
+                if time.time() - last_progress >= idle_grace:
+                    break
                 continue
             except Exception:
                 break
@@ -533,6 +551,7 @@ def _collect_ws_frames(
                     "raw": payload,
                 }
             )
+            last_progress = time.time()
     finally:
         try:
             ws.close()
@@ -572,10 +591,17 @@ def collect_realtime_spot(
             transport = "websocket"
 
     if not frames:
-        deadline_http = time.time() + max(REALTIME_DURATION, REALTIME_INTERVAL)
-        frames = _collect_http_frames(symbol_cycle, deadline_http, interval)
-        if frames:
-            transport = "http"
+        remaining = max(0.0, deadline - time.time())
+        if remaining > 0:
+            deadline_http = time.time() + remaining
+            frames = _collect_http_frames(
+                symbol_cycle,
+                deadline_http,
+                interval,
+                REALTIME_HTTP_MAX_SAMPLES,
+            )
+            if frames:
+                transport = "http"
 
     if not frames:
         return
@@ -852,6 +878,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
