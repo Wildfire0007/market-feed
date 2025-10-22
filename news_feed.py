@@ -47,15 +47,20 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from functools import lru_cache
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import dateutil.parser
 
 from usdjpy_sentiment import DEFAULT_MIN_INTERVAL, SENTIMENT_FILENAME, refresh_usdjpy_sentiment
 
 PUBLIC_DIR = Path(os.getenv("PUBLIC_DIR", "public"))
+
+# Optional override configuration for static or scheduled sentiment events.
+_OVERRIDE_ENV = "SENTIMENT_OVERRIDE_FILE"
+_BASE_DIR = Path(__file__).resolve().parent
 
 # Disable automatic sentiment refresh by default; operators can opt-in via
 # ``USDJPY_SENTIMENT_AUTO=1`` when a live news API is available.
@@ -78,6 +83,29 @@ AUTO_REFRESH_MIN_INTERVAL = _auto_interval(DEFAULT_MIN_INTERVAL)
 
 
 DEFAULT_SENTIMENT_FILENAME = "sentiment.json"
+
+
+def _override_config_path() -> Path:
+    raw = os.getenv(_OVERRIDE_ENV)
+    if raw:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = _BASE_DIR / raw
+        return path
+    return _BASE_DIR / "config" / "sentiment_overrides.json"
+
+
+@lru_cache(maxsize=1)
+def _load_override_config() -> Dict[str, Any]:
+    path = _override_config_path()
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 @dataclass
@@ -196,6 +224,177 @@ def _load_usdjpy_sentiment(base: Path) -> Optional[SentimentSignal]:
     return signal
 
 
+def _time_token_to_minutes(token: Any) -> Optional[int]:
+    if token is None:
+        return None
+    if isinstance(token, (int, float)):
+        value = int(token)
+        if 0 <= value <= 1440:
+            return value
+        return None
+    if isinstance(token, str):
+        token = token.strip()
+        if not token:
+            return None
+        if ":" in token:
+            try:
+                hour, minute = token.split(":", 1)
+                value = int(hour) * 60 + int(minute)
+            except ValueError:
+                return None
+            return max(0, min(1440, value))
+        try:
+            value_int = int(token)
+        except ValueError:
+            return None
+        if 0 <= value_int <= 1440:
+            return value_int
+    return None
+
+
+def _parse_intraday_window(window: Any) -> Optional[Tuple[int, int]]:
+    if window is None:
+        return None
+    if isinstance(window, (list, tuple)) and len(window) >= 2:
+        start = _time_token_to_minutes(window[0])
+        end = _time_token_to_minutes(window[1])
+        if start is None or end is None:
+            return None
+        return start, end
+    if isinstance(window, str):
+        parts = window.split("-", 1)
+        if len(parts) == 2:
+            start = _time_token_to_minutes(parts[0])
+            end = _time_token_to_minutes(parts[1])
+            if start is None or end is None:
+                return None
+            return start, end
+    return None
+
+
+def _override_event_matches(event: Dict[str, Any], asset: str, now: datetime, defaults: Dict[str, Any]) -> bool:
+    assets = event.get("assets")
+    if isinstance(assets, (list, tuple)):
+        asset_keys = {str(item).upper() for item in assets if isinstance(item, (str, bytes))}
+        if asset.upper() not in asset_keys and "*" not in asset_keys:
+            return False
+    elif assets is not None:
+        if str(assets).upper() not in {asset.upper(), "*"}:
+            return False
+    start = _parse_expires(event.get("start") or event.get("valid_from"))
+    if start and now < start:
+        return False
+    end = _parse_expires(event.get("end") or event.get("valid_until") or event.get("expires_at"))
+    if end and now > end:
+        return False
+    weekdays = event.get("weekdays")
+    if weekdays is None:
+        weekdays = defaults.get("weekdays")
+    if isinstance(weekdays, (list, tuple)) and weekdays:
+        try:
+            weekday_set = {int(day) % 7 for day in weekdays}
+        except (TypeError, ValueError):
+            weekday_set = set()
+        if weekday_set and now.weekday() not in weekday_set:
+            return False
+    window = (
+        event.get("intraday_window")
+        or event.get("window")
+        or event.get("intraday")
+        or defaults.get("intraday_window")
+    )
+    parsed_window = _parse_intraday_window(window)
+    if parsed_window:
+        start_minute, end_minute = parsed_window
+        minute_of_day = now.hour * 60 + now.minute
+        if start_minute <= end_minute:
+            if not (start_minute <= minute_of_day <= end_minute):
+                return False
+        else:  # Wrap-around window
+            if not (minute_of_day >= start_minute or minute_of_day <= end_minute):
+                return False
+    return True
+
+
+def _build_override_signal(
+    event: Dict[str, Any],
+    asset: str,
+    now: datetime,
+    defaults: Dict[str, Any],
+) -> Optional[SentimentSignal]:
+    score = _normalise_score(event.get("score"))
+    bias = event.get("bias")
+    if score is None or not bias:
+        return None
+    severity = _normalise_severity(event.get("severity"))
+    if severity is None:
+        severity = _normalise_severity(defaults.get("severity")) or 0.5
+    expires = _parse_expires(event.get("expires_at") or event.get("end"))
+    if expires is None:
+        ttl_minutes = event.get("ttl_minutes")
+        if ttl_minutes is None:
+            ttl_minutes = defaults.get("ttl_minutes") or defaults.get("expires_ttl_minutes")
+        try:
+            ttl_minutes = float(ttl_minutes) if ttl_minutes is not None else None
+        except (TypeError, ValueError):
+            ttl_minutes = None
+        if ttl_minutes and ttl_minutes > 0:
+            expires = now + timedelta(minutes=float(ttl_minutes))
+    signal = SentimentSignal(
+        score=score,
+        bias=str(bias),
+        headline=event.get("headline") or defaults.get("headline"),
+        expires_at=expires,
+        severity=severity,
+        source=_override_config_path(),
+        category=str(event.get("category") or defaults.get("category") or asset),
+    )
+    if signal.is_expired(now):
+        return None
+    return signal
+
+
+def _load_override_sentiment(asset: str) -> Optional[SentimentSignal]:
+    config = _load_override_config()
+    events = config.get("events")
+    if not isinstance(events, list) or not events:
+        return None
+    defaults = config.get("defaults") if isinstance(config.get("defaults"), dict) else {}
+    now = datetime.now(timezone.utc)
+    candidates: List[SentimentSignal] = []
+    for raw_event in events:
+        if not isinstance(raw_event, dict):
+            continue
+        if not _override_event_matches(raw_event, asset, now, defaults):
+            continue
+        signal = _build_override_signal(raw_event, asset, now, defaults)
+        if signal is not None:
+            candidates.append(signal)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda s: abs(s.score) * s.effective_severity, reverse=True)
+    return candidates[0]
+
+
+def _select_sentiment_signal(*signals: Optional[SentimentSignal]) -> Optional[SentimentSignal]:
+    best: Optional[SentimentSignal] = None
+    best_score = -1.0
+    for signal in signals:
+        if signal is None:
+            continue
+        strength = abs(signal.score) * signal.effective_severity
+        if strength > best_score:
+            best = signal
+            best_score = strength
+    return best
+
+
+def reload_sentiment_overrides() -> None:
+    """Clear the override configuration cache (useful for tests)."""
+
+    _load_override_config.cache_clear()
+
+
 def _load_generic_sentiment(asset: str, base: Path) -> Optional[SentimentSignal]:
     candidates = [base / DEFAULT_SENTIMENT_FILENAME, base / "events.json"]
     payload: Optional[Dict[str, Any]] = None
@@ -248,9 +447,12 @@ def load_sentiment(asset: str, outdir: Optional[Path] = None) -> Optional[Sentim
     if not isinstance(base, Path):
         base = Path(base)
 
+    override_signal = _load_override_sentiment(asset_key)
     if asset_key == "USDJPY":
-        return _load_usdjpy_sentiment(base)
-    return _load_generic_sentiment(asset_key, base)
+        primary = _load_usdjpy_sentiment(base)
+        return _select_sentiment_signal(primary, override_signal)
+    generic_signal = _load_generic_sentiment(asset_key, base)
+    return _select_sentiment_signal(generic_signal, override_signal)
 
 
 __all__ = [
@@ -258,4 +460,5 @@ __all__ = [
     "load_sentiment",
     "SENTIMENT_FILENAME",
     "DEFAULT_SENTIMENT_FILENAME",
+    "reload_sentiment_overrides",
 ]
