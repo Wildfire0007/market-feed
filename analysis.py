@@ -52,6 +52,17 @@ except Exception:  # pragma: no cover - optional helper
     def load_volatility_overlay(asset: str, outdir: Path, k1m: Optional[Any] = None) -> Dict[str, Any]:
         return {}
 
+try:
+    from reports.pipeline_monitor import (
+        record_analysis_run,
+        get_pipeline_log_path,
+        DEFAULT_MAX_LAG_SECONDS as PIPELINE_MAX_LAG_SECONDS,
+    )
+except Exception:  # pragma: no cover - optional helper
+    record_analysis_run = None
+    get_pipeline_log_path = None
+    PIPELINE_MAX_LAG_SECONDS = None
+
 import pandas as pd
 import numpy as np
 
@@ -3054,7 +3065,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             }
         save_intervention_asset_summary(outdir, intervention_summary)
 
-    expected_delays = {"k1m": 60, "k5m": 300, "k1h": 3600, "k4h": 4*3600}
+    expected_delays = {"k1m": 180, "k5m": 300, "k1h": 3600, "k4h": 4*3600}
     tf_meta: Dict[str, Dict[str, Any]] = {}
     latency_flags: List[str] = []
     latency_flags.extend(spot_latency_notes)
@@ -4812,15 +4823,81 @@ def analyze(asset: str) -> Dict[str, Any]:
 # ------------------------------- főfolyamat ------------------------------------
 
 def main():
+    analysis_started_at = datetime.now(timezone.utc)
+    pipeline_log_path = None
+    if get_pipeline_log_path:
+        try:
+            pipeline_log_path = get_pipeline_log_path()
+        except Exception:
+            pipeline_log_path = None
+    if pipeline_log_path:
+        pipeline_log_path.parent.mkdir(parents=True, exist_ok=True)
+        if not any(getattr(handler, "_pipeline_log", False) for handler in LOGGER.handlers):
+            handler = logging.FileHandler(pipeline_log_path, encoding="utf-8")
+            handler.setFormatter(logging.Formatter("%(asctime)sZ %(levelname)s %(message)s"))
+            handler._pipeline_log = True  # type: ignore[attr-defined]
+            LOGGER.addHandler(handler)
+        if LOGGER.level > logging.INFO:
+            LOGGER.setLevel(logging.INFO)
+        LOGGER.propagate = False
+
+    pipeline_payload = None
+    analysis_delay_seconds: Optional[float] = None
+    lag_threshold = PIPELINE_MAX_LAG_SECONDS
+    lag_breached = False
+    if record_analysis_run:
+        try:
+            pipeline_payload, analysis_delay_seconds, lag_threshold, lag_breached = record_analysis_run(
+                started_at=analysis_started_at,
+                max_lag_seconds=PIPELINE_MAX_LAG_SECONDS,
+            )
+        except Exception as exc:
+            LOGGER.warning("Failed to record analysis pipeline metrics: %s", exc)
+        else:
+            if analysis_delay_seconds is not None:
+                LOGGER.info(
+                    "Analysis started %.1f seconds after trading run",
+                    analysis_delay_seconds,
+                )
+            if lag_breached and analysis_delay_seconds is not None:
+                if lag_threshold is not None:
+                    LOGGER.warning(
+                        "Analysis start delay %.1f seconds exceeded threshold %ss",
+                        analysis_delay_seconds,
+                        lag_threshold,
+                    )
+                else:
+                    LOGGER.warning(
+                        "Analysis start delay %.1f seconds exceeded threshold",
+                        analysis_delay_seconds,
+                    )
+
     LOGGER.info("Starting analysis run for %d assets", len(ASSETS))
     missing_models = missing_model_artifacts(ASSETS)
     summary = {
         "ok": True,
         "generated_utc": nowiso(),
+        "analysis_started_utc": to_utc_iso(analysis_started_at),
         "assets": {},
         "latency_flags": [],
         "troubleshooting": list(REFRESH_TIPS),
     }
+    if pipeline_payload:
+        summary["pipeline_monitoring"] = pipeline_payload
+        analysis_meta = pipeline_payload.get("analysis") if isinstance(pipeline_payload, dict) else None
+        if isinstance(analysis_meta, dict) and analysis_meta.get("lag_breached"):
+            lag_seconds = analysis_meta.get("lag_from_trading_seconds")
+            threshold_value = analysis_meta.get("lag_threshold_seconds")
+            if lag_seconds is not None:
+                lag_text = int(round(float(lag_seconds)))
+                threshold_text = (
+                    f"{int(threshold_value)}s" if isinstance(threshold_value, (int, float)) else "n/a"
+                )
+                flag_msg = (
+                    f"analysis: trading→analysis késés {lag_text}s (küszöb {threshold_text})"
+                )
+                if flag_msg not in summary["latency_flags"]:
+                    summary["latency_flags"].append(flag_msg)
     if missing_models:
         summary["ml_models_missing"] = {
             asset: str(path) for asset, path in missing_models.items()
@@ -4865,5 +4942,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
