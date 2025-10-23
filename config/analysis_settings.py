@@ -247,3 +247,60 @@ def get_atr_threshold_multiplier(asset: str) -> float:
     """Return the ATR threshold multiplier for the active profile."""
 
     return ATR_THRESHOLD_MULT_ASSET.get(asset, ATR_THRESHOLD_MULT_DEFAULT)
+
+
+def list_entry_threshold_profiles() -> List[str]:
+    """Return the sorted list of entry threshold profile names."""
+
+    return sorted(ENTRY_THRESHOLD_PROFILES.keys())
+
+
+def describe_entry_threshold_profile(profile_name: Optional[str] = None) -> Dict[str, Any]:
+    """Return the resolved threshold values for the requested entry profile.
+
+    Parameters
+    ----------
+    profile_name:
+        Optional explicit profile name. When omitted, the currently active
+        profile (``ENTRY_THRESHOLD_PROFILE_NAME``) is described.
+
+    Returns
+    -------
+    dict
+        A mapping that exposes the profile ``name`` and the effective
+        ``p_score_min`` and ``atr_threshold_multiplier`` values. Each section
+        contains the configured ``default`` value, the per-asset overrides that
+        are present in the JSON, and a ``by_asset`` dictionary that lists the
+        numbers applied to every asset declared in the analysis configuration.
+    """
+
+    target_name = profile_name or ENTRY_THRESHOLD_PROFILE_NAME
+    profile = ENTRY_THRESHOLD_PROFILES.get(target_name)
+    if profile is None:
+        raise AnalysisConfigError(
+            f"Unknown entry threshold profile '{target_name}'"
+        )
+
+    def _resolve(metric_key: str, implicit_default: float) -> Dict[str, Any]:
+        raw_map: Dict[str, float] = profile.get(metric_key, {})
+        default_value = float(raw_map.get("default", implicit_default))
+        overrides = {
+            str(asset): float(value)
+            for asset, value in raw_map.items()
+            if asset != "default"
+        }
+        by_asset = {
+            asset: float(raw_map.get(asset, default_value))
+            for asset in ASSETS
+        }
+        return {
+            "default": default_value,
+            "overrides": overrides,
+            "by_asset": by_asset,
+        }
+
+    return {
+        "name": target_name,
+        "p_score_min": _resolve("p_score_min", 60.0),
+        "atr_threshold_multiplier": _resolve("atr_threshold_multiplier", 1.0),
+    }
