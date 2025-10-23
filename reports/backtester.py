@@ -115,7 +115,8 @@ def _load_price_history(asset: str, public_dir: Path) -> Optional[pd.DataFrame]:
             return frame
     return None
 
-    def _serialise_timestamp(value: Optional[pd.Timestamp]) -> Optional[str]:
+    
+def _serialise_timestamp(value: Optional[pd.Timestamp]) -> Optional[str]:
     if value is None:
         return None
     if isinstance(value, pd.Timestamp):
@@ -124,7 +125,8 @@ def _load_price_history(asset: str, public_dir: Path) -> Optional[pd.DataFrame]:
         return value.isoformat()
     return str(value)
 
-    def _load_manual_fill_log(public_dir: Path) -> Optional[pd.DataFrame]:
+    
+def _load_manual_fill_log(public_dir: Path) -> Optional[pd.DataFrame]:
     path = public_dir / "journal" / MANUAL_FILL_FILENAME
     if not path.exists():
         return None
