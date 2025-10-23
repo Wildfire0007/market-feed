@@ -25,7 +25,7 @@ import argparse
 import json
 import math
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -50,11 +50,25 @@ DEFAULT_CALIBRATION = "platt"
 
 @dataclass
 class Dataset:
-    """Container for the assembled training dataset."""
+    """Container for the assembled training dataset.
+
+    Attributes
+    ----------
+    features:
+        Normalised feature matrix restricted to :data:`MODEL_FEATURES`.
+    labels:
+        Binary targets derived from the label column.
+    weights:
+        Optional per-sample weights if a ``--weight-column`` was provided.
+    missing_features:
+        Sorted list of required feature columns that were absent from the
+        original CSV input before zero filling.
+    """
 
     features: pd.DataFrame
     labels: np.ndarray
     weights: Optional[np.ndarray]
+    missing_features: List[str] = field(default_factory=list)
 
 
 def _logit(value: float, epsilon: float = 1e-6) -> float:
@@ -173,13 +187,13 @@ def _normalise_labels(series: pd.Series) -> np.ndarray:
     raise ValueError("Label column must be binary (0/1 or -1/1)")
 
 
-def _prepare_features(df: pd.DataFrame) -> pd.DataFrame:
+def _prepare_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     working = df.copy()
-    for feature in MODEL_FEATURES:
-        if feature not in working.columns:
-            working[feature] = 0.0
+    missing = [feature for feature in MODEL_FEATURES if feature not in working.columns]
+    for feature in missing:
+        working[feature] = 0.0
     numeric = working[MODEL_FEATURES].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    return numeric.astype(float)
+    return numeric.astype(float), missing
 
 
 def load_dataset(paths: Iterable[Path], label_column: str, weight_column: str | None) -> Dataset:
@@ -196,7 +210,7 @@ def load_dataset(paths: Iterable[Path], label_column: str, weight_column: str | 
         raise KeyError(f"Column '{label_column}' not present in dataset")
 
     labels = _normalise_labels(df[label_column])
-    features = _prepare_features(df)
+    features, missing_features = _prepare_features(df)
 
     weights: Optional[np.ndarray] = None
     if weight_column:
@@ -206,7 +220,21 @@ def load_dataset(paths: Iterable[Path], label_column: str, weight_column: str | 
         weights = weights_series.to_numpy(dtype=float)
         weights = np.clip(weights, a_min=1e-6, a_max=None)
 
-    return Dataset(features=features, labels=labels, weights=weights)
+    if missing_features:
+        preview = ", ".join(missing_features[:6])
+        if len(missing_features) > 6:
+            preview += ", …"
+        print(
+            "Filling missing feature columns with zeros: "
+            f"{preview} (total: {len(missing_features)})"
+        )
+
+    return Dataset(
+        features=features,
+        labels=labels,
+        weights=weights,
+        missing_features=missing_features,
+    )
 
 
 def _train_model(
