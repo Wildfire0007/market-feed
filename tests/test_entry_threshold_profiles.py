@@ -24,18 +24,32 @@ def test_baseline_profile_configuration(monkeypatch):
     settings = _reload_settings(monkeypatch)
 
     assert settings.ENTRY_THRESHOLD_PROFILE_NAME == "baseline"
-    assert settings.get_p_score_min("EURUSD") == pytest.approx(60.0)
-    assert settings.get_atr_threshold_multiplier("EURUSD") == pytest.approx(1.0)
-    # Baseline profile should remain unchanged for non-overridden assets.
-    assert settings.get_atr_threshold_multiplier("USOIL") == pytest.approx(1.0)
+    profile = settings.describe_entry_threshold_profile()
+    assert profile["name"] == "baseline"
+    assert profile["p_score_min"]["default"] == pytest.approx(60.0)
+    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(60.0)
+    assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(1.0)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(1.0)
 
 
 def test_relaxed_profile_override(monkeypatch):
     settings = _reload_settings(monkeypatch, profile="relaxed")
 
     assert settings.ENTRY_THRESHOLD_PROFILE_NAME == "relaxed"
-    assert settings.get_p_score_min("GOLD_CFD") == pytest.approx(55.0)
-    assert settings.get_atr_threshold_multiplier("USOIL") == pytest.approx(0.9)
+    profile = settings.describe_entry_threshold_profile()
+    assert profile["name"] == "relaxed"
+    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(55.0)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.9)
+    # Non-overridden assets fall back to the profile defaults.
+    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(58.0)
+
+    # You can also inspect another profile without changing the active one.
+    baseline = settings.describe_entry_threshold_profile("baseline")
+    assert baseline["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(60.0)
+
+    # The helper exposes the list of available profiles for documentation
+    # and UI surfaces.
+    assert set(settings.list_entry_threshold_profiles()) >= {"baseline", "relaxed"}
 
     # Restore the default profile for subsequent tests.
     _reload_settings(monkeypatch)
