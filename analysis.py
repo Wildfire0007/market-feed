@@ -304,13 +304,20 @@ def session_windows_utc(asset: str) -> Tuple[
         monitor_windows = entry_windows
     return entry_windows, monitor_windows
 
-def in_any_window_utc(windows: Optional[List[Tuple[int,int,int,int]]], h: int, m: int) -> bool:
+def _min_of_day(hour: int, minute: int) -> int:
+    """Return minutes from midnight, clamped to the valid daily range."""
+
+    total = hour * 60 + minute
+    return max(0, min(total, 23 * 60 + 59))
+
+
+def in_any_window_utc(windows: Optional[List[Tuple[int, int, int, int]]], h: int, m: int) -> bool:
     if not windows:
         return True
-    minutes = h*60 + m
+    minutes = _min_of_day(h, m)
     for sh, sm, eh, em in windows:
-        s = sh*60 + sm
-        e = eh*60 + em
+        s = _min_of_day(sh, sm)
+        e = _min_of_day(eh, em)
         if s <= minutes <= e:
             return True
     return False
@@ -679,7 +686,7 @@ def build_action_plan(
 
     if session_meta.get("next_open_utc"):
         plan["context"]["next_session_open_utc"] = session_meta.get("next_open_utc")
-
+      
     notes: List[str] = []
     summary_parts: List[str] = []
     order_counter = 1
@@ -5398,6 +5405,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
