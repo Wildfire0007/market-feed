@@ -228,6 +228,14 @@ def save_json(path: str, obj: Dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def load_json(path: str) -> Optional[Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception:
+        return None
+
+
 def save_series_payload(out_dir: str, name: str, payload: Dict[str, Any]) -> None:
     ensure_dir(out_dir)
     raw: Dict[str, Any] = {"values": []}
@@ -240,6 +248,105 @@ def save_series_payload(out_dir: str, name: str, payload: Dict[str, Any]) -> Non
     save_json(os.path.join(out_dir, f"{name}.json"), raw)
     if meta:
         save_json(os.path.join(out_dir, f"{name}_meta.json"), meta)
+
+
+def _refresh_series_if_stale(
+    attempts: List[Tuple[str, Optional[str]]],
+    interval: str,
+    payload: Dict[str, Any],
+    freshness_limit: Optional[float],
+    *,
+    extra_attempts: int = 2,
+) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return payload
+    if not payload.get("ok"):
+        return payload
+    latency = _coerce_float(payload.get("latency_seconds"))
+    if freshness_limit is None or latency is None or latency <= freshness_limit:
+        return payload
+
+    best_payload = dict(payload)
+    best_latency = latency
+    attempts_made = 0
+
+    for _ in range(max(0, extra_attempts)):
+        time.sleep(max(TD_RATE_LIMITER.current_delay, 0.2))
+        refreshed = try_symbols(
+            attempts,
+            lambda s, ex: td_time_series(s, interval, 180, ex, "desc"),
+            freshness_limit=None,
+        )
+        attempts_made += 1
+        if not isinstance(refreshed, dict) or not refreshed.get("ok"):
+            continue
+        refreshed_latency = _coerce_float(refreshed.get("latency_seconds"))
+        if refreshed_latency is not None:
+            refreshed["latency_seconds"] = refreshed_latency
+        if (
+            refreshed_latency is not None
+            and (best_latency is None or refreshed_latency < best_latency)
+        ):
+            best_payload = dict(refreshed)
+            best_latency = refreshed_latency
+        if (
+            freshness_limit is not None
+            and refreshed_latency is not None
+            and refreshed_latency <= freshness_limit
+        ):
+            best_payload = dict(refreshed)
+            best_payload["freshness_violation"] = False
+            best_payload["stale_refresh_attempts"] = attempts_made
+            return best_payload
+
+    best_payload["stale_refresh_attempts"] = attempts_made
+    return best_payload
+
+
+def _prefer_existing_series(
+    out_dir: str,
+    name: str,
+    payload: Dict[str, Any],
+    freshness_limit: Optional[float],
+) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return payload
+    if freshness_limit is None:
+        return payload
+
+    latency = _coerce_float(payload.get("latency_seconds"))
+    violation = bool(payload.get("freshness_violation"))
+    if latency is not None and freshness_limit is not None:
+        violation = violation or latency > freshness_limit
+    if not violation:
+        return payload
+
+    meta_path = os.path.join(out_dir, f"{name}_meta.json")
+    raw_path = os.path.join(out_dir, f"{name}.json")
+    existing_meta = load_json(meta_path)
+    existing_raw = load_json(raw_path)
+    if not isinstance(existing_meta, dict) or not isinstance(existing_raw, dict):
+        return payload
+
+    prev_latency = _coerce_float(existing_meta.get("latency_seconds"))
+    if prev_latency is None or prev_latency > freshness_limit:
+        return payload
+    values = existing_raw.get("values") if isinstance(existing_raw, dict) else None
+    if not values:
+        return payload
+
+    merged = dict(payload)
+    merged["raw"] = existing_raw
+    merged["latency_seconds"] = prev_latency
+    merged["latest_utc"] = existing_meta.get("latest_utc")
+    merged["freshness_violation"] = False
+    merged["fallback_previous_payload"] = True
+    merged.setdefault("freshness_limit_seconds", freshness_limit)
+    if "used_symbol" not in merged and existing_meta.get("used_symbol"):
+        merged["used_symbol"] = existing_meta.get("used_symbol")
+    if "used_exchange" not in merged and existing_meta.get("used_exchange"):
+        merged["used_exchange"] = existing_meta.get("used_exchange")
+    return merged
 
 
 def _safe_int(value: Any) -> Optional[int]:
@@ -1124,39 +1231,59 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     def ts(s: str, ex: Optional[str], iv: str):
         return td_time_series(s, iv, 500, ex, "desc")
 
+    k1m_limit = SERIES_FRESHNESS_LIMITS.get("1min")
     k1m = fetch_with_freshness(
         attempts,
         lambda s, ex: ts(s, ex, "1min"),
-        freshness_limit=SERIES_FRESHNESS_LIMITS.get("1min"),
+        freshness_limit=k1m_limit,
         max_refreshes=1,
     )
+    if isinstance(k1m, dict):
+        k1m.setdefault("freshness_limit_seconds", k1m_limit)
+        k1m = _refresh_series_if_stale(attempts, "1min", k1m, k1m_limit)
+        k1m = _prefer_existing_series(adir, "klines_1m", k1m, k1m_limit)
     save_series_payload(adir, "klines_1m", k1m if isinstance(k1m, dict) else {"ok": False, "raw": {"values": []}})
     time.sleep(TD_PAUSE)
 
+    k5_limit = SERIES_FRESHNESS_LIMITS.get("5min")
     k5 = fetch_with_freshness(
         attempts,
         lambda s, ex: ts(s, ex, "5min"),
-        freshness_limit=SERIES_FRESHNESS_LIMITS.get("5min"),
+        freshness_limit=k5_limit,
         max_refreshes=1,
     )
+    if isinstance(k5, dict):
+        k5.setdefault("freshness_limit_seconds", k5_limit)
+        k5 = _refresh_series_if_stale(attempts, "5min", k5, k5_limit)
+        k5 = _prefer_existing_series(adir, "klines_5m", k5, k5_limit)
     save_series_payload(adir, "klines_5m", k5 if isinstance(k5, dict) else {"ok": False, "raw": {"values": []}})
     time.sleep(TD_PAUSE)
 
+    k1_limit = SERIES_FRESHNESS_LIMITS.get("1h")
     k1 = fetch_with_freshness(
         attempts,
         lambda s, ex: ts(s, ex, "1h"),
-        freshness_limit=SERIES_FRESHNESS_LIMITS.get("1h"),
+        freshness_limit=k1_limit,
         max_refreshes=1,
     )
+    if isinstance(k1, dict):
+        k1.setdefault("freshness_limit_seconds", k1_limit)
+        k1 = _refresh_series_if_stale(attempts, "1h", k1, k1_limit)
+        k1 = _prefer_existing_series(adir, "klines_1h", k1, k1_limit)
     save_series_payload(adir, "klines_1h", k1 if isinstance(k1, dict) else {"ok": False, "raw": {"values": []}})
     time.sleep(TD_PAUSE)
 
+    k4_limit = SERIES_FRESHNESS_LIMITS.get("4h")
     k4 = fetch_with_freshness(
         attempts,
         lambda s, ex: ts(s, ex, "4h"),
-        freshness_limit=SERIES_FRESHNESS_LIMITS.get("4h"),
+        freshness_limit=k4_limit,
         max_refreshes=1,
     )
+    if isinstance(k4, dict):
+        k4.setdefault("freshness_limit_seconds", k4_limit)
+        k4 = _refresh_series_if_stale(attempts, "4h", k4, k4_limit)
+        k4 = _prefer_existing_series(adir, "klines_4h", k4, k4_limit)
     save_series_payload(adir, "klines_4h", k4 if isinstance(k4, dict) else {"ok": False, "raw": {"values": []}})
     time.sleep(TD_PAUSE)
 
@@ -1255,6 +1382,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
