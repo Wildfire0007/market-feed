@@ -8,6 +8,13 @@ import analysis
 from news_feed import SentimentSignal
 
 
+class TimeUtilityTests(unittest.TestCase):
+    def test_min_of_day_bounds(self) -> None:
+        self.assertEqual(analysis._min_of_day(13, 30), 13 * 60 + 30)
+        self.assertEqual(analysis._min_of_day(-2, -15), 0)
+        self.assertEqual(analysis._min_of_day(26, 90), 23 * 60 + 59)
+
+
 class PositionManagementSentimentTests(unittest.TestCase):
     def test_sentiment_triggers_exit_signal(self) -> None:
         session_meta = {"open": True, "entry_open": False, "status": "open"}
