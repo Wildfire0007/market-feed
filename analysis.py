@@ -118,6 +118,17 @@ MARKET_TIMEZONE = ZoneInfo("Europe/Berlin")
 PUBLIC_DIR = "public"
 
 MAX_RISK_PCT = 1.8
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value_norm = value.strip().lower()
+    return value_norm in {"1", "true", "yes", "on"}
+
+
+ENABLE_SENTIMENT_PROBABILITY = _env_flag("ENABLE_SENTIMENT_PROBABILITY", default=False)
 FIB_TOL = 0.02
 
 # --- Kereskedési/egz. küszöbök (RR/TP) ---
@@ -4114,7 +4125,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         P -= smt_pen
         reasons.append(f"SMT büntetés −{smt_pen}% ({smt_reason})")
 
-    if sentiment_signal:
+    if sentiment_signal and ENABLE_SENTIMENT_PROBABILITY:
         sentiment_points = 0.0
         if effective_bias == "long":
             sentiment_points = 8.0 * sentiment_signal.score
@@ -4134,6 +4145,10 @@ def analyze(asset: str) -> Dict[str, Any]:
             reasons.append(f"{sentiment_msg} (+{sentiment_points:.1f})")
         else:
             reasons.append(f"{sentiment_msg} ({sentiment_points:.1f})")
+    elif sentiment_signal:
+        reasons.append(
+            "Makrohír sentiment jelen van, de a pontozás kikapcsolva (ENABLE_SENTIMENT_PROBABILITY=1 esetén aktiválható)."
+        )
 
     P = max(0.0, min(100.0, P))
 
@@ -4893,6 +4908,12 @@ def analyze(asset: str) -> Dict[str, Any]:
         except TypeError:
             pass
 
+    news_sentiment_value = 0.0
+    news_severity_value = 0.0
+    if sentiment_signal and ENABLE_SENTIMENT_PROBABILITY:
+        news_sentiment_value = sentiment_signal.score or 0.0
+        news_severity_value = sentiment_signal.effective_severity or 0.0
+
     ml_features = {
         "p_score": P,
         "rel_atr": rel_atr_value,
@@ -4902,9 +4923,9 @@ def analyze(asset: str) -> Dict[str, Any]:
         "momentum_vol_ratio": momentum_vol_ratio or 0.0,
         "order_flow_imbalance": order_flow_metrics.get("imbalance") or 0.0,
         "order_flow_pressure": order_flow_metrics.get("pressure") or 0.0,
-        "order_flow_aggressor": order_flow_metrics.get("aggressor_ratio") or 0.0,
-        "news_sentiment": sentiment_signal.score if sentiment_signal else 0.0,
-        "news_event_severity": sentiment_signal.effective_severity if sentiment_signal else 0.0,
+        "order_flow_aggressor": order_flow_metrics.get("aggressor_ratio") or 0.0,␊
+        "news_sentiment": news_sentiment_value,
+        "news_event_severity": news_severity_value,
         "realtime_confidence": realtime_confidence,
         "volatility_ratio": float(overlay_ratio)
         if (overlay_ratio is not None and np.isfinite(float(overlay_ratio)))
@@ -5440,6 +5461,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
