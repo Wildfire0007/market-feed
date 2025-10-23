@@ -15,11 +15,11 @@ Kimenetek:
 Környezeti változók:
   TWELVEDATA_API_KEY = "<api key>"
   OUT_DIR            = "public" (alapértelmezés)
-  TD_PAUSE           = "0.3"    (kímélő szünet hívások közt, sec)
-  TD_MAX_RETRIES     = "4"      (újrapróbálkozások száma)
-  TD_BACKOFF_BASE    = "0.3"    (exponenciális visszavárás alapja)
-  TD_BACKOFF_MAX     = "8"      (exponenciális visszavárás plafonja, sec)
-  TD_REALTIME_SPOT   = "0/1"    (alapértelmezés: 1 — bekapcsolja a valós idejű spot-frissítést)
+  TD_PAUSE           = "0.4"    (kímélő szünet hívások közt, sec)
+  TD_MAX_RETRIES     = "3"      (újrapróbálkozások száma)
+  TD_BACKOFF_BASE    = "0.3"    (exponenciális visszavárás alapja)␊
+  TD_BACKOFF_MAX     = "8"      (exponenciális visszavárás plafonja, sec)␊
+  TD_REALTIME_SPOT   = "0/1"    (alapértelmezés: 0 — külön job kezeli a realtime spotot)
   TD_REALTIME_INTERVAL = "5"    (realtime ciklus közötti szünet sec)
   TD_REALTIME_DURATION = "60"   (realtime poll futási ideje sec)
   TD_REALTIME_HTTP_DURATION = "12" (HTTP fallback mintavételezés hossza sec)
@@ -28,7 +28,7 @@ Környezeti változók:
   TD_REALTIME_HTTP_BACKGROUND = "auto" (HTTP realtime gyűjtés háttérszálon fusson-e)
   TD_REALTIME_WS_IDLE_GRACE = "15"  (WebSocket késlekedési türelem sec)
   TD_MAX_WORKERS      = "3"      (max. párhuzamos eszköz feldolgozás)
-  TD_REQUEST_CONCURRENCY = "3"   (egyszerre futó TD hívások plafonja)
+  TD_REQUEST_CONCURRENCY = "2"   (egyszerre futó TD hívások plafonja)
   PIPELINE_MAX_LAG_SECONDS = "240" (Trading → Analysis log figyelmeztetés küszöbe)
 """
 
@@ -103,13 +103,13 @@ OUT_DIR  = os.getenv("OUT_DIR", "public")
 API_KEY_RAW = os.getenv("TWELVEDATA_API_KEY", "")
 API_KEY  = API_KEY_RAW.strip() if API_KEY_RAW else ""
 TD_BASE  = "https://api.twelvedata.com"
-TD_PAUSE = float(os.getenv("TD_PAUSE", "0.3"))
-TD_PAUSE_MIN = float(os.getenv("TD_PAUSE_MIN", str(max(TD_PAUSE * 0.5, 0.1))))
-TD_PAUSE_MAX = float(os.getenv("TD_PAUSE_MAX", str(max(TD_PAUSE * 6, 3.0))))
-TD_MAX_RETRIES = int(os.getenv("TD_MAX_RETRIES", "4"))
+TD_PAUSE = float(os.getenv("TD_PAUSE", "0.4"))
+TD_PAUSE_MIN = float(os.getenv("TD_PAUSE_MIN", str(max(TD_PAUSE * 0.75, 0.2))))
+TD_PAUSE_MAX = float(os.getenv("TD_PAUSE_MAX", str(max(TD_PAUSE * 6, 4.0))))
+TD_MAX_RETRIES = int(os.getenv("TD_MAX_RETRIES", "3"))
 TD_BACKOFF_BASE = float(os.getenv("TD_BACKOFF_BASE", str(max(TD_PAUSE, 0.3))))
 TD_BACKOFF_MAX = float(os.getenv("TD_BACKOFF_MAX", "8.0"))
-REALTIME_FLAG = os.getenv("TD_REALTIME_SPOT", "1").lower() in {"1", "true", "yes", "on"}
+REALTIME_FLAG = os.getenv("TD_REALTIME_SPOT", "0").lower() in {"1", "true", "yes", "on"}
 REALTIME_INTERVAL = float(os.getenv("TD_REALTIME_INTERVAL", "5"))
 REALTIME_DURATION = float(os.getenv("TD_REALTIME_DURATION", "60"))
 REALTIME_ASSETS_ENV = os.getenv("TD_REALTIME_ASSETS", "")
@@ -179,43 +179,33 @@ class AdaptiveRateLimiter:
 
 TD_RATE_LIMITER = AdaptiveRateLimiter(TD_PAUSE, TD_PAUSE_MIN, TD_PAUSE_MAX)
 
-# ───────────────────────────────── ASSETS ────────────────────────────────␊
-# GER40 helyett USOIL. A fő ticker a WTI/USD, de adunk több fallbackot.␊
+# ───────────────────────────────── ASSETS ────────────────────────────────
+# GER40 helyett USOIL. A fő ticker a WTI/USD, fallbackokra már nincs szükség.
 ASSETS = {
-    "EURUSD":   {"symbol": "EUR/USD", "exchange": "FX", "alt": ["EURUSD", "EURUSD:CUR"]},
-    "USDJPY":   {"symbol": "USD/JPY",  "exchange": "FX", "alt": ["USDJPY", "USDJPY:CUR"]},
+    "EURUSD":   {"symbol": "EUR/USD", "exchange": "FX"},
+    "USDJPY":   {"symbol": "USD/JPY",  "exchange": "FX"},
     "GOLD_CFD": {"symbol": "XAU/USD",  "exchange": None},
 
     # ÚJ: WTI kőolaj. A Twelve Data-n a hivatalos jelölés: WTI/USD.
-    # Biztonság kedvéért próbálunk alternatív jelöléseket is.
+    # A korábbi alternatív ticker-próbálgatást elhagytuk a gyorsabb futásért.
     "USOIL": {
         "symbol": "WTI/USD",
         "exchange": None,
-        "alt": ["USOIL", "WTICOUSD", "WTIUSD"]  # ha a fő nem menne, próbáljuk ezeket
     },
 
-    # Egyedi részvény és ETF kiterjesztések
+# Egyedi részvény és ETF kiterjesztések
     "NVDA": {
         "symbol": "NVDA",
         "exchange": "NASDAQ",
-        "alt": ["NVDA", "NVDA:US"]
     },
     "SRTY": {
         "symbol": "SRTY",
         "exchange": "NYSEARCA",
-        "alt": [
-            {"symbol": "SRTY", "exchange": None},
-            {"symbol": "SRTY", "exchange": "NYSE"},
-            {"symbol": "SRTY", "exchange": "ARCA"},
-            {"symbol": "SRTY", "exchange": "NSE"},
-            "SRTY:US",
-            "SRTY:NSE",
-        ],
      },
 }
 
 TD_MAX_WORKERS = max(1, min(len(ASSETS), _env_int("TD_MAX_WORKERS", 3)))
-_DEFAULT_REQ_CONCURRENCY = max(1, min(TD_MAX_WORKERS, 3))
+_DEFAULT_REQ_CONCURRENCY = max(1, min(TD_MAX_WORKERS, 2))
 TD_REQUEST_CONCURRENCY = max(1, min(len(ASSETS), _env_int("TD_REQUEST_CONCURRENCY", _DEFAULT_REQ_CONCURRENCY)))
 _REQUEST_SEMAPHORE = threading.Semaphore(TD_REQUEST_CONCURRENCY)
 ANCHOR_LOCK = threading.Lock()
@@ -1246,10 +1236,7 @@ def main():
         logger.propagate = False
     started_at_dt = datetime.now(timezone.utc)
     logger.info("Trading run started for %d assets", len(ASSETS))
-    if REALTIME_FLAG:
-        workers = 1
-    else:
-        workers = max(1, min(len(ASSETS), TD_MAX_WORKERS))
+    workers = max(1, min(len(ASSETS), TD_MAX_WORKERS))
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
             executor.submit(_process_asset_guard, asset, cfg): asset
@@ -1268,6 +1255,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
