@@ -41,6 +41,12 @@ except Exception:  # pragma: no cover - optional dependency guard
         return None
 
 try:
+    from reports.precision_monitor import update_precision_gate_report
+except Exception:  # pragma: no cover - optional dependency guard
+    def update_precision_gate_report(*_args, **_kwargs):
+        return None
+
+try:
     from reports.backtester import update_live_validation
 except Exception:  # pragma: no cover - optional dependency guard
     def update_live_validation(*_args, **_kwargs):
@@ -5453,6 +5459,11 @@ def main():
     except Exception:
         pass
 
+    try:
+        update_precision_gate_report()
+    except Exception:
+        pass
+
     reports_dir = Path(os.getenv("REPORTS_DIR", "reports"))
     try:
         update_live_validation(Path(PUBLIC_DIR), reports_dir)
@@ -5461,6 +5472,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
