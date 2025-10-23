@@ -17,7 +17,7 @@ from datetime import datetime, timezone, timedelta
 from datetime import time as dtime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 from zoneinfo import ZoneInfo
 
 from active_anchor import load_anchor_state, record_anchor, update_anchor_metrics
@@ -179,6 +179,9 @@ CRITICAL_STALE_FRAMES = {
     "k5m": "k5m: jelzés korlátozva",
     "k1h": "k1h: jelzés korlátozva",
     "k4h": "k4h: jelzés korlátozva",
+}
+RELAXED_STALE_FRAMES: Dict[str, Set[str]] = {
+    "USOIL": {"k1m", "k5m", "spot"},
 }
 INTERVENTION_CONFIG_FILENAME = "intervention_watch.json"
 INTERVENTION_STATE_FILENAME = "intervention_state.json"
@@ -2037,6 +2040,23 @@ def diagnostics_payload(tf_meta: Dict[str, Dict[str, Any]],
     }
 
 
+def should_enforce_stale_frame(asset: str,
+                               frame: str,
+                               session_meta: Optional[Dict[str, Any]]) -> bool:
+    meta = session_meta or {}
+    asset_key = (asset or "").upper()
+    if not (
+        meta.get("open")
+        or meta.get("within_monitor_window")
+        or meta.get("entry_open")
+    ):
+        return False
+    relaxed = RELAXED_STALE_FRAMES.get(asset_key)
+    if relaxed and frame in relaxed:
+        return False
+    return True
+
+
 def build_data_gap_signal(asset: str,
                           spot_price: Any,
                           spot_utc: str,
@@ -3213,6 +3233,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         realtime_reason = "Realtime spot feed override"
 
     now = datetime.now(timezone.utc)
+    session_ok_flag, session_meta = session_state(asset)
 
     spot_ts_primary = parse_utc_timestamp(spot_utc)
     spot_ts_fallback = parse_utc_timestamp(spot_retrieved)
@@ -3220,6 +3241,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     spot_latency_sec: Optional[int] = None
     spot_stale_reason: Optional[str] = None
     spot_max_age = SPOT_MAX_AGE_SECONDS.get(asset, SPOT_MAX_AGE_SECONDS["default"])
+    relaxed_spot_reason: Optional[str] = None
     if spot_ts:
         delta = now - spot_ts
         if delta.total_seconds() < 0:
@@ -3234,6 +3256,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         spot_stale_reason = "Spot timestamp missing"
     else:
         spot_stale_reason = "Spot data missing"
+
+    if spot_stale_reason and not should_enforce_stale_frame(asset, "spot", session_meta):
+        relaxed_spot_reason = spot_stale_reason
+        spot_stale_reason = None
 
     update_latency_profile(outdir, spot_latency_sec)
     latency_profile = load_latency_profile(outdir)
@@ -3302,7 +3328,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         except Exception:
             last5_close = None
 
-    spot_issue_initial: Optional[str] = None
+    spot_issue_initial: Optional[str] = relaxed_spot_reason
     if spot_price is None:
         spot_issue_initial = "Spot price missing"
     elif spot_stale_reason:
@@ -3347,6 +3373,10 @@ def analyze(asset: str) -> Dict[str, Any]:
             note += f" ({fallback_latency // 60} perc késés)"
         spot_latency_notes.append(note)
         realtime_confidence = min(realtime_confidence, 0.4)
+    elif relaxed_spot_reason:
+        spot_latency_notes.append(
+            f"spot: {relaxed_spot_reason.lower()} — session zárva miatt engedve"
+        )
     elif realtime_used and realtime_reason:
         spot_latency_notes.append("spot: realtime feed aktív")
     elif isinstance(spot_realtime, dict) and spot_realtime.get("forced"):
@@ -3510,6 +3540,8 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     critical_reasons: List[str] = []
     for key, description in CRITICAL_STALE_FRAMES.items():
+        if not should_enforce_stale_frame(asset, key, session_meta):
+            continue
         if stale_timeframes.get(key):
             latency = tf_meta.get(key, {}).get("latency_seconds")
             if latency is not None:
@@ -4123,8 +4155,6 @@ def analyze(asset: str) -> Dict[str, Any]:
         reasons.append(range_guard_reason)
 
     # --- Kapuk (liquidity = Fib zóna VAGY sweep) + session + regime ---
-    session_ok_flag, session_meta = session_state(asset)
-
     if asset == "NVDA":
         h, m = now_utctime_hm()
         minute = h * 60 + m
@@ -5410,6 +5440,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
