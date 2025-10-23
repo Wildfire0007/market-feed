@@ -3,9 +3,21 @@
 
 This utility inspects the trade journal exported by ``analysis.py`` and uses the
 per-asset one minute OHLC caches to determine whether each trade would have hit
-its take profit or stop loss first.  The resulting outcome can be written back
-into the journal for auditing purposes and an optional labelled dataset (using
-``ml_model.MODEL_FEATURES``) can be produced for supervised learning.
+its take profit or stop loss first.  The workflow was extended to cope with
+precision entries and the lack of tick data:
+
+* limit/precision style orders are only marked as filled once price actually
+  trades through the entry within a configurable grace window; otherwise they
+  receive a ``no_fill`` or ``precision_pending`` outcome,
+* market orders are inferred from the distance between the entry and the spot
+  price and assumed to fill immediately at the analysis timestamp,
+* minute bar ambiguity is handled conservatively – whenever the same bar
+  touches both the stop and the target the trade is classified as
+  ``ambiguous``.
+
+The resulting outcome can be written back into the journal for auditing
+purposes and an optional labelled dataset (using ``ml_model.MODEL_FEATURES``)
+can be produced for supervised learning.
 """
 
 from __future__ import annotations
@@ -35,6 +47,7 @@ OUTCOME_NO_FILL = "no_fill"
 OUTCOME_AMBIGUOUS = "ambiguous"
 OUTCOME_MISSING = "missing_levels"
 OUTCOME_DATA_GAP = "insufficient_data"
+OUTCOME_PRECISION_PENDING = "precision_pending"
 
 
 @dataclass
@@ -56,6 +69,8 @@ class TradeResult:
     exit_timestamp: Optional[pd.Timestamp]
     time_to_outcome_minutes: Optional[float]
     feature_row_index: Optional[int] = None
+    precision_state: Optional[str] = None
+    entry_kind: Optional[str] = None
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -87,6 +102,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Evaluation window in minutes (default: 720)",
     )
     parser.add_argument(
+        "--entry-grace",
+        type=int,
+        default=60,
+        help="Minutes to wait for an entry fill before returning no_fill (default: 60)",
+    )
+    parser.add_argument(
+        "--entry-tolerance",
+        type=float,
+        default=0.0005,
+        help="Relative tolerance for matching entry/TP/SL levels (default: 0.0005)",
+    )
+    parser.add_argument(
         "--label-column",
         default="label",
         help="Name of the label column in the exported dataset",
@@ -101,6 +128,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=1,
         help="Minimum number of trades required to emit a labelled dataset",
+    )
+    parser.add_argument(
+        "--precision-state-column",
+        default="precision_state",
+        help="Journal column containing the precision trigger state (ignored if missing)",
+    )
+    parser.add_argument(
+        "--precision-executed-states",
+        default="fire,executed",
+        help="Comma separated precision states considered as executed entries",
+    )
+    parser.add_argument(
+        "--precision-skip-signals",
+        default="precision_ready,precision_arming",
+        help="Comma separated signal values that should be ignored",
     )
     return parser.parse_args(argv)
 
@@ -141,10 +183,68 @@ def _first_valid(values: Iterable[float | int | str | None]) -> Optional[float]:
     return None
 
 
+def _calc_relative_tolerance(price: Optional[float], relative: float) -> float:
+    if price is None or relative <= 0:
+        return 0.0
+    magnitude = max(abs(float(price)), 1e-9)
+    return magnitude * relative
+
+
+def _infer_entry_kind(
+    direction: int,
+    entry_price: Optional[float],
+    spot_price: Optional[float],
+    tolerance: float,
+) -> str:
+    if entry_price is None:
+        return "unknown"
+    if spot_price is None:
+        return "unknown"
+    diff = float(entry_price) - float(spot_price)
+    threshold = max(abs(float(entry_price)), abs(float(spot_price)), 1.0) * max(tolerance, 0.0)
+    if abs(diff) <= threshold:
+        return "market"
+    if direction == 1:
+        return "limit" if diff < 0 else "stop"
+    return "limit" if diff > 0 else "stop"
+
+
+def _bar_contains_price(high: float, low: float, price: float, tolerance: float) -> bool:
+    return (low - tolerance) <= price <= (high + tolerance)
+
+
+def _update_rr_stats(
+    direction: int,
+    entry_price: float,
+    risk: float,
+    bar_high: float,
+    bar_low: float,
+    best_price: float,
+    worst_price: float,
+    max_favorable_rr: float,
+    max_adverse_rr: float,
+) -> Tuple[float, float, float, float]:
+    if direction == 1:
+        best_price = max(best_price, bar_high)
+        worst_price = min(worst_price, bar_low)
+        max_favorable_rr = max(max_favorable_rr, (best_price - entry_price) / risk)
+        max_adverse_rr = max(max_adverse_rr, (entry_price - worst_price) / risk)
+    else:
+        best_price = min(best_price, bar_low)
+        worst_price = max(worst_price, bar_high)
+        max_favorable_rr = max(max_favorable_rr, (entry_price - best_price) / risk)
+        max_adverse_rr = max(max_adverse_rr, (worst_price - entry_price) / risk)
+    return best_price, worst_price, max_favorable_rr, max_adverse_rr
+
+
 def _evaluate_trade(
     trade_row: pd.Series,
     price_frame: pd.DataFrame,
     horizon_minutes: int,
+    entry_grace_minutes: int,
+    entry_tolerance: float,
+    precision_state_column: Optional[str],
+    executed_precision_states: Optional[set[str]],
 ) -> TradeResult:
     asset = str(trade_row.get("asset", "")).upper()
     journal_id = str(trade_row.get("journal_id", ""))
@@ -156,13 +256,27 @@ def _evaluate_trade(
     if analysis_timestamp is None or analysis_timestamp.tzinfo is None:
         raise ValueError(f"Invalid analysis timestamp for journal entry {journal_id}")
 
-    entry_price = _first_valid([trade_row.get("entry_price"), trade_row.get("spot_price")])
+    entry_raw = _first_valid([trade_row.get("entry_price")])
+    spot_price = _first_valid([trade_row.get("spot_price")])
+    entry_price = entry_raw if entry_raw is not None else spot_price
     stop_loss = _first_valid([trade_row.get("stop_loss")])
     take_profit = _first_valid([trade_row.get("take_profit_1"), trade_row.get("take_profit_2")])
 
     mode = str(trade_row.get("signal", "")).lower()
     if mode not in {"buy", "sell"}:
         raise ValueError("evaluate_trade called on a non-executable signal")
+
+    direction = 1 if mode == "buy" else -1
+
+    precision_state_value: Optional[str] = None
+    if precision_state_column and precision_state_column in trade_row.index:
+        raw_state = trade_row.get(precision_state_column)
+        if isinstance(raw_state, str):
+            precision_state_value = raw_state.strip().lower() or None
+        elif pd.notna(raw_state):
+            precision_state_value = str(raw_state).strip().lower() or None
+
+    entry_kind = _infer_entry_kind(direction, entry_price, spot_price, entry_tolerance)
 
     if entry_price is None or stop_loss is None or take_profit is None:
         return TradeResult(
@@ -180,18 +294,20 @@ def _evaluate_trade(
             fill_timestamp=None,
             exit_timestamp=None,
             time_to_outcome_minutes=None,
+            precision_state=precision_state_value,
+            entry_kind=entry_kind if entry_kind != "unknown" else None,
         )
 
-    horizon = analysis_timestamp + pd.Timedelta(minutes=int(max(horizon_minutes, 1)))
-    window_start = analysis_timestamp.floor("min")
-    price_slice = price_frame[(price_frame["timestamp"] >= window_start) & (price_frame["timestamp"] <= horizon)]
-
-    if price_slice.empty:
+    if (
+        precision_state_value
+        and executed_precision_states
+        and precision_state_value not in executed_precision_states
+    ):
         return TradeResult(
             asset=asset,
             journal_id=journal_id,
             analysis_timestamp=str(analysis_timestamp_raw),
-            outcome=OUTCOME_DATA_GAP,
+            outcome=OUTCOME_PRECISION_PENDING,
             label=None,
             entry_price=entry_price,
             stop_loss=stop_loss,
@@ -202,9 +318,9 @@ def _evaluate_trade(
             fill_timestamp=None,
             exit_timestamp=None,
             time_to_outcome_minutes=None,
+            precision_state=precision_state_value,
+            entry_kind=entry_kind if entry_kind != "unknown" else None,
         )
-
-    direction = 1 if mode == "buy" else -1
     risk = entry_price - stop_loss if direction == 1 else stop_loss - entry_price
     if not np.isfinite(risk) or risk <= 0:
         return TradeResult(
@@ -222,61 +338,179 @@ def _evaluate_trade(
             fill_timestamp=None,
             exit_timestamp=None,
             time_to_outcome_minutes=None,
+            precision_state=precision_state_value,
+            entry_kind=entry_kind if entry_kind != "unknown" else None,
         )
 
-    filled = False
-    fill_timestamp: Optional[pd.Timestamp] = None
+    entry_tol = _calc_relative_tolerance(entry_price, entry_tolerance)
+    tp_tol = _calc_relative_tolerance(take_profit, entry_tolerance)
+    sl_tol = _calc_relative_tolerance(stop_loss, entry_tolerance)
+
+    evaluation_end = analysis_timestamp + pd.Timedelta(minutes=int(max(horizon_minutes, 1)))
+    entry_deadline = min(
+        evaluation_end,
+        analysis_timestamp + pd.Timedelta(minutes=int(max(entry_grace_minutes, 1))),
+    )
+    window_start = analysis_timestamp.floor("min")
+    price_slice = price_frame[
+        (price_frame["timestamp"] >= window_start)
+        & (price_frame["timestamp"] <= evaluation_end)
+    ]
+
+    if price_slice.empty:
+        return TradeResult(
+            asset=asset,
+            journal_id=journal_id,
+            analysis_timestamp=str(analysis_timestamp_raw),
+            outcome=OUTCOME_DATA_GAP,
+            label=None,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            risk_r_multiple=None,
+            max_favorable_rr=None,
+            max_adverse_rr=None,
+            fill_timestamp=None,
+            exit_timestamp=None,
+            time_to_outcome_minutes=None,
+            precision_state=precision_state_value,
+            entry_kind=entry_kind,
+        )
+
+    filled = entry_kind == "market"
+    fill_timestamp: Optional[pd.Timestamp] = analysis_timestamp if filled else None
     exit_timestamp: Optional[pd.Timestamp] = None
+    exit_price: Optional[float] = None
     outcome = OUTCOME_NO_EXIT
     label: Optional[int] = None
-    exit_price: Optional[float] = None
     max_favorable_rr = 0.0
     max_adverse_rr = 0.0
-    best_price = entry_price
-    worst_price = entry_price
+    best_price = float(entry_price)
+    worst_price = float(entry_price)
+    last_timestamp: Optional[pd.Timestamp] = None
 
     for _, row in price_slice.iterrows():
         bar_time = row["timestamp"]
         high = float(row["high"])
         low = float(row["low"])
+        last_timestamp = bar_time
 
         if not filled:
-            filled = True
-            fill_timestamp = bar_time
+            if bar_time > entry_deadline:
+                break
+            if _bar_contains_price(high, low, float(entry_price), entry_tol):
+                filled = True
+                fill_timestamp = bar_time
+                best_price = float(entry_price)
+                worst_price = float(entry_price)
+                (
+                    best_price,
+                    worst_price,
+                    max_favorable_rr,
+                    max_adverse_rr,
+                ) = _update_rr_stats(
+                    direction,
+                    float(entry_price),
+                    float(risk),
+                    high,
+                    low,
+                    best_price,
+                    worst_price,
+                    max_favorable_rr,
+                    max_adverse_rr,
+                )
+                if direction == 1:
+                    tp_hit = high >= (take_profit - tp_tol)
+                    sl_hit = low <= (stop_loss + sl_tol)
+                else:
+                    tp_hit = low <= (take_profit + tp_tol)
+                    sl_hit = high >= (stop_loss - sl_tol)
+                if tp_hit and sl_hit:
+                    outcome = OUTCOME_AMBIGUOUS
+                    exit_timestamp = bar_time
+                    exit_price = None
+                    label = None
+                    break
+                if tp_hit:
+                    outcome = OUTCOME_PROFIT
+                    exit_timestamp = bar_time
+                    exit_price = take_profit
+                    label = 1
+                    break
+                if sl_hit:
+                    outcome = OUTCOME_STOP
+                    exit_timestamp = bar_time
+                    exit_price = stop_loss
+                    label = 0
+                    break
+                continue
+            else:
+                continue
 
+        (
+            best_price,
+            worst_price,
+            max_favorable_rr,
+            max_adverse_rr,
+        ) = _update_rr_stats(
+            direction,
+            float(entry_price),
+            float(risk),
+            high,
+            low,
+            best_price,
+            worst_price,
+            max_favorable_rr,
+            max_adverse_rr,
+        )
         if direction == 1:
-            best_price = max(best_price, high)
-            worst_price = min(worst_price, low)
-            hit_tp = high >= take_profit
-            hit_sl = low <= stop_loss
-            max_favorable_rr = max(max_favorable_rr, (best_price - entry_price) / risk)
-            max_adverse_rr = max(max_adverse_rr, (entry_price - worst_price) / risk)
+            tp_hit = high >= (take_profit - tp_tol)
+            sl_hit = low <= (stop_loss + sl_tol)
         else:
-            best_price = min(best_price, low)
-            worst_price = max(worst_price, high)
-            hit_tp = low <= take_profit
-            hit_sl = high >= stop_loss
-            max_favorable_rr = max(max_favorable_rr, (entry_price - best_price) / risk)
-            max_adverse_rr = max(max_adverse_rr, (worst_price - entry_price) / risk)
-
-        if hit_tp and hit_sl:
+            tp_hit = low <= (take_profit + tp_tol)
+            sl_hit = high >= (stop_loss - sl_tol)
+        if tp_hit and sl_hit:
             outcome = OUTCOME_AMBIGUOUS
             exit_timestamp = bar_time
-            label = None
             exit_price = None
+            label = None
             break
-        if hit_tp:
+        if tp_hit:
             outcome = OUTCOME_PROFIT
-            label = 1
             exit_timestamp = bar_time
             exit_price = take_profit
+            label = 1
             break
-        if hit_sl:
+        if sl_hit:
             outcome = OUTCOME_STOP
-            label = 0
             exit_timestamp = bar_time
             exit_price = stop_loss
+            label = 0
             break
+
+    if not filled:
+        coverage_ok = False
+        if last_timestamp is not None:
+            coverage_ok = last_timestamp + pd.Timedelta(minutes=1) >= entry_deadline
+        outcome = OUTCOME_NO_FILL if coverage_ok else OUTCOME_DATA_GAP
+        return TradeResult(
+            asset=asset,
+            journal_id=journal_id,
+            analysis_timestamp=str(analysis_timestamp_raw),
+            outcome=outcome,
+            label=None,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            risk_r_multiple=None,
+            max_favorable_rr=None,
+            max_adverse_rr=None,
+            fill_timestamp=None,
+            exit_timestamp=None,
+            time_to_outcome_minutes=None,
+            precision_state=precision_state_value,
+            entry_kind=entry_kind,
+        )
 
     time_to_outcome: Optional[float]
     if fill_timestamp is not None and exit_timestamp is not None:
@@ -302,11 +536,13 @@ def _evaluate_trade(
         stop_loss=stop_loss,
         take_profit=take_profit,
         risk_r_multiple=risk_r_multiple,
-        max_favorable_rr=max_favorable_rr if filled else None,
-        max_adverse_rr=max_adverse_rr if filled else None,
+        max_favorable_rr=max_favorable_rr,
+        max_adverse_rr=max_adverse_rr,
         fill_timestamp=fill_timestamp,
         exit_timestamp=exit_timestamp,
         time_to_outcome_minutes=time_to_outcome,
+        precision_state=precision_state_value,
+        entry_kind=entry_kind,
     )
 
 
@@ -396,6 +632,10 @@ def _build_labelled_dataset(
         payload["journal_id"] = result.journal_id
         payload["analysis_timestamp"] = result.analysis_timestamp
         payload["outcome"] = result.outcome
+        if result.entry_kind:
+            payload["entry_kind"] = result.entry_kind
+        if result.precision_state:
+            payload["precision_state"] = result.precision_state
         rows.append(payload)
     return pd.DataFrame(rows)
 
@@ -427,8 +667,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not journal_path.exists():
         raise FileNotFoundError(f"Trade journal not found: {journal_path}")
     journal_df = pd.read_csv(journal_path)
+    processing_df = journal_df.copy()
 
-    executable = journal_df[journal_df["signal"].isin(["buy", "sell"])]
+    skip_signals = {
+        token.strip().lower()
+        for token in str(args.precision_skip_signals).split(",")
+        if token.strip()
+    }
+    signal_lower = processing_df["signal"].astype(str).str.lower()
+    if skip_signals:
+        processing_df = processing_df.loc[~signal_lower.isin(skip_signals)].copy()
+        signal_lower = processing_df["signal"].astype(str).str.lower()
+
+    executable = processing_df[signal_lower.isin({"buy", "sell"})]
     if executable.empty:
         print("No executable trades found in journal")
         return 0
@@ -436,17 +687,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     assets = (
         [asset.upper() for asset in args.asset]
         if args.asset
-        else sorted(set(executable["asset"].dropna().str.upper()))
+        else sorted(set(executable["asset"].dropna().astype(str).str.upper()))
     )
     price_root = Path(args.price_root)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    precision_column = args.precision_state_column.strip() or None
+    if precision_column and precision_column not in processing_df.columns:
+        precision_column = None
+    executed_states = {
+        token.strip().lower()
+        for token in str(args.precision_executed_states).split(",")
+        if token.strip()
+    }
+    if not executed_states:
+        executed_states_set: Optional[set[str]] = None
+    else:
+        executed_states_set = executed_states
+    if not precision_column:
+        executed_states_set = None
+
     summary: Dict[str, Dict[str, int]] = {}
     labelled_datasets: Dict[str, pd.DataFrame] = {}
 
     for asset in assets:
-        asset_trades = executable[executable["asset"].str.upper() == asset]
+        asset_trades = executable[executable["asset"].astype(str).str.upper() == asset]
         if asset_trades.empty:
             continue
         try:
@@ -461,7 +727,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         trade_results: List[TradeResult] = []
         for _, row in asset_trades.iterrows():
             try:
-                result = _evaluate_trade(row, price_frame, args.horizon)
+                result = _evaluate_trade(
+                    row,
+                    price_frame,
+                    args.horizon,
+                    args.entry_grace,
+                    args.entry_tolerance,
+                    precision_column,
+                    executed_states_set,
+                )
             except ValueError as exc:
                 print(f"Skipping journal entry due to error: {exc}")
                 continue
