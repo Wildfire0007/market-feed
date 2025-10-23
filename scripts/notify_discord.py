@@ -598,21 +598,31 @@ def note_implies_open(note: str) -> bool:
 
 def format_closed_note(base_note: str = "", reason: Optional[str] = None) -> str:
     note = (base_note or "").strip()
+    reason_text = (reason or "").strip()
+  
     if note_implies_open(note):
         note = ""
 
+    combined = f"{note} {reason_text}".lower()
+    data_issue = any(
+        keyword in combined for keyword in {"adat", "data", "latency", "delay", "stale", "cache"}
+    )
+  
     if not note:
-        note = "Piac zárva"
+        note = "Hiányzó adat" if data_issue else "Piac zárva"
 
     lower = note.lower()
-    if "market" not in lower:
-        if "piac" not in lower:
-            note = f"{note} • Market closed"
-        else:
-            note = f"{note} (market closed)"
+    if not data_issue:
+        if "market" not in lower:
+            if "piac" not in lower:
+                note = f"{note} • Market closed"
+            else:
+                note = f"{note} (market closed)"
 
-    if reason:
-        note = f"{note} – {reason}"
+    if reason_text:
+        lower = note.lower()
+        if reason_text.lower() not in lower:
+            note = f"{note} – {reason_text}" if note else reason_text
 
     return note
 
