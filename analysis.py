@@ -87,6 +87,7 @@ from config.analysis_settings import (
     CORE_RR_MIN,
     DEFAULT_COST_MODEL,
     ENABLE_MOMENTUM_ASSETS,
+    ENTRY_THRESHOLD_PROFILE_NAME,
     EMA_SLOPE_SIGN_ENFORCED,
     EMA_SLOPE_TH_ASSET,
     EMA_SLOPE_TH_DEFAULT,
@@ -112,6 +113,8 @@ from config.analysis_settings import (
     TP_MIN_PCT,
     TP_NET_MIN_ASSET,
     TP_NET_MIN_DEFAULT,
+    get_atr_threshold_multiplier,
+    get_p_score_min,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -171,7 +174,6 @@ PRECISION_FLOW_IMBALANCE_MARGIN = 1.1
 PRECISION_FLOW_PRESSURE_MARGIN = 1.1
 PRECISION_SCORE_THRESHOLD = 70.0
 PRECISION_TRIGGER_NEAR_MULT = 0.2
-P_SCORE_MIN = 60.0
 REALTIME_JUMP_MULT = 2.0
 MICRO_BOS_P_BONUS = 8.0
 MOMENTUM_ATR_REL = 0.0006
@@ -1551,9 +1553,13 @@ def atr_low_threshold(asset: str) -> float:
     h, m = now_utctime_hm()
     if asset == "GOLD_CFD":
         if in_any_window_utc(GOLD_HIGH_VOL_WINDOWS, h, m):
-            return ATR_LOW_TH_DEFAULT
-        return GOLD_LOW_VOL_TH
-    return ATR_LOW_TH_ASSET.get(asset, ATR_LOW_TH_DEFAULT)
+            base = ATR_LOW_TH_DEFAULT
+        else:
+            base = GOLD_LOW_VOL_TH
+    else:
+        base = ATR_LOW_TH_ASSET.get(asset, ATR_LOW_TH_DEFAULT)
+    multiplier = get_atr_threshold_multiplier(asset)
+    return base * multiplier
 
 def tp_min_pct_for(asset: str, rel_atr: float, session_flag: bool) -> float:
     base = TP_MIN_PCT.get(asset, TP_MIN_PCT["default"])
@@ -3227,6 +3233,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     realtime_reason: Optional[str] = None
     realtime_confidence: float = 1.0
     realtime_transport = str(spot_realtime.get("transport") or "http").lower() if isinstance(spot_realtime, dict) else "http"
+    entry_thresholds_meta: Dict[str, Any] = {"profile": ENTRY_THRESHOLD_PROFILE_NAME}
     if spot:
         spot_price = spot.get("price") if spot.get("price") is not None else spot.get("price_usd")
         spot_utc = spot.get("utc") or spot.get("timestamp") or "-"
@@ -3715,7 +3722,17 @@ def analyze(asset: str) -> Dict[str, Any]:
     atr_series_5 = atr(k5m_closed)
     atr5 = atr_series_5.iloc[-1]
     rel_atr = float(atr5 / price_for_calc) if (atr5 and price_for_calc) else float("nan")
+    atr_profile_multiplier = get_atr_threshold_multiplier(asset)
     atr_threshold = atr_low_threshold(asset)
+    entry_thresholds_meta["atr_multiplier"] = atr_profile_multiplier
+    if atr_profile_multiplier not in {None, 0.0}:
+        try:
+            entry_thresholds_meta["atr_threshold_base"] = atr_threshold / atr_profile_multiplier
+        except Exception:
+            entry_thresholds_meta["atr_threshold_base"] = atr_threshold
+    else:
+        entry_thresholds_meta["atr_threshold_base"] = atr_threshold
+    entry_thresholds_meta["atr_threshold_initial"] = atr_threshold
     volatility_overlay: Dict[str, Any] = {}
     atr_overlay_gate = True
     try:
@@ -3753,6 +3770,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         atr_ok = False
     if stale_timeframes.get("k5m"):
         atr_ok = False
+
+    entry_thresholds_meta["atr_threshold_effective"] = atr_threshold
 
     momentum_vol_ratio = volume_ratio(k5m_closed, MOMENTUM_VOLUME_RECENT, MOMENTUM_VOLUME_BASE)
     dynamic_tp_profile = compute_dynamic_tp_profile(
@@ -4234,12 +4253,16 @@ def analyze(asset: str) -> Dict[str, Any]:
                 liquidity_ok = True
                 liquidity_relaxed = True
 
-    p_score_min_local = P_SCORE_MIN
+    p_score_min_base = get_p_score_min(asset)
+    p_score_min_local = p_score_min_base
+    entry_thresholds_meta["p_score_min_base"] = p_score_min_base
     if asset == "USDJPY" and intervention_band in {"HIGH", "IMMINENT"} and effective_bias == "long":
         p_score_min_local += INTERVENTION_P_SCORE_ADD
         note = f"Intervention Watch: USDJPY long P-score küszöb +{INTERVENTION_P_SCORE_ADD} (IRS {intervention_summary['irs']} {intervention_band})" if intervention_summary else None
         if note and note not in reasons:
             reasons.append(note)
+        entry_thresholds_meta["p_score_min_intervention_add"] = INTERVENTION_P_SCORE_ADD
+    entry_thresholds_meta["p_score_min_effective"] = p_score_min_local
 
     tp_net_threshold = tp_net_min_for(asset)
     tp_net_pct_display = f"{tp_net_threshold * 100:.2f}".rstrip("0").rstrip(".")
@@ -4291,7 +4314,11 @@ def analyze(asset: str) -> Dict[str, Any]:
     can_enter_core = (P >= p_score_min_local) and base_core_ok and bos_gate_ok
     missing_core = [k for k, v in conds_core.items() if not v]
     if P < p_score_min_local:
-        missing_core.append(f"P_score>={p_score_min_local}")
+        if float(p_score_min_local).is_integer():
+            p_score_label = str(int(round(p_score_min_local)))
+        else:
+            p_score_label = f"{p_score_min_local:.1f}"
+        missing_core.append(f"P_score>={p_score_label}")
     if micro_bos_active and not conds_core["bos5m"]:
         if "bos5m" not in missing_core:
             missing_core.append("bos5m")
@@ -5087,6 +5114,9 @@ def analyze(asset: str) -> Dict[str, Any]:
     decision_obj["dynamic_tp_profile"] = dynamic_tp_profile
     decision_obj["order_flow_metrics"] = order_flow_metrics
     decision_obj["intraday_profile"] = intraday_profile
+    entry_thresholds_meta.setdefault("atr_threshold_effective", atr_threshold)
+    entry_thresholds_meta.setdefault("p_score_min_effective", p_score_min_local)
+    decision_obj["entry_thresholds"] = entry_thresholds_meta
     if volatility_overlay:
         decision_obj["volatility_overlay"] = volatility_overlay
     if tick_order_flow:
@@ -5472,6 +5502,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
