@@ -111,9 +111,90 @@ def _get_config_value(key: str) -> Any:
     return cfg.get(key)
 
 
+def _normalize_threshold_map(raw_map: Any, default_value: float) -> Dict[str, float]:
+    mapping: Dict[str, float] = {"default": float(default_value)}
+    if isinstance(raw_map, dict):
+        for key, value in raw_map.items():
+            try:
+                mapping[str(key)] = float(value)
+            except (TypeError, ValueError):
+                LOGGER.warning(
+                    "Ignoring invalid threshold value %r for %s in entry profile",
+                    value,
+                    key,
+                )
+    return mapping
+
+
+def _normalize_entry_profile(name: str, raw_profile: Any) -> Dict[str, Dict[str, float]]:
+    if not isinstance(raw_profile, dict):
+        LOGGER.warning(
+            "Entry threshold profile '%s' must be a mapping; falling back to defaults",
+            name,
+        )
+        raw_profile = {}
+    return {
+        "p_score_min": _normalize_threshold_map(raw_profile.get("p_score_min"), 60.0),
+        "atr_threshold_multiplier": _normalize_threshold_map(
+            raw_profile.get("atr_threshold_multiplier"), 1.0
+        ),
+    }
+
+
 # Module level shortcuts used by ``analysis.py`` and helper scripts.
 ASSETS: List[str] = load_config()["assets"]
 LEVERAGE: Dict[str, float] = load_config()["leverage"]
+_ENTRY_THRESHOLD_PROFILES_RAW: Dict[str, Any] = dict(
+    _get_config_value("entry_threshold_profiles") or {}
+)
+_DEFAULT_ENTRY_PROFILE_NAME = "baseline"
+if _DEFAULT_ENTRY_PROFILE_NAME not in _ENTRY_THRESHOLD_PROFILES_RAW:
+    _ENTRY_THRESHOLD_PROFILES_RAW[_DEFAULT_ENTRY_PROFILE_NAME] = {}
+
+ENTRY_THRESHOLD_PROFILES: Dict[str, Dict[str, Dict[str, float]]] = {
+    name: _normalize_entry_profile(name, profile)
+    for name, profile in _ENTRY_THRESHOLD_PROFILES_RAW.items()
+}
+
+if _DEFAULT_ENTRY_PROFILE_NAME not in ENTRY_THRESHOLD_PROFILES:
+    ENTRY_THRESHOLD_PROFILES[_DEFAULT_ENTRY_PROFILE_NAME] = _normalize_entry_profile(
+        _DEFAULT_ENTRY_PROFILE_NAME, {}
+    )
+
+_ENV_PROFILE = os.getenv("ENTRY_THRESHOLD_PROFILE")
+_CFG_ACTIVE_PROFILE = _get_config_value("active_entry_threshold_profile")
+_ACTIVE_PROFILE_NAME = (
+    _ENV_PROFILE
+    or (_CFG_ACTIVE_PROFILE if isinstance(_CFG_ACTIVE_PROFILE, str) else None)
+    or _DEFAULT_ENTRY_PROFILE_NAME
+)
+if _ACTIVE_PROFILE_NAME not in ENTRY_THRESHOLD_PROFILES:
+    LOGGER.warning(
+        "Unknown entry threshold profile '%s'; falling back to '%s'",
+        _ACTIVE_PROFILE_NAME,
+        _DEFAULT_ENTRY_PROFILE_NAME,
+    )
+    _ACTIVE_PROFILE_NAME = _DEFAULT_ENTRY_PROFILE_NAME
+
+ENTRY_THRESHOLD_PROFILE_NAME: str = _ACTIVE_PROFILE_NAME
+_ACTIVE_PROFILE = ENTRY_THRESHOLD_PROFILES[ENTRY_THRESHOLD_PROFILE_NAME]
+_P_SCORE_PROFILE = _ACTIVE_PROFILE.get("p_score_min", {})
+_ATR_MULT_PROFILE = _ACTIVE_PROFILE.get("atr_threshold_multiplier", {})
+
+P_SCORE_MIN_DEFAULT: float = float(_P_SCORE_PROFILE.get("default", 60.0))
+P_SCORE_MIN_ASSET: Dict[str, float] = {
+    key: float(value)
+    for key, value in _P_SCORE_PROFILE.items()
+    if key != "default"
+}
+
+ATR_THRESHOLD_MULT_DEFAULT: float = float(_ATR_MULT_PROFILE.get("default", 1.0))
+ATR_THRESHOLD_MULT_ASSET: Dict[str, float] = {
+    key: float(value)
+    for key, value in _ATR_MULT_PROFILE.items()
+    if key != "default"
+}
+
 ATR_LOW_TH_DEFAULT: float = float(_get_config_value("atr_low_threshold_default"))
 ATR_LOW_TH_ASSET: Dict[str, float] = dict(_get_config_value("atr_low_threshold") or {})
 GOLD_HIGH_VOL_WINDOWS = _get_config_value("gold_high_vol_windows") or []
@@ -154,3 +235,15 @@ SPOT_MAX_AGE_SECONDS: Dict[str, int] = {
 INTERVENTION_WATCH_DEFAULT: Dict[str, Any] = dict(_get_config_value("intervention_watch_default") or {})
 SESSION_WEEKDAYS: Dict[str, Any] = dict(_get_config_value("session_weekdays") or {})
 SESSION_TIME_RULES: Dict[str, Dict[str, Any]] = load_config()["session_time_rules"]
+
+
+def get_p_score_min(asset: str) -> float:
+    """Return the configured minimum P-score for the active profile."""
+
+    return P_SCORE_MIN_ASSET.get(asset, P_SCORE_MIN_DEFAULT)
+
+
+def get_atr_threshold_multiplier(asset: str) -> float:
+    """Return the ATR threshold multiplier for the active profile."""
+
+    return ATR_THRESHOLD_MULT_ASSET.get(asset, ATR_THRESHOLD_MULT_DEFAULT)
