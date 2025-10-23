@@ -3956,6 +3956,29 @@ def analyze(asset: str) -> Dict[str, Any]:
             if note not in reasons:
                 reasons.append(note)
 
+    candidate_dir = (
+        effective_bias
+        if effective_bias in ("long", "short")
+        else (bias1h if bias1h in ("long", "short") else None)
+    )
+    strong_momentum = False
+    if candidate_dir == "long":
+        strong_momentum = bool(
+            bos5m_long
+            or (struct_retest_long and not recent_break_short)
+            or micro_bos_long
+        )
+        if asset == "NVDA":
+            strong_momentum = strong_momentum or nvda_cross_long
+    elif candidate_dir == "short":
+        strong_momentum = bool(
+            bos5m_short
+            or (struct_retest_short and not recent_break_long)
+            or micro_bos_short
+        )
+        if asset == "NVDA":
+            strong_momentum = strong_momentum or nvda_cross_short
+
     if isinstance(intraday_profile, dict):
         range_position = intraday_profile.get("range_position")
         range_compression = bool(intraday_profile.get("range_compression"))
@@ -4143,24 +4166,6 @@ def analyze(asset: str) -> Dict[str, Any]:
             or (effective_bias == "long" and struct_retest_long)
             or (effective_bias == "short" and struct_retest_short)
         )
-    candidate_dir = effective_bias if effective_bias in ("long", "short") else (bias1h if bias1h in ("long", "short") else None)
-    strong_momentum = False
-    if candidate_dir == "long":
-        strong_momentum = bool(
-            bos5m_long
-            or (struct_retest_long and not recent_break_short)
-            or micro_bos_long
-        )
-        if asset == "NVDA":
-            strong_momentum = strong_momentum or nvda_cross_long
-    elif candidate_dir == "short":
-        strong_momentum = bool(
-            bos5m_short
-            or (struct_retest_short and not recent_break_long)
-            or micro_bos_short
-        )
-        if asset == "NVDA":
-            strong_momentum = strong_momentum or nvda_cross_short
     liquidity_relaxed = False
     liquidity_ok = liquidity_ok_base
     directional_confirmation = False
@@ -5405,6 +5410,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
