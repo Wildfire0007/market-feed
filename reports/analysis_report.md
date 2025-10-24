@@ -29,13 +29,13 @@ Forrás: Twelve Data (lokális JSON)
 **Állapot:** no entry — Spot data stale: 1596 min behind (limit 45 min)
 Hiányzó kapuk: data_integrity
 
-### USDJPY
+### BTCUSD
 
-Spot (USD): **149.8600** • UTC: `2025-10-12T14:55:00+00:00`
+Spot (USD): **48250.00** • UTC: `2025-10-12T14:55:00+00:00`
 Valószínűség: **P = 0%**
 Forrás: Twelve Data (lokális JSON)
 
-**Állapot:** no entry — Spot data stale: 36 min behind (limit 20 min)
+**Állapot:** no entry — Spot data stale: 36 min behind (limit 5 min)
 Hiányzó kapuk: data_integrity
 
 
