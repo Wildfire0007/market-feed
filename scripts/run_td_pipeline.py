@@ -132,13 +132,13 @@ def main(argv: List[str] | None = None) -> int:
     if not args.skip_news:
         if _news_available(args.force_news):
             _run_step(
-                "USDJPY sentiment",
-                [python, "scripts/update_usdjpy_sentiment.py"],
+                "BTCUSD sentiment",
+                [python, "scripts/update_btcusd_sentiment.py"],
                 optional=True,
             )
         else:
             print(
-                "⚠️  Skipping USDJPY sentiment refresh (NEWSAPI_KEY not configured)",
+                "⚠️  Skipping BTCUSD sentiment refresh (NEWSAPI_KEY not configured)",
                 file=sys.stderr,
             )
 
