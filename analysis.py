@@ -164,7 +164,7 @@ REFRESH_TIPS = (
     "A kliens kéréséhez adj cache-busting query paramot (pl. ?v=<timestamp>) és no-store cache-control fejlécet.",
     "Cloudflare Worker stale policy: 5m feedre állítsd 120s-re, hogy hamar átjöjjön az új jel.",
     "A dashboard stabilizáló (2 azonos jel + 10 perc cooldown) lassíthatja a kártya frissítését — lazítsd, ha realtime kell.",
-    "Hiányzó ML modellek: EURUSD, GOLD_CFD, NVDA, SRTY, USDJPY, USOIL – töltsd fel a public/models/<asset>_gbm.pkl fájlokat a valószínűségi score aktiválásához."
+    "Hiányzó ML modellek: EURUSD, GOLD_CFD, NVDA, SRTY, BTCUSD, USOIL – töltsd fel a public/models/<asset>_gbm.pkl fájlokat a valószínűségi score aktiválásához."
 )
 LATENCY_PROFILE_FILENAME = "latency_profile.json"
 ORDER_FLOW_LOOKBACK_MIN = 120
@@ -541,8 +541,14 @@ def format_atr_hint(asset: str, atr_value: Optional[float]) -> Optional[str]:
         return None
     if atr_value == 0:
         return None
-    if asset in {"EURUSD", "USDJPY"}:
+    if asset == "EURUSD":
         return f"1h ATR ≈ {atr_value:.4f}"
+    if asset == "BTCUSD":
+        if atr_value >= 500:
+            return f"1h ATR ≈ {atr_value:.0f}"
+        if atr_value >= 100:
+            return f"1h ATR ≈ {atr_value:.1f}"
+        return f"1h ATR ≈ {atr_value:.2f}"
     if atr_value >= 100:
         return f"1h ATR ≈ {atr_value:.0f}"
     if atr_value >= 10:
@@ -585,7 +591,7 @@ def translate_gate_label(label: str) -> str:
         "bos5m": "5m struktúra nem erősíti meg a setupot.",
         "tp_min_profit": "TP1 távolság túl kicsi – keress jobb kockázat/hozam arányt.",
         "min_stoploss": "Stop távolság túl kicsi – szélesítsd a védelmi sávot.",
-        "intervention_watch": "Intervention Watch tiltja az új belépőt.",
+        "intervention_watch": "Crypto Watch tiltja az új belépőt.",
         "ml_confidence": "ML valószínűség alacsony – belépő blokkolva.",
         "precision_flow_alignment": "Precision belépő: order flow megerősítés hiányzik.",
         "precision_trigger_sync": "Precision belépő: trigger szinkronra vár.",
@@ -1596,7 +1602,7 @@ def estimate_overnight_days(asset: str, now: Optional[datetime] = None) -> int:
     if now is None:
         now = datetime.now(timezone.utc)
     wd = now.weekday()
-    if asset in {"EURUSD", "USDJPY"}:
+    if asset == "EURUSD":
         return 3 if wd == 2 else 1   # FX: szerdai tripla díj
     if asset in {"GOLD_CFD", "USOIL", "NVDA", "SRTY"}:
         return 3 if wd == 4 else 1   # hétvégi elszámolás pénteken
@@ -1659,7 +1665,7 @@ def intervention_band(score: int, bands: Dict[str, List[int]]) -> str:
             if low <= score <= high:
                 return name
     if score >= 80:
-        return "IMMINENT"
+        return "EXTREME" if "EXTREME" in bands else "IMMINENT"
     if score >= 60:
         return "HIGH"
     if score >= 40:
@@ -1667,35 +1673,39 @@ def intervention_band(score: int, bands: Dict[str, List[int]]) -> str:
     return "LOW"
 
 
-def _normalize_usdjpy_sentiment(signal: SentimentSignal) -> float:
+def _normalize_btcusd_sentiment(signal: SentimentSignal) -> float:
     bias = (signal.bias or "").lower()
     direction = 1.0
-    if "usd" in bias:
-        if any(flag in bias for flag in ("bearish", "weak", "dovish")):
-            direction = -1.0
-    elif "jpy" in bias:
-        if any(flag in bias for flag in ("bullish", "strong", "hawkish")):
-            direction = -1.0
+    if any(flag in bias for flag in ("bear", "risk_off", "usd_bullish")):
+        direction = -1.0
+    elif any(flag in bias for flag in ("btc_bullish", "risk_on", "bull")):
+        direction = 1.0
     return signal.score * direction
 
 
-def _sentiment_points_usdjpy(
+def _sentiment_points_btcusd(
     signal: Optional[SentimentSignal], cfg: Dict[str, Any]
 ) -> Tuple[Optional[float], float]:
     if signal is None:
         return None, 0.0
-    normalized = _normalize_usdjpy_sentiment(signal)
-    threshold = float(cfg.get("sentiment_min_abs", 0.15) or 0.0)
+    normalized = _normalize_btcusd_sentiment(signal)
+    threshold = float(cfg.get("sentiment_min_abs", 0.2) or 0.0)
     if abs(normalized) < threshold:
         return normalized, 0.0
-    weight_pos = float(cfg.get("sentiment_weight_positive", 6.0) or 0.0)
-    weight_neg = float(cfg.get("sentiment_weight_negative", 4.0) or 0.0)
+    weight_pos = float(cfg.get("sentiment_weight_positive", 7.0) or 0.0)
+    weight_neg = float(cfg.get("sentiment_weight_negative", 5.0) or 0.0)
     weight = weight_pos if normalized >= 0 else weight_neg
     severity = signal.effective_severity
     return normalized, normalized * weight * severity
 
 
-def compute_irs_usdjpy(
+def _percent_change(current: Optional[float], previous: Optional[float]) -> Optional[float]:
+    if current is None or previous is None or previous == 0:
+        return None
+    return (current - previous) / previous * 100.0
+
+
+def compute_btcusd_intraday_watch(
     df_1m: pd.DataFrame,
     df_5m: pd.DataFrame,
     now_utc: datetime,
@@ -1703,20 +1713,18 @@ def compute_irs_usdjpy(
     news_flag: int = 0,
     sentiment_signal: Optional[SentimentSignal] = None,
 ) -> Tuple[int, str, Dict[str, Any]]:
-    cfg = config.get("intervention_watch", config)
+    cfg = dict(config.get("crypto_watch", config))
     metrics: Dict[str, Any] = {
         "price": None,
-        "nearest_big_figure": None,
-        "dist_pips": None,
-        "roc_30m_pips": None,
-        "d5_pips": None,
-        "atr5_pips": None,
-        "atr5_median_pips": None,
-        "rv_ratio": None,
-        "session_points": 0,
-        "comms_points": 0,
-        "comms_from_flag": 0,
-        "comms_from_sentiment": 0,
+        "roc_30m_pct": None,
+        "roc_5m_pct": None,
+        "atr5_usd": None,
+        "atr5_ratio": None,
+        "range_position_pct": None,
+        "session_points": 0.0,
+        "comms_points": 0.0,
+        "comms_from_flag": 0.0,
+        "comms_from_sentiment": 0.0,
         "sentiment_score": None,
         "components": {},
     }
@@ -1725,175 +1733,131 @@ def compute_irs_usdjpy(
         return 0, "LOW", metrics
 
     price = safe_float(df_1m["close"].iloc[-1])
-    if price is None:
+    if price is None or price <= 0:
         return 0, "LOW", metrics
 
-    big_figures = cfg.get("big_figures") or []
-    if big_figures:
-        nearest = min(big_figures, key=lambda x: abs(price - float(x)))
-    else:
-        nearest = round(price)
-    nearest = float(nearest)
-    dist_pips = abs(price - nearest) * 100.0
-    lps = max(0.0, min(30.0, 30.0 - dist_pips / 5.0))
-
-    roc_30 = 0.0
+    roc_thresholds = cfg.get("roc_thresholds_pct_30m", [1.2, 2.0, 3.2])
+    roc_30_pct = 0.0
     speed_score = 0.0
-    speed_thresholds = cfg.get("speed_thresholds_pips_30m", [40, 60, 80])
     if len(df_1m) >= 31:
         price_30 = safe_float(df_1m["close"].iloc[-30])
-        if price_30 is not None:
-            roc_30 = abs(price - price_30) * 100.0
-            if roc_30 >= float(speed_thresholds[2] if len(speed_thresholds) > 2 else 80):
-                speed_score += 18
-            elif roc_30 >= float(speed_thresholds[1] if len(speed_thresholds) > 1 else 60):
-                speed_score += 12
-            elif roc_30 >= float(speed_thresholds[0] if speed_thresholds else 40):
-                speed_score += 7
+        roc_30_pct = abs(_percent_change(price, price_30) or 0.0)
+        if roc_thresholds:
+            tiers = list(roc_thresholds) + [roc_thresholds[-1] + 1]
+            if roc_30_pct >= tiers[2]:
+                speed_score += 24
+            elif roc_30_pct >= tiers[1]:
+                speed_score += 16
+            elif roc_30_pct >= tiers[0]:
+                speed_score += 9
 
-    d5 = 0.0
-    atr5_val = None
-    atr5_series = atr(df_5m, 14)
+    roc_5_pct = 0.0
     if len(df_5m) >= 2:
-        close_curr = safe_float(df_5m["close"].iloc[-1])
-        close_prev = safe_float(df_5m["close"].iloc[-2])
-        if close_curr is not None and close_prev is not None:
-            d5 = abs(close_curr - close_prev) * 100.0
-    if not atr5_series.empty:
-        atr5_raw = safe_float(atr5_series.iloc[-1])
-        if atr5_raw is not None:
-            atr5_val = atr5_raw
-    atr5_pips = (atr5_val or 0.0) * 100.0
+        price_5 = safe_float(df_5m["close"].iloc[-2])
+        roc_5_pct = abs(_percent_change(price, price_5) or 0.0)
+        if roc_5_pct >= max(roc_thresholds[0] / 2 if roc_thresholds else 0.6, 0.4):
+            speed_score += 6
+    speed_score = min(32.0, speed_score)
+
+    atr5_series = atr(df_5m, 14)
+    atr5_val = safe_float(atr5_series.iloc[-1]) if not atr5_series.empty else None
     atr5_med = None
     if not atr5_series.empty:
         tail = atr5_series.tail(48).to_numpy(dtype=float)
         if tail.size:
             atr5_med = float(np.nanmedian(tail))
-    atr5_med_pips = (atr5_med or 0.0) * 100.0
+    atr_ratio = None
+    vol_score = 0.0
+    atr_spike_ratio = float(cfg.get("atr_spike_ratio", 1.7) or 1.7)
+    if atr5_val and atr5_med:
+        atr_ratio = atr5_val / atr5_med if atr5_med else None
+        if atr_ratio and atr_ratio >= atr_spike_ratio:
+            vol_score += 18
+        elif atr_ratio and atr_ratio >= max(atr_spike_ratio - 0.4, 1.2):
+            vol_score += 10
 
-    spike_mult = float(cfg.get("spike_multiplier_atr5", 1.2) or 1.2)
-    delta5_spike = False
-    if d5 >= 25.0 and atr5_pips > 0 and d5 >= spike_mult * atr5_pips:
-        speed_score += 12
-        delta5_spike = True
-    speed_score = min(30.0, speed_score)
+    range_score = 0.0
+    range_position = None
+    range_breakout_pct = float(cfg.get("range_breakout_pct", 1.0) or 1.0)
+    if len(df_5m) >= 288:
+        window = df_5m.tail(288)
+        high = safe_float(window["high"].max())
+        low = safe_float(window["low"].min())
+        if high and low and high > low:
+            range_position = (price - low) / (high - low) * 100.0
+            top_pct = (high - price) / price * 100.0
+            bottom_pct = (price - low) / price * 100.0
+            if top_pct <= range_breakout_pct:
+                range_score += 10
+            if bottom_pct <= range_breakout_pct:
+                range_score += 10
 
-    vol_spike = 0.0
-    atr_spike_ratio = float(cfg.get("atr_spike_ratio", 1.6) or 1.6)
-    atr_spike = False
-    if atr5_med_pips > 0 and atr5_pips > 0:
-        if (atr5_pips / atr5_med_pips) >= atr_spike_ratio:
-            vol_spike += 12
-            atr_spike = True
-
-    rv_ratio = None
-    vr_threshold = float(cfg.get("vr_threshold", 1.4) or 1.4)
-    vr_spike = False
-    if len(df_1m) >= 60 and len(df_5m) >= 12:
-        rv1 = safe_float(np.var(np.diff(df_1m["close"].iloc[-60:].to_numpy(dtype=float))))
-        rv5 = safe_float(np.var(np.diff(df_5m["close"].iloc[-12:].to_numpy(dtype=float))))
-        if rv1 is not None and rv5 is not None and rv5 > 0:
-            rv_ratio = rv1 / rv5
-            if rv_ratio >= vr_threshold:
-                vol_spike += 8
-                vr_spike = True
-
-    wick_pressure = False
-    wick_threshold = float(cfg.get("wick_ratio_trigger", 0.55) or 0.55)
-    if len(df_5m) >= 3:
-        last_bars = df_5m.iloc[-3:]
-        wick_hits = 0
-        for _, row in last_bars.iterrows():
-            high = safe_float(row.get("high"))
-            low = safe_float(row.get("low"))
-            open_ = safe_float(row.get("open"))
-            close = safe_float(row.get("close"))
-            if None in (high, low, open_, close):
-                continue
-            total = high - low
-            if total <= 0:
-                continue
-            if close >= open_:
-                upper = high - max(open_, close)
-                if upper / total >= wick_threshold:
-                    wick_hits += 1
-        if wick_hits >= 2:
-            vol_spike += 4
-            wick_pressure = True
-
-    vol_spike = min(20.0, vol_spike)
-
-    session_points = 0.0
-    primary = cfg.get("session_primary_utc")
-    secondary = cfg.get("session_secondary_utc")
-    if isinstance(primary, (list, tuple)) and len(primary) == 2:
-        if in_utc_range(now_utc, str(primary[0]), str(primary[1])):
-            session_points += 8
-    if isinstance(secondary, (list, tuple)) and len(secondary) == 2:
-        if in_utc_range(now_utc, str(secondary[0]), str(secondary[1])):
-            session_points += 3
-    session_points = min(10.0, session_points)
+    var_ratio = None
+    if len(df_1m) >= 120 and len(df_5m) >= 24:
+        short_var = np.var(np.diff(df_1m["close"].iloc[-120:].to_numpy(dtype=float)))
+        long_var = np.var(np.diff(df_5m["close"].iloc[-24:].to_numpy(dtype=float)))
+        if np.isfinite(short_var) and np.isfinite(long_var) and long_var > 0:
+            var_ratio = float(short_var / long_var)
+            if var_ratio >= 1.8:
+                vol_score += 8
+            elif var_ratio >= 1.4:
+                vol_score += 4
+    vol_score = min(24.0, vol_score)
 
     base_comms = max(0.0, min(10.0, float(news_flag or 0)))
-    sentiment_norm, sentiment_points = _sentiment_points_usdjpy(sentiment_signal, cfg)
+    sentiment_norm, sentiment_points = _sentiment_points_btcusd(sentiment_signal, cfg)
     applied_sentiment = 0.0
     if sentiment_points:
         applied_sentiment = max(-base_comms, min(sentiment_points, 10.0 - base_comms))
-    comms = max(0.0, min(10.0, base_comms + applied_sentiment))
+    comms = max(0.0, min(12.0, base_comms + applied_sentiment))
 
-    total_score = lps + speed_score + vol_spike + session_points + comms
-    irs = int(round(max(0.0, min(100.0, total_score))))
-    band = intervention_band(irs, cfg.get("irs_bands", {}))
+    total_score = speed_score + vol_score + range_score + comms
+    crypto_score = int(round(max(0.0, min(100.0, total_score))))
+    band = intervention_band(crypto_score, config.get("irs_bands", {}))
 
     metrics.update(
         {
             "price": price,
-            "nearest_big_figure": nearest,
-            "dist_pips": dist_pips,
-            "roc_30m_pips": roc_30,
-            "d5_pips": d5,
-            "atr5_pips": atr5_pips,
-            "atr5_median_pips": atr5_med_pips,
-            "rv_ratio": rv_ratio,
-            "session_points": session_points,
+            "roc_30m_pct": roc_30_pct,
+            "roc_5m_pct": roc_5_pct,
+            "atr5_usd": atr5_val,
+            "atr5_ratio": atr_ratio,
+            "range_position_pct": range_position,
+            "variance_ratio": var_ratio,
+            "session_points": 0.0,
             "comms_points": comms,
             "comms_from_flag": base_comms,
             "comms_from_sentiment": applied_sentiment,
             "sentiment_score": sentiment_norm,
             "components": {
-                "level_pressure": lps,
                 "speed": speed_score,
-                "vol_spike": vol_spike,
-                "session": session_points,
+                "volatility": vol_score,
+                "range": range_score,
                 "comms": comms,
-                "delta5_spike": delta5_spike,
-                "atr_spike": atr_spike,
-                "vr_spike": vr_spike,
-                "wick_pressure": wick_pressure,
             },
         }
     )
 
-    return irs, band, metrics
+    return crypto_score, band, metrics
 
 
 def load_intervention_config(outdir: str) -> Dict[str, Any]:
-    base_cfg = deepcopy(INTERVENTION_WATCH_DEFAULT.get("USDJPY", {}))
+    base_cfg = deepcopy(INTERVENTION_WATCH_DEFAULT.get("BTCUSD", {}))
     path = os.path.join(outdir, INTERVENTION_CONFIG_FILENAME)
     override = load_json(path)
     if isinstance(override, dict):
         candidate = override
-        if "USDJPY" in candidate and isinstance(candidate["USDJPY"], dict):
-            candidate = candidate["USDJPY"]
-        if "intervention_watch" in candidate and isinstance(candidate["intervention_watch"], dict):
-            candidate = candidate["intervention_watch"]
+        if "BTCUSD" in candidate and isinstance(candidate["BTCUSD"], dict):
+            candidate = candidate["BTCUSD"]
+        if "crypto_watch" in candidate and isinstance(candidate["crypto_watch"], dict):
+            candidate = candidate["crypto_watch"]
         if isinstance(candidate, dict):
             base_cfg = deep_update(deepcopy(base_cfg), candidate)
     return base_cfg
 
 
 def load_intervention_news_flag(outdir: str, config: Dict[str, Any]) -> int:
-    cfg = config.get("intervention_watch", config)
+    cfg = config.get("crypto_watch", config)
     base_flag = cfg.get("news_flag", 0)
     path = os.path.join(outdir, INTERVENTION_NEWS_FILENAME)
     data = load_json(path)
@@ -1931,47 +1895,32 @@ def build_intervention_reasons(
     config: Dict[str, Any],
 ) -> List[str]:
     reasons: List[str] = []
-    cfg = config.get("intervention_watch", config)
-    dist = safe_float(metrics.get("dist_pips"))
-    nearest = safe_float(metrics.get("nearest_big_figure"))
-    if dist is not None and nearest is not None and dist <= 30:
-        reasons.append(f"Near {nearest:.2f} (dist {dist:.0f} pip)")
+    roc = safe_float(metrics.get("roc_30m_pct"))
+    if roc is not None and roc >= 3.0:
+        reasons.append(f"30m change {roc:.1f}%")
+    elif roc is not None and roc >= 1.5:
+        reasons.append(f"30m impulse {roc:.1f}%")
 
-    roc = safe_float(metrics.get("roc_30m_pips"))
-    speed_thresholds = cfg.get("speed_thresholds_pips_30m", [40, 60, 80])
-    if roc is not None and speed_thresholds:
-        if roc >= float(speed_thresholds[-1]):
-            reasons.append(f"+Speed 30m={roc:.0f} pip")
-        elif roc >= float(speed_thresholds[0]):
-            reasons.append(f"Speed 30m={roc:.0f} pip")
+    roc5 = safe_float(metrics.get("roc_5m_pct"))
+    if roc5 is not None and roc5 >= 1.0:
+        reasons.append(f"5m burst {roc5:.1f}%")
 
-    if metrics.get("components", {}).get("delta5_spike"):
-        d5 = safe_float(metrics.get("d5_pips"))
-        atr5 = safe_float(metrics.get("atr5_pips"))
-        ratio = (d5 / atr5) if d5 and atr5 else None
-        if ratio:
-            reasons.append(f"5m Δ={d5:.0f} pip ({ratio:.1f}×ATR5)")
-        elif d5:
-            reasons.append(f"5m Δ={d5:.0f} pip spike")
+    atr_ratio = safe_float(metrics.get("atr5_ratio"))
+    if atr_ratio and atr_ratio >= 1.7:
+        reasons.append(f"ATR spike {atr_ratio:.1f}×")
+    elif atr_ratio and atr_ratio >= 1.3:
+        reasons.append(f"ATR elevated {atr_ratio:.1f}×")
 
-    if metrics.get("components", {}).get("atr_spike"):
-        reasons.append("ATR5 spike vs 48-bar median")
+    variance_ratio = safe_float(metrics.get("variance_ratio"))
+    if variance_ratio and variance_ratio >= 1.8:
+        reasons.append(f"Variance-ratio {variance_ratio:.2f}")
 
-    if metrics.get("components", {}).get("vr_spike"):
-        vr = safe_float(metrics.get("rv_ratio"))
-        if vr:
-            reasons.append(f"Variance-ratio={vr:.2f} (>={cfg.get('vr_threshold', 1.4)})")
-        else:
-            reasons.append("Variance-ratio spike")
-
-    if metrics.get("components", {}).get("wick_pressure"):
-        reasons.append("Upper wick pressure (parabola risk)")
-
-    session_pts = safe_float(metrics.get("session_points"))
-    if session_pts and session_pts >= 6:
-        reasons.append("Tokyo session focus")
-    elif session_pts and session_pts > 0:
-        reasons.append("US afternoon window")
+    range_position = safe_float(metrics.get("range_position_pct"))
+    if range_position is not None:
+        if range_position >= 95:
+            reasons.append("Pressing daily high")
+        elif range_position <= 5:
+            reasons.append("Testing daily low")
 
     comms_flag = safe_float(metrics.get("comms_from_flag"))
     if comms_flag:
@@ -1986,68 +1935,42 @@ def build_intervention_reasons(
 
 def build_intervention_policy(band: str, metrics: Dict[str, Any], config: Dict[str, Any]) -> List[str]:
     policy: List[str] = [
-        "spread_guard_top3bars>=1.4×normal → pause entries 5-10m",
+        "increase_spread_buffer_when_volatility>=1.5×",
         "discord_alert_cooldown:10m",
     ]
-    cfg = config.get("intervention_watch", config)
-    actions = cfg.get("actions", {})
+    actions = config.get("crypto_watch", {}).get("actions", {})
 
-    if band in {"HIGH", "IMMINENT"}:
+    if band in {"HIGH", "EXTREME"}:
         high_actions = actions.get("HIGH", {})
-        if high_actions.get("block_new_longs"):
-            policy.append("block_new_longs")
-        reduce_pct = high_actions.get("reduce_long_size_pct")
-        if reduce_pct:
-            policy.append(f"reduce_long_size_pct:{int(reduce_pct)}")
-        p_add = high_actions.get("p_score_long_add")
-        if p_add:
-            policy.append(f"p_score_long_add:+{int(p_add)}")
         if high_actions.get("tighten_sl"):
             ts = high_actions["tighten_sl"]
             policy.append(
                 "tighten_sl>=max({:.1f}×ATR5m,{:.2f}%)".format(
-                    float(ts.get("atr5_mult", 0.3)), float(ts.get("min_pct", 0.10))
+                    float(ts.get("atr5_mult", 0.4)), float(ts.get("min_pct", 0.35))
                 )
             )
-        policy.append("jpy_cross_longs_blocked")
-        policy.append("jpy_cross_shorts_slippage_buffer")
+        if high_actions.get("require_retest"):
+            policy.append("require_retest_before_breakout_entries")
+        p_add = high_actions.get("p_score_add", 0)
+        if p_add:
+            policy.append(f"p_score_long_add:+{int(p_add)}")
 
-    if band == "IMMINENT":
-        immin_actions = actions.get("IMMINENT", {})
-        force_pct = immin_actions.get("force_partial_close_long_pct")
-        if force_pct:
-            policy.append(f"force_partial_close_long_pct:{int(force_pct)}")
-        trailing = immin_actions.get("trailing_sl")
-        if trailing:
-            policy.append(
-                "trailing_sl>=max({:.1f}×ATR5m,{:.2f}%)".format(
-                    float(trailing.get("atr5_mult", 0.5)), float(trailing.get("min_pct", 0.20))
-                )
-            )
-        pb = immin_actions.get("allow_new_shorts_after_pullback", {})
-        if pb:
-            pullback_mult = float(pb.get("pullback_atr5_mult", 0.5) or 0.5)
-            rr_min = float(pb.get("rr_min", 2.5) or 2.5)
-            policy.append(
-                "new_shorts_after_pullback≥{:.1f}×ATR5m(rr≥{:.1f})".format(
-                    pullback_mult,
-                    rr_min,
-                )
-            )
-        lev_cap = immin_actions.get("leverage_cap_jpy_cross")
-        if lev_cap:
-            policy.append(f"jpy_cross_leverage_cap:{float(lev_cap):.0f}x")
-        policy.append("tp_targets_jpy_cross:1.8R/2.8R")
-        policy.append("market_entries_blocked_use_limit_with≥0.5×ATR5m_buffer")
+    if band == "EXTREME":
+        extreme_actions = actions.get("EXTREME", {})
+        if extreme_actions.get("pause_breakouts"):
+            policy.append("pause_breakout_entries")
+        limit_mult = extreme_actions.get("limit_order_atr_buffer", 0.6)
+        policy.append(f"limit_orders_buffer≥{float(limit_mult):.1f}×ATR5m")
+        policy.append("scale_out_on_1.5×ATR adverse move")
 
     return policy
 
 
 def save_intervention_asset_summary(outdir: str, risk_summary: Dict[str, Any]) -> None:
     payload = {
-        "asset": "USDJPY",
+        "asset": "BTCUSD",
         "generated_utc": nowiso(),
-        "boj_mof_risk": risk_summary,
+        "crypto_risk": risk_summary,
     }
     save_json(os.path.join(outdir, INTERVENTION_SUMMARY_FILENAME), payload)
 
@@ -3416,11 +3339,11 @@ def analyze(asset: str) -> Dict[str, Any]:
     sentiment_signal = None
     sentiment_applied_points: Optional[float] = None
     sentiment_normalized: Optional[float] = None
-    if asset == "USDJPY":
+    if asset == "BTCUSD":
         intervention_config = load_intervention_config(outdir)
         news_flag = load_intervention_news_flag(outdir, intervention_config)
         sentiment_signal = load_sentiment(asset, Path(outdir))
-        irs_value, irs_band, irs_metrics = compute_irs_usdjpy(
+        irs_value, irs_band, irs_metrics = compute_btcusd_intraday_watch(
             k1m_closed,
             k5m_closed,
             analysis_now,
@@ -3432,10 +3355,9 @@ def analyze(asset: str) -> Dict[str, Any]:
         iw_reasons = build_intervention_reasons(irs_metrics, intervention_config)
         policy = build_intervention_policy(irs_band, irs_metrics, intervention_config)
         score_breakdown = {
-            "level_pressure": irs_metrics.get("components", {}).get("level_pressure", 0.0),
             "speed": irs_metrics.get("components", {}).get("speed", 0.0),
-            "vol_spike": irs_metrics.get("components", {}).get("vol_spike", 0.0),
-            "session": irs_metrics.get("components", {}).get("session", 0.0),
+            "volatility": irs_metrics.get("components", {}).get("volatility", 0.0),
+            "range": irs_metrics.get("components", {}).get("range", 0.0),
             "comms": irs_metrics.get("components", {}).get("comms", 0.0),
         }
         intervention_summary = {
@@ -3680,7 +3602,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         )
     )
 
-    if asset in {"EURUSD", "USDJPY", "NVDA", "SRTY"}:
+    if asset in {"EURUSD", "BTCUSD", "NVDA", "SRTY"}:
         if bias4h != bias1h or bias1h not in {"long", "short"}:
             trend_bias = "neutral"
 
@@ -4218,7 +4140,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 "Cash sessionen kívül — ATR nem elég magas a kereskedéshez"
             )
 
-    if asset in {"EURUSD", "USDJPY"}:
+    if asset in {"EURUSD", "BTCUSD"}:
         liquidity_ok_base = bool(fib_ok)
     elif asset == "SRTY":
         liquidity_ok_base = bool(fib_ok)
@@ -4256,9 +4178,13 @@ def analyze(asset: str) -> Dict[str, Any]:
     p_score_min_base = get_p_score_min(asset)
     p_score_min_local = p_score_min_base
     entry_thresholds_meta["p_score_min_base"] = p_score_min_base
-    if asset == "USDJPY" and intervention_band in {"HIGH", "IMMINENT"} and effective_bias == "long":
+    if asset == "BTCUSD" and intervention_band in {"HIGH", "EXTREME"} and effective_bias == "long":
         p_score_min_local += INTERVENTION_P_SCORE_ADD
-        note = f"Intervention Watch: USDJPY long P-score küszöb +{INTERVENTION_P_SCORE_ADD} (IRS {intervention_summary['irs']} {intervention_band})" if intervention_summary else None
+        note = (
+            f"Crypto Watch: BTCUSD long P-score küszöb +{INTERVENTION_P_SCORE_ADD} (IRS {intervention_summary['irs']} {intervention_band})"
+            if intervention_summary
+            else None
+        )
         if note and note not in reasons:
             reasons.append(note)
         entry_thresholds_meta["p_score_min_intervention_add"] = INTERVENTION_P_SCORE_ADD
@@ -4279,7 +4205,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     momentum_rr_min = max(momentum_rr_min, dynamic_tp_profile["momentum"]["rr"])
 
     liquidity_label = "liquidity(fib|sweep|ema21|retest)"
-    if asset in {"EURUSD", "USDJPY", "SRTY"}:
+    if asset in {"EURUSD", "BTCUSD", "SRTY"}:
         liquidity_label = "liquidity(fib zone)"
     elif asset == "NVDA":
         liquidity_label = "liquidity(fib|retest)"
@@ -4820,14 +4746,15 @@ def analyze(asset: str) -> Dict[str, Any]:
                 reasons.append(msg)
 
     if intervention_summary and intervention_summary.get("irs", 0) >= 40:
-        highlight = f"BoJ/MoF Intervention Watch: IRS {intervention_summary['irs']} ({intervention_summary['band']})"
+        highlight = f"Crypto Watch: IRS {intervention_summary['irs']} ({intervention_summary['band']})"
         if highlight not in reasons:
             reasons.insert(0, highlight)
-    if asset == "USDJPY" and intervention_band:
-        if decision == "buy" and intervention_band in {"HIGH", "IMMINENT"}:
+    if asset == "BTCUSD" and intervention_band:
+        if decision == "buy" and intervention_band in {"HIGH", "EXTREME"}:
             block_msg = (
-                f"Intervention Watch: IRS {intervention_summary['irs']} ({intervention_band}) → USDJPY long belépés tiltva"
-                if intervention_summary else "Intervention Watch: USDJPY long belépés tiltva"
+                f"Crypto Watch: IRS {intervention_summary['irs']} ({intervention_band}) → BTCUSD long belépés tiltva"
+                if intervention_summary
+                else "Crypto Watch: BTCUSD long belépés tiltva"
             )
             if block_msg not in reasons:
                 reasons.insert(0, block_msg)
@@ -4835,11 +4762,11 @@ def analyze(asset: str) -> Dict[str, Any]:
             entry = sl = tp1 = tp2 = rr = None
             if "intervention_watch" not in missing:
                 missing.append("intervention_watch")
-        elif decision == "sell" and intervention_band == "IMMINENT":
-            note_short = "Intervention Watch: új short csak 0.5×ATR5m pullback + RR≥2.5 után"
+        elif decision == "sell" and intervention_band == "EXTREME":
+            note_short = "Crypto Watch: új short csak 0.5×ATR5m pullback + RR≥2.5 után"
             if note_short not in reasons:
                 reasons.append(note_short)
-        if intervention_band == "IMMINENT":
+        if intervention_band == "EXTREME":
             guard_note = "Order guard: market belépés tiltva, limit ≥0.5×ATR5m bufferrel"
             if guard_note not in reasons:
                 reasons.append(guard_note)
@@ -5502,6 +5429,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
