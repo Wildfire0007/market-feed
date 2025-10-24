@@ -9,7 +9,7 @@ need for broker connectivity.
 
 Example usage::
 
-    python -m scripts.backtest --root reports/history --asset USDJPY
+    python -m scripts.backtest --root reports/history --asset BTCUSD
 
 """
 
