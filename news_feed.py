@@ -1,7 +1,7 @@
-"""Lightweight sentiment loader for the USDJPY intervention watch.
+"""Lightweight sentiment loader for the market-feed assets.
 
 The production environment drops a ``news_sentiment.json`` file into the
-``public/USDJPY`` directory whenever macro news flashes occur.  The same
+``public/BTCUSD`` directory whenever crypto news flashes occur.  The same
 machinery can be extended to additional instruments by dropping sentiment
 snapshots into ``public/<ASSET>/sentiment.json`` (or ``events.json``) with an
 optional ``severity`` field so that higher impact events influence the trading
@@ -13,8 +13,8 @@ Single snapshot example:
 
     {
         "score": 0.75,
-        "bias": "usd_bullish",
-        "headline": "MoF reassures markets, yen weakens",
+        "bias": "btc_bullish",
+        "headline": "ETF inflows accelerate, bitcoin rallies",
         "severity": 0.6,
         "expires_at": "2024-05-01T12:30:00Z"
     }
@@ -37,7 +37,7 @@ Event list example (the loader picks the most severe, non-expired entry):
 
 The ``score`` lies within ``[-1, 1]`` while ``severity`` is clipped to
 ``[0, 1]``.  ``expires_at`` invalidates stale sentiment snapshots.  The module
-performs no network access besides the optional USDJPY auto-refresh; it simply
+performs no network access besides the optional BTCUSD auto-refresh; it simply
 parses the JSON, validates the timestamp and returns a structured payload to
 ``analysis.py``.
 """
@@ -54,7 +54,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import dateutil.parser
 
-from usdjpy_sentiment import DEFAULT_MIN_INTERVAL, SENTIMENT_FILENAME, refresh_usdjpy_sentiment
+from btcusd_sentiment import DEFAULT_MIN_INTERVAL, SENTIMENT_FILENAME, refresh_btcusd_sentiment
 
 PUBLIC_DIR = Path(os.getenv("PUBLIC_DIR", "public"))
 
@@ -63,13 +63,13 @@ _OVERRIDE_ENV = "SENTIMENT_OVERRIDE_FILE"
 _BASE_DIR = Path(__file__).resolve().parent
 
 # Disable automatic sentiment refresh by default; operators can opt-in via
-# ``USDJPY_SENTIMENT_AUTO=1`` when a live news API is available.
+# ``BTCUSD_SENTIMENT_AUTO=1`` when a live news API is available.
 _AUTO_REFRESH_DEFAULT = "0"
-_AUTO_REFRESH_FLAG = os.getenv("USDJPY_SENTIMENT_AUTO", _AUTO_REFRESH_DEFAULT).lower()
+_AUTO_REFRESH_FLAG = os.getenv("BTCUSD_SENTIMENT_AUTO", _AUTO_REFRESH_DEFAULT).lower()
 AUTO_REFRESH_ENABLED = _AUTO_REFRESH_FLAG not in {"0", "false", "off", "no"}
 
 def _auto_interval(default: int) -> int:
-    raw = os.getenv("USDJPY_SENTIMENT_MIN_INTERVAL")
+    raw = os.getenv("BTCUSD_SENTIMENT_MIN_INTERVAL")
     if not raw:
         return default
     try:
@@ -184,10 +184,10 @@ def _select_event(events: Iterable[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     return candidates[0]
 
 
-def _load_usdjpy_sentiment(base: Path) -> Optional[SentimentSignal]:
+def _load_btcusd_sentiment(base: Path) -> Optional[SentimentSignal]:
     if AUTO_REFRESH_ENABLED:
         try:
-            refresh_usdjpy_sentiment(
+            refresh_btcusd_sentiment(
                 api_key=os.getenv("NEWSAPI_KEY", ""),
                 output_dir=base,
                 min_interval=AUTO_REFRESH_MIN_INTERVAL,
@@ -448,8 +448,8 @@ def load_sentiment(asset: str, outdir: Optional[Path] = None) -> Optional[Sentim
         base = Path(base)
 
     override_signal = _load_override_sentiment(asset_key)
-    if asset_key == "USDJPY":
-        primary = _load_usdjpy_sentiment(base)
+    if asset_key == "BTCUSD":
+        primary = _load_btcusd_sentiment(base)
         return _select_sentiment_signal(primary, override_signal)
     generic_signal = _load_generic_sentiment(asset_key, base)
     return _select_sentiment_signal(generic_signal, override_signal)
