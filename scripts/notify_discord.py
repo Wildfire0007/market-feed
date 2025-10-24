@@ -181,7 +181,7 @@ except Exception as exc:  # pragma: no cover - fallback
 # ---- Megjelenés / emoji / színek ----
 EMOJI = {
     "EURUSD": "💶",
-    "USDJPY": "💴",
+    "BTCUSD": "₿",
     "GOLD_CFD": "💰",
     "USOIL": "🛢️",
     "NVDA": "🤖",
