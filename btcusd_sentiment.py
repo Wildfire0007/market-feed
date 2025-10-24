@@ -1,4 +1,4 @@
-""Utilities for fetching and maintaining BTCUSD intraday sentiment snapshots."""
+"""Utilities for fetching and maintaining BTCUSD intraday sentiment snapshots."""
 from __future__ import annotations
 
 import json
