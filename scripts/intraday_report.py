@@ -21,7 +21,7 @@ import analysis
 ASSETS: Iterable[str] = getattr(
     analysis,
     "ASSETS",
-    ("EURUSD", "GOLD_CFD", "USDJPY", "USOIL", "NVDA", "SRTY"),
+    ("EURUSD", "GOLD_CFD", "BTCUSD", "USOIL", "NVDA", "SRTY"),
 )
 PUBLIC_DIR = os.getenv("PUBLIC_DIR", getattr(analysis, "PUBLIC_DIR", "public"))
 REPORT_DIR = os.getenv("REPORT_DIR", "reports")
