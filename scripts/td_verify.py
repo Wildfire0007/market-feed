@@ -16,7 +16,7 @@ import requests
 PUBLIC_DIR = "public"
 ASSETS = {
     "EURUSD": {"symbol": "EUR/USD", "exchange": "FX"},
-    "USDJPY": {"symbol": "USD/JPY", "exchange": "FX"},
+    "BTCUSD": {"symbol": "BTC/USD", "exchange": "CRYPTO"},
     "GOLD_CFD": {"symbol": "XAU/USD"},
     "USOIL": {"symbol": "WTI/USD"},
     "NVDA": {
