@@ -73,7 +73,7 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--skip-news",
         action="store_true",
-        help="Skip USDJPY sentiment refresh step",
+        help="Skip BTCUSD sentiment refresh step",
     )
     parser.add_argument(
         "--force-news",
