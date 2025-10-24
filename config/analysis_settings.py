@@ -70,12 +70,38 @@ def _build_session_windows(raw: Dict[str, Any]) -> Dict[str, Dict[str, Optional[
     return processed
 
 
+def _optional_int(value: Any, *, field: str, asset: str) -> Optional[int]:
+    """Return ``value`` converted to ``int`` when possible, otherwise ``None``.
+
+    The configuration uses ``null`` to express the absence of a time bound.  When
+    that happens (or when an invalid value sneaks in) we want the analysis layer
+    to behave as if there is no restriction instead of defaulting to midnight.
+    """
+
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "Ignoring invalid %s value %r for asset %s in session_time_rules",
+            field,
+            value,
+            asset,
+        )
+        return None
+
+
 def _build_session_time_rules(raw: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     processed: Dict[str, Dict[str, Any]] = {}
     for asset, meta in raw.items():
         processed[asset] = {
-            "sunday_open_minute": int(meta.get("sunday_open_minute", 0)),
-            "friday_close_minute": int(meta.get("friday_close_minute", 0)),
+            "sunday_open_minute": _optional_int(
+                meta.get("sunday_open_minute"), field="sunday_open_minute", asset=asset
+            ),
+            "friday_close_minute": _optional_int(
+                meta.get("friday_close_minute"), field="friday_close_minute", asset=asset
+            ),
             "daily_breaks": _convert_sequence(meta.get("daily_breaks")),
         }
     return processed
