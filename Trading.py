@@ -1033,14 +1033,41 @@ def wait_for_realtime_background() -> None:
 
 # ─────────────────────── több-szimbólumos fallback ───────────────────────
 
+def _symbol_attempt_variants(symbol: str,
+                             exchange: Optional[str]) -> List[Tuple[str, Optional[str]]]:
+    """Generate fallback symbol/exchange combinations for Twelve Data requests."""
+
+    variants: List[Tuple[str, Optional[str]]] = []
+    if not symbol:
+        return variants
+
+    base = (symbol, exchange)
+    variants.append(base)
+
+    if exchange:
+        variants.append((symbol, None))
+        if ":" not in symbol:
+            variants.append((f"{symbol}:{exchange}", None))
+
+    if "/" in symbol:
+        compact = symbol.replace("/", "")
+        if compact:
+            variants.append((compact, exchange))
+            if exchange:
+                variants.append((compact, None))
+
+    return variants
+
+
 def _normalize_symbol_attempts(cfg: Dict[str, Any]) -> List[Tuple[str, Optional[str]]]:
     base_symbol = cfg["symbol"]
     base_exchange = cfg.get("exchange")
     attempts: List[Tuple[str, Optional[str]]] = []
 
     def push(symbol: Optional[str], exchange: Optional[str]) -> None:
-        if symbol:
-            attempts.append((symbol, exchange))
+        if not symbol:
+            return
+        attempts.extend(_symbol_attempt_variants(symbol, exchange))
 
     push(base_symbol, base_exchange)
     for alt in cfg.get("alt", []):
@@ -1053,7 +1080,7 @@ def _normalize_symbol_attempts(cfg: Dict[str, Any]) -> List[Tuple[str, Optional[
             exchange = alt[1] if len(alt) > 1 else base_exchange
             push(symbol, exchange)
 
-    seen = set()
+    seen: set[Tuple[str, Optional[str]]] = set()
     unique: List[Tuple[str, Optional[str]]] = []
     for sym, exch in attempts:
         key = (sym, exch)
@@ -1382,6 +1409,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
