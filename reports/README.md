@@ -12,16 +12,16 @@ el a `public/<ASSET>/signal.json` és a kapcsolódó riportokat.
 
 ## Makro hangulatfolyam (news_sentiment.json) frissítése
 
-### Automatikus frissítés scripts/update_usdjpy_sentiment.py-vel
+### Automatikus frissítés scripts/update_btcusd_sentiment.py-vel
 
 #### Beépített automatikus futtatás
 
-Amint `analysis.py` USDJPY eszközhöz fut, a `news_feed.load_sentiment()` automatikusan meghívja a
+Amint `analysis.py` BTCUSD eszközhöz fut, a `news_feed.load_sentiment()` automatikusan meghívja a
 NewsAPI-alapú lekérdező modult. Ha a `NEWSAPI_KEY` környezeti változó be van állítva és a
-`USDJPY_SENTIMENT_AUTO` nincs kikapcsolva (`0`/`false`), a rendszer:
+`BTCUSD_SENTIMENT_AUTO` nincs kikapcsolva (`0`/`false`), a rendszer:
 
 1. ellenőrzi, hogy a meglévő `news_sentiment.json` snapshot lejárt-e, vagy régebbi, mint a
-   `USDJPY_SENTIMENT_MIN_INTERVAL` (alapértelmezés: 600 s),
+   `BTCUSD_SENTIMENT_MIN_INTERVAL` (alapértelmezés: 600 s),
 2. szükség esetén lekéri a legfrissebb címeket a NewsAPI-ról, kiszámolja a kulcsszavas
    sentiment-átlagot, majd frissíti a fájlt új `expires_at` időbélyeggel.
 
@@ -35,18 +35,18 @@ legutóbbi érvényes sentimenttel dolgozik tovább.
 1. **API-kulcs beállítása.** Szerezz NewsAPI.org (vagy kompatibilis) kulcsot, majd add ki a
    `export NEWSAPI_KEY="<kulcs>"` parancsot. A script az `os.getenv`-en keresztül tölti be a
    titkot, így hiányzó kulcs esetén biztonságosan kilép.
-2. **Script futtatása.** Példa parancs: `python scripts/update_usdjpy_sentiment.py \
-   --query "USDJPY intervention" --country jp --expires-minutes 90`. A futás több oldalt is
+2. **Script futtatása.** Példa parancs: `python scripts/update_btcusd_sentiment.py \
+   --query "bitcoin OR btcusd" --expires-minutes 60`. A futás több oldalt is
    lekér a NewsAPI-tól, exponenciális visszavárással kezeli a rate-limit válaszokat, majd a
    kulcsszavas heurisztika alapján számolja ki a −1…1 tartományú sentiment pontszámot.
 3. **Fájl frissítése.** A script automatikusan létrehozza/frissíti a
-   `public/USDJPY/news_sentiment.json` állományt a következő mezőkkel:
+   `public/BTCUSD/news_sentiment.json` állományt a következő mezőkkel:
 
    ```json
    {
      "score": 0.42,
-     "bias": "usd_bullish",
-     "headline": "MoF warns about rapid yen moves",
+     "bias": "btc_bullish",
+     "headline": "ETF inflows accelerate bitcoin rally",
      "source_url": "https://...",
      "published_at": "2024-05-01T11:05:00+00:00",
      "expires_at": "2024-05-01T12:35:00Z"
@@ -63,7 +63,7 @@ legutóbbi érvényes sentimenttel dolgozik tovább.
 - **Ütemezett futtatás.** A scriptet futtathatod cronból vagy bármelyik schedulerből (pl. systemd
   timer). Példa cron bejegyzés, ami 15 percenként frissít, ha elérhető új hír::
 
-      */15 * * * * NEWSAPI_KEY=... /usr/bin/python /path/to/repo/scripts/update_usdjpy_sentiment.py --expires-minutes 60 >> /var/log/usdjpy_sentiment.log 2>&1
+      */15 * * * * NEWSAPI_KEY=... /usr/bin/python /path/to/repo/scripts/update_BTCUSD_sentiment.py --expires-minutes 60 >> /var/log/BTCUSD_sentiment.log 2>&1
 
 - **Hibafigyelés.** A script nem írja felül a meglévő fájlt, ha nincs találat; ilyenkor kilép
   hiba nélkül (exit code 3) és a korábbi sentiment marad érvényben egészen a lejáratig.
@@ -74,11 +74,11 @@ legutóbbi érvényes sentimenttel dolgozik tovább.
 
 ### Manuális override
 
-1. **Forrás beazonosítása.** Amint beérkezik egy releváns USDJPY makrohír (pl. japán pénzügyi
-   minisztériumi kommunikáció, váratlan kamatdöntés vagy USD-érzékeny headline), az operátor
-   eldönti, hogy a hír befolyásolja-e az intervenciós kockázatot. A döntéshez használhatók a
-   belső hírfeedek, Bloomberg/Reuters jelzések vagy egy dedikált newsroom bot kivonatai.
-2. **JSON fájl szerkesztése.** Navigálj a `public/USDJPY/` könyvtárba, és nyisd meg a
+1. **Forrás beazonosítása.** Amint beérkezik egy releváns BTCUSD hír (pl. ETF-beáramlások,
+   szabályozói lépések vagy hálózati esemény), az operátor eldönti, hogy a hír befolyásolja-e a
+   rövid távú kockázati környezetet. A döntéshez használhatók a belső hírfeedek, Bloomberg/Reuters
+   jelzések vagy kripto specifikus monitoring botok kivonatai.
+2. **JSON fájl szerkesztése.** Navigálj a `public/BTCUSD/` könyvtárba, és nyisd meg a
    `news_sentiment.json` állományt. Ha nem létezik, hozz létre egy új, UTF-8 kódolású fájlt.
 3. **Értékek kitöltése.** A fájl szerkezete megegyezik a fenti példával; manuális frissítésnél is
    tartsd be a −1…1 tartományú `score` értéket és az ISO8601 formátumú `expires_at` mezőt.
