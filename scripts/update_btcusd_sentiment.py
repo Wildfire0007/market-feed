@@ -1,5 +1,5 @@
-"""Automate maintenance of USDJPY macro news sentiment snapshots."""
-from __future__ import annotations
+#!/usr/bin/env python3
+"""Refresh the BTCUSD news sentiment snapshot used by analysis.py."""
 
 import argparse
 import os
@@ -7,10 +7,11 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from usdjpy_sentiment import (
+from btcusd_sentiment import (
     DEFAULT_COUNTRY,
     DEFAULT_EXPIRY_MINUTES,
     DEFAULT_LANGUAGE,
+    DEFAULT_MIN_INTERVAL,
     DEFAULT_PAGE_SIZE,
     DEFAULT_QUERY,
     MAX_PAGES,
@@ -20,6 +21,7 @@ from usdjpy_sentiment import (
     determine_bias,
     ensure_output_dir,
     fetch_articles,
+    refresh_btcusd_sentiment,
     write_sentiment,
 )
 
@@ -30,9 +32,9 @@ def _env_api_key() -> Optional[str]:
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    default_output_dir = Path(os.getenv("PUBLIC_DIR", "public")) / "USDJPY"
+    default_output_dir = Path(os.getenv("PUBLIC_DIR", "public")) / "BTCUSD"
 
-    parser = argparse.ArgumentParser(description="Update USDJPY macro sentiment snapshot")
+    parser = argparse.ArgumentParser(description="Update BTCUSD news sentiment snapshot")
     parser.add_argument("--query", default=DEFAULT_QUERY, help="Search query for the news API")
     parser.add_argument(
         "--language", default=DEFAULT_LANGUAGE, help="ISO language code for filtering headlines"
@@ -65,6 +67,17 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=DEFAULT_PAGE_SIZE,
         help="Number of articles to request per page",
     )
+    parser.add_argument(
+        "--min-interval",
+        type=int,
+        default=DEFAULT_MIN_INTERVAL,
+        help="Minimum seconds between refresh attempts when running in cron",
+    )
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Use cached sentiment when it's fresh enough instead of rewriting",
+    )
     return parser.parse_args(argv)
 
 
@@ -74,6 +87,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not api_key:
         print("NEWSAPI_KEY is not set; cannot refresh sentiment", file=sys.stderr)
         return 1
+    
+    if args.auto:
+        result = refresh_btcusd_sentiment(
+            api_key=api_key,
+            output_dir=Path(args.output_dir),
+            query=args.query,
+            language=args.language,
+            country=args.country or None,
+            page_size=args.page_size,
+            max_pages=args.max_pages,
+            expires_minutes=args.expires_minutes,
+            min_interval=max(args.min_interval, 0),
+        )
+        if result is None:
+            print("Existing sentiment snapshot is still fresh; nothing to do")
+            return 0
+        print(
+            "Updated sentiment snapshot via auto mode: "
+            f"score={result['score']:.2f} bias={result['bias']}"
+        )
+        return 0
+
+    
     try:
         articles = fetch_articles(
             args.query,
@@ -85,10 +121,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
     except Exception as exc:  # pragma: no cover - defensive guard
         print(f"Failed to download headlines: {exc}", file=sys.stderr)
+        
         return 2
     score = aggregate_score(articles)
     if score is None:
         print("No relevant headlines returned; sentiment not updated", file=sys.stderr)
+        
         return 3
     bias = determine_bias(score)
     representative = choose_representative(articles, score)
