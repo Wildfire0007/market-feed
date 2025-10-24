@@ -1,4 +1,4 @@
-"""Utilities for fetching and maintaining USDJPY macro sentiment snapshots."""
+""Utilities for fetching and maintaining BTCUSD intraday sentiment snapshots."""
 from __future__ import annotations
 
 import json
@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-try:
+try:  # pragma: no cover - fallback shim exercised in CI without requests
     import requests
 except ModuleNotFoundError:  # pragma: no cover - exercised in CI without requests
     import json as _json
@@ -18,7 +18,6 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in CI without reques
 
     class _RequestException(Exception):
         """Fallback replacement for requests.RequestException."""
-
 
     class _Response:
         def __init__(self, *, status_code: int, body: bytes, headers: _Any = None) -> None:
@@ -32,7 +31,6 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in CI without reques
 
         def json(self) -> _Any:
             return _json.loads(self.text)
-
 
     class _Session:
         def get(
@@ -58,56 +56,65 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in CI without reques
             except _urlerror.URLError as exc:  # pragma: no cover - network errors are rare in tests
                 raise _RequestException(str(exc)) from exc
 
-
     class _RequestsShim:
         Session = _Session
         RequestException = _RequestException
 
-
     requests = _RequestsShim()  # type: ignore[assignment]
+
 
 SENTIMENT_FILENAME = "news_sentiment.json"
 
-DEFAULT_QUERY = "USDJPY intervention"
+DEFAULT_QUERY = "bitcoin OR btcusd OR \"btc price\" OR \"bitcoin etf\""
 DEFAULT_LANGUAGE = "en"
-DEFAULT_COUNTRY: Optional[str] = "jp"
-DEFAULT_PAGE_SIZE = 20
+DEFAULT_COUNTRY: Optional[str] = None
+DEFAULT_PAGE_SIZE = 30
 DEFAULT_TIMEOUT = 10
-DEFAULT_EXPIRY_MINUTES = 90
-MAX_PAGES = 2
-DEFAULT_MIN_INTERVAL = 600
-
+DEFAULT_EXPIRY_MINUTES = 60
+MAX_PAGES = 3
+DEFAULT_MIN_INTERVAL = 300
+ 
+# Simple lexicon tuned for crypto headlines.  We bias towards liquidity and
+# policy keywords because they often foreshadow intraday volatility in BTC.
 POSITIVE_KEYWORDS = {
-    "intervention",
-    "warns",
-    "concern",
-    "sell",
-    "weak",
-    "weakens",
+    "adoption",
+    "approval",
+    "bullish",
+    "etf",
+    "fidelity",
+    "halving",
+    "inflow",
+    "institutional",
+    "listing",
+    "longs",
     "record",
-    "support",
-    "defend",
-    "meeting",
-    "pressure",
+    "rally",
     "surge",
-    "boost",
-    "hawkish",
-    "rate",
-    "tighten",
 }
 NEGATIVE_KEYWORDS = {
-    "relief",
-    "calm",
-    "stabilize",
-    "stable",
-    "strengthens",
-    "strong",
-    "buy",
-    "bullish",
-    "dovish",
-    "ease",
-    "cuts",
-    "cut",
+    "ban",
+    "bearish",
+    "crackdown",
+    "dump",
+    "hack",
+    "liquidation",
+    "outflow",
+    "regulatory",
+    "selloff",
+    "shorts",
+    "slump",
+    "tax",
+}
+WEIGHTED_PHRASES = {
+    "spot etf": 1.5,
+    "rate cut": 0.6,
+    "risk-off": -0.8,
+    "risk on": 0.5,
+    "margin call": -1.2,
+    "leverage wipeout": -1.5,
+    "all-time high": 1.2,
+    "halving": 0.8,
+    "miners capitulate": -1.0,
 }
 
 
@@ -192,15 +199,28 @@ def fetch_articles(
     return articles
 
 
+def _weighted_term_score(text: str) -> float:
+    score = 0.0
+    for phrase, weight in WEIGHTED_PHRASES.items():
+        if phrase in text:
+            score += weight
+    return score
+
+
 def score_text(text: str) -> float:
     tokens = text.lower().split()
-    pos_hits = sum(tokens.count(word) for word in POSITIVE_KEYWORDS)
-    neg_hits = sum(tokens.count(word) for word in NEGATIVE_KEYWORDS)
-    if pos_hits == 0 and neg_hits == 0:
+    if not tokens:
         return 0.0
-    raw = pos_hits - neg_hits
-    total = pos_hits + neg_hits
-    score = raw / total
+    base = 0.0
+    for token in tokens:
+        if token in POSITIVE_KEYWORDS:
+            base += 1.0
+        elif token in NEGATIVE_KEYWORDS:
+            base -= 1.0
+    base += _weighted_term_score(" ".join(tokens))
+    # Normalise by headline length but avoid excessive damping.
+    normaliser = max(len(tokens) / 12.0, 1.0)
+    score = base / normaliser
     return max(-1.0, min(1.0, score))
 
 
@@ -212,10 +232,10 @@ def aggregate_score(articles: Iterable[Article]) -> Optional[float]:
 
 
 def determine_bias(score: float) -> str:
-    if score > 0.2:
-        return "usd_bullish"
-    if score < -0.2:
-        return "usd_bearish"
+    if score > 0.25:
+        return "btc_bullish"
+    if score < -0.25:
+        return "btc_bearish"
     return "neutral"
 
 
@@ -279,7 +299,7 @@ def _expires_at(payload: Optional[dict]) -> Optional[datetime]:
         return None
 
 
-def refresh_usdjpy_sentiment(
+def refresh_btcusd_sentiment(
     *,
     api_key: str,
     output_dir: Path,
@@ -351,7 +371,7 @@ __all__ = [
     "score_text",
     "ensure_output_dir",
     "write_sentiment",
-    "refresh_usdjpy_sentiment",
+    "refresh_btcusd_sentiment",
     "DEFAULT_QUERY",
     "DEFAULT_LANGUAGE",
     "DEFAULT_COUNTRY",
