@@ -183,7 +183,7 @@ TD_RATE_LIMITER = AdaptiveRateLimiter(TD_PAUSE, TD_PAUSE_MIN, TD_PAUSE_MAX)
 # GER40 helyett USOIL. A fő ticker a WTI/USD, fallbackokra már nincs szükség.
 ASSETS = {
     "EURUSD":   {"symbol": "EUR/USD", "exchange": "FX"},
-    "USDJPY":   {"symbol": "USD/JPY",  "exchange": "FX"},
+    "BTCUSD":   {"symbol": "BTC/USD",  "exchange": "CRYPTO"},
     "GOLD_CFD": {"symbol": "XAU/USD",  "exchange": None},
 
     # ÚJ: WTI kőolaj. A Twelve Data-n a hivatalos jelölés: WTI/USD.
@@ -1382,6 +1382,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
