@@ -52,7 +52,7 @@ FALLBACK_OVERRIDE_FILENAME = "fallback_overrides.json"
 FALLBACK_THRESHOLD_DEFAULT = 0.58
 FALLBACK_THRESHOLD_OVERRIDES: Dict[str, float] = {
     "EURUSD": 0.56,
-    "USDJPY": 0.57,
+    "BTCUSD": 0.6,
     "GOLD_CFD": 0.59,
     "USOIL": 0.6,
     "NVDA": 0.6,
