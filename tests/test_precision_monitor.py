@@ -28,14 +28,14 @@ def test_precision_monitor_generates_reports(tmp_path):
         },
         {
             "journal_id": "3",
-            "asset": "USDJPY",
+            "asset": "BTCUSD",
             "analysis_timestamp": "2025-01-02T09:00:00Z",
             "signal": "no entry",
             "notes": "missing: precision_trigger_sync",
         },
         {
             "journal_id": "4",
-            "asset": "USDJPY",
+            "asset": "BTCUSD",
             "analysis_timestamp": "2024-12-20T09:00:00Z",
             "signal": "no entry",
             "notes": "missing: precision_flow_alignment",
@@ -79,7 +79,7 @@ def test_precision_monitor_generates_reports(tmp_path):
 
     assets = {entry["asset"]: entry for entry in payload["assets"]}
     assert assets["EURUSD"]["precision_blocked"] == 1
-    assert assets["USDJPY"]["precision_blocked"] == 2
+    assert assets["BTCUSD"]["precision_blocked"] == 2
     assert assets["GOLD_CFD"]["precision_blocked"] == 1
 
     daily_csv = monitor_dir / "precision_gates_daily.csv"
@@ -99,6 +99,6 @@ def test_precision_monitor_generates_reports(tmp_path):
         row["asset"]: row for row in asset_df.to_dict(orient="records")
     }
     assert asset_totals["EURUSD"]["precision_score"] == 1
-    assert asset_totals["USDJPY"]["precision_flow_alignment"] == 1
-    assert asset_totals["USDJPY"]["precision_trigger_sync"] == 1
+    assert asset_totals["BTCUSD"]["precision_flow_alignment"] == 1
+    assert asset_totals["BTCUSD"]["precision_trigger_sync"] == 1
     assert asset_totals["GOLD_CFD"]["precision_score"] == 1
