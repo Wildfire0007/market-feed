@@ -28,6 +28,7 @@ Környezeti változók:
   TD_REALTIME_ASSETS = ""       (komma-szeparált lista, üres = mind)
   TD_REALTIME_HTTP_MAX_SAMPLES = "6" (HTTP fallback minták plafonja)
   TD_REALTIME_HTTP_BACKGROUND = "auto/1" (HTTP realtime gyűjtés háttérszálon fusson-e)
+  TD_REALTIME_HTTP_BUDGET = "auto" (HTTP realtime mintavételek per-run limitje)
   TD_REALTIME_WS_IDLE_GRACE = "15"  (WebSocket késlekedési türelem sec)
   TD_MAX_WORKERS      = "5"      (max. párhuzamos eszköz feldolgozás)
   TD_REQUEST_CONCURRENCY = "4"   (egyszerre futó TD hívások plafonja)
@@ -330,6 +331,18 @@ ASSETS = {
         "exchange": "NYSEARCA",
      },
 }
+
+_BASE_REQUESTS_PER_ASSET = 1 + len(SERIES_FETCH_PLAN)
+_BASE_REQUESTS_TOTAL = len(ASSETS) * _BASE_REQUESTS_PER_ASSET
+_DEFAULT_HTTP_BUDGET = max(1, TD_REQUESTS_PER_MINUTE - _BASE_REQUESTS_TOTAL)
+REALTIME_HTTP_BUDGET_TOTAL = max(
+    1,
+    _env_int("TD_REALTIME_HTTP_BUDGET", _DEFAULT_HTTP_BUDGET),
+)
+REALTIME_HTTP_BUDGET_PER_ASSET = max(
+    1,
+    math.ceil(REALTIME_HTTP_BUDGET_TOTAL / max(len(ASSETS), 1)),
+)
 
 _TRADING_STATUS: Dict[str, Dict[str, Any]] = {}
 _TRADING_STATUS_LOCK = threading.Lock()
@@ -1236,6 +1249,8 @@ def _collect_realtime_spot_impl(
     ensure_dir(out_dir)
     interval = max(0.5, REALTIME_INTERVAL)
     http_max_samples = REALTIME_HTTP_MAX_SAMPLES
+    initial_http_max_samples = http_max_samples
+    http_budget_cap: Optional[int] = None
     duration = max(REALTIME_DURATION, interval)
     http_duration = max(interval, REALTIME_HTTP_DURATION)
 
@@ -1257,6 +1272,12 @@ def _collect_realtime_spot_impl(
         quick_window = max(interval * 2.0, 6.0)
         duration = min(duration, quick_window)
         http_max_samples = max(1, min(http_max_samples, 2))
+
+    if not use_ws:
+        budget_cap = REALTIME_HTTP_BUDGET_PER_ASSET
+        if budget_cap is not None and budget_cap > 0:
+            http_budget_cap = budget_cap
+            http_max_samples = max(1, min(http_max_samples, budget_cap))
 
     frames: List[Dict[str, Any]] = []
     transport: Optional[str] = None
@@ -1316,6 +1337,9 @@ def _collect_realtime_spot_impl(
             payload["force_reason"] = reason
         payload["sampling_window_seconds"] = round(duration, 3)
         payload["sampling_max_samples"] = http_max_samples
+    if http_budget_cap is not None:
+        payload["sampling_budget_cap"] = http_budget_cap
+        payload["sampling_capped"] = http_max_samples < initial_http_max_samples
     if transport == "websocket" and isinstance(last_frame.get("raw"), dict):
         payload["raw_last_frame"] = last_frame["raw"]
 
@@ -1631,7 +1655,6 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
         force_reason = "spot_stale"
     elif spot.get("fallback_used"):
         force_reason = "spot_fallback"
-    collect_realtime_spot(asset, attempts, adir, force=bool(force_reason), reason=force_reason)
     series_payloads = _collect_series_payloads(attempts, adir)
     k5 = series_payloads.get("klines_5m")
     if not isinstance(k5, dict):
@@ -1656,6 +1679,14 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
             "probability": 0,   # előzetes; a véglegeset az analysis.py adja
             "spot": {"price": spot.get("price"), "utc": spot.get("utc")},
         },
+    )
+
+    collect_realtime_spot(
+        asset,
+        attempts,
+        adir,
+        force=bool(force_reason),
+        reason=force_reason,
     )
 
 # ─────────────────────────────── main ─────────────────────────────────────
@@ -1743,6 +1774,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
