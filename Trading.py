@@ -143,7 +143,7 @@ SERIES_FRESHNESS_LIMITS = {
 }
 SPOT_FRESHNESS_LIMIT = float(os.getenv("TD_SPOT_FRESHNESS_LIMIT", "900"))
 
-# Reduce the volume of large timeframe requests to keep latency in check.  The␊
+# Reduce the volume of large timeframe requests to keep latency in check.  The
 # short-term series now default to a lighter 300 bar history, while the heavier
 # 1h and 4h payloads stay lean as well.  All values can be overridden from the
 # environment if necessary.
@@ -162,7 +162,7 @@ SERIES_FETCH_PLAN = [
 ]
 
 
-class AdaptiveRateLimiter:␊
+class AdaptiveRateLimiter:
     def __init__(self, base_pause: float, min_pause: float, max_pause: float) -> None:
         self.base = max(base_pause, 0.0)
         self.min_pause = max(min_pause, 0.0)
@@ -1743,6 +1743,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
