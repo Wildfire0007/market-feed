@@ -15,20 +15,20 @@ Kimenetek:
 Környezeti változók:
   TWELVEDATA_API_KEY = "<api key>"
   OUT_DIR            = "public" (alapértelmezés)
-  TD_PAUSE           = "0.4"    (kímélő szünet hívások közt, sec)
+  TD_PAUSE           = "0.25"   (kímélő szünet hívások közt, sec)
   TD_MAX_RETRIES     = "3"      (újrapróbálkozások száma)
-  TD_BACKOFF_BASE    = "0.3"    (exponenciális visszavárás alapja)␊
-  TD_BACKOFF_MAX     = "8"      (exponenciális visszavárás plafonja, sec)␊
+  TD_BACKOFF_BASE    = "0.25"   (exponenciális visszavárás alapja)
+  TD_BACKOFF_MAX     = "8"      (exponenciális visszavárás plafonja, sec)
   TD_REALTIME_SPOT   = "0/1"    (alapértelmezés: 0 — külön job kezeli a realtime spotot)
   TD_REALTIME_INTERVAL = "5"    (realtime ciklus közötti szünet sec)
-  TD_REALTIME_DURATION = "60"   (realtime poll futási ideje sec)
-  TD_REALTIME_HTTP_DURATION = "12" (HTTP fallback mintavételezés hossza sec)
+  TD_REALTIME_DURATION = "20"   (realtime poll futási ideje sec)
+  TD_REALTIME_HTTP_DURATION = "8"  (HTTP fallback mintavételezés hossza sec)
   TD_REALTIME_ASSETS = ""       (komma-szeparált lista, üres = mind)
   TD_REALTIME_HTTP_MAX_SAMPLES = "6" (HTTP fallback minták plafonja)
-  TD_REALTIME_HTTP_BACKGROUND = "auto" (HTTP realtime gyűjtés háttérszálon fusson-e)
+  TD_REALTIME_HTTP_BACKGROUND = "auto/1" (HTTP realtime gyűjtés háttérszálon fusson-e)
   TD_REALTIME_WS_IDLE_GRACE = "15"  (WebSocket késlekedési türelem sec)
-  TD_MAX_WORKERS      = "3"      (max. párhuzamos eszköz feldolgozás)
-  TD_REQUEST_CONCURRENCY = "2"   (egyszerre futó TD hívások plafonja)
+  TD_MAX_WORKERS      = "5"      (max. párhuzamos eszköz feldolgozás)
+  TD_REQUEST_CONCURRENCY = "4"   (egyszerre futó TD hívások plafonja)
   PIPELINE_MAX_LAG_SECONDS = "240" (Trading → Analysis log figyelmeztetés küszöbe)
 """
 
@@ -103,15 +103,15 @@ OUT_DIR  = os.getenv("OUT_DIR", "public")
 API_KEY_RAW = os.getenv("TWELVEDATA_API_KEY", "")
 API_KEY  = API_KEY_RAW.strip() if API_KEY_RAW else ""
 TD_BASE  = "https://api.twelvedata.com"
-TD_PAUSE = float(os.getenv("TD_PAUSE", "0.4"))
-TD_PAUSE_MIN = float(os.getenv("TD_PAUSE_MIN", str(max(TD_PAUSE * 0.75, 0.2))))
+TD_PAUSE = float(os.getenv("TD_PAUSE", "0.25"))
+TD_PAUSE_MIN = float(os.getenv("TD_PAUSE_MIN", str(max(TD_PAUSE * 0.8, 0.2))))
 TD_PAUSE_MAX = float(os.getenv("TD_PAUSE_MAX", str(max(TD_PAUSE * 6, 4.0))))
 TD_MAX_RETRIES = int(os.getenv("TD_MAX_RETRIES", "3"))
-TD_BACKOFF_BASE = float(os.getenv("TD_BACKOFF_BASE", str(max(TD_PAUSE, 0.3))))
+TD_BACKOFF_BASE = float(os.getenv("TD_BACKOFF_BASE", str(max(TD_PAUSE, 0.25))))
 TD_BACKOFF_MAX = float(os.getenv("TD_BACKOFF_MAX", "8.0"))
 REALTIME_FLAG = os.getenv("TD_REALTIME_SPOT", "0").lower() in {"1", "true", "yes", "on"}
 REALTIME_INTERVAL = float(os.getenv("TD_REALTIME_INTERVAL", "5"))
-REALTIME_DURATION = float(os.getenv("TD_REALTIME_DURATION", "60"))
+REALTIME_DURATION = float(os.getenv("TD_REALTIME_DURATION", "20"))
 REALTIME_ASSETS_ENV = os.getenv("TD_REALTIME_ASSETS", "")
 REALTIME_WS_URL = os.getenv("TD_REALTIME_WS_URL", "")
 REALTIME_WS_SUBSCRIBE = os.getenv("TD_REALTIME_WS_SUBSCRIBE", "")
@@ -122,7 +122,7 @@ REALTIME_WS_IDLE_GRACE = float(os.getenv("TD_REALTIME_WS_IDLE_GRACE", "15"))
 REALTIME_WS_TIMEOUT = float(os.getenv("TD_REALTIME_WS_TIMEOUT", str(max(REALTIME_DURATION, 30.0))))
 REALTIME_WS_ENABLED = bool(REALTIME_WS_URL and websocket is not None)
 REALTIME_HTTP_MAX_SAMPLES = int(os.getenv("TD_REALTIME_HTTP_MAX_SAMPLES", "6"))
-REALTIME_HTTP_DURATION = max(1.0, _env_float("TD_REALTIME_HTTP_DURATION", 12.0))
+REALTIME_HTTP_DURATION = max(1.0, _env_float("TD_REALTIME_HTTP_DURATION", 8.0))
 _REALTIME_HTTP_BACKGROUND_FLAG = _env_flag("TD_REALTIME_HTTP_BACKGROUND")
 
 # ───────────────────────────── Data freshness guards ──────────────────────
@@ -161,7 +161,10 @@ class AdaptiveRateLimiter:
         with self._lock:
             if self._current <= 0:
                 return
-            self._current = max(self.min_pause, self._current * 0.85)
+            target = self._current * 0.7
+            if self.base > 0:
+                target = max(target, self.base * 0.6)
+            self._current = max(self.min_pause, target)
 
     def record_failure(self, throttled: bool = False) -> None:
         growth = 1.6 if throttled else 1.3
@@ -204,8 +207,8 @@ ASSETS = {
      },
 }
 
-TD_MAX_WORKERS = max(1, min(len(ASSETS), _env_int("TD_MAX_WORKERS", 3)))
-_DEFAULT_REQ_CONCURRENCY = max(1, min(TD_MAX_WORKERS, 2))
+TD_MAX_WORKERS = max(1, min(len(ASSETS), _env_int("TD_MAX_WORKERS", 5)))
+_DEFAULT_REQ_CONCURRENCY = max(1, min(TD_MAX_WORKERS, 4))
 TD_REQUEST_CONCURRENCY = max(1, min(len(ASSETS), _env_int("TD_REQUEST_CONCURRENCY", _DEFAULT_REQ_CONCURRENCY)))
 _REQUEST_SEMAPHORE = threading.Semaphore(TD_REQUEST_CONCURRENCY)
 ANCHOR_LOCK = threading.Lock()
@@ -887,10 +890,10 @@ def _collect_realtime_spot_impl(
 
     # Forced realtime collection (pl. spot fallback) should be quick – if we
     # cannot rely on the websocket path we fall back to a much shorter HTTP
-    # sampling window so the trading pipeline does not block for a full minute
-    # on every asset.  This was the primary reason behind the ~8 perces
-    # futásidő: minden instrumentum 60 másodpercig próbálkozott, miközben a
-    # quote továbbra sem frissült.
+    # sampling window so the trading pipeline does not block for a long
+    # interval on every asset.  Korábban a 60 másodperces ablak minden kényszer
+    # esetén extra perceket adott a futáshoz; az új 20 másodperces alap és a
+    # még rövidebb force-ablak ezt hivatott megszüntetni.
     if force and not use_ws:
         interval = min(interval, 2.0)
         quick_window = max(interval * 2.0, 6.0)
@@ -1001,10 +1004,12 @@ def collect_realtime_spot(
         return
 
     use_ws = REALTIME_WS_ENABLED and REALTIME_FLAG and not force
-    run_async = False
-    if not use_ws and not force:
-        if _REALTIME_HTTP_BACKGROUND_FLAG is None or _REALTIME_HTTP_BACKGROUND_FLAG:
-            run_async = True
+    http_background_enabled = (
+        _REALTIME_HTTP_BACKGROUND_FLAG
+        if _REALTIME_HTTP_BACKGROUND_FLAG is not None
+        else True
+    )
+    run_async = http_background_enabled and not use_ws
 
     if run_async:
         thread = threading.Thread(
@@ -1046,15 +1051,15 @@ def _symbol_attempt_variants(symbol: str,
 
     if exchange:
         variants.append((symbol, None))
-        if ":" not in symbol:
+        if ":" not in symbol and "/" not in symbol:
             variants.append((f"{symbol}:{exchange}", None))
+    elif ":" not in symbol and "/" not in symbol:
+        variants.append((symbol, None))
 
     if "/" in symbol:
         compact = symbol.replace("/", "")
         if compact:
-            variants.append((compact, exchange))
-            if exchange:
-                variants.append((compact, None))
+            variants.append((compact, exchange if exchange else None))
 
     return variants
 
@@ -1409,6 +1414,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
