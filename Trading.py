@@ -299,7 +299,11 @@ LOGGER = logging.getLogger("market_feed.trading")
 
 
 ASSETS = {
-    "EURUSD":   {"symbol": "EUR/USD", "exchange": "FX"},
+    "EURUSD": {
+        "symbol": "EUR/USD",
+        "exchange": "FX",
+        "alt": ["EURUSD", "EURUSD:CUR"],
+    },
     "BTCUSD": {
         "symbol": "BTC/USD",
         "exchange": "CRYPTO",
@@ -312,23 +316,34 @@ ASSETS = {
             "BTCUSD",
         ],
     },
-    "GOLD_CFD": {"symbol": "XAU/USD",  "exchange": None},
+    "GOLD_CFD": {"symbol": "XAU/USD", "exchange": None},
 
-    # ÚJ: WTI kőolaj. A Twelve Data-n a hivatalos jelölés: WTI/USD.
-    # A korábbi alternatív ticker-próbálgatást elhagytuk a gyorsabb futásért.
+    # ÚJ: WTI kőolaj. A Twelve Data-n a hivatalos jelölés: WTI/USD, de több
+    # alternatív ticker is forgalomban van – hagyjuk meg a korábbi fallback
+    # listát, hogy ne ismételjünk felesleges, sikertelen próbálkozásokat.
     "USOIL": {
         "symbol": "WTI/USD",
         "exchange": None,
+        "alt": ["USOIL", "WTICOUSD", "WTIUSD"],
     },
 
 # Egyedi részvény és ETF kiterjesztések
     "NVDA": {
         "symbol": "NVDA",
         "exchange": "NASDAQ",
+        "alt": ["NVDA", "NVDA:US"],
     },
     "SRTY": {
         "symbol": "SRTY",
         "exchange": "NYSEARCA",
+        "alt": [
+            {"symbol": "SRTY", "exchange": None},
+            {"symbol": "SRTY", "exchange": "NYSE"},
+            {"symbol": "SRTY", "exchange": "ARCA"},
+            {"symbol": "SRTY", "exchange": "NSE"},
+            "SRTY:US",
+            "SRTY:NSE",
+        ],
      },
 }
 
@@ -913,7 +928,8 @@ def td_get(path: str, **params) -> Dict[str, Any]:
                     response.status_code if response is not None else None
                 )
                 last_status = effective_status
-                throttled = (error_code == 429) or ("limit" in message.lower())
+                msg_lc = message.lower()
+                throttled = (error_code == 429) or ("limit" in msg_lc)
                 retry_after_hint = None
                 if response is not None:
                     retry_after_hint = _parse_retry_after(response.headers.get("Retry-After"))
@@ -921,6 +937,8 @@ def td_get(path: str, **params) -> Dict[str, Any]:
                     throttled=throttled,
                     retry_after=retry_after_hint,
                 )
+                if error_code in {400, 404, 422}:
+                    raise err
                 if attempt == TD_MAX_RETRIES:
                     raise err
             else:
@@ -932,10 +950,13 @@ def td_get(path: str, **params) -> Dict[str, Any]:
             retry_after_hint = None
             if exc.response is not None:
                 retry_after_hint = _parse_retry_after(exc.response.headers.get("Retry-After"))
+            throttled = last_status in {429, 503}
             TD_RATE_LIMITER.record_failure(
-                throttled=last_status in {429, 503},
+                throttled=throttled,
                 retry_after=retry_after_hint,
             )
+            if last_status and last_status < 500 and not throttled:
+                raise
             if attempt == TD_MAX_RETRIES:
                 raise
         except (requests.RequestException, ValueError, json.JSONDecodeError) as exc:
@@ -1872,6 +1893,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
