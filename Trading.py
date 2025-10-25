@@ -203,9 +203,23 @@ TD_RATE_LIMITER = AdaptiveRateLimiter(TD_PAUSE, TD_PAUSE_MIN, TD_PAUSE_MAX)
 
 # ───────────────────────────────── ASSETS ────────────────────────────────
 # GER40 helyett USOIL. A fő ticker a WTI/USD, fallbackokra már nincs szükség.
+LOGGER = logging.getLogger("market_feed.trading")
+
+
 ASSETS = {
     "EURUSD":   {"symbol": "EUR/USD", "exchange": "FX"},
-    "BTCUSD":   {"symbol": "BTC/USD",  "exchange": "CRYPTO"},
+    "BTCUSD": {
+        "symbol": "BTC/USD",
+        "exchange": "CRYPTO",
+        "alt": [
+            {"symbol": "BTC/USD", "exchange": "Coinbase"},
+            {"symbol": "BTC/USD", "exchange": "Binance"},
+            {"symbol": "BTCUSD", "exchange": "Coinbase"},
+            {"symbol": "BTCUSD", "exchange": "Binance"},
+            {"symbol": "BTC/USD", "exchange": None},
+            "BTCUSD",
+        ],
+    },
     "GOLD_CFD": {"symbol": "XAU/USD",  "exchange": None},
 
     # ÚJ: WTI kőolaj. A Twelve Data-n a hivatalos jelölés: WTI/USD.
@@ -225,6 +239,9 @@ ASSETS = {
         "exchange": "NYSEARCA",
      },
 }
+
+_TRADING_STATUS: Dict[str, Dict[str, Any]] = {}
+_TRADING_STATUS_LOCK = threading.Lock()
 
 TD_MAX_WORKERS = max(1, min(len(ASSETS), _env_int("TD_MAX_WORKERS", 5)))
 _DEFAULT_REQ_CONCURRENCY = max(1, min(TD_MAX_WORKERS, 4))
@@ -265,6 +282,98 @@ def load_json(path: str) -> Optional[Any]:
             return json.load(handle)
     except Exception:
         return None
+
+
+def _format_attempts(attempts: List[Tuple[str, Optional[str]]]) -> List[Dict[str, Optional[str]]]:
+    formatted: List[Dict[str, Optional[str]]] = []
+    for symbol, exchange in attempts:
+        formatted.append({"symbol": symbol, "exchange": exchange})
+    return formatted
+
+
+def _record_asset_status(
+    asset: str,
+    attempts: List[Tuple[str, Optional[str]]],
+    spot: Dict[str, Any],
+    series_payloads: Dict[str, Dict[str, Any]],
+) -> None:
+    summary_series: Dict[str, Dict[str, Any]] = {}
+    for name, payload in series_payloads.items():
+        if not isinstance(payload, dict):
+            continue
+        values = []
+        raw = payload.get("raw")
+        if isinstance(raw, dict):
+            raw_values = raw.get("values")
+            if isinstance(raw_values, list):
+                values = raw_values
+        summary_series[name] = {
+            "ok": bool(payload.get("ok")),
+            "values": len(values),
+            "freshness_violation": bool(payload.get("freshness_violation")),
+            "used_symbol": payload.get("used_symbol"),
+            "used_exchange": payload.get("used_exchange"),
+            "error": payload.get("error"),
+        }
+
+    spot_info = spot if isinstance(spot, dict) else {"ok": False}
+    spot_summary = {
+        "ok": bool(spot_info.get("ok")),
+        "freshness_violation": bool(spot_info.get("freshness_violation")),
+        "used_symbol": spot_info.get("used_symbol") or spot_info.get("asset"),
+        "used_exchange": spot_info.get("used_exchange"),
+        "error": spot_info.get("error"),
+    }
+
+    payload = {
+        "asset": asset,
+        "updated_at_utc": now_utc(),
+        "attempts": _format_attempts(attempts),
+        "spot": spot_summary,
+        "series": summary_series,
+    }
+
+    with _TRADING_STATUS_LOCK:
+        _TRADING_STATUS[asset] = payload
+
+
+def _record_asset_failure(asset: str, reason: str) -> None:
+    payload = {
+        "asset": asset,
+        "updated_at_utc": now_utc(),
+        "attempts": [],
+        "spot": {"ok": False, "error": reason},
+        "series": {},
+    }
+    with _TRADING_STATUS_LOCK:
+        _TRADING_STATUS[asset] = payload
+
+
+def _write_trading_status_summary(out_dir: str) -> None:
+    with _TRADING_STATUS_LOCK:
+        assets = list(_TRADING_STATUS.values())
+
+    assets.sort(key=lambda item: item.get("asset", ""))
+    all_ready = True if assets else False
+    for item in assets:
+        spot_ok = bool(item.get("spot", {}).get("ok"))
+        series_info = item.get("series", {})
+        frames_ok = all(
+            bool(frame.get("ok")) and frame.get("values", 0) > 0
+            for frame in series_info.values()
+        ) if series_info else False
+        if not (spot_ok and frames_ok):
+            all_ready = False
+            break
+
+    pipeline_dir = os.path.join(out_dir, "pipeline")
+    ensure_dir(pipeline_dir)
+    payload = {
+        "generated_at_utc": now_utc(),
+        "assets": assets,
+        "all_assets_ready": all_ready,
+    }
+    save_json(os.path.join(pipeline_dir, "trading_status.json"), payload)
 
 
 def save_series_payload(out_dir: str, name: str, payload: Dict[str, Any]) -> None:
@@ -362,6 +471,28 @@ def _collect_series_payloads(
                 freshness_limit,
                 payload,
             )
+            result_payload = results[name]
+            if isinstance(result_payload, dict):
+                ok = bool(result_payload.get("ok"))
+                values = []
+                raw = result_payload.get("raw")
+                if isinstance(raw, dict):
+                    raw_values = raw.get("values")
+                    if isinstance(raw_values, list):
+                        values = raw_values
+                if not ok or not values:
+                    attempts_fmt = ", ".join(
+                        f"{sym}@{exch}" if exch else sym for sym, exch in attempts
+                    ) or "<none>"
+                    LOGGER.warning(
+                        "Series fetch degraded for %s (%s): ok=%s values=%d attempts=[%s] error=%s",
+                        name,
+                        interval,
+                        ok,
+                        len(values),
+                        attempts_fmt,
+                        result_payload.get("error") or result_payload.get("message"),
+                    )
 
     return results
 
@@ -1229,6 +1360,12 @@ def try_symbols(
             result = fetch_fn(sym, exch)
         except Exception as exc:
             last = {"ok": False, "error": str(exc)}
+            LOGGER.warning(
+                "Twelve Data request error for %s (exchange=%s): %s",
+                sym,
+                exch or "default",
+                exc,
+            )
             time.sleep(max(TD_RATE_LIMITER.current_delay * 0.5, 0.1))
             continue
 
@@ -1265,6 +1402,15 @@ def try_symbols(
                 if best_latency is None or latency < best_latency:
                     best = result
                     best_latency = latency
+
+        if not result.get("ok"):
+            LOGGER.warning(
+                "Attempt returned no data for %s (exchange=%s, interval=%s): error=%s",
+                sym,
+                exch or "default",
+                result.get("interval"),
+                result.get("error") or result.get("message"),
+            )
 
         time.sleep(max(TD_RATE_LIMITER.current_delay * 0.5, 0.1))
 
@@ -1383,6 +1529,8 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
             "freshness_limit_seconds": SERIES_FRESHNESS_LIMITS.get("5min"),
         }
 
+    _record_asset_status(asset, attempts, spot, series_payloads)
+
     # 3) 5m előzetes jelzés (analysis.py később felülírhatja)
     sig = signal_from_5m(k5 if isinstance(k5, dict) else {"ok": False})
     save_json(
@@ -1436,6 +1584,7 @@ def _process_asset_guard(asset: str, cfg: Dict[str, Any]) -> None:
         process_asset(asset, cfg)
     except Exception as error:
         _write_error_payload(asset, error)
+        _record_asset_failure(asset, str(error))
 
 
 def main():
@@ -1472,12 +1621,17 @@ def main():
     duration_seconds = max((completed_at_dt - started_at_dt).total_seconds(), 0.0)
     logger.info("Trading run completed in %.1f seconds", duration_seconds)
     try:
+        _write_trading_status_summary(OUT_DIR)
+    except Exception as exc:
+        logger.warning("Failed to write trading status summary: %s", exc)
+    try:
         record_trading_run(started_at=started_at_dt, completed_at=completed_at_dt, duration_seconds=duration_seconds)
     except Exception as exc:
         logger.warning("Failed to record trading pipeline metrics: %s", exc)
 
 if __name__ == "__main__":
     main()
+
 
 
 
