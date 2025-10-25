@@ -39,7 +39,7 @@ import os, json, time, math, logging
 import threading
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, Optional, List, Tuple, Callable
+from typing import Any, Dict, Optional, List, Tuple, Callable, Set
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -55,13 +55,20 @@ except Exception:  # pragma: no cover - optional dependency
     websocket = None
 
 try:
-    from reports.pipeline_monitor import record_trading_run, get_pipeline_log_path
+    from reports.pipeline_monitor import (
+        record_trading_run,
+        get_pipeline_log_path,
+        summarize_pipeline_warnings,
+    )
 except Exception:  # pragma: no cover - optional helper
     def record_trading_run(*_args, **_kwargs):
         return None
 
     def get_pipeline_log_path(*_args, **_kwargs):
         return None
+
+    def summarize_pipeline_warnings(*_args, **_kwargs):
+        return {}
 
 
 def _env_int(name: str, default: int) -> int:
@@ -293,6 +300,22 @@ TD_RATE_LIMITER = RequestGovernor(
     TD_REQUEST_BURST,
 )
 
+# ────────────────────────────── Exceptions ───────────────────────────────
+
+
+class TDError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: Optional[int] = None,
+        throttled: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.throttled = throttled
+
+
 # ───────────────────────────────── ASSETS ────────────────────────────────
 # GER40 helyett USOIL. A fő ticker a WTI/USD, fallbackokra már nincs szükség.
 LOGGER = logging.getLogger("market_feed.trading")
@@ -302,7 +325,7 @@ ASSETS = {
     "EURUSD": {
         "symbol": "EUR/USD",
         "exchange": "FX",
-        "alt": ["EURUSD", "EURUSD:CUR"],
+        "alt": ["EURUSD"],
     },
     "BTCUSD": {
         "symbol": "BTC/USD",
@@ -324,14 +347,14 @@ ASSETS = {
     "USOIL": {
         "symbol": "WTI/USD",
         "exchange": None,
-        "alt": ["USOIL", "WTICOUSD", "WTIUSD"],
+        "alt": ["USOIL", "WTIUSD"],
     },
 
 # Egyedi részvény és ETF kiterjesztések
     "NVDA": {
         "symbol": "NVDA",
         "exchange": "NASDAQ",
-        "alt": ["NVDA", "NVDA:US"],
+        "alt": ["NVDA"],
     },
     "SRTY": {
         "symbol": "SRTY",
@@ -340,9 +363,7 @@ ASSETS = {
             {"symbol": "SRTY", "exchange": None},
             {"symbol": "SRTY", "exchange": "NYSE"},
             {"symbol": "SRTY", "exchange": "ARCA"},
-            {"symbol": "SRTY", "exchange": "NSE"},
             "SRTY:US",
-            "SRTY:NSE",
         ],
      },
 }
@@ -358,6 +379,8 @@ REALTIME_HTTP_BUDGET_PER_ASSET = max(
     1,
     math.ceil(REALTIME_HTTP_BUDGET_TOTAL / max(len(ASSETS), 1)),
 )
+
+MARKET_CLOSED_GRACE_SECONDS = max(0.0, float(os.getenv("TD_MARKET_CLOSED_GRACE", "43200")))
 
 _TRADING_STATUS: Dict[str, Dict[str, Any]] = {}
 _TRADING_STATUS_LOCK = threading.Lock()
@@ -386,7 +409,53 @@ _REQUEST_SESSION.headers.update({"User-Agent": "market-feed/td-only/1.0"})
 _ORIGINAL_REQUESTS_GET = requests.get
 ANCHOR_LOCK = threading.Lock()
 _REALTIME_BACKGROUND_LOCK = threading.Lock()
-_REALTIME_BACKGROUND_THREADS: List[threading.Thread] = []
+REALTIME_BACKGROUND_THREADS: List[threading.Thread] = []
+
+# ───────────────────────────── Attempt memory ─────────────────────────────
+
+
+class AttemptMemory:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._hard_failures: Dict[Tuple[str, Optional[str]], str] = {}
+        self._skip_logged: Set[Tuple[str, Optional[str]]] = set()
+
+    def record_hard_failure(
+        self,
+        symbol: str,
+        exchange: Optional[str],
+        reason: str,
+    ) -> None:
+        key = (symbol, exchange)
+        normalized_reason = " ".join(str(reason).split())
+        with self._lock:
+            if key not in self._hard_failures:
+                self._hard_failures[key] = normalized_reason
+            else:
+                # Update the reason if the new message is more descriptive.
+                existing = self._hard_failures[key]
+                if normalized_reason and normalized_reason not in existing:
+                    self._hard_failures[key] = normalized_reason
+            self._skip_logged.discard(key)
+
+    def should_skip(self, symbol: str, exchange: Optional[str]) -> Tuple[bool, Optional[str], bool]:
+        key = (symbol, exchange)
+        with self._lock:
+            reason = self._hard_failures.get(key)
+            if reason is None:
+                return False, None, False
+            first_skip = key not in self._skip_logged
+            if first_skip:
+                self._skip_logged.add(key)
+        return True, reason, first_skip
+
+    def snapshot(self) -> Dict[Tuple[str, Optional[str]], str]:
+        with self._lock:
+            return dict(self._hard_failures)
+
+    def is_blacklisted(self, symbol: str, exchange: Optional[str]) -> Optional[str]:
+        with self._lock:
+            return self._hard_failures.get((symbol, exchange))
 
 # ─────────────────────────────── Segédek ─────────────────────────────────
 
@@ -452,6 +521,7 @@ def _record_asset_status(
     attempts: List[Tuple[str, Optional[str]]],
     spot: Dict[str, Any],
     series_payloads: Dict[str, Dict[str, Any]],
+    attempt_memory: Optional[AttemptMemory] = None,
 ) -> None:
     summary_series: Dict[str, Dict[str, Any]] = {}
     for name, payload in series_payloads.items():
@@ -481,13 +551,21 @@ def _record_asset_status(
         "error": spot_info.get("error"),
     }
 
-    payload = {
+    payload: Dict[str, Any] = {
         "asset": asset,
         "updated_at_utc": now_utc(),
         "attempts": _format_attempts(attempts),
         "spot": spot_summary,
         "series": summary_series,
     }
+
+    if attempt_memory is not None:
+        recorded = attempt_memory.snapshot()
+        if recorded:
+            payload["hard_failures"] = [
+                {"symbol": sym, "exchange": exch, "reason": reason}
+                for (sym, exch), reason in recorded.items()
+            ]
 
     with _TRADING_STATUS_LOCK:
         _TRADING_STATUS[asset] = payload
@@ -625,6 +703,7 @@ def _finalize_series_payload(
     interval: str,
     freshness_limit: Optional[float],
     payload: Dict[str, Any],
+    attempt_memory: Optional[AttemptMemory] = None,
 ) -> Dict[str, Any]:
     data: Dict[str, Any] = dict(payload) if isinstance(payload, dict) else {"ok": False}
     if "raw" not in data or not isinstance(data.get("raw"), dict):
@@ -638,7 +717,13 @@ def _finalize_series_payload(
     original_retries = data.get("freshness_retries")
 
     if data.get("ok"):
-        data = _refresh_series_if_stale(attempts, interval, data, freshness_limit)
+        data = _refresh_series_if_stale(
+            attempts,
+            interval,
+            data,
+            freshness_limit,
+            attempt_memory=attempt_memory,
+        )
         data = _prefer_existing_series(out_dir, name, data, freshness_limit)
 
     if original_retries is not None:
@@ -653,8 +738,9 @@ def _finalize_series_payload(
 
 def _collect_series_payloads(
     attempts: List[Tuple[str, Optional[str]]],
+    attempt_memory: Optional[AttemptMemory],
     out_dir: str,
-) -> Dict[str, Dict[str, Any]]:
+) -> Dict[str, Dict[str, Any]]
     if not SERIES_FETCH_PLAN:
         return {}
 
@@ -673,6 +759,7 @@ def _collect_series_payloads(
                 fetch_fn,
                 freshness_limit=freshness_limit,
                 max_refreshes=1,
+                attempt_memory=attempt_memory,
             )
             future_map[future] = (name, interval, freshness_limit)
 
@@ -694,6 +781,7 @@ def _collect_series_payloads(
                 interval,
                 freshness_limit,
                 payload,
+                attempt_memory=attempt_memory,
             )
             result_payload = results[name]
             if isinstance(result_payload, dict):
@@ -728,6 +816,7 @@ def _refresh_series_if_stale(
     freshness_limit: Optional[float],
     *,
     extra_attempts: int = 2,
+    attempt_memory: Optional[AttemptMemory] = None,
 ) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return payload
@@ -747,6 +836,7 @@ def _refresh_series_if_stale(
             attempts,
             lambda s, ex: td_time_series(s, interval, 180, ex, "desc"),
             freshness_limit=None,
+            attempt_memory=attempt_memory,
         )
         attempts_made += 1
         if not isinstance(refreshed, dict) or not refreshed.get("ok"):
@@ -922,14 +1012,7 @@ def td_get(path: str, **params) -> Dict[str, Any]:
                     message = f"{error_message} (code {error_code})"
                 else:
                     message = error_message
-                err = RuntimeError(message)
-                last_error = err
-                effective_status = error_code if error_code is not None else (
-                    response.status_code if response is not None else None
-                )
-                last_status = effective_status
-                msg_lc = message.lower()
-                throttled = (error_code == 429) or ("limit" in msg_lc)
+                throttled = (error_code == 429) or ("limit" in message.lower())
                 retry_after_hint = None
                 if response is not None:
                     retry_after_hint = _parse_retry_after(response.headers.get("Retry-After"))
@@ -937,10 +1020,16 @@ def td_get(path: str, **params) -> Dict[str, Any]:
                     throttled=throttled,
                     retry_after=retry_after_hint,
                 )
+                td_error = TDError(message, status_code=error_code, throttled=throttled)
+                last_error = td_error
+                effective_status = error_code if error_code is not None else (
+                    response.status_code if response is not None else None
+                )
+                last_status = effective_status
                 if error_code in {400, 404, 422}:
-                    raise err
+                    raise td_error
                 if attempt == TD_MAX_RETRIES:
-                    raise err
+                    raise td_error
             else:
                 TD_RATE_LIMITER.record_success()
                 return data
@@ -956,8 +1045,10 @@ def td_get(path: str, **params) -> Dict[str, Any]:
                 retry_after=retry_after_hint,
             )
             if last_status and last_status < 500 and not throttled:
-                raise
+                raise TDError(str(exc), status_code=last_status, throttled=throttled) from exc
             if attempt == TD_MAX_RETRIES:
+                if last_status and last_status < 500:
+                    raise TDError(str(exc), status_code=last_status, throttled=throttled) from exc
                 raise
         except (requests.RequestException, ValueError, json.JSONDecodeError) as exc:
             last_error = exc
@@ -973,7 +1064,10 @@ def td_get(path: str, **params) -> Dict[str, Any]:
         time.sleep(backoff)
 
     status_str = f" status={last_status}" if last_status else ""
-    raise RuntimeError(f"TD request failed after {TD_MAX_RETRIES} attempts{status_str}: {last_error}")
+    raise TDError(
+        f"TD request failed after {TD_MAX_RETRIES} attempts{status_str}: {last_error}",
+        status_code=last_status,
+    )
 
 def _iso_from_td_ts(ts: Any) -> Optional[str]:
     """TD időbélyeg ISO-UTC-re (kezeli a 'YYYY-MM-DD HH:MM:SS' és epoch sec formátumot)."""
@@ -1048,6 +1142,19 @@ def td_time_series(symbol: str, interval: str, outputsize: int = 500,
             "latency_seconds": latency_seconds,
             "raw": j if ok else {"values": []},
         }
+    except TDError as exc:
+        return {
+            "used_symbol": symbol,
+            "asset": symbol,
+            "interval": interval,
+            "source": "twelvedata:time_series",
+            "ok": False,
+            "retrieved_at_utc": now_utc(),
+            "error": str(exc),
+            "error_code": exc.status_code,
+            "error_throttled": exc.throttled,
+            "raw": {"values": []},
+        }
     except Exception as e:
         return {
             "used_symbol": symbol,
@@ -1118,6 +1225,13 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
     """Spot ár: quote → ha nincs, 5m utolsó close (time_series) fallback."""
     try:
         q = td_quote(symbol, exchange)
+    except TDError as exc:
+        q = {
+            "ok": False,
+            "error": str(exc),
+            "error_code": exc.status_code,
+            "error_throttled": exc.throttled,
+        }
     except Exception as e:
         q = {"ok": False, "error": str(e)}
 
@@ -1128,6 +1242,11 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
     if price is None:
         try:
             px, ts = td_last_close(symbol, "5min", exchange)
+        except TDError as exc:
+            px, ts = None, None
+            if isinstance(q, dict):
+                q["error_fallback"] = str(exc)
+                q["error_code"] = exc.status_code or q.get("error_code")
         except Exception as e:
             px, ts = None, None
             if isinstance(q, dict):
@@ -1218,16 +1337,35 @@ def _collect_http_frames(
     deadline: float,
     interval: float,
     max_samples: int,
-) -> List[Dict[str, Any]]:
+    *,
+    force: bool = False,
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     frames: List[Dict[str, Any]] = []
     sample_cap = max(1, int(max_samples))
     failure_cycles = 0
     max_failures = max(2, len(symbol_cycle)) if symbol_cycle else 2
+    consecutive_client_errors = 0
+    abort_reason: Optional[str] = None
     while time.time() < deadline and len(frames) < sample_cap:
         cycle_success = False
         for symbol, exchange in symbol_cycle:
             try:
                 quote = td_quote(symbol, exchange)
+            except TDError as exc:
+                if exc.status_code in {400, 404}:
+                    consecutive_client_errors += 1
+                    if force and consecutive_client_errors >= 2 and not frames:
+                        abort_reason = f"client_error_{exc.status_code or 'unknown'}"
+                        LOGGER.info(
+                            "Realtime HTTP sampling aborted for %s (exchange=%s) after repeated %s errors",
+                            symbol,
+                            exchange or "default",
+                            exc.status_code,
+                        )
+                        break
+                else:
+                    consecutive_client_errors = 0
+                continue
             except Exception:
                 continue
             price = quote.get("price")
@@ -1251,6 +1389,9 @@ def _collect_http_frames(
                 }
             )
             cycle_success = True
+            consecutive_client_errors = 0
+            break
+        if abort_reason:
             break
         if len(frames) >= sample_cap:
             break
@@ -1264,7 +1405,7 @@ def _collect_http_frames(
         if remaining <= 0:
             break
         time.sleep(min(interval, remaining))
-    return frames
+    return frames, abort_reason
 
 
 def _collect_ws_frames(
@@ -1398,6 +1539,7 @@ def _collect_realtime_spot_impl(
 
     frames: List[Dict[str, Any]] = []
     transport: Optional[str] = None
+    abort_reason: Optional[str] = None
 
     deadline = time.time() + duration
     if use_ws:
@@ -1409,11 +1551,12 @@ def _collect_realtime_spot_impl(
         remaining = max(0.0, deadline - time.time())
         if remaining > 0:
             deadline_http = time.time() + remaining
-            frames = _collect_http_frames(
+            frames, abort_reason = _collect_http_frames(
                 symbol_cycle,
                 deadline_http,
                 interval,
                 http_max_samples,
+                force=force,
             )
             if frames:
                 transport = "http"
@@ -1431,6 +1574,8 @@ def _collect_realtime_spot_impl(
         "latency_avg": sum(latencies) / len(latencies) if latencies else None,
         "latency_max": max(latencies) if latencies else None,
     }
+    if abort_reason:
+        stats["http_abort_reason"] = abort_reason
     if latencies:
         lat_sorted = sorted(latencies)
         stats["latency_median"] = lat_sorted[len(lat_sorted) // 2]
@@ -1457,6 +1602,8 @@ def _collect_realtime_spot_impl(
     if http_budget_cap is not None:
         payload["sampling_budget_cap"] = http_budget_cap
         payload["sampling_capped"] = http_max_samples < initial_http_max_samples
+    if abort_reason:
+        payload["http_abort_reason"] = abort_reason
     if transport == "websocket" and isinstance(last_frame.get("raw"), dict):
         payload["raw_last_frame"] = last_frame["raw"]
 
@@ -1483,6 +1630,8 @@ def collect_realtime_spot(
     asset: str,
     attempts: List[Tuple[str, Optional[str]]],
     out_dir: str,
+    *,
+    attempt_memory: Optional[AttemptMemory] = None,
     force: bool = False,
     reason: Optional[str] = None,
 ) -> None:
@@ -1498,7 +1647,16 @@ def collect_realtime_spot(
     if allowed_assets and asset.upper() not in allowed_assets and not force:
         return
 
-    symbol_cycle = list(attempts) if attempts else []
+    base_cycle = list(attempts) if attempts else []
+    if attempt_memory is not None:
+        filtered_cycle = [
+            (sym, exch)
+            for sym, exch in base_cycle
+            if attempt_memory.is_blacklisted(sym, exch) is None
+        ]
+    else:
+        filtered_cycle = base_cycle
+    symbol_cycle = filtered_cycle or base_cycle
     if not symbol_cycle:
         return
 
@@ -1601,6 +1759,8 @@ def try_symbols(
     attempts: List[Tuple[str, Optional[str]]],
     fetch_fn,
     freshness_limit: Optional[float] = None,
+    *,
+    attempt_memory: Optional[AttemptMemory] = None,
 ):
     """Iterate over symbol candidates and prefer the freshest successful payload."""
 
@@ -1609,8 +1769,39 @@ def try_symbols(
     best_latency: Optional[float] = None
 
     for sym, exch in attempts:
+        skip = False
+        skip_reason: Optional[str] = None
+        if attempt_memory is not None:
+            skip, skip_reason, first_skip = attempt_memory.should_skip(sym, exch)
+            if skip:
+                if first_skip:
+                    LOGGER.info(
+                        "Skipping %s (exchange=%s) due to previous client error: %s",
+                        sym,
+                        exch or "default",
+                        skip_reason or "",
+                    )
+                last = {
+                    "ok": False,
+                    "error": skip_reason or "client error blacklist",
+                    "used_symbol": sym,
+                    "used_exchange": exch,
+                }
+                continue
         try:
             result = fetch_fn(sym, exch)
+        except TDError as exc:
+            last = {"ok": False, "error": str(exc), "error_code": exc.status_code}
+            LOGGER.warning(
+                "Twelve Data request error for %s (exchange=%s): %s",
+                sym,
+                exch or "default",
+                exc,
+            )
+            if attempt_memory is not None and exc.status_code in {400, 404}:
+                attempt_memory.record_hard_failure(sym, exch, str(exc))
+            time.sleep(max(TD_RATE_LIMITER.current_delay * 0.5, 0.1))
+            continue
         except Exception as exc:
             last = {"ok": False, "error": str(exc)}
             LOGGER.warning(
@@ -1645,6 +1836,12 @@ def try_symbols(
         elif freshness_limit is not None and "freshness_violation" not in result:
             result["freshness_violation"] = False
 
+        if attempt_memory is not None and isinstance(result, dict):
+            error_code = _safe_int(result.get("error_code"))
+            if error_code in {400, 404}:
+                reason = result.get("error") or result.get("message") or f"code {error_code}"
+                attempt_memory.record_hard_failure(sym, exch, str(reason))
+
         if result.get("ok"):
             if not violation:
                 return result
@@ -1672,13 +1869,56 @@ def try_symbols(
     return last or {"ok": False}
 
 
+def _accept_market_closed_staleness(
+    payload: Optional[Dict[str, Any]],
+    freshness_limit: Optional[float],
+) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if not payload.get("ok") or not payload.get("freshness_violation"):
+        return False
+    if freshness_limit is None:
+        return False
+    source = str(payload.get("source") or "")
+    if "time_series" not in source:
+        return False
+    latest_iso = payload.get("latest_utc") or payload.get("utc")
+    age = _age_seconds_from_iso(latest_iso)
+    if age is None or age < max(MARKET_CLOSED_GRACE_SECONDS, 0.0):
+        return False
+    latest_dt = _parse_iso_utc(latest_iso)
+    now_dt = datetime.now(timezone.utc)
+    if latest_dt is None:
+        return False
+    if latest_dt.weekday() < 5 and now_dt.weekday() < 5:
+        return False
+    payload["freshness_violation"] = False
+    payload.setdefault("freshness_limit_seconds", freshness_limit)
+    payload["market_closed_assumed"] = True
+    if age is not None:
+        payload["latency_seconds"] = age
+    payload["freshness_note"] = "market_closed_weekend"
+    return True
+
+
 def fetch_with_freshness(
     attempts: List[Tuple[str, Optional[str]]],
     fetch_fn: Callable[[str, Optional[str]], Dict[str, Any]],
     freshness_limit: Optional[float] = None,
     max_refreshes: int = 1,
+    *,
+    attempt_memory: Optional[AttemptMemory] = None,
 ):
-    result = try_symbols(attempts, fetch_fn, freshness_limit=freshness_limit)
+    result = try_symbols(
+        attempts,
+        fetch_fn,
+        freshness_limit=freshness_limit,
+        attempt_memory=attempt_memory,
+    )
+    if _accept_market_closed_staleness(result, freshness_limit):
+        if isinstance(result, dict):
+            result.setdefault("freshness_retries", 0)
+        return result
     retries = 0
     while (
         freshness_limit is not None
@@ -1689,12 +1929,19 @@ def fetch_with_freshness(
     ):
         retries += 1
         time.sleep(max(TD_RATE_LIMITER.current_delay, 0.2))
-        result = try_symbols(attempts, fetch_fn, freshness_limit=freshness_limit)
+        result = try_symbols(
+            attempts,
+            fetch_fn,
+            freshness_limit=freshness_limit,
+            attempt_memory=attempt_memory,
+        )
+        if _accept_market_closed_staleness(result, freshness_limit):
+            break
     if isinstance(result, dict):
         result.setdefault("freshness_violation", bool(result.get("freshness_violation")))
         result["freshness_retries"] = retries
     return result
-
+  
 # ───────────────────── 5m EMA9–EMA21 (előzetes jelzés) ───────────────────
 
 def ema(series: List[Optional[float]], period: int) -> List[Optional[float]]:
@@ -1750,6 +1997,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     ensure_dir(adir)
 
     attempts = _normalize_symbol_attempts(cfg)
+    attempt_memory = AttemptMemory()
 
     # 1) Spot (quote → 5m close fallback), több tickerrel
     spot = fetch_with_freshness(
@@ -1757,6 +2005,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
         lambda s, ex: td_spot_with_fallback(s, ex),
         freshness_limit=SPOT_FRESHNESS_LIMIT,
         max_refreshes=1,
+        attempt_memory=attempt_memory,
     )
     if isinstance(spot, dict):
         spot.setdefault("freshness_limit_seconds", SPOT_FRESHNESS_LIMIT)
@@ -1774,7 +2023,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
         force_reason = "spot_stale"
     elif spot.get("fallback_used") or spot.get("fallback_previous_payload"):
         force_reason = "spot_fallback"
-    series_payloads = _collect_series_payloads(attempts, adir)
+    series_payloads = _collect_series_payloads(attempts, attempt_memory, adir)
     k5 = series_payloads.get("klines_5m")
     if not isinstance(k5, dict):
         k5 = {
@@ -1783,7 +2032,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
             "freshness_limit_seconds": SERIES_FRESHNESS_LIMITS.get("5min"),
         }
 
-    _record_asset_status(asset, attempts, spot, series_payloads)
+    _record_asset_status(asset, attempts, spot, series_payloads, attempt_memory=attempt_memory)
 
     # 3) 5m előzetes jelzés (analysis.py később felülírhatja)
     sig = signal_from_5m(k5 if isinstance(k5, dict) else {"ok": False})
@@ -1804,6 +2053,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
         asset,
         attempts,
         adir,
+        attempt_memory=attempt_memory,
         force=bool(force_reason),
         reason=force_reason,
     )
@@ -1890,39 +2140,20 @@ def main():
         record_trading_run(started_at=started_at_dt, completed_at=completed_at_dt, duration_seconds=duration_seconds)
     except Exception as exc:
         logger.warning("Failed to record trading pipeline metrics: %s", exc)
+    try:
+        warning_summary = summarize_pipeline_warnings()
+        warning_lines = warning_summary.get("warning_lines") or 0
+        client_lines = warning_summary.get("client_error_lines") or 0
+        ratio = warning_summary.get("client_error_ratio") or 0.0
+        if warning_lines:
+            logger.info(
+                "Pipeline warnings=%d client_errors=%d ratio=%.3f",
+                warning_lines,
+                client_lines,
+                ratio,
+            )
+    except Exception as exc:
+        logger.warning("Failed to summarize pipeline warnings: %s", exc)
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
