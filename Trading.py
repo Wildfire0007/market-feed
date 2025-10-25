@@ -139,13 +139,13 @@ SERIES_FRESHNESS_LIMITS = {
 }
 SPOT_FRESHNESS_LIMIT = float(os.getenv("TD_SPOT_FRESHNESS_LIMIT", "900"))
 
-# Reduce the volume of large timeframe requests to keep latency in check.  The
-# short-term series still use the full 500 bar history, while the heavier 1h
-# and 4h payloads are trimmed to a leaner default that can be overridden from
-# the environment if necessary.
+# Reduce the volume of large timeframe requests to keep latency in check.  The␊
+# short-term series now default to a lighter 300 bar history, while the heavier
+# 1h and 4h payloads stay lean as well.  All values can be overridden from the
+# environment if necessary.
 SERIES_OUTPUT_SIZES = {
-    "1min": max(50, _env_int("TD_OUTPUTSIZE_1MIN", 500)),
-    "5min": max(50, _env_int("TD_OUTPUTSIZE_5MIN", 500)),
+    "1min": max(50, _env_int("TD_OUTPUTSIZE_1MIN", 300)),
+    "5min": max(50, _env_int("TD_OUTPUTSIZE_5MIN", 300)),
     "1h": max(50, _env_int("TD_OUTPUTSIZE_1H", 240)),
     "4h": max(50, _env_int("TD_OUTPUTSIZE_4H", 180)),
 }
@@ -1631,6 +1631,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
