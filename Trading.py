@@ -740,7 +740,7 @@ def _collect_series_payloads(
     attempts: List[Tuple[str, Optional[str]]],
     attempt_memory: Optional[AttemptMemory],
     out_dir: str,
-) -> Dict[str, Dict[str, Any]]
+) -> Dict[str, Dict[str, Any]]:
     if not SERIES_FETCH_PLAN:
         return {}
 
@@ -2157,3 +2157,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
