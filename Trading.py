@@ -404,6 +404,34 @@ def _format_attempts(attempts: List[Tuple[str, Optional[str]]]) -> List[Dict[str
     return formatted
 
 
+def _reuse_previous_spot(adir: str, payload: Dict[str, Any], freshness_limit: float) -> Dict[str, Any]:
+    if payload.get("ok") and payload.get("price") is not None:
+        return payload
+
+    previous = load_json(os.path.join(adir, "spot.json"))
+    if not isinstance(previous, dict) or not previous.get("ok"):
+        return payload
+
+    price = previous.get("price")
+    utc_iso = previous.get("utc")
+    if price is None or not isinstance(utc_iso, str):
+        return payload
+
+    age = _age_seconds_from_iso(utc_iso)
+    if age is None or age > freshness_limit:
+        return payload
+
+    reused = dict(previous)
+    reused["retrieved_at_utc"] = now_utc()
+    reused["latency_seconds"] = age
+    reused["fallback_previous_payload"] = True
+    reason = payload.get("error") or payload.get("error_fallback")
+    if reason:
+        reused["fallback_reason"] = str(reason)
+    reused.setdefault("freshness_limit_seconds", freshness_limit)
+    return reused
+
+
 def _record_asset_status(
     asset: str,
     attempts: List[Tuple[str, Optional[str]]],
@@ -503,6 +531,71 @@ def save_series_payload(out_dir: str, name: str, payload: Dict[str, Any]) -> Non
         save_json(os.path.join(out_dir, f"{name}_meta.json"), meta)
 
 
+def _load_existing_series(out_dir: str, name: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    meta_path = os.path.join(out_dir, f"{name}_meta.json")
+    raw_path = os.path.join(out_dir, f"{name}.json")
+    meta = load_json(meta_path)
+    raw = load_json(raw_path)
+    if not isinstance(meta, dict) or not isinstance(raw, dict):
+        return None, None
+    return meta, raw
+
+
+def _age_seconds_from_iso(ts: Optional[str]) -> Optional[float]:
+    parsed = _parse_iso_utc(ts)
+    if not parsed:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
+
+
+def _reuse_previous_series_payload(
+    out_dir: str,
+    name: str,
+    payload: Dict[str, Any],
+    freshness_limit: Optional[float],
+) -> Dict[str, Any]:
+    if freshness_limit is None:
+        return payload
+
+    ok = bool(payload.get("ok"))
+    raw_values: List[Any] = []
+    raw = payload.get("raw")
+    if isinstance(raw, dict):
+        raw_candidate = raw.get("values")
+        if isinstance(raw_candidate, list):
+            raw_values = raw_candidate
+    if ok and raw_values:
+        return payload
+
+    meta_prev, raw_prev = _load_existing_series(out_dir, name)
+    if not meta_prev or not raw_prev:
+        return payload
+
+    prev_values = raw_prev.get("values") if isinstance(raw_prev, dict) else None
+    if not prev_values:
+        return payload
+
+    latest_iso = None
+    if isinstance(meta_prev, dict):
+        latest_iso = meta_prev.get("latest_utc") or meta_prev.get("utc")
+    age = _age_seconds_from_iso(latest_iso)
+    if age is None or age > freshness_limit:
+        return payload
+
+    reused = dict(meta_prev)
+    reused["raw"] = raw_prev
+    reused.setdefault("ok", True)
+    reused["freshness_violation"] = False
+    reused.setdefault("freshness_limit_seconds", freshness_limit)
+    reused["latency_seconds"] = age
+    reused["retrieved_at_utc"] = now_utc()
+    reused["fallback_previous_payload"] = True
+    reason = payload.get("error") or payload.get("message")
+    if reason:
+        reused["fallback_reason"] = str(reason)
+    return reused
+
+
 def _series_fetcher(interval: str, outputsize: int) -> Callable[[str, Optional[str]], Dict[str, Any]]:
     def _inner(symbol: str, exchange: Optional[str]) -> Dict[str, Any]:
         return td_time_series(symbol, interval, outputsize, exchange, "desc")
@@ -535,6 +628,9 @@ def _finalize_series_payload(
 
     if original_retries is not None:
         data.setdefault("freshness_retries", original_retries)
+
+    if not data.get("ok") or not data.get("raw", {}).get("values"):
+        data = _reuse_previous_series_payload(out_dir, name, data, freshness_limit)
 
     save_series_payload(out_dir, name, data)
     return data
@@ -1645,6 +1741,8 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
         spot.setdefault("freshness_limit_seconds", SPOT_FRESHNESS_LIMIT)
     else:
         spot = {"ok": False, "freshness_limit_seconds": SPOT_FRESHNESS_LIMIT}
+    if isinstance(spot, dict):
+        spot = _reuse_previous_spot(adir, spot, SPOT_FRESHNESS_LIMIT)
     save_json(os.path.join(adir, "spot.json"), spot)
 
     spot_violation = bool(spot.get("freshness_violation")) if isinstance(spot, dict) else False
@@ -1653,7 +1751,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
         force_reason = "spot_error"
     elif spot_violation:
         force_reason = "spot_stale"
-    elif spot.get("fallback_used"):
+    elif spot.get("fallback_used") or spot.get("fallback_previous_payload"):
         force_reason = "spot_fallback"
     series_payloads = _collect_series_payloads(attempts, adir)
     k5 = series_payloads.get("klines_5m")
@@ -1774,6 +1872,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
