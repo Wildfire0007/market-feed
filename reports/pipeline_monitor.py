@@ -127,6 +127,42 @@ def get_pipeline_log_path(path: Optional[Path] = None) -> Path:
     return target
 
 
+def summarize_pipeline_warnings(path: Optional[Path] = None) -> Dict[str, Any]:
+    """Parse the pipeline log and compute warning/client-error ratios."""
+
+    target = Path(path or PIPELINE_LOG_PATH)
+    summary: Dict[str, Any] = {
+        "total_lines": 0,
+        "warning_lines": 0,
+        "client_error_lines": 0,
+        "client_error_ratio": 0.0,
+        "updated_utc": _to_iso(_now()),
+    }
+    if not target.exists():
+        return summary
+
+    try:
+        with target.open("r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                summary["total_lines"] += 1
+                lower = line.lower()
+                if "warning" in lower:
+                    summary["warning_lines"] += 1
+                    if "404" in lower or "400" in lower or "client error" in lower:
+                        summary["client_error_lines"] += 1
+    except Exception:
+        return summary
+
+    warnings = summary.get("warning_lines") or 0
+    client_errors = summary.get("client_error_lines") or 0
+    if warnings:
+        summary["client_error_ratio"] = round(client_errors / warnings, 3)
+    return summary
+    
+    
 __all__ = [
     "DEFAULT_MAX_LAG_SECONDS",
     "PIPELINE_MONITOR_PATH",
@@ -134,4 +170,5 @@ __all__ = [
     "get_pipeline_log_path",
     "record_analysis_run",
     "record_trading_run",
+    "summarize_pipeline_warnings",
 ]
