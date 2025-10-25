@@ -2003,14 +2003,46 @@ def should_enforce_stale_frame(asset: str,
     return True
 
 
-def build_data_gap_signal(asset: str,
-                          spot_price: Any,
-                          spot_utc: str,
-                          spot_retrieved: str,
-                          leverage: float,
-                          reasons: List[str],
-                          display_spot: Optional[float],
-                          diagnostics: Dict[str, Any]) -> Dict[str, Any]:
+def build_data_gap_signal(
+    asset: str,
+    spot_price: Any,
+    spot_utc: str,
+    spot_retrieved: str,
+    leverage: float,
+    reasons: List[str],
+    display_spot: Optional[float],
+    diagnostics: Dict[str, Any],
+    session_meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    session_payload: Dict[str, Any] = {
+        "open": None,
+        "within_window": None,
+        "weekday_ok": None,
+        "status": "unavailable",
+        "status_note": "Hiányzó adat",
+    }
+    if session_meta:
+        session_payload = dict(session_meta)
+
+    gates_mode = "data_gap"
+    required: List[str] = ["data_integrity"]
+    missing: List[str] = ["data_integrity"]
+    signal = "no entry"
+    reasons_payload = list(reasons)
+
+    if session_meta:
+        open_now = bool(session_meta.get("open"))
+        monitor_ok = bool(session_meta.get("within_monitor_window"))
+        entry_open = bool(session_meta.get("entry_open"))
+        if not open_now and not monitor_ok and not entry_open:
+            gates_mode = "session_closed"
+            required = ["session"]
+            missing = ["session"]
+            signal = "market closed"
+            status_note = session_meta.get("status_note")
+            if status_note and status_note not in reasons_payload:
+                reasons_payload.insert(0, status_note)
+
     return {
         "asset": asset,
         "ok": False,
@@ -2021,7 +2053,7 @@ def build_data_gap_signal(asset: str,
             "utc": spot_utc,
             "retrieved_at_utc": spot_retrieved,
         },
-        "signal": "no entry",
+        "signal": signal,
         "probability": 0,
         "entry": None,
         "sl": None,
@@ -2030,19 +2062,13 @@ def build_data_gap_signal(asset: str,
         "rr": None,
         "leverage": leverage,
         "gates": {
-            "mode": "data_gap",
-            "required": ["data_integrity"],
-            "missing": ["data_integrity"],
+            "mode": gates_mode,
+            "required": required,
+            "missing": missing,
         },
-        "session_info": {
-            "open": None,
-            "within_window": None,
-            "weekday_ok": None,
-            "status": "unavailable",
-            "status_note": "Hiányzó adat",
-        },
+        "session_info": session_payload,
         "diagnostics": diagnostics,
-        "reasons": reasons,
+        "reasons": reasons_payload,
     }
 
 def save_json(path: str, obj: Any) -> None:
@@ -3506,6 +3532,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             reasons_payload,
             display_spot,
             diag_factory(),
+            session_meta=session_meta,
         )
         if realtime_used and realtime_reason:
             msg.setdefault("reasons", []).append(realtime_reason)
@@ -3538,6 +3565,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             data_gap_reasons,
             display_spot,
             diag_factory(),
+            session_meta=session_meta,
         )
         save_json(os.path.join(outdir, "signal.json"), msg)
         return msg
@@ -3562,6 +3590,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             ],
             display_spot,
             diag_factory(),
+            session_meta=session_meta,
         )
         save_json(os.path.join(outdir, "signal.json"), msg)
         return msg
@@ -3576,6 +3605,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             ["Insufficient closed data (5m close)"],
             display_spot,
             diag_factory(),
+            session_meta=session_meta,
         )
         save_json(os.path.join(outdir, "signal.json"), msg)
         return msg
@@ -5429,6 +5459,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
