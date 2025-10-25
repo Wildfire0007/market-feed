@@ -1677,7 +1677,7 @@ def collect_realtime_spot(
         )
         thread.start()
         with _REALTIME_BACKGROUND_LOCK:
-            _REALTIME_BACKGROUND_THREADS.append(thread)
+            REALTIME_BACKGROUND_THREADS.append(thread)
         return
 
     _collect_realtime_spot_impl(asset, symbol_cycle, out_dir, force=force, reason=reason)
@@ -1686,10 +1686,10 @@ def collect_realtime_spot(
 def wait_for_realtime_background() -> None:
     while True:
         with _REALTIME_BACKGROUND_LOCK:
-            if not _REALTIME_BACKGROUND_THREADS:
+            if not REALTIME_BACKGROUND_THREADS:
                 break
-            threads = list(_REALTIME_BACKGROUND_THREADS)
-            _REALTIME_BACKGROUND_THREADS.clear()
+            threads = list(REALTIME_BACKGROUND_THREADS)
+            REALTIME_BACKGROUND_THREADS.clear()
         for thread in threads:
             thread.join()
 
@@ -2157,4 +2157,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
