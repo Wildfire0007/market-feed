@@ -139,6 +139,24 @@ SERIES_FRESHNESS_LIMITS = {
 }
 SPOT_FRESHNESS_LIMIT = float(os.getenv("TD_SPOT_FRESHNESS_LIMIT", "900"))
 
+# Reduce the volume of large timeframe requests to keep latency in check.  The
+# short-term series still use the full 500 bar history, while the heavier 1h
+# and 4h payloads are trimmed to a leaner default that can be overridden from
+# the environment if necessary.
+SERIES_OUTPUT_SIZES = {
+    "1min": max(50, _env_int("TD_OUTPUTSIZE_1MIN", 500)),
+    "5min": max(50, _env_int("TD_OUTPUTSIZE_5MIN", 500)),
+    "1h": max(50, _env_int("TD_OUTPUTSIZE_1H", 240)),
+    "4h": max(50, _env_int("TD_OUTPUTSIZE_4H", 180)),
+}
+
+SERIES_FETCH_PLAN = [
+    ("klines_1m", "1min"),
+    ("klines_5m", "5min"),
+    ("klines_1h", "1h"),
+    ("klines_4h", "4h"),
+]
+
 
 class AdaptiveRateLimiter:
     def __init__(self, base_pause: float, min_pause: float, max_pause: float) -> None:
@@ -220,6 +238,7 @@ _REQUEST_ADAPTER = HTTPAdapter(
 _REQUEST_SESSION.mount("https://", _REQUEST_ADAPTER)
 _REQUEST_SESSION.mount("http://", _REQUEST_ADAPTER)
 _REQUEST_SESSION.headers.update({"User-Agent": "market-feed/td-only/1.0"})
+_ORIGINAL_REQUESTS_GET = requests.get
 ANCHOR_LOCK = threading.Lock()
 _REALTIME_BACKGROUND_LOCK = threading.Lock()
 _REALTIME_BACKGROUND_THREADS: List[threading.Thread] = []
@@ -260,6 +279,91 @@ def save_series_payload(out_dir: str, name: str, payload: Dict[str, Any]) -> Non
     save_json(os.path.join(out_dir, f"{name}.json"), raw)
     if meta:
         save_json(os.path.join(out_dir, f"{name}_meta.json"), meta)
+
+
+def _series_fetcher(interval: str, outputsize: int) -> Callable[[str, Optional[str]], Dict[str, Any]]:
+    def _inner(symbol: str, exchange: Optional[str]) -> Dict[str, Any]:
+        return td_time_series(symbol, interval, outputsize, exchange, "desc")
+
+    return _inner
+
+
+def _finalize_series_payload(
+    attempts: List[Tuple[str, Optional[str]]],
+    out_dir: str,
+    name: str,
+    interval: str,
+    freshness_limit: Optional[float],
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    data: Dict[str, Any] = dict(payload) if isinstance(payload, dict) else {"ok": False}
+    if "raw" not in data or not isinstance(data.get("raw"), dict):
+        data["raw"] = payload.get("raw") if isinstance(payload, dict) else {"values": []}
+        if not isinstance(data["raw"], dict):
+            data["raw"] = {"values": []}
+
+    if freshness_limit is not None:
+        data.setdefault("freshness_limit_seconds", freshness_limit)
+
+    original_retries = data.get("freshness_retries")
+
+    if data.get("ok"):
+        data = _refresh_series_if_stale(attempts, interval, data, freshness_limit)
+        data = _prefer_existing_series(out_dir, name, data, freshness_limit)
+
+    if original_retries is not None:
+        data.setdefault("freshness_retries", original_retries)
+
+    save_series_payload(out_dir, name, data)
+    return data
+
+
+def _collect_series_payloads(
+    attempts: List[Tuple[str, Optional[str]]],
+    out_dir: str,
+) -> Dict[str, Dict[str, Any]]:
+    if not SERIES_FETCH_PLAN:
+        return {}
+
+    workers = max(1, min(len(SERIES_FETCH_PLAN), TD_REQUEST_CONCURRENCY))
+    results: Dict[str, Dict[str, Any]] = {}
+    future_map = {}
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for name, interval in SERIES_FETCH_PLAN:
+            outputsize = SERIES_OUTPUT_SIZES.get(interval, 500)
+            fetch_fn = _series_fetcher(interval, outputsize)
+            freshness_limit = SERIES_FRESHNESS_LIMITS.get(interval)
+            future = pool.submit(
+                fetch_with_freshness,
+                attempts,
+                fetch_fn,
+                freshness_limit=freshness_limit,
+                max_refreshes=1,
+            )
+            future_map[future] = (name, interval, freshness_limit)
+
+        for future in as_completed(future_map):
+            name, interval, freshness_limit = future_map[future]
+            try:
+                payload = future.result()
+            except Exception as exc:
+                payload = {
+                    "ok": False,
+                    "error": f"series fetch failed: {exc}",
+                    "retrieved_at_utc": now_utc(),
+                    "raw": {"values": []},
+                }
+            results[name] = _finalize_series_payload(
+                attempts,
+                out_dir,
+                name,
+                interval,
+                freshness_limit,
+                payload,
+            )
+
+    return results
 
 
 def _refresh_series_if_stale(
@@ -446,8 +550,11 @@ def td_get(path: str, **params) -> Dict[str, Any]:
         TD_RATE_LIMITER.wait()
         response: Optional[requests.Response] = None
         try:
+            request_fn = _REQUEST_SESSION.get
+            if getattr(requests, "get", None) is not _ORIGINAL_REQUESTS_GET:
+                request_fn = requests.get
             with _REQUEST_SEMAPHORE:
-                response = _REQUEST_SESSION.get(
+                response = request_fn(
                     f"{TD_BASE}/{path}",
                     params=params,
                     timeout=30,
@@ -1059,7 +1166,7 @@ def _symbol_attempt_variants(symbol: str,
 
     if exchange:
         variants.append((symbol, None))
-        if ":" not in symbol and "/" not in symbol:
+        if ":" not in symbol:
             variants.append((f"{symbol}:{exchange}", None))
     elif ":" not in symbol and "/" not in symbol:
         variants.append((symbol, None))
@@ -1068,6 +1175,8 @@ def _symbol_attempt_variants(symbol: str,
         compact = symbol.replace("/", "")
         if compact:
             variants.append((compact, exchange if exchange else None))
+            if exchange is not None:
+                variants.append((compact, None))
 
     return variants
 
@@ -1265,67 +1374,14 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     elif spot.get("fallback_used"):
         force_reason = "spot_fallback"
     collect_realtime_spot(asset, attempts, adir, force=bool(force_reason), reason=force_reason)
-    time.sleep(TD_PAUSE)
-
-    # 2) OHLC (1m / 5m / 1h / 4h) – az első sikeres tickerrel
-    def ts(s: str, ex: Optional[str], iv: str):
-        return td_time_series(s, iv, 500, ex, "desc")
-
-    k1m_limit = SERIES_FRESHNESS_LIMITS.get("1min")
-    k1m = fetch_with_freshness(
-        attempts,
-        lambda s, ex: ts(s, ex, "1min"),
-        freshness_limit=k1m_limit,
-        max_refreshes=1,
-    )
-    if isinstance(k1m, dict):
-        k1m.setdefault("freshness_limit_seconds", k1m_limit)
-        k1m = _refresh_series_if_stale(attempts, "1min", k1m, k1m_limit)
-        k1m = _prefer_existing_series(adir, "klines_1m", k1m, k1m_limit)
-    save_series_payload(adir, "klines_1m", k1m if isinstance(k1m, dict) else {"ok": False, "raw": {"values": []}})
-    time.sleep(TD_PAUSE)
-
-    k5_limit = SERIES_FRESHNESS_LIMITS.get("5min")
-    k5 = fetch_with_freshness(
-        attempts,
-        lambda s, ex: ts(s, ex, "5min"),
-        freshness_limit=k5_limit,
-        max_refreshes=1,
-    )
-    if isinstance(k5, dict):
-        k5.setdefault("freshness_limit_seconds", k5_limit)
-        k5 = _refresh_series_if_stale(attempts, "5min", k5, k5_limit)
-        k5 = _prefer_existing_series(adir, "klines_5m", k5, k5_limit)
-    save_series_payload(adir, "klines_5m", k5 if isinstance(k5, dict) else {"ok": False, "raw": {"values": []}})
-    time.sleep(TD_PAUSE)
-
-    k1_limit = SERIES_FRESHNESS_LIMITS.get("1h")
-    k1 = fetch_with_freshness(
-        attempts,
-        lambda s, ex: ts(s, ex, "1h"),
-        freshness_limit=k1_limit,
-        max_refreshes=1,
-    )
-    if isinstance(k1, dict):
-        k1.setdefault("freshness_limit_seconds", k1_limit)
-        k1 = _refresh_series_if_stale(attempts, "1h", k1, k1_limit)
-        k1 = _prefer_existing_series(adir, "klines_1h", k1, k1_limit)
-    save_series_payload(adir, "klines_1h", k1 if isinstance(k1, dict) else {"ok": False, "raw": {"values": []}})
-    time.sleep(TD_PAUSE)
-
-    k4_limit = SERIES_FRESHNESS_LIMITS.get("4h")
-    k4 = fetch_with_freshness(
-        attempts,
-        lambda s, ex: ts(s, ex, "4h"),
-        freshness_limit=k4_limit,
-        max_refreshes=1,
-    )
-    if isinstance(k4, dict):
-        k4.setdefault("freshness_limit_seconds", k4_limit)
-        k4 = _refresh_series_if_stale(attempts, "4h", k4, k4_limit)
-        k4 = _prefer_existing_series(adir, "klines_4h", k4, k4_limit)
-    save_series_payload(adir, "klines_4h", k4 if isinstance(k4, dict) else {"ok": False, "raw": {"values": []}})
-    time.sleep(TD_PAUSE)
+    series_payloads = _collect_series_payloads(attempts, adir)
+    k5 = series_payloads.get("klines_5m")
+    if not isinstance(k5, dict):
+        k5 = {
+            "ok": False,
+            "raw": {"values": []},
+            "freshness_limit_seconds": SERIES_FRESHNESS_LIMITS.get("5min"),
+        }
 
     # 3) 5m előzetes jelzés (analysis.py később felülírhatja)
     sig = signal_from_5m(k5 if isinstance(k5, dict) else {"ok": False})
@@ -1422,6 +1478,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
