@@ -15,10 +15,12 @@ Kimenetek:
 Környezeti változók:
   TWELVEDATA_API_KEY = "<api key>"
   OUT_DIR            = "public" (alapértelmezés)
-  TD_PAUSE           = "0.25"   (kímélő szünet hívások közt, sec)
+  TD_PAUSE           = "0.15"   (kímélő szünet hívások közt, sec)
   TD_MAX_RETRIES     = "3"      (újrapróbálkozások száma)
   TD_BACKOFF_BASE    = "0.25"   (exponenciális visszavárás alapja)
   TD_BACKOFF_MAX     = "8"      (exponenciális visszavárás plafonja, sec)
+  TD_REQUESTS_PER_MINUTE = "55" (Twelve Data perces hívás plafon)
+  TD_REQUEST_BURST   = "10"     (engedélyezett azonnali burst ablak)
   TD_REALTIME_SPOT   = "0/1"    (alapértelmezés: 0 — külön job kezeli a realtime spotot)
   TD_REALTIME_INTERVAL = "5"    (realtime ciklus közötti szünet sec)
   TD_REALTIME_DURATION = "20"   (realtime poll futási ideje sec)
@@ -104,12 +106,14 @@ OUT_DIR  = os.getenv("OUT_DIR", "public")
 API_KEY_RAW = os.getenv("TWELVEDATA_API_KEY", "")
 API_KEY  = API_KEY_RAW.strip() if API_KEY_RAW else ""
 TD_BASE  = "https://api.twelvedata.com"
-TD_PAUSE = float(os.getenv("TD_PAUSE", "0.25"))
-TD_PAUSE_MIN = float(os.getenv("TD_PAUSE_MIN", str(max(TD_PAUSE * 0.8, 0.2))))
+TD_PAUSE = float(os.getenv("TD_PAUSE", "0.15"))
+TD_PAUSE_MIN = float(os.getenv("TD_PAUSE_MIN", str(max(TD_PAUSE * 0.6, 0.1))))
 TD_PAUSE_MAX = float(os.getenv("TD_PAUSE_MAX", str(max(TD_PAUSE * 6, 4.0))))
 TD_MAX_RETRIES = int(os.getenv("TD_MAX_RETRIES", "3"))
 TD_BACKOFF_BASE = float(os.getenv("TD_BACKOFF_BASE", str(max(TD_PAUSE, 0.25))))
 TD_BACKOFF_MAX = float(os.getenv("TD_BACKOFF_MAX", "8.0"))
+TD_REQUESTS_PER_MINUTE = max(10, _env_int("TD_REQUESTS_PER_MINUTE", 55))
+TD_REQUEST_BURST = max(1, _env_int("TD_REQUEST_BURST", min(10, TD_REQUESTS_PER_MINUTE)))
 REALTIME_FLAG = os.getenv("TD_REALTIME_SPOT", "0").lower() in {"1", "true", "yes", "on"}
 REALTIME_INTERVAL = float(os.getenv("TD_REALTIME_INTERVAL", "5"))
 REALTIME_DURATION = float(os.getenv("TD_REALTIME_DURATION", "20"))
@@ -158,7 +162,7 @@ SERIES_FETCH_PLAN = [
 ]
 
 
-class AdaptiveRateLimiter:
+class AdaptiveRateLimiter:␊
     def __init__(self, base_pause: float, min_pause: float, max_pause: float) -> None:
         self.base = max(base_pause, 0.0)
         self.min_pause = max(min_pause, 0.0)
@@ -199,7 +203,94 @@ class AdaptiveRateLimiter:
         return min(wait, TD_BACKOFF_MAX)
 
 
-TD_RATE_LIMITER = AdaptiveRateLimiter(TD_PAUSE, TD_PAUSE_MIN, TD_PAUSE_MAX)
+class TokenBucketLimiter:
+    def __init__(
+        self,
+        rate_per_minute: int,
+        burst_size: int,
+    ) -> None:
+        rate_per_minute = max(1, rate_per_minute)
+        burst_size = max(1, burst_size)
+        self.rate_per_second = rate_per_minute / 60.0
+        self.capacity = float(max(burst_size, 1))
+        self.tokens = float(self.capacity)
+        self.updated = time.monotonic()
+        self._lock = threading.Lock()
+
+    def _refill_locked(self) -> None:
+        now = time.monotonic()
+        delta = now - self.updated
+        if delta <= 0:
+            return
+        self.tokens = min(self.capacity, self.tokens + delta * self.rate_per_second)
+        self.updated = now
+
+    def wait(self) -> None:
+        while True:
+            with self._lock:
+                self._refill_locked()
+                if self.tokens >= 1.0:
+                    self.tokens -= 1.0
+                    return
+                needed = (1.0 - self.tokens) / self.rate_per_second if self.rate_per_second else 0.2
+            time.sleep(max(needed, 0.05))
+
+    def penalize(self, seconds: float = 2.0) -> None:
+        seconds = max(seconds, 0.0)
+        if seconds <= 0:
+            return
+        with self._lock:
+            self._refill_locked()
+            penalty = max(self.rate_per_second * seconds, 1.0)
+            self.tokens = max(0.0, self.tokens - penalty)
+            self.updated = time.monotonic()
+
+
+class RequestGovernor:
+    def __init__(
+        self,
+        base_pause: float,
+        min_pause: float,
+        max_pause: float,
+        rate_per_minute: int,
+        burst_size: int,
+    ) -> None:
+        self._adaptive = AdaptiveRateLimiter(base_pause, min_pause, max_pause)
+        self._bucket = TokenBucketLimiter(rate_per_minute, burst_size)
+
+    @property
+    def current_delay(self) -> float:
+        return self._adaptive.current_delay
+
+    def wait(self) -> None:
+        self._bucket.wait()
+        self._adaptive.wait()
+
+    def record_success(self) -> None:
+        self._adaptive.record_success()
+
+    def record_failure(
+        self,
+        throttled: bool = False,
+        *,
+        retry_after: Optional[float] = None,
+    ) -> None:
+        self._adaptive.record_failure(throttled=throttled)
+        if throttled:
+            penalty = retry_after if retry_after is not None else 5.0
+            self._bucket.penalize(max(penalty, 1.0))
+
+    def backoff_seconds(self, attempt: int, retry_after: Optional[float] = None) -> float:
+        return self._adaptive.backoff_seconds(attempt, retry_after=retry_after)
+
+
+TD_RATE_LIMITER = RequestGovernor(
+    TD_PAUSE,
+    TD_PAUSE_MIN,
+    TD_PAUSE_MAX,
+    TD_REQUESTS_PER_MINUTE,
+    TD_REQUEST_BURST,
+)
 
 # ───────────────────────────────── ASSETS ────────────────────────────────
 # GER40 helyett USOIL. A fő ticker a WTI/USD, fallbackokra már nincs szükség.
@@ -243,9 +334,18 @@ ASSETS = {
 _TRADING_STATUS: Dict[str, Dict[str, Any]] = {}
 _TRADING_STATUS_LOCK = threading.Lock()
 
-TD_MAX_WORKERS = max(1, min(len(ASSETS), _env_int("TD_MAX_WORKERS", 5)))
-_DEFAULT_REQ_CONCURRENCY = max(1, min(TD_MAX_WORKERS, 4))
-TD_REQUEST_CONCURRENCY = max(1, min(len(ASSETS), _env_int("TD_REQUEST_CONCURRENCY", _DEFAULT_REQ_CONCURRENCY)))
+TD_MAX_WORKERS = max(1, min(len(ASSETS), _env_int("TD_MAX_WORKERS", len(ASSETS))))
+_DEFAULT_REQ_CONCURRENCY = max(
+    1,
+    min(len(ASSETS) * max(len(SERIES_FETCH_PLAN), 1), 12),
+)
+TD_REQUEST_CONCURRENCY = max(
+    1,
+    min(
+        len(ASSETS) * max(len(SERIES_FETCH_PLAN), 1),
+        _env_int("TD_REQUEST_CONCURRENCY", _DEFAULT_REQ_CONCURRENCY),
+    ),
+)
 _REQUEST_SEMAPHORE = threading.Semaphore(TD_REQUEST_CONCURRENCY)
 _REQUEST_SESSION = requests.Session()
 _REQUEST_ADAPTER = HTTPAdapter(
@@ -705,7 +805,13 @@ def td_get(path: str, **params) -> Dict[str, Any]:
                 )
                 last_status = effective_status
                 throttled = (error_code == 429) or ("limit" in message.lower())
-                TD_RATE_LIMITER.record_failure(throttled=throttled)
+                retry_after_hint = None
+                if response is not None:
+                    retry_after_hint = _parse_retry_after(response.headers.get("Retry-After"))
+                TD_RATE_LIMITER.record_failure(
+                    throttled=throttled,
+                    retry_after=retry_after_hint,
+                )
                 if attempt == TD_MAX_RETRIES:
                     raise err
             else:
@@ -714,7 +820,13 @@ def td_get(path: str, **params) -> Dict[str, Any]:
         except requests.HTTPError as exc:
             last_error = exc
             last_status = exc.response.status_code if exc.response else None
-            TD_RATE_LIMITER.record_failure(throttled=last_status in {429, 503})
+            retry_after_hint = None
+            if exc.response is not None:
+                retry_after_hint = _parse_retry_after(exc.response.headers.get("Retry-After"))
+            TD_RATE_LIMITER.record_failure(
+                throttled=last_status in {429, 503},
+                retry_after=retry_after_hint,
+            )
             if attempt == TD_MAX_RETRIES:
                 raise
         except (requests.RequestException, ValueError, json.JSONDecodeError) as exc:
@@ -1631,6 +1743,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
