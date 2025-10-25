@@ -330,11 +330,11 @@ ASSETS = {
     "BTCUSD": {
         "symbol": "BTC/USD",
         "exchange": "CRYPTO",
-        "alt": [
-            {"symbol": "BTC/USD", "exchange": "Coinbase"},
+        "alt": [            
             {"symbol": "BTC/USD", "exchange": "Binance"},
-            {"symbol": "BTCUSD", "exchange": "Coinbase"},
+            {"symbol": "BTC/USD", "exchange": "Coinbase"},
             {"symbol": "BTCUSD", "exchange": "Binance"},
+            {"symbol": "BTCUSD", "exchange": "Coinbase"},
             {"symbol": "BTC/USD", "exchange": None},
             "BTCUSD",
         ],
@@ -2157,5 +2157,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
