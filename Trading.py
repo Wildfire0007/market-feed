@@ -39,6 +39,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Optional, List, Tuple, Callable
 
 import requests
+from requests.adapters import HTTPAdapter
 
 try:
     from active_anchor import update_anchor_metrics
@@ -211,6 +212,14 @@ TD_MAX_WORKERS = max(1, min(len(ASSETS), _env_int("TD_MAX_WORKERS", 5)))
 _DEFAULT_REQ_CONCURRENCY = max(1, min(TD_MAX_WORKERS, 4))
 TD_REQUEST_CONCURRENCY = max(1, min(len(ASSETS), _env_int("TD_REQUEST_CONCURRENCY", _DEFAULT_REQ_CONCURRENCY)))
 _REQUEST_SEMAPHORE = threading.Semaphore(TD_REQUEST_CONCURRENCY)
+_REQUEST_SESSION = requests.Session()
+_REQUEST_ADAPTER = HTTPAdapter(
+    pool_connections=TD_REQUEST_CONCURRENCY,
+    pool_maxsize=max(TD_REQUEST_CONCURRENCY * 2, 4),
+)
+_REQUEST_SESSION.mount("https://", _REQUEST_ADAPTER)
+_REQUEST_SESSION.mount("http://", _REQUEST_ADAPTER)
+_REQUEST_SESSION.headers.update({"User-Agent": "market-feed/td-only/1.0"})
 ANCHOR_LOCK = threading.Lock()
 _REALTIME_BACKGROUND_LOCK = threading.Lock()
 _REALTIME_BACKGROUND_THREADS: List[threading.Thread] = []
@@ -227,7 +236,7 @@ def save_json(path: str, obj: Dict[str, Any]) -> None:
     ensure_dir(os.path.dirname(path))
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+        json.dump(obj, f, ensure_ascii=False, separators=(",", ":"))
     os.replace(tmp, path)
 
 
@@ -438,11 +447,10 @@ def td_get(path: str, **params) -> Dict[str, Any]:
         response: Optional[requests.Response] = None
         try:
             with _REQUEST_SEMAPHORE:
-                response = requests.get(
+                response = _REQUEST_SESSION.get(
                     f"{TD_BASE}/{path}",
                     params=params,
                     timeout=30,
-                    headers={"User-Agent": "market-feed/td-only/1.0"},
                 )
             response.raise_for_status()
             data = response.json()
@@ -1414,6 +1422,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
