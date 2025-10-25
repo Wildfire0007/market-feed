@@ -35,10 +35,11 @@ class TDGetErrorTests(unittest.TestCase):
              mock.patch.object(Trading.TD_RATE_LIMITER, "record_failure") as record_failure, \
              mock.patch.object(Trading.TD_RATE_LIMITER, "record_success") as record_success, \
              mock.patch("Trading.API_KEY", "demo"):
-            with self.assertRaises(RuntimeError) as ctx:
+            with self.assertRaises(Trading.TDError) as ctx:
                 Trading.td_get("quote", symbol="EUR/USD")
 
         self.assertIn("Invalid API key", str(ctx.exception))
+        self.assertEqual(ctx.exception.status_code, 401)
         mock_get.assert_called_once()
         record_failure.assert_called()
         record_success.assert_not_called()
@@ -59,12 +60,21 @@ class CollectHttpFramesTests(unittest.TestCase):
 
         time_stub = TimeStub()
 
-        with mock.patch("Trading.td_quote", side_effect=RuntimeError("bad key")) as mock_quote, \
+        td_error = Trading.TDError("not found", status_code=404)
+
+        with mock.patch("Trading.td_quote", side_effect=td_error) as mock_quote, \
              mock.patch("Trading.time.sleep") as sleep_mock, \
              mock.patch("Trading.time.time", side_effect=time_stub.time):
-            frames = Trading._collect_http_frames(symbol_cycle, deadline=10.0, interval=0.5, max_samples=3)
+            frames, abort_reason = Trading._collect_http_frames(
+                symbol_cycle,
+                deadline=10.0,
+                interval=0.5,
+                max_samples=3,
+                force=True,
+            )
 
         self.assertEqual(frames, [])
+        self.assertEqual(abort_reason, "client_error_404")
         self.assertLessEqual(mock_quote.call_count, 2)
         sleep_mock.assert_called_once()
 
@@ -73,22 +83,24 @@ class CollectRealtimeSpotTests(unittest.TestCase):
     def test_force_mode_uses_short_http_window(self):
         calls: Dict[str, Any] = {}
 
-        def fake_http(symbol_cycle, deadline, interval, max_samples):
+        def fake_http(symbol_cycle, deadline, interval, max_samples, force=False):
             calls.update(
                 {
                     "symbol_cycle": symbol_cycle,
                     "deadline": deadline,
                     "interval": interval,
                     "max_samples": max_samples,
+                    "force": force,
                 }
             )
-            return [
+            frames = [
                 {
                     "price": 1.2345,
                     "utc": "2024-01-01T00:00:00Z",
                     "retrieved_at_utc": "2024-01-01T00:00:01Z",
                 }
             ]
+            return frames, None
 
         with mock.patch("Trading.REALTIME_FLAG", False), \
              mock.patch("Trading.REALTIME_WS_ENABLED", False), \
@@ -108,6 +120,7 @@ class CollectRealtimeSpotTests(unittest.TestCase):
         http_mock.assert_called_once()
         self.assertLessEqual(calls["max_samples"], 2)
         self.assertLessEqual(calls["interval"], 2.0)
+        self.assertTrue(calls["force"])
 
 
 class TDQuotePriceExtractionTests(unittest.TestCase):
