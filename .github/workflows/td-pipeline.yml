@@ -41,7 +41,15 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install requests pandas numpy
+          pip install -r requirements.txt
+
+      - name: Show sklearn/joblib versions
+        run: |
+          python - <<'PY'
+          import sklearn, joblib
+          print("scikit-learn:", sklearn.__version__)
+          print("joblib:", joblib.__version__)
+          PY
 
       - name: Run Trading.py (pull all OHLC + spot)
         run: python Trading.py
@@ -86,10 +94,33 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy
+          pip install -r requirements.txt
 
-      - name: Run analysis.py (generate signals)
-        run: python analysis.py
+      - name: Show sklearn/joblib versions
+        run: |
+          python - <<'PY'
+          import sklearn, joblib
+          print("scikit-learn:", sklearn.__version__)
+          print("joblib:", joblib.__version__)
+          PY
+
+      - name: Verify model exists & loadable
+        run: python scripts/check_ml_readiness.py BTCUSD
+
+      - name: Run analysis with ML preferred
+        env:
+          USE_ML: "1"
+        run: |
+          python analysis.py
+          python - <<'PY'
+          import json, pathlib
+          signal_path = pathlib.Path("public/BTCUSD/signal.json")
+          data = json.loads(signal_path.read_text())
+          source = data.get("probability_stack", {}).get("source")
+          print("probability_stack.source =", source)
+          if source != "sklearn":
+              raise SystemExit("ML probability stack not sourced from scikit-learn")
+          PY
 
       - name: Commit & Push analysis outputs
         run: |
