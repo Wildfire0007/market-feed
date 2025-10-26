@@ -84,7 +84,7 @@ def run_diagnostics(assets: Iterable[str]) -> int:
     for asset in assets:
         info = inspect_model_artifact(asset)
         status = info.get("status", "unknown")
-        if status != "ok":
+        if status not in {"ok", "placeholder"}:
             exit_code = 1
         status_label = _format_status(status)
         print(f"- {asset}: {status_label}")
@@ -115,6 +115,15 @@ def run_diagnostics(assets: Iterable[str]) -> int:
             print(
                 "      2. Ellenőrizd, hogy ugyanazzal a scikit-learn verzióval készült, mint amit a requirements.txt ír elő."
             )
+        elif status == "placeholder":
+            print("    Figyelmeztetés: placeholder modell fájl észlelve.")
+            print(
+                "    Töltsd fel a tényleges GradientBoostingClassifier pickle-t ide: {path}".format(
+                    path=info["path"]
+                )
+            )
+            if info.get("detail"):
+                print(f"    Részletek: {info['detail']}")
         elif status == "type_mismatch":
             print("    Teendő: győződj meg róla, hogy GradientBoostingClassifier példányt tartalmaz a pickle.")
         elif status not in {"ok", "unknown"}:
