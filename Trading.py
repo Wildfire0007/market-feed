@@ -324,48 +324,70 @@ LOGGER = logging.getLogger("market_feed.trading")
 ASSETS = {
     "EURUSD": {
         "symbol": "EUR/USD",
-        "exchange": "FX",
-        "alt": ["EURUSD"],
+        "name": "Euro / US Dollar",
+        "asset_class": "FX",
+        "exchange": "PHYSICAL CURRENCY",
+        "exchange_display": "Physical Currency",
+        "currency": "USD",
     },
     "BTCUSD": {
         "symbol": "BTC/USD",
-        "exchange": "CRYPTO",
-        "alt": [            
-            {"symbol": "BTC/USD", "exchange": "Binance"},
-            {"symbol": "BTC/USD", "exchange": "Coinbase"},
-            {"symbol": "BTCUSD", "exchange": "Binance"},
-            {"symbol": "BTCUSD", "exchange": "Coinbase"},
-            {"symbol": "BTC/USD", "exchange": None},
-            "BTCUSD",
-        ],
+        "name": "Bitcoin / US Dollar (Coinbase Pro)",
+        "asset_class": "Crypto",
+        "exchange": "Coinbase Pro",
+        "exchange_display": "Coinbase Pro",
+        "currency": "USD",
     },
-    "GOLD_CFD": {"symbol": "XAU/USD", "exchange": None},
+    "GOLD_CFD": {
+        "symbol": "XAU/USD",
+        "name": "Gold / US Dollar",
+        "asset_class": "Commodity",
+        "exchange": "PHYSICAL METAL",
+        "exchange_display": "Physical Metal",
+        "currency": "USD",
+    },
 
     # ÚJ: WTI kőolaj. A Twelve Data-n a hivatalos jelölés: WTI/USD, de több
-    # alternatív ticker is forgalomban van – hagyjuk meg a korábbi fallback
-    # listát, hogy ne ismételjünk felesleges, sikertelen próbálkozásokat.
+    # alternatív ticker is forgalomban van – tartsuk meg a ténylegesen szükséges
+    # fallbackokat, hogy elkerüljük a fölös próbálkozásokat.
     "USOIL": {
         "symbol": "WTI/USD",
-        "exchange": None,
-        "alt": ["USOIL", "WTIUSD"],
+        "name": "Crude Oil WTI Spot / US Dollar",
+        "asset_class": "Commodity",
+        "exchange": "COMMODITY",
+        "exchange_display": "Commodity",
+        "currency": "USD",
+        "alt": ["USOIL"],
     },
 
 # Egyedi részvény és ETF kiterjesztések
     "NVDA": {
         "symbol": "NVDA",
+        "name": "NVIDIA Corporation",
+        "asset_class": "Equity",
         "exchange": "NASDAQ",
-        "alt": ["NVDA"],
+        "exchange_display": "Nasdaq",
+        "mic": "XNGS",
+        "currency": "USD",
+        "supports_prepost": True,
     },
     "SRTY": {
         "symbol": "SRTY",
-        "exchange": "NYSEARCA",
+        "name": "ProShares UltraPro Short Russell 2000",
+        "asset_class": "ETF",
+        "exchange": "ARCX",
+        "exchange_display": "NYSE Arca",
+        "mic": "ARCX",
+        "currency": "USD",
+        "supports_prepost": True,
+        # A Twelve Data metainformációi szerint az elsődleges piac az ARCX.
+        # A korábbi fallback kombinációk közül csak azokat hagyjuk meg,
+        # amelyek bizonyítottan működnek, hogy csökkentsük a fölös próbákat.
         "alt": [
-            {"symbol": "SRTY", "exchange": None},
-            {"symbol": "SRTY", "exchange": "NYSE"},
-            {"symbol": "SRTY", "exchange": "ARCA"},
+            {"symbol": "SRTY", "exchange": "NYSEARCA"},
             "SRTY:US",
         ],
-     },
+    },
 }
 
 _BASE_REQUESTS_PER_ASSET = 1 + len(SERIES_FETCH_PLAN)
@@ -2157,6 +2179,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
