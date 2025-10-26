@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, os.path.abspath(Path(__file__).resolve().parent.parent))
 
 import ml_model
+from scripts import check_ml_readiness
 
 
 @pytest.fixture(autouse=True)
@@ -65,3 +66,21 @@ def test_inspect_model_artifact_success(monkeypatch, tmp_path):
     assert result["status"] == "ok"
     assert result["model_class"] == "GradientBoostingClassifier"
     assert result["size_bytes"] == path.stat().st_size
+
+
+def test_python_version_status_ok(monkeypatch):
+    fake_sys = type("FakeSys", (), {"version_info": (3, 10, 4)})
+    monkeypatch.setattr(check_ml_readiness, "sys", fake_sys)
+
+    info = check_ml_readiness.python_version_status()
+    assert info["status"] == "ok"
+    assert info["current"].startswith("3.10")
+
+
+def test_python_version_status_outdated(monkeypatch):
+    fake_sys = type("FakeSys", (), {"version_info": (3, 8, 17)})
+    monkeypatch.setattr(check_ml_readiness, "sys", fake_sys)
+
+    info = check_ml_readiness.python_version_status()
+    assert info["status"] == "outdated"
+    assert info["recommended"].startswith(">= 3.9")
