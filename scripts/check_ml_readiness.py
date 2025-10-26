@@ -128,7 +128,13 @@ def run_diagnostics(assets: Iterable[str]) -> int:
             print("      1. Telepítsd a függőségeket: python -m pip install -r requirements.txt")
             print("      2. Generáld újra a feature CSV-t: USE_ML=0 python analysis.py")
             print(
-                "      3. Címkézd fel a `public/ml_features/BTCUSD_features.csv` fájl sorait és mentsd `public/ml_features/BTCUSD_labelled.csv` néven."
+                "      3. Generálj label oszlopot a `scripts/make_labels.py` segédprogrammal (pl.:"
+            )
+            print(
+                "         python scripts/make_labels.py --features public/ml_features/BTCUSD_features.csv --method fixed --ohlc public/data/BTCUSD_ohlc.csv)"
+            )
+            print(
+                "         majd nevezd át az outputot `public/ml_features/BTCUSD_labelled.csv` névre."
             )
             print(
                 "      4. Taníts modellt: python scripts/train_models.py --asset BTCUSD --dataset public/ml_features/BTCUSD_labelled.csv"
