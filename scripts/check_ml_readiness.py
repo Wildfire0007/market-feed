@@ -131,7 +131,7 @@ def run_diagnostics(assets: Iterable[str]) -> int:
                 "      3. Generálj label oszlopot a `scripts/make_labels.py` segédprogrammal (pl.:"
             )
             print(
-                "         python scripts/make_labels.py --features public/ml_features/BTCUSD_features.csv --method fixed --ohlc public/data/BTCUSD_ohlc.csv)"
+                "         python scripts/make_labels.py --features public/ml_features/BTCUSD_features.csv --asset BTCUSD --method fixed --horizon 12)"
             )
             print(
                 "         majd nevezd át az outputot `public/ml_features/BTCUSD_labelled.csv` névre."
