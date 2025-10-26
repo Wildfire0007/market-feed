@@ -124,6 +124,21 @@ def run_diagnostics(assets: Iterable[str]) -> int:
             )
             if info.get("detail"):
                 print(f"    Részletek: {info['detail']}")
+            print("    Lépésről lépésre javítás:")
+            print("      1. Telepítsd a függőségeket: python -m pip install -r requirements.txt")
+            print("      2. Generáld újra a feature CSV-t: USE_ML=0 python analysis.py")
+            print(
+                "      3. Címkézd fel a `public/ml_features/BTCUSD_features.csv` fájl sorait és mentsd `public/ml_features/BTCUSD_labelled.csv` néven."
+            )
+            print(
+                "      4. Taníts modellt: python scripts/train_models.py --asset BTCUSD --dataset public/ml_features/BTCUSD_labelled.csv"
+            )
+            print(
+                "      5. Ellenőrizd: python scripts/check_ml_readiness.py BTCUSD (a státusz legyen OK)."
+            )
+            print(
+                "      6. Ha GitHubon néznéd meg a részletes útmutatót, kattints a docs/ml_model_training_hu.md fájlban a `Raw` gombra."
+            )
         elif status == "type_mismatch":
             print("    Teendő: győződj meg róla, hogy GradientBoostingClassifier példányt tartalmaz a pickle.")
         elif status not in {"ok", "unknown"}:
