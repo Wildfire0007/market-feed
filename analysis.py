@@ -25,6 +25,7 @@ from ml_model import (
     log_feature_snapshot,
     missing_model_artifacts,
     predict_signal_probability,
+    runtime_dependency_issues,
 )
 from news_feed import SentimentSignal, load_sentiment
 
@@ -163,8 +164,7 @@ REFRESH_TIPS = (
     "CI/CD-ben kösd össze a Trading és Analysis futást: az analysis job csak a trading után induljon (needs: trading).",
     "A kliens kéréséhez adj cache-busting query paramot (pl. ?v=<timestamp>) és no-store cache-control fejlécet.",
     "Cloudflare Worker stale policy: 5m feedre állítsd 120s-re, hogy hamar átjöjjön az új jel.",
-    "A dashboard stabilizáló (2 azonos jel + 10 perc cooldown) lassíthatja a kártya frissítését — lazítsd, ha realtime kell.",
-    "Hiányzó ML modellek: EURUSD, GOLD_CFD, NVDA, SRTY, BTCUSD, USOIL – töltsd fel a public/models/<asset>_gbm.pkl fájlokat a valószínűségi score aktiválásához."
+    "A dashboard stabilizáló (2 azonos jel + 10 perc cooldown) lassíthatja a kártya frissítését — lazítsd, ha realtime kell."
 )
 LATENCY_PROFILE_FILENAME = "latency_profile.json"
 ORDER_FLOW_LOOKBACK_MIN = 120
@@ -5386,6 +5386,7 @@ def main():
 
     LOGGER.info("Starting analysis run for %d assets", len(ASSETS))
     missing_models = missing_model_artifacts(ASSETS)
+    dependency_issues = runtime_dependency_issues()
     summary = {
         "ok": True,
         "generated_utc": nowiso(),
@@ -5410,6 +5411,16 @@ def main():
                 )
                 if flag_msg not in summary["latency_flags"]:
                     summary["latency_flags"].append(flag_msg)
+    if dependency_issues:
+        summary["ml_runtime_issues"] = dependency_issues
+        missing_list = ", ".join(sorted(dependency_issues))
+        dep_warning = (
+            "ML függőségek hiányoznak: "
+            f"{missing_list} – telepítsd a requirements.txt szerinti csomagokat "
+            "(pl. pip install -r requirements.txt vagy építsd be a konténerbe)."
+        )
+        summary["troubleshooting"].append(dep_warning)
+        LOGGER.warning("ml runtime dependencies missing: %s", dep_warning)
     if missing_models:
         summary["ml_models_missing"] = {
             asset: str(path) for asset, path in missing_models.items()
@@ -5459,6 +5470,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
