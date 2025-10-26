@@ -449,6 +449,30 @@ def missing_model_artifacts(assets: Iterable[str]) -> Dict[str, Path]:
         if not path.exists():
             missing[symbol] = path
     return missing
+
+
+def runtime_dependency_issues() -> Dict[str, str]:
+    """Return a mapping of missing runtime dependencies and remediation hints."""
+
+    issues: Dict[str, str] = {}
+    if _SKLEARN_IMPORT_ERROR is not None:
+        issues["scikit-learn"] = (
+            "scikit-learn import hiba — telepítsd a requirements.txt szerinti "
+            "scikit-learn csomagot (pl. pip install -r requirements.txt). "
+            f"Részletek: {_SKLEARN_IMPORT_ERROR}"
+        )
+    if load is None:
+        if _JOBLIB_IMPORT_ERROR is not None:
+            issues["joblib"] = (
+                "joblib import hiba — telepítsd a requirements.txt szerinti "
+                "joblib csomagot (pl. pip install -r requirements.txt). "
+                f"Részletek: {_JOBLIB_IMPORT_ERROR}"
+            )
+        else:  # pragma: no cover - defensive guard
+            issues["joblib"] = (
+                "joblib nem elérhető, ezért a modellek betöltése nem lehetséges."
+            )
+    return issues
     
 
 def _load_stack_config(asset: str) -> Optional[Dict[str, Any]]:
