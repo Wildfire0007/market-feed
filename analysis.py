@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 from active_anchor import load_anchor_state, record_anchor, update_anchor_metrics
 from ml_model import (
     ProbabilityPrediction,
+    inspect_model_artifact,
     log_feature_snapshot,
     missing_model_artifacts,
     predict_signal_probability,
@@ -141,11 +142,18 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 ENABLE_SENTIMENT_PROBABILITY = _env_flag("ENABLE_SENTIMENT_PROBABILITY", default=False)
 ENABLE_ML_PROBABILITY = _env_flag("ENABLE_ML_PROBABILITY", default=False)
+# Allow hard-disabling ML scoring regardless of legacy flags.  The CI runner
+# doesn't currently set this but it gives operators a one-line escape hatch.
+if _env_flag("DISABLE_ML_PROBABILITY", default=False) or _env_flag(
+    "FORCE_DISABLE_ML", default=False
+):
+    ENABLE_ML_PROBABILITY = False
 # ``USE_ML`` was the legacy toggle for enabling machine learning scoring.  CI
 # still exports it, so treat it as a backwards compatible alias to avoid
 # silently disabling probabilities when only ``USE_ML`` is set.
 if not ENABLE_ML_PROBABILITY and _env_flag("USE_ML", default=False):
     ENABLE_ML_PROBABILITY = True
+ML_PROBABILITY_ACTIVE = ENABLE_ML_PROBABILITY
 FIB_TOL = 0.02
 
 # --- Kereskedési/egz. küszöbök (RR/TP) ---
@@ -4942,11 +4950,15 @@ def analyze(asset: str) -> Dict[str, Any]:
         "structure_flip_flag": structure_flip_flag_value,
     }
 
-    if ENABLE_ML_PROBABILITY:
+    if ML_PROBABILITY_ACTIVE:
         ml_prediction = predict_signal_probability(asset, ml_features)
     else:
         ml_prediction = ProbabilityPrediction(
-            metadata={"source": "disabled", "reason": "ml_scoring_disabled"}
+            metadata={
+                "source": "sklearn",
+                "status": "disabled",
+                "unavailable_reason": "ml_scoring_disabled",
+            }
         )
     ml_probability = ml_prediction.probability
     ml_probability_raw = ml_prediction.raw_probability
@@ -5398,10 +5410,16 @@ def main():
 
     LOGGER.info("Starting analysis run for %d assets", len(ASSETS))
     missing_models = {}
-    dependency_issues: List[str] = []
+    dependency_issues: Dict[str, str] = {}
+    placeholder_models: Dict[str, Dict[str, Any]] = {}
     if ENABLE_ML_PROBABILITY:
         missing_models = missing_model_artifacts(ASSETS)
         dependency_issues = runtime_dependency_issues()
+        if not missing_models:
+            for asset in ASSETS:
+                info = inspect_model_artifact(asset)
+                if info.get("status") == "placeholder":
+                    placeholder_models[asset] = info
     summary = {
         "ok": True,
         "generated_utc": nowiso(),
@@ -5426,16 +5444,21 @@ def main():
                 )
                 if flag_msg not in summary["latency_flags"]:
                     summary["latency_flags"].append(flag_msg)
+    global ML_PROBABILITY_ACTIVE
+    ml_active = ENABLE_ML_PROBABILITY
+    ml_disable_notes: List[str] = []
     if dependency_issues:
         summary["ml_runtime_issues"] = dependency_issues
-        missing_list = ", ".join(sorted(dependency_issues))
+        issue_names = ", ".join(sorted(dependency_issues))
         dep_warning = (
             "ML függőségek hiányoznak: "
-            f"{missing_list} – telepítsd a requirements.txt szerinti csomagokat "
+            f"{issue_names} – telepítsd a requirements.txt szerinti csomagokat "
             "(pl. pip install -r requirements.txt vagy építsd be a konténerbe)."
         )
         summary["troubleshooting"].append(dep_warning)
         LOGGER.warning("ml runtime dependencies missing: %s", dep_warning)
+        ml_active = False
+        ml_disable_notes.append("függőségi problémák")
     if missing_models:
         summary["ml_models_missing"] = {
             asset: str(path) for asset, path in missing_models.items()
@@ -5448,9 +5471,34 @@ def main():
         )
         summary["troubleshooting"].append(warning)
         LOGGER.warning("ml artifacts missing: %s", warning)
-    elif not ENABLE_ML_PROBABILITY:
+        ml_active = False
+        ml_disable_notes.append("modell artefakt hiányzik")
+    if placeholder_models:
+        summary["ml_models_placeholder"] = {
+            asset: {
+                key: value
+                for key, value in info.items()
+                if key not in {"asset"} and value is not None
+            }
+            for asset, info in placeholder_models.items()
+        }
+        placeholders = ", ".join(sorted(placeholder_models))
+        placeholder_msg = (
+            "Placeholder ML modellek: "
+            f"{placeholders} – töltsd fel a tényleges GradientBoostingClassifier pickle-t."
+        )
+        summary["troubleshooting"].append(placeholder_msg)
+        LOGGER.warning("ml placeholder artefacts detected: %s", placeholder_msg)
+        ml_active = False
+        ml_disable_notes.append("placeholder modell detektálva")
+    if not ENABLE_ML_PROBABILITY:
+        ml_disable_notes.append("flag letiltva (ENABLE_ML_PROBABILITY=0)")
+    ML_PROBABILITY_ACTIVE = ml_active
+    if not ML_PROBABILITY_ACTIVE:
+        reason_text = "; ".join(ml_disable_notes) if ml_disable_notes else "ismeretlen ok"
         summary["troubleshooting"].append(
-            "ML valószínűség számítás ideiglenesen letiltva (ENABLE_ML_PROBABILITY=1 esetén aktiválható)."
+            "ML valószínűség számítás ideiglenesen letiltva"
+            + (f" ({reason_text})." if reason_text else ".")
         )
     for asset in ASSETS:
         try:
@@ -5489,6 +5537,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
