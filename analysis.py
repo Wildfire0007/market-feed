@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 from active_anchor import load_anchor_state, record_anchor, update_anchor_metrics
 from ml_model import (
+    ProbabilityPrediction,
     log_feature_snapshot,
     missing_model_artifacts,
     predict_signal_probability,
@@ -139,6 +140,7 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 
 ENABLE_SENTIMENT_PROBABILITY = _env_flag("ENABLE_SENTIMENT_PROBABILITY", default=False)
+ENABLE_ML_PROBABILITY = _env_flag("ENABLE_ML_PROBABILITY", default=False)
 FIB_TOL = 0.02
 
 # --- Kereskedési/egz. küszöbök (RR/TP) ---
@@ -4935,7 +4937,12 @@ def analyze(asset: str) -> Dict[str, Any]:
         "structure_flip_flag": structure_flip_flag_value,
     }
 
-    ml_prediction = predict_signal_probability(asset, ml_features)
+    if ENABLE_ML_PROBABILITY:
+        ml_prediction = predict_signal_probability(asset, ml_features)
+    else:
+        ml_prediction = ProbabilityPrediction(
+            metadata={"source": "disabled", "reason": "ml_scoring_disabled"}
+        )
     ml_probability = ml_prediction.probability
     ml_probability_raw = ml_prediction.raw_probability
     ml_threshold = ml_prediction.threshold
@@ -5385,8 +5392,11 @@ def main():
                     )
 
     LOGGER.info("Starting analysis run for %d assets", len(ASSETS))
-    missing_models = missing_model_artifacts(ASSETS)
-    dependency_issues = runtime_dependency_issues()
+    missing_models = {}
+    dependency_issues: List[str] = []
+    if ENABLE_ML_PROBABILITY:
+        missing_models = missing_model_artifacts(ASSETS)
+        dependency_issues = runtime_dependency_issues()
     summary = {
         "ok": True,
         "generated_utc": nowiso(),
@@ -5433,6 +5443,10 @@ def main():
         )
         summary["troubleshooting"].append(warning)
         LOGGER.warning("ml artifacts missing: %s", warning)
+    elif not ENABLE_ML_PROBABILITY:
+        summary["troubleshooting"].append(
+            "ML valószínűség számítás ideiglenesen letiltva (ENABLE_ML_PROBABILITY=1 esetén aktiválható)."
+        )
     for asset in ASSETS:
         try:
             res = analyze(asset)
@@ -5470,6 +5484,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
