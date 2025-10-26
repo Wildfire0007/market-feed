@@ -451,6 +451,68 @@ def missing_model_artifacts(assets: Iterable[str]) -> Dict[str, Path]:
     return missing
 
 
+def inspect_model_artifact(asset: str) -> Dict[str, Any]:
+    """Return diagnostics about a single model artefact.
+
+    The function is intentionally lightweight so that CLI utilities can surface
+    actionable remediation hints without re-running the full analysis pipeline.
+    It checks that the pickle exists, validates that runtime dependencies are
+    available and attempts to load the artefact to ensure that the bytes on
+    disk represent a ``GradientBoostingClassifier`` instance.
+    """
+
+    symbol = str(asset).upper()
+    path = _model_path(symbol)
+    info: Dict[str, Any] = {
+        "asset": symbol,
+        "path": str(path),
+    }
+
+    if not path.exists():
+        info["status"] = "missing"
+        return info
+
+    try:
+        size = path.stat().st_size
+    except OSError as exc:  # pragma: no cover - filesystem edge case
+        info["status"] = "unreadable"
+        info["detail"] = str(exc)
+        return info
+
+    info["size_bytes"] = size
+    if size < 1024:
+        info["size_warning"] = (
+            "Model fájl rendellenesen kicsi; valószínűleg placeholder vagy "
+            "hiányos feltöltés."
+        )
+
+    if load is None or _SKLEARN_IMPORT_ERROR is not None:
+        info["status"] = "dependency_unavailable"
+        details: List[str] = []
+        if _SKLEARN_IMPORT_ERROR is not None:
+            details.append(str(_SKLEARN_IMPORT_ERROR))
+        if load is None and _JOBLIB_IMPORT_ERROR is not None:
+            details.append(str(_JOBLIB_IMPORT_ERROR))
+        if details:
+            info["detail"] = "; ".join(details)
+        return info
+
+    try:
+        clf = load(path)
+    except Exception as exc:  # pragma: no cover - corrupted artefacts
+        info["status"] = "load_error"
+        info["detail"] = str(exc)
+        return info
+
+    info["model_class"] = type(clf).__name__
+    if not isinstance(clf, GradientBoostingClassifier):
+        info["status"] = "type_mismatch"
+        return info
+
+    info["status"] = "ok"
+    return info
+
+
 def runtime_dependency_issues() -> Dict[str, str]:
     """Return a mapping of missing runtime dependencies and remediation hints."""
 
