@@ -141,6 +141,11 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 ENABLE_SENTIMENT_PROBABILITY = _env_flag("ENABLE_SENTIMENT_PROBABILITY", default=False)
 ENABLE_ML_PROBABILITY = _env_flag("ENABLE_ML_PROBABILITY", default=False)
+# ``USE_ML`` was the legacy toggle for enabling machine learning scoring.  CI
+# still exports it, so treat it as a backwards compatible alias to avoid
+# silently disabling probabilities when only ``USE_ML`` is set.
+if not ENABLE_ML_PROBABILITY and _env_flag("USE_ML", default=False):
+    ENABLE_ML_PROBABILITY = True
 FIB_TOL = 0.02
 
 # --- Kereskedési/egz. küszöbök (RR/TP) ---
@@ -5484,6 +5489,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
