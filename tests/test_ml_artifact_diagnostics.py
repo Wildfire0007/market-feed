@@ -37,12 +37,23 @@ def test_inspect_model_artifact_dependency_issue(monkeypatch, tmp_path):
     result = ml_model.inspect_model_artifact("BTCUSD")
     assert result["status"] == "dependency_unavailable"
     assert "sklearn missing" in result.get("detail", "")
+    assert result.get("placeholder")
+
+
+def test_inspect_model_artifact_placeholder(monkeypatch, tmp_path):
+    monkeypatch.setattr(ml_model, "MODEL_DIR", tmp_path)
+    path = tmp_path / "BTCUSD_gbm.pkl"
+    path.write_text("placeholder", encoding="utf-8")
+
+    result = ml_model.inspect_model_artifact("BTCUSD")
+    assert result["status"] == "placeholder"
+    assert "Placeholder artefact" in result.get("detail", "")
 
 
 def test_inspect_model_artifact_load_error(monkeypatch, tmp_path):
     monkeypatch.setattr(ml_model, "MODEL_DIR", tmp_path)
     path = tmp_path / "BTCUSD_gbm.pkl"
-    path.write_bytes(b"x")
+    path.write_bytes(os.urandom(ml_model.PLACEHOLDER_MAX_BYTES + 1))
 
     result = ml_model.inspect_model_artifact("BTCUSD")
     assert result["status"] == "load_error"
@@ -66,6 +77,20 @@ def test_inspect_model_artifact_success(monkeypatch, tmp_path):
     assert result["status"] == "ok"
     assert result["model_class"] == "GradientBoostingClassifier"
     assert result["size_bytes"] == path.stat().st_size
+
+
+def test_run_diagnostics_placeholder(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(ml_model, "MODEL_DIR", tmp_path)
+    path = tmp_path / "BTCUSD_gbm.pkl"
+    path.write_text("placeholder", encoding="utf-8")
+
+    monkeypatch.setattr(check_ml_readiness, "runtime_dependency_issues", lambda: {})
+
+    exit_code = check_ml_readiness.run_diagnostics(["BTCUSD"])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "PLACEHOLDER" in captured.out
+    assert "Töltsd fel a tényleges" in captured.out
 
 
 def test_python_version_status_ok(monkeypatch):
