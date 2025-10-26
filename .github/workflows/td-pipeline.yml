@@ -36,7 +36,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
+          cache: "pip"   
+      
+      - name: Verify Python version
+        run: |
+          python --version
+          python - <<'PY'
+import sys
+major, minor = sys.version_info[:2]
+if (major, minor) < (3, 9):
+    raise SystemExit(f"Python {major}.{minor} detected, need 3.9+ for ML pipeline")
+PY
 
       - name: Install deps
         run: |
@@ -83,6 +93,16 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
+      - name: Verify Python version
+        run: |
+          python --version
+          python - <<'PY'
+import sys
+major, minor = sys.version_info[:2]
+if (major, minor) < (3, 9):
+    raise SystemExit(f"Python {major}.{minor} detected, need 3.9+ for ML pipeline")
+PY
+
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
@@ -128,6 +148,16 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
+
+      - name: Verify Python version
+        run: |
+          python --version
+          python - <<'PY'
+import sys
+major, minor = sys.version_info[:2]
+if (major, minor) < (3, 9):
+    raise SystemExit(f"Python {major}.{minor} detected, need 3.9+ for ML pipeline")
+PY
 
       - name: Install deps
         run: |
