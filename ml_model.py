@@ -21,7 +21,7 @@ import warnings
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -451,6 +451,47 @@ def missing_model_artifacts(assets: Iterable[str]) -> Dict[str, Path]:
     return missing
 
 
+PLACEHOLDER_MAX_BYTES = 512
+PLACEHOLDER_SENTINELS: Set[str] = {
+    "",
+    "0",
+    "todo",
+    "pending",
+    "placeholder",
+    "coming soon",
+}
+
+
+def _detect_placeholder_model(path: Path, size: int) -> Optional[str]:
+    """Return a human readable reason if the artefact looks like a placeholder."""
+
+    if size > PLACEHOLDER_MAX_BYTES:
+        return None
+
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+
+    if not raw:
+        return "empty file"
+
+    snippet = raw[:PLACEHOLDER_MAX_BYTES]
+    # If the file only contains whitespace / null-bytes treat it as placeholder.
+    if all(byte in {0, 9, 10, 13, 32} for byte in snippet):
+        return "whitespace placeholder"
+
+    text = snippet.decode("utf-8", errors="ignore").strip().lower()
+    if len(text) <= 64:
+        if text in PLACEHOLDER_SENTINELS:
+            return f"token '{text or '∅'}'"
+        # Very small ascii blobs are also suspicious — report first 32 chars.
+        if len(text) <= 8:
+            return f"short marker '{text}'"
+
+    return None
+    
+
 def inspect_model_artifact(asset: str) -> Dict[str, Any]:
     """Return diagnostics about a single model artefact.
 
@@ -495,6 +536,15 @@ def inspect_model_artifact(asset: str) -> Dict[str, Any]:
             details.append(str(_JOBLIB_IMPORT_ERROR))
         if details:
             info["detail"] = "; ".join(details)
+        placeholder_reason = _detect_placeholder_model(path, size)
+        if placeholder_reason is not None:
+            info["placeholder"] = placeholder_reason
+        return info
+
+    placeholder_reason = _detect_placeholder_model(path, size)
+    if placeholder_reason is not None:
+        info["status"] = "placeholder"
+        info["detail"] = f"Placeholder artefact detected ({placeholder_reason})."
         return info
 
     try:
