@@ -1731,7 +1731,9 @@ def _symbol_attempt_variants(symbol: str,
     if exchange:
         variants.append((symbol, None))
         if ":" not in symbol:
-            variants.append((f"{symbol}:{exchange}", None))
+            exchange_str = str(exchange)
+            if exchange_str and not any(ch.isspace() for ch in exchange_str):
+                variants.append((f"{symbol}:{exchange_str}", None))
     elif ":" not in symbol and "/" not in symbol:
         variants.append((symbol, None))
 
@@ -2179,6 +2181,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
