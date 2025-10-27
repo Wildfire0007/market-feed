@@ -5455,11 +5455,12 @@ def main():
     if ENABLE_ML_PROBABILITY:
         missing_models = missing_model_artifacts(ASSETS)
         dependency_issues = runtime_dependency_issues()
-        if not missing_models:
-            for asset in ASSETS:
-                info = inspect_model_artifact(asset)
-                if info.get("status") == "placeholder":
-                    placeholder_models[asset] = info
+        for asset in ASSETS:
+            if asset.upper() in missing_models:
+                continue
+            info = inspect_model_artifact(asset)
+            if info.get("status") == "placeholder":
+                placeholder_models[asset] = info
     summary = {
         "ok": True,
         "generated_utc": nowiso(),
@@ -5581,6 +5582,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
