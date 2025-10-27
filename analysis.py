@@ -3953,7 +3953,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         structure_gate = structure_ok_short
         if asset == "NVDA":
             structure_gate = structure_gate or nvda_cross_short
-        else:
+    else:
         structure_gate = False
 
     # 7) P-score — volatilitás-adaptív súlyozás
@@ -5581,6 +5581,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
