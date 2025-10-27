@@ -218,6 +218,11 @@ CRITICAL_STALE_FRAMES = {
 }
 RELAXED_STALE_FRAMES: Dict[str, Set[str]] = {
     "USOIL": {"k1m", "k5m", "spot"},
+    # A Twelve Data 1m idősora részvény/ETF esetén 15 perces késleltetést használ,
+    # így az SRTY-nél a k1m gyertyák szisztematikusan a frissességi határ felett
+    # vannak. Az elemzést ne blokkoljuk emiatt, inkább kezeljük "stale" állapotként
+    # (a mikroszerkezet mutatók amúgy is letiltanak, ha a k1m késik).
+    "SRTY": {"k1m"},
 }
 INTERVENTION_CONFIG_FILENAME = "intervention_watch.json"
 INTERVENTION_STATE_FILENAME = "intervention_state.json"
@@ -5572,6 +5577,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
