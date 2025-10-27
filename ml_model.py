@@ -56,7 +56,7 @@ FALLBACK_THRESHOLD_OVERRIDES: Dict[str, float] = {
     "GOLD_CFD": 0.59,
     "USOIL": 0.6,
     "NVDA": 0.6,
-    "SRTY": 0.61,
+    "XAGUSD": 0.59,
 }
 
 DEFAULT_FALLBACK_WEIGHTS: Dict[str, float] = {
