@@ -63,13 +63,18 @@ class ProbabilityFallbackTests(unittest.TestCase):
 
         self.assertIsNotNone(result.probability)
         self.assertGreater(result.probability or 0.0, 0.5)
-        self.assertAlmostEqual(result.raw_probability or 0.0, 0.62, delta=0.05)
+        self.assertGreaterEqual(result.raw_probability or 0.0, 0.62)
         self.assertIsNotNone(result.threshold)
         self.assertEqual(result.metadata.get("source"), "fallback")
         self.assertEqual(result.metadata.get("unavailable_reason"), "model_missing")
         fallback_meta = result.metadata.get("fallback") or {}
         self.assertIn("steps", fallback_meta)
         self.assertGreater(len(fallback_meta.get("steps", [])), 0)
+        self.assertIn("base_probability_initial", fallback_meta)
+        self.assertGreaterEqual(
+            fallback_meta.get("base_probability", 0.0),
+            fallback_meta.get("base_probability_initial", 0.0),
+        )
 
 
 if __name__ == "__main__":
