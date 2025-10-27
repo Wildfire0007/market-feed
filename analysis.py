@@ -3492,6 +3492,20 @@ def analyze(asset: str) -> Dict[str, Any]:
             "used_symbol": meta_info.get("used_symbol"),
             "used_exchange": meta_info.get("used_exchange"),
         }
+        if meta_info.get("fallback_previous_payload"):
+            tf_meta[key]["fallback_previous_payload"] = True
+        fallback_reason = meta_info.get("fallback_reason")
+        if fallback_reason:
+            tf_meta[key]["fallback_reason"] = fallback_reason
+            note_msg = f"{key}: {fallback_reason}"
+            if note_msg not in latency_flags:
+                latency_flags.append(note_msg)
+        error_message = meta_info.get("error") or meta_info.get("message")
+        if error_message:
+            tf_meta[key]["error"] = error_message
+        error_code = meta_info.get("error_code")
+        if error_code is not None:
+            tf_meta[key]["error_code"] = error_code
 
     tf_meta["spot"] = {
         "last_raw_utc": to_utc_iso(spot_ts) if spot_ts else None,
@@ -5577,6 +5591,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
