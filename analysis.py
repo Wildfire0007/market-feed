@@ -2025,6 +2025,31 @@ def should_enforce_stale_frame(asset: str,
     return True
 
 
+def classify_critical_staleness(
+    asset: str,
+    stale_timeframes: Dict[str, bool],
+    latency_seconds: Dict[str, Optional[int]],
+    session_meta: Optional[Dict[str, Any]],
+) -> Tuple[Dict[str, bool], List[str]]:
+    """Return critical stale flags and human-readable reasons for gating."""
+
+    critical_flags: Dict[str, bool] = {}
+    reasons: List[str] = []
+    for key, description in CRITICAL_STALE_FRAMES.items():
+        enforce = should_enforce_stale_frame(asset, key, session_meta)
+        is_critical = bool(stale_timeframes.get(key) and enforce)
+        critical_flags[key] = is_critical
+        if not is_critical:
+            continue
+        latency = latency_seconds.get(key)
+        if latency is not None:
+            minutes = latency // 60
+            reasons.append(f"{description} — {minutes} perc késés")
+        else:
+            reasons.append(description)
+    return critical_flags, reasons
+
+
 def build_data_gap_signal(
     asset: str,
     spot_price: Any,
@@ -3443,6 +3468,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     latency_flags: List[str] = []
     latency_flags.extend(spot_latency_notes)
     stale_timeframes: Dict[str, bool] = {key: False for key in expected_delays}
+    latency_by_frame: Dict[str, Optional[int]] = {key: None for key in expected_delays}
     if spot_meta.get("freshness_violation") and spot_latency_sec is not None:
         limit_sec = spot_meta.get("freshness_limit_seconds") or spot_max_age
         limit_min = int(limit_sec // 60) if limit_sec else 0
@@ -3466,7 +3492,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         meta_info = timeframe_meta_lookup.get(key, {})
         last_raw = df_last_timestamp(df_full)
         last_closed = df_last_timestamp(df_closed)
-        latency_sec = None
+        latency_sec: Optional[int] = None
         if last_closed:
             latency_sec = int((now - last_closed).total_seconds())
             expected = expected_delays.get(key, 0)
@@ -3479,6 +3505,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 flag_msg = f"{key}: jelzés korlátozva {delay_min} perc késés miatt"
                 if flag_msg not in latency_flags:
                     latency_flags.append(flag_msg)
+        latency_by_frame[key] = latency_sec
         tf_meta[key] = {
             "last_raw_utc": to_utc_iso(last_raw) if last_raw else None,
             "last_closed_utc": to_utc_iso(last_closed) if last_closed else None,
@@ -3546,17 +3573,15 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     diag_factory = lambda: diagnostics_payload(tf_meta, source_files, latency_flags)
 
-    critical_reasons: List[str] = []
-    for key, description in CRITICAL_STALE_FRAMES.items():
-        if not should_enforce_stale_frame(asset, key, session_meta):
-            continue
-        if stale_timeframes.get(key):
-            latency = tf_meta.get(key, {}).get("latency_seconds")
-            if latency is not None:
-                minutes = latency // 60
-                critical_reasons.append(f"{description} — {minutes} perc késés")
-            else:
-                critical_reasons.append(description)
+    critical_flags, critical_reasons = classify_critical_staleness(
+        asset,
+        stale_timeframes,
+        latency_by_frame,
+        session_meta,
+    )
+    for key, flag in critical_flags.items():
+        if key in tf_meta:
+            tf_meta[key]["critical_stale"] = flag
     if critical_reasons:
         reasons_payload = ["Critical data latency — belépés tiltva"] + critical_reasons
         msg = build_data_gap_signal(
@@ -5591,6 +5616,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
