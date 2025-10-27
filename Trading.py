@@ -371,22 +371,13 @@ ASSETS = {
         "currency": "USD",
         "supports_prepost": True,
     },
-    "SRTY": {
-        "symbol": "SRTY",
-        "name": "ProShares UltraPro Short Russell 2000",
-        "asset_class": "ETF",
-        "exchange": "ARCX",
-        "exchange_display": "NYSE Arca",
-        "mic": "ARCX",
+    "XAGUSD": {
+        "symbol": "XAG/USD",
+        "name": "Silver / US Dollar",
+        "asset_class": "Commodity",
+        "exchange": "PHYSICAL METAL",
+        "exchange_display": "Physical Metal",
         "currency": "USD",
-        "supports_prepost": True,
-        # A Twelve Data metainformációi szerint az elsődleges piac az ARCX.
-        # A korábbi fallback kombinációk közül csak azokat hagyjuk meg,
-        # amelyek bizonyítottan működnek, hogy csökkentsük a fölös próbákat.
-        "alt": [
-            {"symbol": "SRTY", "exchange": "NYSEARCA"},
-            "SRTY:US",
-        ],
     },
 }
 
@@ -2231,6 +2222,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
