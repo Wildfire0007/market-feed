@@ -250,7 +250,6 @@ MOMENTUM_RR_MIN: Dict[str, float] = dict(_get_config_value("momentum_rr_min") or
 FX_TP_TARGETS: Dict[str, float] = dict(_get_config_value("fx_tp_targets") or {})
 NVDA_EXTENDED_ATR_REL: float = float(_get_config_value("nvda_extended_atr_rel") or 0.0)
 NVDA_MOMENTUM_ATR_REL: float = float(_get_config_value("nvda_momentum_atr_rel") or 0.0)
-SRTY_MOMENTUM_ATR_REL: float = float(_get_config_value("srty_momentum_atr_rel") or 0.0)
 ENABLE_MOMENTUM_ASSETS: set = load_config()["enable_momentum_assets"]
 SESSION_WINDOWS_UTC: Dict[str, Dict[str, Optional[List[Tuple[int, int, int, int]]]]] = load_config()[
     "session_windows_utc"
