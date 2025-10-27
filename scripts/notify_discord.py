@@ -183,9 +183,9 @@ EMOJI = {
     "EURUSD": "💶",
     "BTCUSD": "🚀",
     "GOLD_CFD": "💰",
+    "XAGUSD": "🥈",
     "USOIL": "🛢️",
-    "NVDA": "🤖",
-    "SRTY": "📉",
+    "NVDA": "🤖",    
 }
 COLOR = {
     "BUY":   0x2ecc71,  # zöld
