@@ -154,6 +154,8 @@ if _env_flag("DISABLE_ML_PROBABILITY", default=False) or _env_flag(
 if not ENABLE_ML_PROBABILITY and _env_flag("USE_ML", default=False):
     ENABLE_ML_PROBABILITY = True
 ML_PROBABILITY_ACTIVE = ENABLE_ML_PROBABILITY
+ML_PROBABILITY_PLACEHOLDER_BLOCKLIST: Set[str] = set()
+ML_PROBABILITY_PLACEHOLDER_INFO: Dict[str, Dict[str, Any]] = {}
 FIB_TOL = 0.02
 
 # --- Kereskedési/egz. küszöbök (RR/TP) ---
@@ -4950,7 +4952,33 @@ def analyze(asset: str) -> Dict[str, Any]:
         "structure_flip_flag": structure_flip_flag_value,
     }
 
-    if ML_PROBABILITY_ACTIVE:
+    asset_key = asset.upper()
+    placeholder_meta = ML_PROBABILITY_PLACEHOLDER_INFO.get(asset_key)
+    if (
+        ML_PROBABILITY_ACTIVE
+        and asset_key in ML_PROBABILITY_PLACEHOLDER_BLOCKLIST
+        and placeholder_meta
+    ):
+        placeholder_payload = {
+            "source": "sklearn",
+            "status": "placeholder_model",
+            "unavailable_reason": "placeholder_model",
+        }
+        detail = placeholder_meta.get("detail")
+        if detail:
+            placeholder_payload["detail"] = detail
+        model_path = placeholder_meta.get("path")
+        if model_path:
+            placeholder_payload["model_path"] = model_path
+        placeholder_payload.update(
+            {
+                key: value
+                for key, value in placeholder_meta.items()
+                if key in {"size_bytes", "size_warning"}
+            }
+        )
+        ml_prediction = ProbabilityPrediction(metadata=placeholder_payload)
+    elif ML_PROBABILITY_ACTIVE:
         ml_prediction = predict_signal_probability(asset, ml_features)
     else:
         ml_prediction = ProbabilityPrediction(
@@ -5412,6 +5440,9 @@ def main():
     missing_models = {}
     dependency_issues: Dict[str, str] = {}
     placeholder_models: Dict[str, Dict[str, Any]] = {}
+    global ML_PROBABILITY_PLACEHOLDER_BLOCKLIST, ML_PROBABILITY_PLACEHOLDER_INFO
+    ML_PROBABILITY_PLACEHOLDER_BLOCKLIST = set()
+    ML_PROBABILITY_PLACEHOLDER_INFO = {}
     if ENABLE_ML_PROBABILITY:
         missing_models = missing_model_artifacts(ASSETS)
         dependency_issues = runtime_dependency_issues()
@@ -5473,14 +5504,19 @@ def main():
         LOGGER.warning("ml artifacts missing: %s", warning)
         ml_disable_notes.append("modell artefakt hiányzik")
     if placeholder_models:
-        summary["ml_models_placeholder"] = {
-            asset: {
+        placeholder_payload = {
+            asset.upper(): {
                 key: value
                 for key, value in info.items()
                 if key not in {"asset"} and value is not None
             }
             for asset, info in placeholder_models.items()
         }
+        summary["ml_models_placeholder"] = {
+            asset: meta for asset, meta in placeholder_payload.items()
+        }
+        ML_PROBABILITY_PLACEHOLDER_BLOCKLIST = set(placeholder_payload)
+        ML_PROBABILITY_PLACEHOLDER_INFO = placeholder_payload
         placeholders = ", ".join(sorted(placeholder_models))
         placeholder_msg = (
             "Placeholder ML modellek: "
@@ -5536,6 +5572,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
