@@ -80,7 +80,7 @@ DEFAULT_FALLBACK_WEIGHTS: Dict[str, float] = {
     "structure_flip_flag": 0.55,
     "momentum_trail_activation_rr": 0.35,
     "momentum_trail_lock_ratio": 0.4,
-    "bias_neutral_penalty": -0.55,
+    "bias_neutral_penalty": -0.35,
 }
 
 # A consistent, minimal feature vector so that models can be re-trained offline
@@ -195,10 +195,55 @@ def _fallback_probability(
     if not math.isfinite(base_score):
         base_score = 50.0
     base_probability = _clamp(base_score / 100.0, 0.05, 0.95)
+    base_probability_initial = base_probability
+
+    def _precision_alignment_floor() -> Optional[float]:
+        try:
+            precision_fire = _clamp(float(features.get("precision_trigger_fire") or 0.0), 0.0, 1.0)
+        except (TypeError, ValueError):
+            precision_fire = 0.0
+        try:
+            precision_confidence = _clamp(
+                float(features.get("precision_trigger_confidence") or 0.0),
+                0.0,
+                1.0,
+            )
+        except (TypeError, ValueError):
+            precision_confidence = 0.0
+        try:
+            precision_ready = _clamp(float(features.get("precision_trigger_ready") or 0.0), 0.0, 1.0)
+        except (TypeError, ValueError):
+            precision_ready = 0.0
+        try:
+            precision_arming = _clamp(float(features.get("precision_trigger_arming") or 0.0), 0.0, 1.0)
+        except (TypeError, ValueError):
+            precision_arming = 0.0
+
+        alignment_strength = (
+            0.6 * precision_fire * precision_confidence
+            + 0.25 * precision_ready
+            + 0.15 * precision_arming
+        )
+        if alignment_strength <= 0.0:
+            return None
+        floor = _clamp(0.4 + alignment_strength * 0.45, 0.4, 0.82)
+        return floor if floor > base_probability_initial else None
 
     weights = _get_fallback_weights(asset)
-    logit = _logit(base_probability)
+    precision_floor = _precision_alignment_floor()
     steps: List[Dict[str, Any]] = []
+    if precision_floor is not None:
+        base_probability = precision_floor
+        steps.append(
+            {
+                "feature": "precision_alignment_floor",
+                "weight": 0.0,
+                "normalized": precision_floor,
+                "delta": precision_floor - base_probability_initial,
+            }
+        )
+
+    logit = _logit(base_probability)
 
     def apply(
         feature_name: str,
@@ -377,6 +422,7 @@ def _fallback_probability(
 
     meta: Dict[str, Any] = {
         "base_probability": base_probability,
+        "base_probability_initial": base_probability_initial,
         "adjusted_logit": logit,
         "probability": probability,
         "threshold": threshold,
