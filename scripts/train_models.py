@@ -31,6 +31,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.isotonic import IsotonicRegression
@@ -241,6 +242,21 @@ def load_dataset(paths: Iterable[Path], label_column: str, weight_column: str | 
     )
 
 
+def _train_constant_model(
+    dataset: Dataset,
+    constant_label: int,
+) -> Tuple[DummyClassifier, pd.DataFrame, pd.DataFrame]:
+    clf = DummyClassifier(strategy="constant", constant=constant_label)
+    clf.fit(dataset.features, dataset.labels, sample_weight=dataset.weights)
+
+    frame = dataset.features.copy()
+    frame["label"] = dataset.labels
+    if dataset.weights is not None:
+        frame["weight"] = dataset.weights
+
+    return clf, frame, frame.copy()
+   
+
 def _train_model(
     dataset: Dataset,
     args: argparse.Namespace,
@@ -320,6 +336,30 @@ def _train_model(
         training_frame["weight"] = w_train
 
     return clf, training_frame, calibration_frame
+
+
+def _positive_class_probabilities(
+    clf: GradientBoostingClassifier | DummyClassifier,
+    features: pd.DataFrame,
+) -> np.ndarray:
+    probabilities = clf.predict_proba(features)
+    classes = np.asarray(getattr(clf, "classes_", []))
+
+    if classes.size == 0:
+        raise ValueError("Classifier does not expose class labels for predict_proba")
+
+    if classes.size == 1:
+        label = int(classes[0])
+        if label == 1:
+            return probabilities[:, 0]
+        return np.zeros(probabilities.shape[0], dtype=float)
+
+    try:
+        positive_index = int(np.where(classes == 1)[0][0])
+    except IndexError as exc:  # pragma: no cover - safety net for unexpected layouts
+        raise ValueError("Classifier is missing probability column for positive class") from exc
+
+    return probabilities[:, positive_index]
 
 
 def _weighted_confusion(
@@ -551,21 +591,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Loaded {len(dataset.features)} rows for asset {asset}")
 
 if len(dataset.label_counts) < 2:
-        only_label, sample_count = next(iter(dataset.label_counts.items()), (None, 0))
-        message = (
+        only_label, sample_count = next(iter(dataset.label_counts.items()), (0, 0))
+        print(
             f"Dataset for {asset} only contains class {only_label} "
-            f"({sample_count} samples). "
-            "Add labelled examples for the opposite class before training."
+            f"({sample_count} samples)."
         )
-        raise SystemExit(message)
-    
-clf, train_frame, calibration_frame = _train_model(dataset, args)
+        print(
+            "Training a constant fallback model that always predicts this class. "
+            "Add labelled examples for the opposite class to unlock gradient boosting."
+        )
+        clf, train_frame, calibration_frame = _train_constant_model(dataset, only_label)
+    else:
+        clf, train_frame, calibration_frame = _train_model(dataset, args)
     print(
         f"Training rows: {len(train_frame)}, calibration rows: {len(calibration_frame)}"
     )
 
-    train_probs = clf.predict_proba(train_frame[MODEL_FEATURES])[:, 1]
-    calib_probs = clf.predict_proba(calibration_frame[MODEL_FEATURES])[:, 1]
+    train_probs = _positive_class_probabilities(clf, train_frame[MODEL_FEATURES])
+    calib_probs = _positive_class_probabilities(clf, calibration_frame[MODEL_FEATURES])
 
     train_labels = train_frame["label"].to_numpy()
     train_weights = (
