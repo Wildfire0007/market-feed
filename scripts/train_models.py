@@ -69,6 +69,7 @@ class Dataset:
     labels: np.ndarray
     weights: Optional[np.ndarray]
     missing_features: List[str] = field(default_factory=list)
+    label_counts: Dict[int, int] = field(default_factory=dict)
 
 
 def _logit(value: float, epsilon: float = 1e-6) -> float:
@@ -211,7 +212,9 @@ def load_dataset(paths: Iterable[Path], label_column: str, weight_column: str | 
 
     labels = _normalise_labels(df[label_column])
     features, missing_features = _prepare_features(df)
-
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    label_counts = {int(label): int(count) for label, count in zip(unique_labels, counts)}
+   
     weights: Optional[np.ndarray] = None
     if weight_column:
         if weight_column not in df.columns:
@@ -234,6 +237,7 @@ def load_dataset(paths: Iterable[Path], label_column: str, weight_column: str | 
         labels=labels,
         weights=weights,
         missing_features=missing_features,
+        label_counts=label_counts,
     )
 
 
@@ -258,11 +262,26 @@ def _train_model(
         if dataset.weights is not None:
             split_inputs.append(dataset.weights)
 
-        split_outputs = train_test_split(
+       stratify_labels: Optional[np.ndarray]
+        if len(dataset.label_counts) > 1:
+            minority = min(dataset.label_counts.values())
+            if minority >= 2:
+                stratify_labels = dataset.labels
+            else:
+                stratify_labels = None
+                print(
+                    "Warning: skipping stratified split; "
+                    "minority class has only "
+                    f"{minority} sample{'s' if minority != 1 else ''}."
+                )
+        else:
+            stratify_labels = None
+           
+       split_outputs = train_test_split(
             *split_inputs,
             test_size=args.validation_split,
             random_state=args.random_state,
-            stratify=dataset.labels if len(np.unique(dataset.labels)) > 1 else None,
+            stratify=stratify_labels,
         )
 
         X_train = split_outputs[0]
@@ -531,7 +550,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(f"Loaded {len(dataset.features)} rows for asset {asset}")
 
-    clf, train_frame, calibration_frame = _train_model(dataset, args)
+if len(dataset.label_counts) < 2:
+        only_label, sample_count = next(iter(dataset.label_counts.items()), (None, 0))
+        message = (
+            f"Dataset for {asset} only contains class {only_label} "
+            f"({sample_count} samples). "
+            "Add labelled examples for the opposite class before training."
+        )
+        raise SystemExit(message)
+    
+clf, train_frame, calibration_frame = _train_model(dataset, args)
     print(
         f"Training rows: {len(train_frame)}, calibration rows: {len(calibration_frame)}"
     )
