@@ -76,75 +76,6 @@ import pandas as pd
 import numpy as np
 
 # --- Elemzendő eszközök ---
-@@ -54,93 +54,92 @@ try:
-except Exception:  # pragma: no cover - optional dependency guard
-    def update_live_validation(*_args, **_kwargs):
-        return None
-
-try:
-    from volatility_metrics import load_volatility_overlay
-except Exception:  # pragma: no cover - optional helper
-    def load_volatility_overlay(asset: str, outdir: Path, k1m: Optional[Any] = None) -> Dict[str, Any]:
-        return {}
-
-try:
-    from reports.pipeline_monitor import (
-        record_analysis_run,
-        get_pipeline_log_path,
-        DEFAULT_MAX_LAG_SECONDS as PIPELINE_MAX_LAG_SECONDS,
-    )
-except Exception:  # pragma: no cover - optional helper
-    record_analysis_run = None
-    get_pipeline_log_path = None
-    PIPELINE_MAX_LAG_SECONDS = None
-
-import pandas as pd
-import numpy as np
-
-# --- Elemzendő eszközök ---
-from config.analysis_settings import (
-    ACTIVE_INVALID_BUFFER_ABS,
-    ASSET_COST_MODEL,
-    ATR5_MIN_MULT,
-    ATR_ABS_MIN,
-    ATR_LOW_TH_ASSET,
-    ATR_LOW_TH_DEFAULT,
-    ATR_VOL_HIGH_REL,
-    ASSETS,
-    COST_MULT_DEFAULT,
-    COST_MULT_HIGH_VOL,
-    CORE_RR_MIN,
-    DEFAULT_COST_MODEL,
-    ENABLE_MOMENTUM_ASSETS,
-    ENTRY_THRESHOLD_PROFILE_NAME,
-    EMA_SLOPE_SIGN_ENFORCED,
-    EMA_SLOPE_TH_ASSET,
-    EMA_SLOPE_TH_DEFAULT,
-    FX_TP_TARGETS,
-    GOLD_HIGH_VOL_WINDOWS,
-    GOLD_LOW_VOL_TH,
-    INTERVENTION_WATCH_DEFAULT,
-    LEVERAGE,
-    MIN_RISK_ABS,
-    MOMENTUM_RR_MIN,
-    NVDA_EXTENDED_ATR_REL,
-    NVDA_MOMENTUM_ATR_REL,
-    SESSION_TIME_RULES,
-    SESSION_WEEKDAYS,
-    SESSION_WINDOWS_UTC,
-    SL_BUFFER_RULES,
-    SMT_AUTO_CONFIG,
-    SMT_PENALTY_VALUE,
-    SMT_REQUIRED_BARS,
-    SPOT_MAX_AGE_SECONDS,
-    SRTY_MOMENTUM_ATR_REL,
-    TP_MIN_ABS,
-    TP_MIN_PCT,
-    TP_NET_MIN_ASSET,
-    TP_NET_MIN_DEFAULT,
-    get_atr_threshold_multiplier,
-    get_p_score_min,
-)
 from config.analysis_settings import (
     ACTIVE_INVALID_BUFFER_ABS,
     ASSET_COST_MODEL,
@@ -286,11 +217,6 @@ CRITICAL_STALE_FRAMES = {
 }
 RELAXED_STALE_FRAMES: Dict[str, Set[str]] = {
     "USOIL": {"k1m", "k5m", "spot"},
-    # A Twelve Data 1m idősora részvény/ETF esetén 15 perces késleltetést használ,
-    # így az SRTY-nél a k1m gyertyák szisztematikusan a frissességi határ felett
-    # vannak. Az elemzést ne blokkoljuk emiatt, inkább kezeljük "stale" állapotként
-    # (a mikroszerkezet mutatók amúgy is letiltanak, ha a k1m késik).
-    "SRTY": {"k1m"},
 }
 INTERVENTION_CONFIG_FILENAME = "intervention_watch.json"
 INTERVENTION_STATE_FILENAME = "intervention_state.json"
@@ -1694,7 +1620,7 @@ def estimate_overnight_days(asset: str, now: Optional[datetime] = None) -> int:
     wd = now.weekday()
     if asset == "EURUSD":
         return 3 if wd == 2 else 1   # FX: szerdai tripla díj
-    if asset in {"GOLD_CFD", "USOIL", "NVDA", "SRTY"}:
+    if asset in {"GOLD_CFD", "USOIL", "NVDA", "XAGUSD"}:
         return 3 if wd == 4 else 1   # hétvégi elszámolás pénteken
     return 1
 
@@ -3761,7 +3687,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         )
     )
 
-    if asset in {"EURUSD", "BTCUSD", "NVDA", "SRTY"}:
+    if asset in {"EURUSD", "BTCUSD", "NVDA"}:
         if bias4h != bias1h or bias1h not in {"long", "short"}:
             trend_bias = "neutral"
 
@@ -3989,8 +3915,6 @@ def analyze(asset: str) -> Dict[str, Any]:
             effective_bias = override_dir
             bias_override_used = True
 
-    if asset == "SRTY" and effective_bias != "short":
-        effective_bias = "neutral"
     if asset == "NVDA" and effective_bias == "neutral" and bias1h in {"long", "short"} and bias4h == bias1h and regime_ok:
         effective_bias = bias1h
 
@@ -4029,9 +3953,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         structure_gate = structure_ok_short
         if asset == "NVDA":
             structure_gate = structure_gate or nvda_cross_short
-        if asset == "SRTY":
-            structure_gate = bool(bos5m_short)
-    else:
+        else:
         structure_gate = False
 
     # 7) P-score — volatilitás-adaptív súlyozás
@@ -4301,8 +4223,6 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     if asset in {"EURUSD", "BTCUSD"}:
         liquidity_ok_base = bool(fib_ok)
-    elif asset == "SRTY":
-        liquidity_ok_base = bool(fib_ok)
     elif asset == "NVDA":
         liquidity_ok_base = bool(
             fib_ok
@@ -4324,15 +4244,14 @@ def analyze(asset: str) -> Dict[str, Any]:
         directional_confirmation = bool(bos5m_long or micro_bos_long)
     elif candidate_dir == "short":
         directional_confirmation = bool(bos5m_short or micro_bos_short)
-    if asset != "SRTY":
-        if not liquidity_ok_base and strong_momentum:
-            high_atr_push = bool(
-                atr_ok and not np.isnan(rel_atr)
-                and rel_atr >= max(atr_threshold * 1.3, MOMENTUM_ATR_REL)
-            )
-            if high_atr_push and directional_confirmation:
-                liquidity_ok = True
-                liquidity_relaxed = True
+    if not liquidity_ok_base and strong_momentum:
+        high_atr_push = bool(
+            atr_ok and not np.isnan(rel_atr)
+            and rel_atr >= max(atr_threshold * 1.3, MOMENTUM_ATR_REL)
+        )
+        if high_atr_push and directional_confirmation:
+            liquidity_ok = True
+            liquidity_relaxed = True
 
     p_score_min_base = get_p_score_min(asset)
     p_score_min_local = p_score_min_base
@@ -4364,7 +4283,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     momentum_rr_min = max(momentum_rr_min, dynamic_tp_profile["momentum"]["rr"])
 
     liquidity_label = "liquidity(fib|sweep|ema21|retest)"
-    if asset in {"EURUSD", "BTCUSD", "SRTY"}:
+    if asset in {"EURUSD", "BTCUSD"}:
         liquidity_label = "liquidity(fib zone)"
     elif asset == "NVDA":
         liquidity_label = "liquidity(fib|retest)"
@@ -4472,30 +4391,8 @@ def analyze(asset: str) -> Dict[str, Any]:
                 if not cross_flag:
                     missing_mom.append("momentum_trigger")
                 if not momentum_liquidity_ok:
-                    missing_mom.append("liquidity")
-        elif asset == "SRTY" and direction == "short":
-            h, m = now_utctime_hm()
-            minute = h * 60 + m
-            window_ok = _min_of_day(13, 30) <= minute <= _min_of_day(15, 0)
-            mom_atr_ok = not np.isnan(rel_atr) and rel_atr >= SRTY_MOMENTUM_ATR_REL and atr_abs_ok
-            bos_ok = bool(bos5m_short)
-            if session_ok_flag and regime_ok and mom_atr_ok and bos_ok and window_ok and momentum_liquidity_ok:
-                mom_dir = "sell"
-                mom_trigger_desc = "Momentum window 13:30–15:00 UTC"
-                missing_mom = []
-            else:
-                if not window_ok:
-                    missing_mom.append("momentum_trigger")
-                if not mom_atr_ok:
-                    missing_mom.append("atr")
-                if not bos_ok:
-                    missing_mom.append("bos5m")
-                if not momentum_liquidity_ok:
-                    missing_mom.append("liquidity")
-        else:
-            if asset == "SRTY" and direction != "short":
-                missing_mom.append("bias")
-
+                    missing_mom.append("liquidity")     
+               
     # 8) Döntés + szintek (RR/TP matek) — core vagy momentum
     decision = "no entry"
     entry = sl = tp1 = tp2 = rr = None
@@ -5684,6 +5581,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
