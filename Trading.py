@@ -479,6 +479,18 @@ class AttemptMemory:
         with self._lock:
             return self._hard_failures.get((symbol, exchange))
 
+# HTTP státuszkódok, amelyeknél a kliens oldali hibát tartósnak tekintjük.
+CLIENT_ERROR_STATUS_CODES: Set[Optional[int]] = {
+    400,
+    401,
+    402,
+    403,
+    404,
+    410,
+    422,
+    451,
+}
+
 # ─────────────────────────────── Segédek ─────────────────────────────────
 
 def now_utc() -> str:
@@ -994,6 +1006,41 @@ def _td_error_details(payload: Any) -> Tuple[Optional[str], Optional[int]]:
         if meta_status == "error" or (meta_code and meta_code not in {0, 200}):
             message = _message_from(meta) or _message_from(payload) or "Twelve Data error"
             return message, meta_code
+
+    def _addon_message(source: Dict[str, Any]) -> Optional[Tuple[str, int]]:
+        addon_value = None
+        for key in ("request_access_via_add_on", "request_access_via_plan"):
+            if source.get(key):
+                addon_value = str(source.get(key))
+                break
+        if not addon_value:
+            return None
+
+        symbol = source.get("symbol")
+        data_field = source.get("data")
+        if isinstance(data_field, dict):
+            symbol = data_field.get("symbol", symbol)
+        elif isinstance(data_field, list):
+            for item in data_field:
+                if isinstance(item, dict) and item.get("symbol"):
+                    symbol = item.get("symbol")
+                    break
+
+        message = source.get("message") or source.get("note") or _message_from(source)
+        if not message:
+            details = f" '{addon_value}'" if addon_value else ""
+            target = f" {symbol}" if symbol else ""
+            message = f"Twelve Data add-on{details} required{target}".strip()
+        return message, 451
+
+    addon_details = _addon_message(payload)
+    if addon_details:
+        return addon_details
+
+    if isinstance(meta, dict):
+        addon_details = _addon_message(meta)
+        if addon_details:
+            return addon_details
 
     return None, None
 
@@ -1822,7 +1869,10 @@ def try_symbols(
                 exch or "default",
                 exc,
             )
-            if attempt_memory is not None and exc.status_code in {400, 404}:
+            if (
+                attempt_memory is not None
+                and exc.status_code in CLIENT_ERROR_STATUS_CODES
+            ):
                 attempt_memory.record_hard_failure(sym, exch, str(exc))
             time.sleep(max(TD_RATE_LIMITER.current_delay * 0.5, 0.1))
             continue
@@ -1862,7 +1912,7 @@ def try_symbols(
 
         if attempt_memory is not None and isinstance(result, dict):
             error_code = _safe_int(result.get("error_code"))
-            if error_code in {400, 404}:
+            if error_code in CLIENT_ERROR_STATUS_CODES:
                 reason = result.get("error") or result.get("message") or f"code {error_code}"
                 attempt_memory.record_hard_failure(sym, exch, str(reason))
 
@@ -2181,6 +2231,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
