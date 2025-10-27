@@ -44,6 +44,39 @@ class TDGetErrorTests(unittest.TestCase):
         record_failure.assert_called()
         record_success.assert_not_called()
 
+    def test_td_get_detects_plan_limited_payload(self):
+        payload = {
+            "data": [
+                {
+                    "symbol": "SRTY",
+                    "name": "ProShares UltraPro Short Russell2000",
+                    "currency": "USD",
+                    "exchange": "NYSE",
+                }
+            ],
+            "request_access_via_add_on": "us",
+            "signup": "request access via add-ons",
+            "status": "ok",
+        }
+
+        response = DummyResponse(payload)
+
+        with mock.patch("Trading.requests.get", return_value=response) as mock_get, \
+             mock.patch("Trading.time.sleep"), \
+             mock.patch("Trading.TD_MAX_RETRIES", 1), \
+             mock.patch.object(Trading.TD_RATE_LIMITER, "wait", return_value=None), \
+             mock.patch.object(Trading.TD_RATE_LIMITER, "record_failure") as record_failure, \
+             mock.patch.object(Trading.TD_RATE_LIMITER, "record_success") as record_success, \
+             mock.patch("Trading.API_KEY", "demo"):
+            with self.assertRaises(Trading.TDError) as ctx:
+                Trading.td_get("time_series", symbol="SRTY", interval="1min")
+
+        self.assertIn("add-on", str(ctx.exception).lower())
+        self.assertEqual(ctx.exception.status_code, 451)
+        mock_get.assert_called_once()
+        record_failure.assert_called()
+        record_success.assert_not_called()
+
 
 class CollectHttpFramesTests(unittest.TestCase):
     def test_collect_http_frames_breaks_after_repeated_failures(self):
