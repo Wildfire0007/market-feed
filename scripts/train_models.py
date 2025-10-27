@@ -278,7 +278,7 @@ def _train_model(
         if dataset.weights is not None:
             split_inputs.append(dataset.weights)
 
-       stratify_labels: Optional[np.ndarray]
+        stratify_labels: Optional[np.ndarray]
         if len(dataset.label_counts) > 1:
             minority = min(dataset.label_counts.values())
             if minority >= 2:
@@ -293,7 +293,7 @@ def _train_model(
         else:
             stratify_labels = None
            
-       split_outputs = train_test_split(
+        split_outputs = train_test_split(
             *split_inputs,
             test_size=args.validation_split,
             random_state=args.random_state,
@@ -590,7 +590,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(f"Loaded {len(dataset.features)} rows for asset {asset}")
 
-if len(dataset.label_counts) < 2:
+    if len(dataset.label_counts) < 2:
         only_label, sample_count = next(iter(dataset.label_counts.items()), (0, 0))
         print(
             f"Dataset for {asset} only contains class {only_label} "
