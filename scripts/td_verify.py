@@ -27,16 +27,14 @@ ASSETS = {
             "NVDA:US",
         ],
     },
-    "SRTY": {
-        "symbol": "SRTY",
-        "exchange": "NYSEARCA",
+    "XAGUSD": {
+        "symbol": "XAG/USD",
+        "exchange": "PHYSICAL METAL",
         "alt": [
-            {"symbol": "SRTY", "exchange": None},
-            {"symbol": "SRTY", "exchange": "NYSE"},
-            {"symbol": "SRTY", "exchange": "ARCA"},
-            {"symbol": "SRTY", "exchange": "NSE"},
-            "SRTY:US",
-            "SRTY:NSE",
+            {"symbol": "XAG/USD", "exchange": None},
+            {"symbol": "XAGUSD", "exchange": None},
+            "XAGUSD",
+            "XAG/USD:FOREX",
         ],
     },
 }
