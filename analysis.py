@@ -76,6 +76,32 @@ import pandas as pd
 import numpy as np
 
 # --- Elemzendő eszközök ---
+@@ -54,93 +54,92 @@ try:
+except Exception:  # pragma: no cover - optional dependency guard
+    def update_live_validation(*_args, **_kwargs):
+        return None
+
+try:
+    from volatility_metrics import load_volatility_overlay
+except Exception:  # pragma: no cover - optional helper
+    def load_volatility_overlay(asset: str, outdir: Path, k1m: Optional[Any] = None) -> Dict[str, Any]:
+        return {}
+
+try:
+    from reports.pipeline_monitor import (
+        record_analysis_run,
+        get_pipeline_log_path,
+        DEFAULT_MAX_LAG_SECONDS as PIPELINE_MAX_LAG_SECONDS,
+    )
+except Exception:  # pragma: no cover - optional helper
+    record_analysis_run = None
+    get_pipeline_log_path = None
+    PIPELINE_MAX_LAG_SECONDS = None
+
+import pandas as pd
+import numpy as np
+
+# --- Elemzendő eszközök ---
 from config.analysis_settings import (
     ACTIVE_INVALID_BUFFER_ABS,
     ASSET_COST_MODEL,
@@ -112,6 +138,48 @@ from config.analysis_settings import (
     SMT_REQUIRED_BARS,
     SPOT_MAX_AGE_SECONDS,
     SRTY_MOMENTUM_ATR_REL,
+    TP_MIN_ABS,
+    TP_MIN_PCT,
+    TP_NET_MIN_ASSET,
+    TP_NET_MIN_DEFAULT,
+    get_atr_threshold_multiplier,
+    get_p_score_min,
+)
+from config.analysis_settings import (
+    ACTIVE_INVALID_BUFFER_ABS,
+    ASSET_COST_MODEL,
+    ATR5_MIN_MULT,
+    ATR_ABS_MIN,
+    ATR_LOW_TH_ASSET,
+    ATR_LOW_TH_DEFAULT,
+    ATR_VOL_HIGH_REL,
+    ASSETS,
+    COST_MULT_DEFAULT,
+    COST_MULT_HIGH_VOL,
+    CORE_RR_MIN,
+    DEFAULT_COST_MODEL,
+    ENABLE_MOMENTUM_ASSETS,
+    ENTRY_THRESHOLD_PROFILE_NAME,
+    EMA_SLOPE_SIGN_ENFORCED,
+    EMA_SLOPE_TH_ASSET,
+    EMA_SLOPE_TH_DEFAULT,
+    FX_TP_TARGETS,
+    GOLD_HIGH_VOL_WINDOWS,
+    GOLD_LOW_VOL_TH,
+    INTERVENTION_WATCH_DEFAULT,
+    LEVERAGE,
+    MIN_RISK_ABS,
+    MOMENTUM_RR_MIN,
+    NVDA_EXTENDED_ATR_REL,
+    NVDA_MOMENTUM_ATR_REL,
+    SESSION_TIME_RULES,
+    SESSION_WEEKDAYS,
+    SESSION_WINDOWS_UTC,
+    SL_BUFFER_RULES,
+    SMT_AUTO_CONFIG,
+    SMT_PENALTY_VALUE,
+    SMT_REQUIRED_BARS,
+    SPOT_MAX_AGE_SECONDS,
     TP_MIN_ABS,
     TP_MIN_PCT,
     TP_NET_MIN_ASSET,
@@ -5616,6 +5684,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
