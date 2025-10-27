@@ -48,10 +48,10 @@ class TDGetErrorTests(unittest.TestCase):
         payload = {
             "data": [
                 {
-                    "symbol": "SRTY",
-                    "name": "ProShares UltraPro Short Russell2000",
+                    "symbol": "XAG/USD",
+                    "name": "Silver / US Dollar",
                     "currency": "USD",
-                    "exchange": "NYSE",
+                    "exchange": "PHYSICAL METAL",
                 }
             ],
             "request_access_via_add_on": "us",
@@ -69,7 +69,7 @@ class TDGetErrorTests(unittest.TestCase):
              mock.patch.object(Trading.TD_RATE_LIMITER, "record_success") as record_success, \
              mock.patch("Trading.API_KEY", "demo"):
             with self.assertRaises(Trading.TDError) as ctx:
-                Trading.td_get("time_series", symbol="SRTY", interval="1min")
+                Trading.td_get("time_series", symbol="XAG/USD", interval="1min")
 
         self.assertIn("add-on", str(ctx.exception).lower())
         self.assertEqual(ctx.exception.status_code, 451)
