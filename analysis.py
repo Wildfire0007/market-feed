@@ -5467,11 +5467,10 @@ def main():
         warning = (
             "Hiányzó ML modellek: "
             f"{missing_list} – töltsd fel a public/models/<asset>_gbm.pkl fájlokat "
-            "a valószínűségi score aktiválásához."
+            "a valószínűségi score aktiválásához; a többi asseten az ML továbbra is fut."
         )
         summary["troubleshooting"].append(warning)
         LOGGER.warning("ml artifacts missing: %s", warning)
-        ml_active = False
         ml_disable_notes.append("modell artefakt hiányzik")
     if placeholder_models:
         summary["ml_models_placeholder"] = {
@@ -5485,11 +5484,11 @@ def main():
         placeholders = ", ".join(sorted(placeholder_models))
         placeholder_msg = (
             "Placeholder ML modellek: "
-            f"{placeholders} – töltsd fel a tényleges GradientBoostingClassifier pickle-t."
+            f"{placeholders} – töltsd fel a tényleges GradientBoostingClassifier pickle-t; "
+            "ezeken az eszközökön fallback pontozás fut, a többi asset valódi ML-t használ."
         )
         summary["troubleshooting"].append(placeholder_msg)
         LOGGER.warning("ml placeholder artefacts detected: %s", placeholder_msg)
-        ml_active = False
         ml_disable_notes.append("placeholder modell detektálva")
     if not ENABLE_ML_PROBABILITY:
         ml_disable_notes.append("flag letiltva (ENABLE_ML_PROBABILITY=0)")
@@ -5537,6 +5536,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
