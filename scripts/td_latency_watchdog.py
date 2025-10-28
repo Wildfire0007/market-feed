@@ -21,6 +21,8 @@ import os
 import re
 import subprocess
 import sys
+import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -31,6 +33,8 @@ FLAG_PATTERN = re.compile(r"\b(k\d+m)\b.*?(\d+)\s+perc", re.IGNORECASE)
 DEFAULT_TIMEFRAMES = ("k1m", "k5m")
 DEFAULT_THRESHOLD_MINUTES = float(os.getenv("TD_WATCHDOG_THRESHOLD_MINUTES", "30"))
 DEFAULT_COOLDOWN_MINUTES = float(os.getenv("TD_WATCHDOG_COOLDOWN_MINUTES", "10"))
+DEFAULT_VERIFY_SECONDS = float(os.getenv("TD_WATCHDOG_VERIFY_SECONDS", "0"))
+DEFAULT_VERIFY_POLL_SECONDS = float(os.getenv("TD_WATCHDOG_VERIFY_POLL_SECONDS", "5"))
 
 
 @dataclass
@@ -60,7 +64,12 @@ class LatencyIssue:
         }
 
 
-__all__ = ["LatencyIssue", "collect_latency_issues", "load_state", "save_state"]
+__all__ = [
+    "LatencyIssue",
+    "collect_latency_issues",
+    "load_state",
+    "save_state",
+]
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -240,6 +249,77 @@ def save_state(path: Path, payload: Dict[str, Any]) -> Path:
     return path
 
 
+def _summary_signature(summary: Dict[str, Any]) -> Optional[str]:
+    """Return a string identifying the freshness of the summary payload."""
+
+    for key in ("generated_utc", "generated_at_utc", "analysis_started_utc", "generated_at"):
+        value = summary.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _wait_for_summary_refresh(
+    summary_path: Path,
+    previous_signature: Optional[str],
+    previous_mtime: Optional[float],
+    timeout_seconds: float,
+    poll_seconds: float,
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """Poll ``summary_path`` until it becomes fresher than ``previous_signature``."""
+
+    deadline = time.monotonic() + timeout_seconds
+    last_payload: Optional[Dict[str, Any]] = None
+    poll_seconds = max(poll_seconds, 0.1)
+
+    while True:
+        candidate: Optional[Dict[str, Any]] = None
+
+        try:
+            with summary_path.open("r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    candidate = loaded
+                    last_payload = loaded
+        except Exception:
+            candidate = None
+
+        current_signature = _summary_signature(candidate) if candidate else None
+        if current_signature and current_signature != previous_signature:
+            return True, candidate
+
+        if previous_mtime is not None:
+            try:
+                mtime = summary_path.stat().st_mtime
+            except FileNotFoundError:
+                mtime = None
+            if mtime is not None and mtime > previous_mtime:
+                return True, candidate
+
+        if time.monotonic() >= deadline:
+            return False, last_payload
+
+        time.sleep(min(poll_seconds, max(deadline - time.monotonic(), 0.0)))
+
+
+def _write_cache_bust_token(
+    destination: Path, summary_payload: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Persist a cache-busting token next to the summary output."""
+
+    token = f"{_format_iso(_now())}-{uuid.uuid4().hex}"
+    payload = {
+        "token": token,
+        "generated_utc": _summary_signature(summary_payload) if summary_payload else None,
+        "created_utc": _format_iso(_now()),
+    }
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    return payload
+
+
 def _default_restart_command() -> List[str]:
     python = sys.executable or "python3"
     return [python, "Trading.py"]
@@ -275,6 +355,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Minimum minutes between restart attempts (default: 10)",
     )
     parser.add_argument(
+        "--verify-refresh-seconds",
+        type=float,
+        default=DEFAULT_VERIFY_SECONDS,
+        help="After a successful restart, wait up to N seconds for the summary to refresh (default: 0 - disabled)",
+    )
+    parser.add_argument(
+        "--verify-refresh-poll",
+        type=float,
+        default=DEFAULT_VERIFY_POLL_SECONDS,
+        help="Polling interval while waiting for a refreshed summary (default: 5)",
+    )
+    parser.add_argument(
         "--state-path",
         help="Optional path to persist watchdog state (default: <public>/monitoring/td_latency_watchdog.json)",
     )
@@ -282,6 +374,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--restart-cmd",
         nargs="+",
         help="Command to execute when a restart is required (default: python Trading.py)",
+    )
+    parser.add_argument(
+        "--cache-bust",
+        action="store_true",
+        help="Write a cache-busting token after a successful restart (default: disabled)",
+    )
+    parser.add_argument(
+        "--cache-bust-path",
+        help="Path of the cache-busting token file (default: <public>/monitoring/cache_bust.json)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Do not execute restart command")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
@@ -321,6 +422,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     issues = collect_latency_issues(summary, threshold_seconds, timeframes)
     now = _now()
+    previous_signature = _summary_signature(summary)
+    try:
+        previous_mtime = summary_path.stat().st_mtime
+    except FileNotFoundError:
+        previous_mtime = None
 
     state_path = (
         _resolve_path(args.state_path)
@@ -385,10 +491,58 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if exit_code != 0:
         LOGGER.error("Restart command exited with code %s", exit_code)
-    else:
-        LOGGER.info("Restart command completed successfully")
+        return exit_code
 
-    return exit_code
+    LOGGER.info("Restart command completed successfully")
+
+    verify_seconds = max(float(args.verify_refresh_seconds), 0.0)
+    verify_poll = max(float(args.verify_refresh_poll), 0.1)
+    refreshed_summary: Optional[Dict[str, Any]] = summary
+
+    if verify_seconds > 0:
+        LOGGER.info(
+            "Waiting up to %.1f seconds for analysis summary refresh (poll %.1f s)",
+            verify_seconds,
+            verify_poll,
+        )
+        refreshed, payload = _wait_for_summary_refresh(
+            summary_path,
+            previous_signature,
+            previous_mtime,
+            verify_seconds,
+            verify_poll,
+        )
+        state["verify_timeout_seconds"] = verify_seconds
+        state["verify_poll_seconds"] = verify_poll
+        state["verified_generated_utc"] = _summary_signature(payload) if payload else None
+        state["last_result"] = "restart_verified" if refreshed else "restart_verify_timeout"
+        save_state(state_path, state)
+
+        if not refreshed:
+            LOGGER.error(
+                "Restart completed but %s did not refresh within %.1f seconds",
+                summary_path,
+                verify_seconds,
+            )
+            return 2
+
+        refreshed_summary = payload or summary
+        LOGGER.info("Analysis summary refreshed: generated=%s", state["verified_generated_utc"])
+
+    if args.cache_bust:
+        cache_bust_path = (
+            _resolve_path(args.cache_bust_path)
+            if args.cache_bust_path
+            else (summary_path.parent / "monitoring" / "cache_bust.json")
+        )
+        cache_payload = _write_cache_bust_token(cache_bust_path, refreshed_summary)
+        state["last_cache_bust_path"] = str(cache_bust_path)
+        state["last_cache_bust_token"] = cache_payload.get("token")
+        state["last_cache_bust_created_utc"] = cache_payload.get("created_utc")
+        save_state(state_path, state)
+        LOGGER.info("Cache-busting token written to %s", cache_bust_path)
+
+    return 0
 
 
 if __name__ == "__main__":
