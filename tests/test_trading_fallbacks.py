@@ -76,6 +76,73 @@ def test_reuse_previous_series_respects_limit(tmp_path: Path) -> None:
     assert not reused.get("fallback_previous_payload")
 
 
+def test_write_spot_payload_preserves_existing_on_fallback(tmp_path: Path) -> None:
+    asset_dir = tmp_path / "USOIL"
+    asset_dir.mkdir()
+    spot_path = asset_dir / "spot.json"
+    original = {
+        "ok": True,
+        "price": 81.25,
+        "utc": "2024-01-01T00:00:00Z",
+    }
+    _write(spot_path, original)
+
+    fallback = dict(original)
+    fallback.update(
+        {
+            "retrieved_at_utc": "2024-01-02T00:00:00Z",
+            "fallback_previous_payload": True,
+            "fallback_reuse_count": 1,
+            "fallback_reason": "symbol unavailable",
+        }
+    )
+
+    Trading._write_spot_payload(str(asset_dir), "USOIL", fallback)
+
+    stored = json.loads(spot_path.read_text(encoding="utf-8"))
+    assert stored == original
+
+    state_path = asset_dir / "_fallback_state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["spot"]["reuse_count"] == 1
+
+
+def test_save_series_payload_preserves_existing_on_fallback(tmp_path: Path) -> None:
+    asset_dir = tmp_path / "NVDA"
+    asset_dir.mkdir()
+    name = "klines_1m"
+    raw_path = asset_dir / f"{name}.json"
+    meta_path = asset_dir / f"{name}_meta.json"
+    raw_payload = {"values": [["2024-01-01T00:00:00Z", "1.0"]]}
+    meta_payload = {
+        "ok": True,
+        "latest_utc": "2024-01-01T00:00:00Z",
+        "interval": "1min",
+    }
+    _write(raw_path, raw_payload)
+    _write(meta_path, meta_payload)
+
+    fallback = {
+        "ok": True,
+        "raw": raw_payload,
+        "interval": "1min",
+        "fallback_previous_payload": True,
+        "fallback_reuse_count": 2,
+        "retrieved_at_utc": "2024-01-02T00:00:00Z",
+    }
+
+    Trading.save_series_payload(str(asset_dir), name, fallback)
+
+    stored_raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    stored_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert stored_raw == raw_payload
+    assert stored_meta == meta_payload
+
+    state_path = asset_dir / "_fallback_state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state[f"series:{name}"]["reuse_count"] == 2
+
+
 def test_market_closed_staleness_enforces_hard_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     hard_cap = 60.0
     monkeypatch.setattr(Trading, "MARKET_CLOSED_MAX_AGE_SECONDS", hard_cap)
