@@ -2013,6 +2013,12 @@ def should_enforce_stale_frame(asset: str,
         or meta.get("entry_open")
     ):
         return False
+    if not meta.get("entry_open"):
+        status = str(meta.get("status") or "").lower()
+        if status in {"open_entry_limited", "closed_out_of_hours", "closed_weekend"}:
+            return False
+        if not meta.get("within_entry_window") and not meta.get("within_window"):
+            return False
     relaxed = RELAXED_STALE_FRAMES.get(asset_key)
     if relaxed and frame in relaxed:
         return False
@@ -5582,6 +5588,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
