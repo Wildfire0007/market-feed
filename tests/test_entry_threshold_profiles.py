@@ -75,3 +75,35 @@ def test_relaxed_profile_override(monkeypatch):
 
     # Restore the default profile for subsequent tests.
     _reload_settings(monkeypatch)
+
+
+def test_intraday_bias_and_atr_overrides(monkeypatch):
+    settings = _reload_settings(monkeypatch)
+
+    assert settings.INTRADAY_ATR_RELAX["EURUSD"] == pytest.approx(0.85)
+    assert settings.INTRADAY_ATR_RELAX["GOLD_CFD"] == pytest.approx(0.9)
+    assert settings.INTRADAY_ATR_RELAX["BTCUSD"] == pytest.approx(0.85)
+
+    eurusd_bias = settings.INTRADAY_BIAS_RELAX["EURUSD"]
+    assert eurusd_bias["allow_neutral"] is True
+    eurusd_scenarios = {
+        (scenario["direction"], tuple(scenario["requires"]))
+        for scenario in eurusd_bias["scenarios"]
+    }
+    assert ("long", ("micro_bos_long", "atr_ok")) in eurusd_scenarios
+    assert ("short", ("micro_bos_short", "atr_ok")) in eurusd_scenarios
+
+    nvda_bias = settings.INTRADAY_BIAS_RELAX["NVDA"]
+    assert any(
+        scenario["direction"] == "long" and "atr_strong" in scenario["requires"]
+        for scenario in nvda_bias["scenarios"]
+    )
+    assert all("label" in scenario for scenario in nvda_bias["scenarios"])
+
+    btc_bias = settings.INTRADAY_BIAS_RELAX["BTCUSD"]
+    assert any(
+        scenario["direction"] == "long" and "momentum_volume" in scenario["requires"]
+        for scenario in btc_bias["scenarios"]
+    )
+
+    _reload_settings(monkeypatch)
