@@ -1013,7 +1013,7 @@ def _prefer_existing_series(
     merged = dict(payload)
     merged["raw"] = existing_raw
     merged["latency_seconds"] = recomputed_latency
-    merged["latest_utc"] = existing_meta.get("latest_utc")␊
+    merged["latest_utc"] = existing_meta.get("latest_utc")
     merged["freshness_violation"] = bool(violation)
     merged["fallback_previous_payload"] = True
     merged.setdefault("freshness_limit_seconds", freshness_limit)
@@ -2347,6 +2347,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
