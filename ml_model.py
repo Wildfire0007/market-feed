@@ -59,26 +59,41 @@ FALLBACK_THRESHOLD_OVERRIDES: Dict[str, float] = {
     "XAGUSD": 0.59,
 }
 
+ENVIRONMENT_MONITOR_DIR = PUBLIC_DIR / "monitoring"
+ENVIRONMENT_PRECISION_FILENAME = "precision_gates_by_asset.csv"
+ENVIRONMENT_DEFAULT_SCALES: Dict[str, float] = {
+    "rel_atr_scale": 1.0,
+    "order_flow_scale": 1.0,
+    "precision_scale": 1.0,
+    "precision_floor_offset": 0.0,
+}
+
+ENVIRONMENT_FEATURE_BASELINES = {
+    "rel_atr": 0.0012,
+    "order_flow": 0.12,
+    "precision_score": 55.0,
+}
+
 DEFAULT_FALLBACK_WEIGHTS: Dict[str, float] = {
     "ema21_slope": 1.1,
-    "rel_atr": 0.35,
-    "momentum_vol_ratio": 0.35,
-    "order_flow_imbalance": 0.65,
-    "order_flow_pressure": 0.45,
-    "order_flow_aggressor": 0.3,
+    "rel_atr": 0.48,
+    "momentum_vol_ratio": 0.4,
+    "order_flow_imbalance": 0.85,
+    "order_flow_pressure": 0.6,
+    "order_flow_aggressor": 0.45,
     "news_sentiment": 0.8,
     "news_severity": 0.25,
     "realtime_confidence": 0.9,
-    "volatility_ratio": -0.45,
-    "volatility_regime_flag": -0.55,
-    "precision_score": 0.35,
-    "precision_trigger_ready": 0.45,
-    "precision_trigger_arming": 0.35,
-    "precision_trigger_fire": 0.95,
-    "precision_trigger_confidence": 0.55,
-    "precision_order_flow_ready": 0.4,
+     "volatility_ratio": -0.35,
+    "volatility_regime_flag": -0.45,
+    "precision_score": 0.45,
+    "precision_trigger_ready": 0.55,
+    "precision_trigger_arming": 0.45,
+    "precision_trigger_fire": 1.1,
+    "precision_trigger_confidence": 0.65,
+    "precision_order_flow_ready": 0.55,
     "structure_flip_flag": 0.55,
-    "momentum_trail_activation_rr": 0.35,
+    "momentum_trail_activation_rr": 0.4,
     "momentum_trail_lock_ratio": 0.4,
     "bias_neutral_penalty": -0.35,
 }
@@ -140,6 +155,252 @@ def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
 
+@lru_cache(maxsize=1)
+def _load_precision_gate_profile() -> Dict[str, Dict[str, float]]:
+    path = ENVIRONMENT_MONITOR_DIR / ENVIRONMENT_PRECISION_FILENAME
+    if not path.exists():
+        return {}
+    try:
+        frame = pd.read_csv(path)
+    except Exception:
+        return {}
+    if frame.empty or "asset" not in frame.columns:
+        return {}
+    profile: Dict[str, Dict[str, float]] = {}
+    for _, row in frame.iterrows():
+        asset = str(row.get("asset", "")).strip()
+        if not asset:
+            continue
+        try:
+            total = float(row.get("total_signals") or 0.0)
+        except (TypeError, ValueError):
+            total = 0.0
+        if total <= 0.0:
+            try:
+                total = float(row.get("no_entry_signals") or 0.0)
+            except (TypeError, ValueError):
+                total = 0.0
+        if total <= 0.0:
+            continue
+        ratios: Dict[str, float] = {}
+        for column, key in (
+            ("precision_blocked", "precision_block_ratio"),
+            ("precision_flow_alignment", "precision_flow_ratio"),
+            ("precision_trigger_sync", "precision_sync_ratio"),
+        ):
+            try:
+                value = float(row.get(column) or 0.0)
+            except (TypeError, ValueError):
+                value = 0.0
+            ratios[key] = _clamp(value / total if total else 0.0, 0.0, 1.0)
+        profile[asset.upper()] = ratios
+    return profile
+
+
+def _read_environment_feature_frame(path: Path) -> Optional[pd.DataFrame]:
+    desired = {
+        "rel_atr",
+        "order_flow_imbalance",
+        "order_flow_pressure",
+        "order_flow_aggressor",
+        "precision_score",
+        "precision_trigger_ready",
+        "precision_trigger_arming",
+        "precision_trigger_fire",
+        "precision_trigger_confidence",
+        "precision_order_flow_ready",
+    }
+    try:
+        header = pd.read_csv(path, nrows=0)
+    except Exception:
+        return None
+    available = [column for column in header.columns if column in desired]
+    if not available:
+        return None
+    try:
+        frame = pd.read_csv(path, usecols=available)
+    except Exception:
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
+            return None
+    return frame if not frame.empty else None
+
+
+def _series_quantile(frame: pd.DataFrame, column: str, quantile: float) -> Optional[float]:
+    if column not in frame.columns:
+        return None
+    series = pd.to_numeric(frame[column], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if series.empty:
+        return None
+    try:
+        value = float(series.quantile(quantile))
+    except Exception:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _scale_against_baseline(
+    value: Optional[float],
+    baseline: float,
+    *,
+    lower: float,
+    upper: float,
+) -> float:
+    if value is None or not math.isfinite(value) or baseline <= 0:
+        return 1.0
+    return _clamp(value / baseline, lower, upper)
+
+
+@lru_cache(maxsize=1)
+def _environment_scaling_map() -> Dict[str, Dict[str, float]]:
+    feature_dir = FEATURE_LOG_DIR
+    gate_profile = _load_precision_gate_profile()
+    scales: Dict[str, Dict[str, float]] = {}
+    asset_scale_values: List[Dict[str, float]] = []
+
+    if feature_dir.exists():
+        for path in feature_dir.glob("*_labelled.csv"):
+            stem = path.stem
+            if stem.endswith("_labelled"):
+                stem = stem[: -len("_labelled")]
+            asset = stem.upper()
+            frame = _read_environment_feature_frame(path)
+            if frame is None:
+                continue
+            asset_profile = dict(ENVIRONMENT_DEFAULT_SCALES)
+            atr_baseline = ENVIRONMENT_FEATURE_BASELINES["rel_atr"]
+            atr_value = _series_quantile(frame, "rel_atr", 0.6)
+            asset_profile["rel_atr_scale"] = _scale_against_baseline(
+                atr_value,
+                atr_baseline,
+                lower=0.85,
+                upper=1.9,
+            )
+
+            order_flow_cols = [
+                column
+                for column in ["order_flow_imbalance", "order_flow_pressure", "order_flow_aggressor"]
+                if column in frame.columns
+            ]
+            if order_flow_cols:
+                order_flow_matrix = frame[order_flow_cols].apply(pd.to_numeric, errors="coerce").abs()
+                order_flow_series = (
+                    order_flow_matrix.replace([np.inf, -np.inf], np.nan).mean(axis=1).replace([np.inf, -np.inf], np.nan)
+                )
+                order_flow_series = order_flow_series.dropna()
+                if not order_flow_series.empty:
+                    order_flow_value = float(order_flow_series.quantile(0.65))
+                else:
+                    order_flow_value = None
+            else:
+                order_flow_value = None
+            asset_profile["order_flow_scale"] = _scale_against_baseline(
+                order_flow_value,
+                ENVIRONMENT_FEATURE_BASELINES["order_flow"],
+                lower=0.75,
+                upper=1.8,
+            )
+
+            precision_score_value = _series_quantile(frame, "precision_score", 0.75)
+            if precision_score_value is not None and precision_score_value > 5.0:
+                precision_base = _scale_against_baseline(
+                    precision_score_value,
+                    ENVIRONMENT_FEATURE_BASELINES["precision_score"],
+                    lower=0.7,
+                    upper=1.7,
+                )
+            else:
+                precision_base = 1.0
+
+            precision_ready = _series_quantile(frame, "precision_trigger_ready", 0.75) or 0.0
+            precision_fire = _series_quantile(frame, "precision_trigger_fire", 0.75) or 0.0
+            precision_confidence = _series_quantile(frame, "precision_trigger_confidence", 0.75) or 0.0
+            precision_of_ready = _series_quantile(frame, "precision_order_flow_ready", 0.75) or 0.0
+
+            gate_stats = gate_profile.get(asset, {})
+            block_ratio = float(gate_stats.get("precision_block_ratio", 0.0) or 0.0)
+            flow_ratio = float(gate_stats.get("precision_flow_ratio", 0.0) or 0.0)
+
+            order_flow_scale = asset_profile["order_flow_scale"] * (1.0 + 0.9 * flow_ratio + 0.4 * precision_of_ready)
+            asset_profile["order_flow_scale"] = _clamp(order_flow_scale, 0.75, 2.0)
+
+            trigger_intensity = 0.55 * precision_fire + 0.35 * precision_ready
+            confidence_bonus = max(0.0, precision_confidence - 0.55) * 0.5
+            precision_scale = precision_base * (1.0 + 0.8 * block_ratio) + trigger_intensity * 0.5 + confidence_bonus
+            asset_profile["precision_scale"] = _clamp(precision_scale, 0.85, 2.0)
+
+            precision_floor_offset = (
+                0.02 * precision_ready
+                + 0.03 * precision_fire
+                + 0.02 * block_ratio
+                + 0.01 * precision_confidence
+            )
+            asset_profile["precision_floor_offset"] = _clamp(precision_floor_offset, 0.0, 0.08)
+
+            scales[asset] = asset_profile
+            asset_scale_values.append(asset_profile)
+
+    for asset, gate_stats in _load_precision_gate_profile().items():
+        if asset in scales:
+            continue
+        profile = dict(ENVIRONMENT_DEFAULT_SCALES)
+        block_ratio = float(gate_stats.get("precision_block_ratio", 0.0) or 0.0)
+        flow_ratio = float(gate_stats.get("precision_flow_ratio", 0.0) or 0.0)
+        profile["order_flow_scale"] = _clamp(1.0 + 0.9 * flow_ratio, 0.75, 1.9)
+        profile["precision_scale"] = _clamp(1.0 + 0.8 * block_ratio, 0.85, 1.9)
+        profile["precision_floor_offset"] = _clamp(0.02 * block_ratio, 0.0, 0.05)
+        scales[asset] = profile
+        asset_scale_values.append(profile)
+
+    if asset_scale_values:
+        aggregated: Dict[str, float] = {}
+        for key in ENVIRONMENT_DEFAULT_SCALES:
+            values = [profile[key] for profile in asset_scale_values if key in profile]
+            aggregated[key] = float(np.nanmedian(values)) if values else ENVIRONMENT_DEFAULT_SCALES[key]
+        scales["__GLOBAL__"] = aggregated
+    else:
+        scales["__GLOBAL__"] = dict(ENVIRONMENT_DEFAULT_SCALES)
+
+    return scales
+
+
+def _apply_environment_weight_scaling(asset: str, weights: Dict[str, float]) -> None:
+    env_map = _environment_scaling_map()
+    asset_profile = env_map.get(asset.upper()) or env_map.get("__GLOBAL__")
+    if not asset_profile:
+        return
+
+    def _scale(keys: Iterable[str], multiplier: float) -> None:
+        if abs(multiplier - 1.0) < 1e-9:
+            return
+        for key in keys:
+            if key in weights:
+                weights[key] *= multiplier
+
+    atr_multiplier = float(asset_profile.get("rel_atr_scale", 1.0) or 1.0)
+    order_flow_multiplier = float(asset_profile.get("order_flow_scale", 1.0) or 1.0)
+    precision_multiplier = float(asset_profile.get("precision_scale", 1.0) or 1.0)
+
+    _scale(["rel_atr"], atr_multiplier)
+    _scale(["order_flow_imbalance", "order_flow_pressure", "order_flow_aggressor"], order_flow_multiplier)
+    _scale(
+        [
+            "precision_score",
+            "precision_trigger_ready",
+            "precision_trigger_arming",
+            "precision_trigger_fire",
+            "precision_trigger_confidence",
+            "precision_order_flow_ready",
+        ],
+        precision_multiplier,
+    )
+
+    # precision_order_flow_ready also benefits from a touch of order flow emphasis in noisy regimes
+    if "precision_order_flow_ready" in weights and order_flow_multiplier > 1.0:
+        weights["precision_order_flow_ready"] *= 1.0 + 0.25 * (order_flow_multiplier - 1.0)
+
+
 def _get_fallback_threshold(asset: str) -> float:
     overrides = _load_fallback_overrides()
     thresholds = overrides.get("thresholds") if isinstance(overrides.get("thresholds"), dict) else {}
@@ -180,6 +441,7 @@ def _get_fallback_weights(asset: str) -> Dict[str, float]:
                         weights[key] = float(value)
                     except (TypeError, ValueError):
                         continue
+    _apply_environment_weight_scaling(asset, weights)                    
     return weights
 
 
@@ -197,6 +459,10 @@ def _fallback_probability(
     base_probability = _clamp(base_score / 100.0, 0.05, 0.95)
     base_probability_initial = base_probability
 
+    environment_map = _environment_scaling_map()
+    environment_profile = environment_map.get(asset.upper()) or environment_map.get("__GLOBAL__") or {}
+    precision_floor_offset = float(environment_profile.get("precision_floor_offset", 0.0) or 0.0)
+    
     def _precision_alignment_floor() -> Optional[float]:
         try:
             precision_fire = _clamp(float(features.get("precision_trigger_fire") or 0.0), 0.0, 1.0)
@@ -226,7 +492,10 @@ def _fallback_probability(
         )
         if alignment_strength <= 0.0:
             return None
-        floor = _clamp(0.4 + alignment_strength * 0.45, 0.4, 0.82)
+        floor = 0.4 + alignment_strength * 0.45
+        if precision_floor_offset:
+            floor += precision_floor_offset
+        floor = _clamp(floor, 0.42, 0.88)
         return floor if floor > base_probability_initial else None
 
     weights = _get_fallback_weights(asset)
@@ -428,6 +697,8 @@ def _fallback_probability(
         "threshold": threshold,
         "steps": steps,
     }
+    if environment_profile:
+        meta["environment_profile"] = environment_profile
     if reason:
         meta["reason"] = reason
     return probability, threshold, meta
