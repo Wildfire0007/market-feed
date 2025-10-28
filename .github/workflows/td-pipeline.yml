@@ -134,9 +134,71 @@ jobs:
           else
             echo "No changes to commit."
           fi
-  notify:
-    name: 3) Discord értesítő
+  predeploy:
+    name: 3) Pre-deploy verification & tests
     needs: analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout latest main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Sync with origin/main
+        run: |
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Clean Python caches
+        run: |
+          find . -type d -name "__pycache__" -exec rm -rf {} +
+          find . -name "*.pyc" -delete
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify analysis.py hash against origin/main
+        run: |
+          set -euo pipefail
+          current_hash=$(sha256sum analysis.py | awk '{print $1}')
+          remote_hash=$(git show origin/main:analysis.py | sha256sum | awk '{print $1}')
+          echo "analysis.py working hash: $current_hash"
+          echo "analysis.py origin/main hash: $remote_hash"
+          if [ "$current_hash" != "$remote_hash" ]; then
+            echo "analysis.py hash mismatch detected" >&2
+            exit 1
+          fi
+
+      - name: Run pytest suite
+        run: pytest
+
+      - name: Ensure checked-out commit matches origin/main HEAD
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          head_rev=$(git rev-parse HEAD)
+          main_rev=$(git rev-parse origin/main)
+          echo "HEAD revision: $head_rev"
+          echo "origin/main revision: $main_rev"
+          if [ "$head_rev" != "$main_rev" ]; then
+            echo "Working commit diverges from origin/main" >&2
+            exit 1
+          fi
+
+  notify:
+    name: 4) Discord értesítő
+    needs:
+      - analysis
+      - predeploy
     runs-on: ubuntu-latest
     env:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
