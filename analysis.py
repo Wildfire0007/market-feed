@@ -99,6 +99,8 @@ from config.analysis_settings import (
     GOLD_HIGH_VOL_WINDOWS,
     GOLD_LOW_VOL_TH,
     INTERVENTION_WATCH_DEFAULT,
+    INTRADAY_ATR_RELAX,
+    INTRADAY_BIAS_RELAX,
     LEVERAGE,
     MIN_RISK_ABS,
     MOMENTUM_RR_MIN,
@@ -3834,6 +3836,14 @@ def analyze(asset: str) -> Dict[str, Any]:
     else:
         entry_thresholds_meta["atr_threshold_base"] = atr_threshold
     entry_thresholds_meta["atr_threshold_initial"] = atr_threshold
+    intraday_relax_factor = INTRADAY_ATR_RELAX.get(asset)
+    if intraday_relax_factor not in (None, 0.0) and intraday_relax_factor != 1.0:
+        try:
+            atr_threshold = float(atr_threshold) * float(intraday_relax_factor)
+        except Exception:
+            atr_threshold = atr_threshold * intraday_relax_factor  # best effort
+        entry_thresholds_meta["atr_intraday_relax"] = float(intraday_relax_factor)
+        entry_thresholds_meta["atr_threshold_intraday"] = atr_threshold
     volatility_overlay: Dict[str, Any] = {}
     atr_overlay_gate = True
     try:
@@ -3994,8 +4004,18 @@ def analyze(asset: str) -> Dict[str, Any]:
     if stale_timeframes.get("k1m") or stale_timeframes.get("k5m"):
         micro_bos_long = micro_bos_short = False
 
+    nvda_cross_long = nvda_cross_short = False
+    if asset == "NVDA":
+        ema9_5m = ema(k5m_closed["close"], 9)
+        ema21_5m = ema(k5m_closed["close"], 21)
+        nvda_cross_long = ema_cross_recent(ema9_5m, ema21_5m, bars=7, direction="long")
+        nvda_cross_short = ema_cross_recent(ema9_5m, ema21_5m, bars=7, direction="short")
+
     effective_bias = trend_bias
     bias_override_used = False
+    bias_override_reason: Optional[str] = None
+    intraday_bias_gate_meta: Optional[Dict[str, Any]] = None
+    bias_gate_notes: List[str] = []
     if trend_bias == "neutral" and bias1h in ("long", "short"):
         override_dir = bias1h
         bos_support = bos5m_long if override_dir == "long" else bos5m_short
@@ -4008,9 +4028,157 @@ def analyze(asset: str) -> Dict[str, Any]:
         if regime_ok and (bos_support or struct_support or (micro_support and atr_push)):
             effective_bias = override_dir
             bias_override_used = True
+            bias_override_reason = f"Bias override: 1h trend {override_dir} + momentum támogatás"
 
-    if asset == "NVDA" and effective_bias == "neutral" and bias1h in {"long", "short"} and bias4h == bias1h and regime_ok:
+    if (
+        asset == "NVDA"
+        and effective_bias == "neutral"
+        and bias1h in {"long", "short"}
+        and bias4h == bias1h
+        and regime_ok
+    ):
         effective_bias = bias1h
+        bias_override_used = True
+        bias_override_reason = "Bias override: NVDA 1h trend cash-session megerősítés"
+
+    if effective_bias == "neutral":
+        relax_cfg = INTRADAY_BIAS_RELAX.get(asset)
+        if relax_cfg:
+            requirement_labels = {
+                "micro_bos_long": "1m micro BOS long",
+                "micro_bos_short": "1m micro BOS short",
+                "struct_retest_long": "5m retest long",
+                "struct_retest_short": "5m retest short",
+                "bos5m_long": "5m BOS long",
+                "bos5m_short": "5m BOS short",
+                "atr_ok": "ATR gate",
+                "atr_strong": "Magas ATR megerősítés",
+                "momentum_volume": "Momentum volume ráta",
+                "nvda_cross_long": "EMA9×21 long",
+                "nvda_cross_short": "EMA9×21 short",
+            }
+
+            def describe_requirement(token: str) -> str:
+                return requirement_labels.get(token, token)
+
+            def requirement_ok(token: str, direction: str) -> bool:
+                if token == "atr_ok":
+                    return bool(atr_ok)
+                if token == "atr_strong":
+                    if np.isnan(rel_atr):
+                        return False
+                    strong_th = max(atr_threshold, MOMENTUM_ATR_REL) * 1.1
+                    try:
+                        return float(rel_atr) >= float(strong_th)
+                    except Exception:
+                        return False
+                if token == "momentum_volume":
+                    return (
+                        momentum_vol_ratio is not None
+                        and momentum_vol_ratio >= MOMENTUM_VOLUME_RATIO_TH
+                    )
+                if token == "micro_bos_long":
+                    return bool(micro_bos_long and not micro_bos_short)
+                if token == "micro_bos_short":
+                    return bool(micro_bos_short and not micro_bos_long)
+                if token == "struct_retest_long":
+                    return bool(struct_retest_long and not struct_retest_short)
+                if token == "struct_retest_short":
+                    return bool(struct_retest_short and not struct_retest_long)
+                if token == "bos5m_long":
+                    return bool(bos5m_long and not bos5m_short)
+                if token == "bos5m_short":
+                    return bool(bos5m_short and not bos5m_long)
+                if token == "nvda_cross_long":
+                    return bool(nvda_cross_long)
+                if token == "nvda_cross_short":
+                    return bool(nvda_cross_short)
+                return False
+
+            intraday_bias_gate_meta = {
+                "configured": True,
+                "allow_neutral": bool(relax_cfg.get("allow_neutral")),
+                "scenarios": [],
+            }
+            scenario_defs = relax_cfg.get("scenarios") or []
+            satisfied_direction: Optional[str] = None
+            selected_state: Optional[Dict[str, Any]] = None
+            conflict = False
+            allow_neutral = bool(relax_cfg.get("allow_neutral"))
+
+            for scenario in scenario_defs:
+                if not isinstance(scenario, dict):
+                    continue
+                direction = str(scenario.get("direction", "")).lower()
+                if direction not in {"long", "short"}:
+                    continue
+                requires_raw = scenario.get("requires") or []
+                requires = [str(req) for req in requires_raw if isinstance(req, str)]
+                missing = [req for req in requires if not requirement_ok(req, direction)]
+                state: Dict[str, Any] = {
+                    "direction": direction,
+                    "requires": requires,
+                    "missing": missing,
+                    "met": not missing,
+                }
+                label_value = scenario.get("label")
+                if isinstance(label_value, str):
+                    state["label"] = label_value
+                if missing:
+                    state["missing_pretty"] = [describe_requirement(req) for req in missing]
+                else:
+                    state["missing_pretty"] = []
+                state["requires_pretty"] = [describe_requirement(req) for req in requires]
+                intraday_bias_gate_meta["scenarios"].append(state)
+                if allow_neutral and not missing:
+                    if satisfied_direction is None:
+                        satisfied_direction = direction
+                        selected_state = state
+                    elif satisfied_direction != direction:
+                        conflict = True
+            if allow_neutral and selected_state and not conflict:
+                effective_bias = selected_state["direction"]
+                bias_override_used = True
+                label_text = selected_state.get("label")
+                base_message = label_text or f"intraday {effective_bias} setup"
+                bias_override_reason = f"Bias override: Intraday {base_message}"
+                intraday_bias_gate_meta["selected"] = {
+                    "direction": selected_state["direction"],
+                    "label": label_text,
+                    "requires": selected_state.get("requires", []),
+                    "requires_pretty": selected_state.get("requires_pretty"),
+                }
+                intraday_bias_gate_meta["matched"] = True
+            elif conflict:
+                intraday_bias_gate_meta["conflict"] = True
+                intraday_bias_gate_meta["matched"] = False
+            elif intraday_bias_gate_meta["scenarios"]:
+                intraday_bias_gate_meta["matched"] = False
+
+            if (
+                intraday_bias_gate_meta
+                and effective_bias == "neutral"
+                and intraday_bias_gate_meta.get("allow_neutral")
+            ):
+                if intraday_bias_gate_meta.get("conflict"):
+                    msg = "Intraday bias gate: ellentétes long/short jelek → várakozás"
+                    if msg not in bias_gate_notes:
+                        bias_gate_notes.append(msg)
+                else:
+                    missing_msgs: List[str] = []
+                    for state in intraday_bias_gate_meta.get("scenarios", []):
+                        if state.get("met"):
+                            continue
+                        label_text = state.get("label") or f"{state.get('direction')} setup"
+                        missing_pretty = state.get("missing_pretty") or []
+                        if missing_pretty:
+                            missing_msgs.append(
+                                f"{label_text}: {', '.join(missing_pretty)}"
+                            )
+                    if missing_msgs:
+                        msg = "Intraday bias gate feltételek hiányosak — " + " | ".join(missing_msgs)
+                        if msg not in bias_gate_notes:
+                            bias_gate_notes.append(msg)
 
     if effective_bias == "long":
         bos5m = bos5m_long
@@ -4032,12 +4200,6 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     structure_ok_long = bool((bos5m_long or struct_retest_long) and not recent_break_short)
     structure_ok_short = bool((bos5m_short or struct_retest_short) and not recent_break_long)
-    nvda_cross_long = nvda_cross_short = False
-    if asset == "NVDA":
-        ema9_5m = ema(k5m_closed["close"], 9)
-        ema21_5m = ema(k5m_closed["close"], 21)
-        nvda_cross_long = ema_cross_recent(ema9_5m, ema21_5m, bars=7, direction="long")
-        nvda_cross_short = ema_cross_recent(ema9_5m, ema21_5m, bars=7, direction="short")
     structure_gate = False
     if effective_bias == "long":
         structure_gate = structure_ok_long
@@ -4052,16 +4214,17 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     # 7) P-score — volatilitás-adaptív súlyozás
     P, reasons = 15.0, []
+    if bias_gate_notes:
+        reasons.extend(bias_gate_notes)
     if effective_bias != "neutral":
         bias_strength = 1.0 + (0.3 if bias_override_used else 0.0)
         bias_points = 15.0 * bias_strength
         P += bias_points
         if bias_override_used:
-            reasons.append(
-                f"Bias override: 1h trend {effective_bias} + momentum támogatás (+{bias_points:.1f})"
-            )
+            label = bias_override_reason or f"Bias override: {effective_bias}"
         else:
-            reasons.append(f"Bias(4H→1H)={effective_bias} (+{bias_points:.1f})")
+            label = f"Bias(4H→1H)={effective_bias}"
+        reasons.append(f"{label} (+{bias_points:.1f})")
     else:
         reasons.append("Bias neutrálsávban")
 
@@ -5150,6 +5313,14 @@ def analyze(asset: str) -> Dict[str, Any]:
     analysis_timestamp = nowiso()
     probability_percent = int(max(0, min(100, round(combined_probability * 100))))
 
+    gates_payload: Dict[str, Any] = {
+        "mode": mode,
+        "required": required_list,
+        "missing": missing,
+    }
+    if intraday_bias_gate_meta:
+        gates_payload["intraday_bias"] = intraday_bias_gate_meta
+
     decision_obj = {
         "asset": asset,
         "ok": True,
@@ -5182,11 +5353,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             "adjusted_4h": bias4h,
             "adjusted_1h": bias1h,
         },
-        "gates": {
-            "mode": mode,
-            "required": required_list,
-            "missing": missing,
-        },
+        "gates": gates_payload,
         "session_info": session_meta,
         "diagnostics": diagnostics_payload(tf_meta, source_files, latency_flags),
         "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else []))
@@ -5682,6 +5849,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
