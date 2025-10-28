@@ -6,7 +6,7 @@ import json
 import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 PUBLIC_DIR = Path(os.getenv("PUBLIC_DIR", "public"))
 MONITOR_DIR = Path(os.getenv("PIPELINE_MONITOR_DIR", str(PUBLIC_DIR / "monitoring")))
@@ -17,6 +17,7 @@ PIPELINE_LOG_PATH = Path(
     os.getenv("PIPELINE_MONITOR_LOG", str(MONITOR_DIR / "pipeline.log"))
 )
 DEFAULT_MAX_LAG_SECONDS = int(os.getenv("PIPELINE_MAX_LAG_SECONDS", "240"))
+ML_MODEL_REMINDER_DAYS = int(os.getenv("ML_MODEL_REMINDER_DAYS", "7"))
 
 
 def _now() -> datetime:
@@ -127,6 +128,58 @@ def get_pipeline_log_path(path: Optional[Path] = None) -> Path:
     return target
 
 
+def record_ml_model_status(
+    missing: Optional[Iterable[str]] = None,
+    placeholders: Optional[Iterable[str]] = None,
+    remind_after_days: Optional[int] = None,
+    path: Optional[Path] = None,
+    now: Optional[datetime] = None,
+) -> Tuple[Dict[str, Any], bool]:
+    """Persist ML model availability metadata and determine reminder cadence."""
+
+    current = now or _now()
+    try:
+        remind_days = int(remind_after_days) if remind_after_days is not None else ML_MODEL_REMINDER_DAYS
+    except (TypeError, ValueError):
+        remind_days = ML_MODEL_REMINDER_DAYS
+    remind_days = max(remind_days, 1)
+
+    missing_list = sorted({str(item).upper() for item in (missing or []) if str(item).strip()})
+    placeholder_list = sorted({str(item).upper() for item in (placeholders or []) if str(item).strip()})
+
+    payload = _load_payload(path)
+    ml_section = payload.get("ml_models") if isinstance(payload, dict) else None
+    if not isinstance(ml_section, dict):
+        ml_section = {}
+
+    status_payload = {
+        "missing": missing_list,
+        "placeholders": placeholder_list,
+        "updated_utc": _to_iso(current),
+    }
+
+    last_reminder = _parse_iso(ml_section.get("last_reminder_utc")) if isinstance(ml_section, dict) else None
+    reminder_due = False
+    if missing_list or placeholder_list:
+        due_since = None
+        if last_reminder is not None:
+            delta = current - last_reminder
+            if delta >= timedelta(days=remind_days):
+                due_since = last_reminder
+        else:
+            due_since = current
+        if due_since is not None:
+            reminder_due = True
+            ml_section["last_reminder_utc"] = _to_iso(current)
+
+    ml_section["status"] = status_payload
+    ml_section["reminder_period_days"] = remind_days
+    payload["ml_models"] = ml_section
+    payload["updated_utc"] = _to_iso(_now())
+    _save_payload(payload, path)
+    return payload, reminder_due
+
+
 def summarize_pipeline_warnings(path: Optional[Path] = None) -> Dict[str, Any]:
     """Parse the pipeline log and compute warning/client-error ratios."""
 
@@ -165,9 +218,11 @@ def summarize_pipeline_warnings(path: Optional[Path] = None) -> Dict[str, Any]:
     
 __all__ = [
     "DEFAULT_MAX_LAG_SECONDS",
+    "ML_MODEL_REMINDER_DAYS",
     "PIPELINE_MONITOR_PATH",
     "PIPELINE_LOG_PATH",
     "get_pipeline_log_path",
+    "record_ml_model_status",
     "record_analysis_run",
     "record_trading_run",
     "summarize_pipeline_warnings",
