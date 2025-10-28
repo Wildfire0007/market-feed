@@ -63,3 +63,15 @@ riportban vagy debug logban is.
    `analysis.py` pipeline-t, majd a generált `signal.json` fájlban a
    `entry_thresholds` mezőben ellenőrizheted, hogy melyik profil milyen
    küszöböket alkalmazott.
+   
+4. **Diagnosztika** – a `scripts/entry_threshold_audit.py` segéd végigfut a
+   `public/analysis_summary.json` exporton, és táblázatosan mutatja, melyik
+   eszköz P-score-ja mennyivel marad el az aktív profil küszöbétől, illetve
+   felderíti, hogy a gate listában szerepel-e a `P_score` blokk. Használat:
+
+   ```bash
+   python scripts/entry_threshold_audit.py
+   ```
+
+   Az opcionális `--suggest-buffer` kapcsolóval átírhatod, hogy hány ponttal
+   csökkentett értéket javasoljon a riport (alapértelmezetten 5).
