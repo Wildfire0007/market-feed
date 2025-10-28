@@ -37,7 +37,7 @@ Környezeti változók:
 
 import os, json, time, math, logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time as dt_time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Optional, List, Tuple, Callable, Set
 
@@ -357,7 +357,7 @@ ASSETS = {
         "exchange": "COMMODITY",
         "exchange_display": "Commodity",
         "currency": "USD",
-        "alt": ["USOIL"],
+        "disable_compact_variants": True,
     },
 
 # Egyedi részvény és ETF kiterjesztések
@@ -378,8 +378,80 @@ ASSETS = {
         "exchange": "PHYSICAL METAL",
         "exchange_display": "Physical Metal",
         "currency": "USD",
+        "disable_compact_variants": True,
     },
 }
+
+
+def _normalize_symbol_token(symbol: str) -> str:
+    return symbol.replace("/", "").replace(":", "").replace("-", "").strip().upper()
+
+
+_ASSET_SYMBOL_INDEX: Dict[str, str] = {}
+for _asset_key, _cfg in ASSETS.items():
+    if not isinstance(_cfg, dict):
+        continue
+    if isinstance(_asset_key, str) and _asset_key:
+        _ASSET_SYMBOL_INDEX.setdefault(_normalize_symbol_token(_asset_key), _asset_key)
+    symbol_text = _cfg.get("symbol")
+    if isinstance(symbol_text, str) and symbol_text:
+        _ASSET_SYMBOL_INDEX.setdefault(_normalize_symbol_token(symbol_text), _asset_key)
+    for alt in _cfg.get("alt", []) or []:
+        if isinstance(alt, str) and alt:
+            _ASSET_SYMBOL_INDEX.setdefault(_normalize_symbol_token(alt), _asset_key)
+        elif isinstance(alt, dict):
+            alt_symbol = alt.get("symbol")
+            if isinstance(alt_symbol, str) and alt_symbol:
+                _ASSET_SYMBOL_INDEX.setdefault(_normalize_symbol_token(alt_symbol), _asset_key)
+
+
+def _resolve_asset_from_payload(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    candidates: List[str] = []
+    for key in (
+        "asset",
+        "asset_key",
+        "symbol",
+        "requested_symbol",
+        "base_symbol",
+        "symbol_requested",
+    ):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            candidates.append(value)
+    for candidate in candidates:
+        normalized = _normalize_symbol_token(candidate)
+        asset_key = _ASSET_SYMBOL_INDEX.get(normalized)
+        if not asset_key:
+            continue
+        cfg = ASSETS.get(asset_key)
+        if isinstance(cfg, dict):
+            return asset_key, cfg
+    return None, None
+
+
+def _is_us_equity_asset(cfg: Dict[str, Any]) -> bool:
+    asset_class = str(cfg.get("asset_class") or "").strip().lower()
+    if asset_class != "equity":
+        return False
+    exchange = str(cfg.get("exchange") or cfg.get("exchange_display") or "").upper()
+    return any(tag in exchange for tag in ("NASDAQ", "NYSE", "ARCA", "BATS"))
+
+
+def _asset_market_closed_reason(
+    asset_key: Optional[str],
+    cfg: Optional[Dict[str, Any]],
+    latest_dt: datetime,
+    now_dt: datetime,
+) -> Optional[str]:
+    if now_dt.weekday() >= 5 or latest_dt.weekday() >= 5:
+        return "weekend"
+    if not cfg:
+        return None
+    if _is_us_equity_asset(cfg):
+        now_time = now_dt.time()
+        if now_time < US_EQUITY_OPEN_UTC or now_time >= US_EQUITY_CLOSE_UTC:
+            return "outside_hours"
+    return None
 
 _BASE_REQUESTS_PER_ASSET = 1 + len(SERIES_FETCH_PLAN)
 _BASE_REQUESTS_TOTAL = len(ASSETS) * _BASE_REQUESTS_PER_ASSET
@@ -394,6 +466,8 @@ REALTIME_HTTP_BUDGET_PER_ASSET = max(
 )
 
 MARKET_CLOSED_GRACE_SECONDS = max(0.0, float(os.getenv("TD_MARKET_CLOSED_GRACE", "43200")))
+US_EQUITY_OPEN_UTC = dt_time(13, 30)
+US_EQUITY_CLOSE_UTC = dt_time(20, 0)
 
 _TRADING_STATUS: Dict[str, Dict[str, Any]] = {}
 _TRADING_STATUS_LOCK = threading.Lock()
@@ -915,7 +989,22 @@ def _prefer_existing_series(
         return payload
 
     prev_latency = _coerce_float(existing_meta.get("latency_seconds"))
-    if prev_latency is None or prev_latency > freshness_limit:
+    existing_latest_iso = None
+    if isinstance(existing_meta, dict):
+        existing_latest_iso = existing_meta.get("latest_utc") or existing_meta.get("utc")
+    recomputed_latency = _age_seconds_from_iso(existing_latest_iso)
+    if recomputed_latency is None:
+        recomputed_latency = prev_latency
+
+    if recomputed_latency is None:
+        return payload
+
+    if freshness_limit is not None and recomputed_latency > freshness_limit:
+        # The cached payload is also outside the allowed freshness budget – keep
+        # the violation flag so downstream diagnostics see the stale state.
+        violation = True
+
+    if prev_latency is None or (freshness_limit is not None and prev_latency > freshness_limit):
         return payload
     values = existing_raw.get("values") if isinstance(existing_raw, dict) else None
     if not values:
@@ -923,9 +1012,9 @@ def _prefer_existing_series(
 
     merged = dict(payload)
     merged["raw"] = existing_raw
-    merged["latency_seconds"] = prev_latency
-    merged["latest_utc"] = existing_meta.get("latest_utc")
-    merged["freshness_violation"] = False
+    merged["latency_seconds"] = recomputed_latency
+    merged["latest_utc"] = existing_meta.get("latest_utc")␊
+    merged["freshness_violation"] = bool(violation)
     merged["fallback_previous_payload"] = True
     merged.setdefault("freshness_limit_seconds", freshness_limit)
     if "used_symbol" not in merged and existing_meta.get("used_symbol"):
@@ -1755,8 +1844,12 @@ def wait_for_realtime_background() -> None:
 
 # ─────────────────────── több-szimbólumos fallback ───────────────────────
 
-def _symbol_attempt_variants(symbol: str,
-                             exchange: Optional[str]) -> List[Tuple[str, Optional[str]]]:
+def _symbol_attempt_variants(
+    symbol: str,
+    exchange: Optional[str],
+    *,
+    allow_compact: bool = True,
+) -> List[Tuple[str, Optional[str]]]:
     """Generate fallback symbol/exchange combinations for Twelve Data requests."""
 
     variants: List[Tuple[str, Optional[str]]] = []
@@ -1775,7 +1868,7 @@ def _symbol_attempt_variants(symbol: str,
     elif ":" not in symbol and "/" not in symbol:
         variants.append((symbol, None))
 
-    if "/" in symbol:
+    if allow_compact and "/" in symbol:
         compact = symbol.replace("/", "")
         if compact:
             variants.append((compact, exchange if exchange else None))
@@ -1789,18 +1882,35 @@ def _normalize_symbol_attempts(cfg: Dict[str, Any]) -> List[Tuple[str, Optional[
     base_symbol = cfg["symbol"]
     base_exchange = cfg.get("exchange")
     attempts: List[Tuple[str, Optional[str]]] = []
+    allow_compact = not bool(cfg.get("disable_compact_variants"))
 
-    def push(symbol: Optional[str], exchange: Optional[str]) -> None:
+    def push(
+        symbol: Optional[str],
+        exchange: Optional[str],
+        *,
+        allow_compact_override: Optional[bool] = None,
+    ) -> None:
         if not symbol:
             return
-        attempts.extend(_symbol_attempt_variants(symbol, exchange))
+        compact_allowed = (
+            allow_compact if allow_compact_override is None else allow_compact_override
+        )
+        attempts.extend(
+            _symbol_attempt_variants(symbol, exchange, allow_compact=compact_allowed)
+        )
 
     push(base_symbol, base_exchange)
     for alt in cfg.get("alt", []):
         if isinstance(alt, str):
             push(alt, base_exchange)
         elif isinstance(alt, dict):
-            push(alt.get("symbol", base_symbol), alt.get("exchange", base_exchange))
+            push(
+                alt.get("symbol", base_symbol),
+                alt.get("exchange", base_exchange),
+                allow_compact_override=None
+                if alt.get("disable_compact_variants") is None
+                else not bool(alt.get("disable_compact_variants")),
+            )
         elif isinstance(alt, (list, tuple)) and alt:
             symbol = alt[0]
             exchange = alt[1] if len(alt) > 1 else base_exchange
@@ -1949,20 +2059,35 @@ def _accept_market_closed_staleness(
         return False
     latest_iso = payload.get("latest_utc") or payload.get("utc")
     age = _age_seconds_from_iso(latest_iso)
-    if age is None or age < max(MARKET_CLOSED_GRACE_SECONDS, 0.0):
+    if age is None:
         return False
     latest_dt = _parse_iso_utc(latest_iso)
     now_dt = datetime.now(timezone.utc)
     if latest_dt is None:
         return False
-    if latest_dt.weekday() < 5 and now_dt.weekday() < 5:
-        return False
+    asset_key, asset_cfg = _resolve_asset_from_payload(payload)
+    closed_reason = _asset_market_closed_reason(asset_key, asset_cfg, latest_dt, now_dt)
+    if closed_reason is None:
+        # Fall back to the historical behaviour for assets without explicit
+        # trading hours metadata: treat multi-hour gaps around the weekend as
+        # acceptable market closures.
+        if age < max(MARKET_CLOSED_GRACE_SECONDS, 0.0):
+            return False
+        if latest_dt.weekday() < 5 and now_dt.weekday() < 5:
+            return False
+        closed_reason = "weekend"
     payload["freshness_violation"] = False
     payload.setdefault("freshness_limit_seconds", freshness_limit)
     payload["market_closed_assumed"] = True
     if age is not None:
         payload["latency_seconds"] = age
-    payload["freshness_note"] = "market_closed_weekend"
+    if closed_reason == "weekend":
+        payload["freshness_note"] = "market_closed_weekend"
+    else:
+        payload["freshness_note"] = "market_closed_outside_hours"
+    if asset_key and "asset" not in payload:
+        payload.setdefault("asset", asset_key)
+    payload["market_closed_reason"] = closed_reason
     return True
 
 
@@ -2222,6 +2347,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
