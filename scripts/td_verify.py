@@ -13,40 +13,10 @@ from typing import Dict, Any, Tuple, List, Optional
 
 import requests
 
+import Trading
+
 PUBLIC_DIR = "public"
-ASSETS = {
-    "EURUSD": {"symbol": "EUR/USD", "exchange": "FX"},
-    "BTCUSD": {"symbol": "BTC/USD", "exchange": "CRYPTO"},
-    "GOLD_CFD": {"symbol": "XAU/USD"},
-    "USOIL": {
-        "symbol": "WTI/USD",
-        "alt": [
-            {"symbol": "WTIUSD", "exchange": "COMMODITY"},
-            {"symbol": "WTIUSD", "exchange": None},
-            {"symbol": "CL=F", "exchange": None},
-            {"symbol": "CL1!", "exchange": "NYMEX"},
-        ],
-    },
-    "NVDA": {
-        "symbol": "NVDA",
-        "exchange": "NASDAQ",
-        "alt": [
-            {"symbol": "NVDA", "exchange": None},
-            "NVDA:US",
-        ],
-    },
-    "XAGUSD": {
-        "symbol": "XAG/USD",
-        "exchange": "PHYSICAL METAL",
-        "alt": [
-            {"symbol": "XAG/USD", "exchange": None},
-            {"symbol": "XAGUSD", "exchange": None},
-            {"symbol": "XAGUSD", "exchange": "FOREX"},
-            "XAGUSD",
-            "XAG/USD:FOREX",
-        ],
-    },
-}
+ASSET_IDS = ("EURUSD", "BTCUSD", "GOLD_CFD", "USOIL", "NVDA", "XAGUSD")
 
 INTERVALS = ["5min", "1h", "4h"]
 
@@ -88,34 +58,10 @@ def bps_diff(a: float, b: float) -> str:
         return "—"
 
 def _normalize_attempts(meta: Dict[str, Any]) -> List[Tuple[str, Optional[str]]]:
-    base_symbol = meta["symbol"]
-    base_exchange = meta.get("exchange")
-    attempts: List[Tuple[str, Optional[str]]] = []
+    """Proxy to Trading._normalize_symbol_attempts to keep probe in sync."""
 
-    def push(symbol: Optional[str], exchange: Optional[str]) -> None:
-        if symbol:
-            attempts.append((symbol, exchange))
+    return Trading._normalize_symbol_attempts(meta)
 
-    push(base_symbol, base_exchange)
-    for alt in meta.get("alt", []):
-        if isinstance(alt, str):
-            push(alt, base_exchange)
-        elif isinstance(alt, dict):
-            push(alt.get("symbol", base_symbol), alt.get("exchange", base_exchange))
-        elif isinstance(alt, (list, tuple)) and alt:
-            symbol = alt[0]
-            exchange = alt[1] if len(alt) > 1 else base_exchange
-            push(symbol, exchange)
-
-    seen = set()
-    uniq: List[Tuple[str, Optional[str]]] = []
-    for sym, exch in attempts:
-        key = (sym, exch)
-        if key in seen:
-            continue
-        seen.add(key)
-        uniq.append((sym, exch))
-    return uniq
 
 
 def fetch_attempt(sym: str, exchange: Optional[str]) -> Tuple[Optional[float], str, List[str]]:
@@ -150,8 +96,15 @@ def fetch_attempt(sym: str, exchange: Optional[str]) -> Tuple[Optional[float], s
 
 def main():
     print("== Twelve Data live probe ==")
-    for asset, meta in ASSETS.items():
+    for asset in ASSET_IDS:
+        meta = Trading.ASSETS.get(asset)
+        if not meta:
+            print(f"!! Missing asset configuration: {asset}")
+            continue
         attempts = _normalize_attempts(meta)
+        if not attempts:
+            print(f"!! No Twelve Data variants generated for {asset}")
+            continue
         chosen_index = 0
         chosen_payload: Tuple[Optional[float], str, List[str]] = (None, "-", ["n/a"] * len(INTERVALS))
         chosen_meta: Tuple[str, Optional[str]] = (attempts[0][0], attempts[0][1])
