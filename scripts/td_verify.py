@@ -18,7 +18,15 @@ ASSETS = {
     "EURUSD": {"symbol": "EUR/USD", "exchange": "FX"},
     "BTCUSD": {"symbol": "BTC/USD", "exchange": "CRYPTO"},
     "GOLD_CFD": {"symbol": "XAU/USD"},
-    "USOIL": {"symbol": "WTI/USD"},
+    "USOIL": {
+        "symbol": "WTI/USD",
+        "alt": [
+            {"symbol": "WTIUSD", "exchange": "COMMODITY"},
+            {"symbol": "WTIUSD", "exchange": None},
+            {"symbol": "CL=F", "exchange": None},
+            {"symbol": "CL1!", "exchange": "NYMEX"},
+        ],
+    },
     "NVDA": {
         "symbol": "NVDA",
         "exchange": "NASDAQ",
@@ -33,6 +41,7 @@ ASSETS = {
         "alt": [
             {"symbol": "XAG/USD", "exchange": None},
             {"symbol": "XAGUSD", "exchange": None},
+            {"symbol": "XAGUSD", "exchange": "FOREX"},
             "XAGUSD",
             "XAG/USD:FOREX",
         ],
