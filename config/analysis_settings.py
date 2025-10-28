@@ -167,6 +167,48 @@ def _normalize_entry_profile(name: str, raw_profile: Any) -> Dict[str, Dict[str,
     }
 
 
+def _normalize_bias_relax(raw_map: Any) -> Dict[str, Dict[str, Any]]:
+    result: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(raw_map, dict):
+        return result
+
+    for asset, meta in raw_map.items():
+        if not isinstance(meta, dict):
+            continue
+        allow_neutral = bool(meta.get("allow_neutral"))
+        scenarios: List[Dict[str, Any]] = []
+        raw_scenarios = meta.get("scenarios")
+        if isinstance(raw_scenarios, list):
+            for item in raw_scenarios:
+                if not isinstance(item, dict):
+                    continue
+                direction = str(item.get("direction", "")).lower()
+                if direction not in {"long", "short"}:
+                    continue
+                raw_requires = item.get("requires")
+                requires: List[str] = []
+                if isinstance(raw_requires, list):
+                    for requirement in raw_requires:
+                        if isinstance(requirement, str):
+                            requires.append(requirement)
+                if not requires:
+                    continue
+                label = item.get("label")
+                label_value = str(label) if isinstance(label, str) else None
+                scenarios.append(
+                    {
+                        "direction": direction,
+                        "requires": requires,
+                        "label": label_value,
+                    }
+                )
+        result[str(asset)] = {
+            "allow_neutral": allow_neutral,
+            "scenarios": scenarios,
+        }
+    return result
+
+
 # Module level shortcuts used by ``analysis.py`` and helper scripts.
 ASSETS: List[str] = load_config()["assets"]
 LEVERAGE: Dict[str, float] = load_config()["leverage"]
@@ -251,6 +293,12 @@ FX_TP_TARGETS: Dict[str, float] = dict(_get_config_value("fx_tp_targets") or {})
 NVDA_EXTENDED_ATR_REL: float = float(_get_config_value("nvda_extended_atr_rel") or 0.0)
 NVDA_MOMENTUM_ATR_REL: float = float(_get_config_value("nvda_momentum_atr_rel") or 0.0)
 ENABLE_MOMENTUM_ASSETS: set = load_config()["enable_momentum_assets"]
+INTRADAY_ATR_RELAX: Dict[str, float] = {
+    k: float(v) for k, v in dict(_get_config_value("intraday_atr_relax") or {}).items()
+}
+INTRADAY_BIAS_RELAX: Dict[str, Dict[str, Any]] = _normalize_bias_relax(
+    _get_config_value("intraday_bias_relax")
+)
 SESSION_WINDOWS_UTC: Dict[str, Dict[str, Optional[List[Tuple[int, int, int, int]]]]] = load_config()[
     "session_windows_utc"
 ]
