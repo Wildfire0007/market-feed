@@ -29,7 +29,8 @@ import pandas as pd
 from scripts import label_trades as lt
 
 PUBLIC_DIR = Path(os.getenv("PUBLIC_DIR", "public"))
-REPORTS_DIR = Path(os.getenv("REPORTS_DIR", "reports"))
+_DEFAULT_REPORTS_DIR = PUBLIC_DIR / "reports"
+REPORTS_DIR = Path(os.getenv("REPORTS_DIR", str(_DEFAULT_REPORTS_DIR)))
 
 PRICE_CANDIDATES = (
     "klines_15s.json",
