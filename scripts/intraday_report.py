@@ -7,7 +7,7 @@ from __future__ import annotations
 import csv
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 import pathlib
 import sys
@@ -61,6 +61,74 @@ def fmt_missing(missing: Iterable[str]) -> str:
         pretty.append(label or key)
     return ", ".join(dict.fromkeys(pretty))
 
+
+def spot_display_metadata(signal: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    """Extracts presentation details for the spot price column.
+
+    The Twelve Data spot feed occasionally lags for hours when markets are
+    closed.  ``analysis.analyze`` relaxes freshness violations in those cases to
+    avoid blocking the pipeline, but the human-facing reports should not surface
+    misleading stale timestamps.  This helper inspects the diagnostics payload
+    and hides the spot price/timestamp when a latency breach is detected.
+    """
+
+    spot = signal.get("spot") or {}
+    diagnostics = signal.get("diagnostics") or {}
+    tf_meta = diagnostics.get("timeframes") if isinstance(diagnostics, dict) else {}
+    spot_meta = tf_meta.get("spot") if isinstance(tf_meta, dict) else {}
+
+    price = spot.get("price") if spot.get("price") is not None else spot.get("price_usd")
+    timestamp = spot.get("utc") or spot.get("timestamp") or ""
+    retrieved = spot.get("retrieved_at_utc") or ""
+
+    stale = False
+    reason: Optional[str] = None
+
+    if isinstance(spot_meta, dict):
+        latency = spot_meta.get("latency_seconds")
+        expected = spot_meta.get("expected_max_delay_seconds")
+        original_issue = spot_meta.get("original_issue")
+        freshness_violation = spot_meta.get("freshness_violation")
+
+        if original_issue:
+            reason = str(original_issue)
+            stale = True
+        if freshness_violation:
+            stale = True
+            if reason is None:
+                reason = "Spot freshness violation"
+
+        try:
+            latency_value = float(latency) if latency is not None else None
+            expected_value = float(expected) if expected not in (None, 0) else None
+        except (TypeError, ValueError):
+            latency_value = expected_value = None
+
+        if latency_value is not None and expected_value is not None and latency_value > expected_value:
+            stale = True
+            if reason is None:
+                latency_minutes = int(latency_value // 60)
+                limit_minutes = int(expected_value // 60) if expected_value >= 60 else expected_value
+                if latency_minutes and isinstance(limit_minutes, int):
+                    reason = f"Spot latency {latency_minutes} min exceeds limit {limit_minutes} min"
+                else:
+                    reason = "Spot latency exceeds freshness limit"
+
+    if stale:
+        price = None
+        timestamp = ""
+
+    if not timestamp and retrieved:
+        timestamp = str(retrieved)
+
+    return {
+        "price": price,
+        "timestamp": timestamp,
+        "stale": stale,
+        "reason": reason,
+    }
+
+
 def gather_signals() -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     for asset in ASSETS:
@@ -82,9 +150,9 @@ def gather_signals() -> List[Dict[str, Any]]:
 
 def format_signal_md(sig: Dict[str, Any]) -> str:
     asset = sig.get("asset", "?")
-    spot = sig.get("spot") or {}
-    price = spot.get("price") or spot.get("price_usd")
-    spot_utc = spot.get("utc") or spot.get("timestamp") or "-"
+    spot_meta = spot_display_metadata(sig)
+    price = spot_meta.get("price")
+    spot_utc = spot_meta.get("timestamp") or "-"
     probability = int(sig.get("probability") or 0)
     decision_raw = (sig.get("signal") or "no entry").lower()
     decision = "BUY" if decision_raw == "buy" else "SELL" if decision_raw == "sell" else "no entry"
@@ -101,15 +169,25 @@ def format_signal_md(sig: Dict[str, Any]) -> str:
     rr = sig.get("rr")
     lev = sig.get("leverage")
 
+    spot_line = f"Spot (USD): **{fmt_num(price)}** • UTC: `{spot_utc}`"
+    if spot_meta.get("stale") and spot_meta.get("reason"):
+        spot_line += f" _(stale: {spot_meta['reason']})_"
+        
     header = (
         f"### {asset}\n\n"
-        f"Spot (USD): **{fmt_num(price)}** • UTC: `{spot_utc}`\n"
+        f"{spot_line}\n"
         f"Valószínűség: **P = {probability}%**\n"
         "Forrás: Twelve Data (lokális JSON)\n\n"
     )
 
+    extra_reasons = list(reasons)
+    if spot_meta.get("stale") and spot_meta.get("reason"):
+        stale_reason = spot_meta["reason"]
+        if stale_reason not in extra_reasons:
+            extra_reasons.append(stale_reason)
+    
     if decision == "no entry":
-        reason_text = "; ".join(reasons) if reasons else "nincs szignál"
+        reason_text = "; ".join(extra_reasons) if extra_reasons else "nincs szignál"
         body_lines = [f"**Állapot:** no entry — {reason_text}"]
         if missing_line:
             body_lines.append(f"Hiányzó kapuk: {missing_line}")
@@ -122,9 +200,9 @@ def format_signal_md(sig: Dict[str, Any]) -> str:
     lines = [entry_line]
     if missing_line:
         lines.append(f"Hiányzó kapuk / figyelendő: {missing_line}")
-    if reasons:
+    if extra_reasons:
         lines.append("Indoklás:")
-        lines.extend(f"- {r}" for r in reasons)
+        lines.extend(f"- {r}" for r in extra_reasons)
     return header + "\n".join(lines) + "\n\n"
 
 
@@ -166,7 +244,12 @@ def write_summary_csv(signals: List[Dict[str, Any]]) -> None:
             "Reasons",
         ])
         for sig in signals:
-            spot = sig.get("spot") or {}
+            spot_meta = spot_display_metadata(sig)
+            reasons = list(sig.get("reasons") or [])
+            if spot_meta.get("stale") and spot_meta.get("reason"):
+                reason = spot_meta["reason"]
+                if reason not in reasons:
+                    reasons.append(reason)
             writer.writerow([
                 sig.get("asset", ""),
                 (sig.get("signal") or "no entry").upper(),
@@ -178,10 +261,10 @@ def write_summary_csv(signals: List[Dict[str, Any]]) -> None:
                 fmt_num(sig.get("tp2")),
                 fmt_num(sig.get("rr"), 2),
                 fmt_num(sig.get("leverage"), 1),
-                fmt_num(spot.get("price") or spot.get("price_usd")),
-                spot.get("utc") or spot.get("timestamp") or "",
+                fmt_num(spot_meta.get("price")),
+                spot_meta.get("timestamp") or "",
                 fmt_missing((sig.get("gates") or {}).get("missing") or []),
-                " | ".join(sig.get("reasons") or []),
+                " | ".join(reasons),
             ])
 
 def main() -> None:
