@@ -87,6 +87,17 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         help="Skip Discord notification dispatch",
     )
     parser.add_argument(
+        "--auto-train-models",
+        action="store_true",
+        help="Run the Feature→Label→Train automation after analysis",
+    )
+    parser.add_argument(
+        "--auto-train-arg",
+        action="append",
+        default=[],
+        help="Additional arguments forwarded to auto_train_models.py",
+    )
+    parser.add_argument(
         "--skip-watchdog",
         action="store_true",
         help="Skip latency watchdog enforcement",
@@ -168,6 +179,11 @@ def main(argv: List[str] | None = None) -> int:
     if not args.skip_analysis:
         _run_step("Analysis", [python, "analysis.py"])
 
+    if args.auto_train_models:
+        auto_cmd = [python, "scripts/auto_train_models.py", "--public-dir", args.public_dir]
+        auto_cmd.extend(args.auto_train_arg)
+        _run_step("Auto-train models", auto_cmd)
+        
     if not args.skip_discord:
         notify_cmd = [python, "scripts/notify_discord.py"]
         notify_cmd.extend(args.notify_arg)
