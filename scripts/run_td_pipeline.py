@@ -87,6 +87,23 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         help="Skip Discord notification dispatch",
     )
     parser.add_argument(
+        "--skip-watchdog",
+        action="store_true",
+        help="Skip latency watchdog enforcement",
+    )
+    parser.add_argument(
+        "--watchdog-threshold",
+        type=float,
+        default=15.0,
+        help="Latency threshold in minutes before triggering restart (default: 15)",
+    )
+    parser.add_argument(
+        "--watchdog-verify-seconds",
+        type=float,
+        default=180.0,
+        help="How long to wait for analysis summary refresh after restart (default: 180)",
+    )
+    parser.add_argument(
         "--notify-arg",
         action="append",
         default=[],
@@ -150,6 +167,34 @@ def main(argv: List[str] | None = None) -> int:
         notify_cmd.extend(args.notify_arg)
         _run_step("Discord notify", notify_cmd, optional=True)
 
+    if not args.skip_watchdog:
+        public_dir = Path(args.public_dir)
+        summary_path = public_dir / "analysis_summary.json"
+        monitoring_dir = public_dir / "monitoring"
+        state_path = monitoring_dir / "td_latency_watchdog.json"
+        cache_bust_path = monitoring_dir / "cache_bust.json"
+
+        watchdog_cmd: List[str] = [
+            python,
+            "scripts/td_latency_watchdog.py",
+            "--summary",
+            str(summary_path),
+            "--threshold-minutes",
+            f"{max(float(args.watchdog_threshold), 0.0):g}",
+            "--verify-refresh-seconds",
+            f"{max(float(args.watchdog_verify_seconds), 0.0):g}",
+            "--loop-seconds",
+            "0",
+            "--cache-bust",
+            "--cache-bust-path",
+            str(cache_bust_path),
+            "--state-path",
+            str(state_path),
+        ]
+
+        watchdog_cmd.extend(["--restart-cmd", python, "Trading.py"])
+        _run_step("Latency watchdog", watchdog_cmd)
+        
     return 0
 
 
