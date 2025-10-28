@@ -17,6 +17,12 @@ vonatkozik. Az aktív profilt két módon lehet megadni:
 1. `active_entry_threshold_profile` mező a konfigurációban.
 2. `ENTRY_THRESHOLD_PROFILE` környezeti változó futásidőben.
 
+Az alap `baseline` profil 60-as P-score küszöböt és 1.0-s ATR szorzót használ.
+Nyugodtabb piaci környezetre a `relaxed` profil 58-as küszöbre vált, míg a
+mostantól alapértelmezetten aktivált `suppressed` profil agresszíven csökkenti
+az elvárt P-score-t (EURUSD: 30, BTCUSD: 25 stb.), és 0.95-ös ATR szorzót
+alkalmaz, hogy a rendkívül alacsony momentum mellett is legyen esély belépőre.
+
 ## Gyors állapotlekérdezés
 
 A `config.analysis_settings` modul a következő, magától értetődő segédeket
