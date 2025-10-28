@@ -35,7 +35,11 @@ PRICE_CANDIDATES = (
     "klines_15s.json",
     "klines_30s.json",
     "klines_1m.json",
+    "klines_15s.csv",
+    "klines_30s.csv",
+    "klines_1m.csv",
     "klines_5m.json",
+    "klines_5m.csv",
 )
 
 MANUAL_FILL_FILENAME = "manual_fills.csv"
@@ -77,7 +81,7 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _read_price_payload(path: Path) -> Optional[pd.DataFrame]:
+def _read_price_json(path: Path) -> Optional[pd.DataFrame]:
     try:
         with path.open("r", encoding="utf-8") as fh:
             payload = json.load(fh)
@@ -104,6 +108,44 @@ def _read_price_payload(path: Path) -> Optional[pd.DataFrame]:
     frame = frame.sort_values("timestamp").reset_index(drop=True)
     return frame[["timestamp", "open", "high", "low", "close"]]
 
+
+def _read_price_csv(path: Path) -> Optional[pd.DataFrame]:
+    try:
+        frame = pd.read_csv(path)
+    except Exception:
+        return None
+    if frame.empty:
+        return None
+    timestamp_column: Optional[str] = None
+    for candidate in ("timestamp", "datetime", "time"):
+        if candidate in frame.columns:
+            timestamp_column = candidate
+            break
+    if timestamp_column is None:
+        return None
+    try:
+        frame["timestamp"] = pd.to_datetime(frame[timestamp_column], utc=True)
+    except Exception:
+        return None
+    for column in ("open", "high", "low", "close"):
+        if column not in frame.columns:
+            return None
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = frame.dropna(subset=["timestamp", "open", "high", "low", "close"])
+    if frame.empty:
+        return None
+    frame = frame.sort_values("timestamp").reset_index(drop=True)
+    return frame[["timestamp", "open", "high", "low", "close"]]
+
+
+def _read_price_payload(path: Path) -> Optional[pd.DataFrame]:
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        return _read_price_json(path)
+    if suffix == ".csv":
+        return _read_price_csv(path)
+    return None
+    
 def _load_price_history(asset: str, public_dir: Path) -> Optional[pd.DataFrame]:
     asset_dir = public_dir / asset
     for candidate in PRICE_CANDIDATES:
@@ -305,72 +347,108 @@ def update_live_validation(
     journal_df.to_csv(journal_path, index=False)
 
     trade_df = journal_df[executable_mask]
-    resolved = trade_df[
-        trade_df["validation_outcome"].astype(str).str.lower().isin(RESOLVED_OUTCOMES_LOWER)
-    ]
+    
+    def _compute_performance(frame: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        if frame.empty:
+            return None
+        resolved_mask = frame["validation_outcome"].astype(str).str.lower().isin(RESOLVED_OUTCOMES_LOWER)
+        resolved_subset = frame[resolved_mask].copy()
+        performance: Dict[str, Any] = {
+            "trades": int(len(frame)),
+            "resolved": int(len(resolved_subset)),
+            "wins": 0,
+            "losses": 0,
+            "ambiguous": 0,
+            "win_rate": None,
+            "avg_validation_rr": None,
+            "max_drawdown_rr": 0.0,
+        }
+        if resolved_subset.empty:
+            return performance
 
-    resolved_sorted = resolved.sort_values("analysis_timestamp")
-    equity_curve: List[float] = []
-    equity = 0.0
-    for _, trade in resolved_sorted.iterrows():
-        outcome = str(trade.get("validation_outcome", "")).lower()
-        rr_value = trade.get("validation_rr")
-        try:
-            rr_numeric = float(rr_value)
-        except (TypeError, ValueError):
-            rr_numeric = None
-        if outcome in WIN_OUTCOMES_LOWER and rr_numeric is not None and np.isfinite(rr_numeric):
-            equity += float(rr_numeric)
-        elif outcome in LOSS_OUTCOMES_LOWER:
-            if rr_numeric is not None and np.isfinite(rr_numeric):
+        lower_outcomes = resolved_subset["validation_outcome"].astype(str).str.lower()
+        win_mask = lower_outcomes.isin(WIN_OUTCOMES_LOWER)
+        loss_mask = lower_outcomes.isin(LOSS_OUTCOMES_LOWER)
+        ambiguous_mask = lower_outcomes.isin(AMBIGUOUS_OUTCOMES_LOWER)
+        avg_rr_series = pd.to_numeric(resolved_subset["validation_rr"], errors="coerce")
+
+        sort_column = None
+        for candidate in ("analysis_timestamp", "fill_timestamp", "exit_timestamp"):
+            if candidate in resolved_subset.columns:
+                sort_column = candidate
+                break
+        resolved_sorted = resolved_subset.sort_values(sort_column) if sort_column else resolved_subset
+
+        equity_curve: List[float] = []
+        equity = 0.0
+        for _, trade in resolved_sorted.iterrows():
+            outcome = str(trade.get("validation_outcome", "")).lower()
+            rr_value = trade.get("validation_rr")
+            try:
+                rr_numeric = float(rr_value)
+            except (TypeError, ValueError):
+                rr_numeric = None
+            if outcome in WIN_OUTCOMES_LOWER and rr_numeric is not None and np.isfinite(rr_numeric):
                 equity += float(rr_numeric)
-            else:
-                equity -= 1.0
-        elif outcome in AMBIGUOUS_OUTCOMES_LOWER:
-            equity += 0.0
-        equity_curve.append(equity)
+            elif outcome in LOSS_OUTCOMES_LOWER:
+                if rr_numeric is not None and np.isfinite(rr_numeric):
+                    equity += float(rr_numeric)
+                else:
+                    equity -= 1.0
+            elif outcome in AMBIGUOUS_OUTCOMES_LOWER:
+                equity += 0.0
+            equity_curve.append(equity)
 
-    max_drawdown = 0.0
-    peak = -math.inf
-    for value in equity_curve:
-        peak = max(peak, value)
-        drawdown = peak - value
-        max_drawdown = max(max_drawdown, drawdown)
+        max_drawdown = 0.0
+        peak = -math.inf
+        for value in equity_curve:
+            peak = max(peak, value)
+            drawdown = peak - value
+            max_drawdown = max(max_drawdown, drawdown)
 
-    lower_outcomes = resolved["validation_outcome"].astype(str).str.lower()
-    win_mask = lower_outcomes.isin(WIN_OUTCOMES_LOWER)
-    loss_mask = lower_outcomes.isin(LOSS_OUTCOMES_LOWER)
-    ambiguous_mask = lower_outcomes.isin(AMBIGUOUS_OUTCOMES_LOWER)
-
-    avg_rr_series = pd.to_numeric(resolved["validation_rr"], errors="coerce")
-
+        performance.update(
+            {
+                "wins": int(win_mask.sum()),
+                "losses": int(loss_mask.sum()),
+                "ambiguous": int(ambiguous_mask.sum()),
+                "win_rate": float(win_mask.sum() / len(resolved_subset)) if len(resolved_subset) else None,
+                "avg_validation_rr": float(avg_rr_series.mean())
+                if not avg_rr_series.dropna().empty
+                else None,
+                "max_drawdown_rr": float(max_drawdown),
+            }
+        )
+        return performance
+        
+    performance = _compute_performance(trade_df) or {}
+    summary_avg_rr = performance.get("avg_validation_rr")
     summary = {
         "generated_utc": _now().isoformat(),
         "evaluated_trades": int(len(trade_df)),
-        "resolved_trades": int(len(resolved)),
-        "wins": int(win_mask.sum()),
-        "losses": int(loss_mask.sum()),
-        "ambiguous": int(ambiguous_mask.sum()),
-        "win_rate": float(win_mask.sum() / len(resolved)) if len(resolved) else None,
-        "avg_validation_rr": float(avg_rr_series.mean()) if not avg_rr_series.dropna().empty else None,
-        "max_drawdown_rr": max_drawdown,
+        "resolved_trades": int(performance.get("resolved", 0)),
+        "wins": int(performance.get("wins", 0)),
+        "losses": int(performance.get("losses", 0)),
+        "ambiguous": int(performance.get("ambiguous", 0)),
+        "win_rate": performance.get("win_rate"),
+        "avg_validation_rr": float(summary_avg_rr) if summary_avg_rr is not None else None,
+        "max_drawdown_rr": float(performance.get("max_drawdown_rr", 0.0)),
     }
 
+    rule_summary: Optional[Dict[str, Any]] = None
+    if "probability_source" in trade_df.columns:
+        rule_mask = trade_df["probability_source"].astype(str).str.lower().isin({"rule", "fallback"})
+        rule_summary = _compute_performance(trade_df[rule_mask])
+    summary["rule_based_performance"] = rule_summary
+    
     asset_breakdown: Dict[str, Dict[str, Any]] = {}
     for asset, asset_df in trade_df.groupby("asset"):
-        asset_resolved = asset_df[
-            asset_df["validation_outcome"].astype(str).str.lower().isin(RESOLVED_OUTCOMES_LOWER)
-        ]
-        asset_lower = asset_resolved["validation_outcome"].astype(str).str.lower()
-        asset_win_mask = asset_lower.isin(WIN_OUTCOMES_LOWER)
-        asset_rr = pd.to_numeric(asset_resolved["validation_rr"], errors="coerce")
+        asset_performance = _compute_performance(asset_df) or {}
+        asset_avg_rr = asset_performance.get("avg_validation_rr")
         asset_breakdown[asset] = {
-            "trades": int(len(asset_df)),
-            "resolved": int(len(asset_resolved)),
-            "win_rate": float(asset_win_mask.sum() / len(asset_resolved))
-            if len(asset_resolved)
-            else None,
-            "avg_validation_rr": float(asset_rr.mean()) if not asset_rr.dropna().empty else None,
+            "trades": int(asset_performance.get("trades", len(asset_df))),
+            "resolved": int(asset_performance.get("resolved", 0)),
+            "win_rate": asset_performance.get("win_rate"),
+            "avg_validation_rr": float(asset_avg_rr) if asset_avg_rr is not None else None,
         }
     summary["assets"] = asset_breakdown
 
