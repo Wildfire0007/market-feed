@@ -359,10 +359,7 @@ ASSETS = {
         "currency": "USD",
         "disable_compact_variants": True,
         "alt": [
-            {"symbol": "WTIUSD", "exchange": "COMMODITY", "disable_compact_variants": True},
-            {"symbol": "WTIUSD", "exchange": None, "disable_compact_variants": True},
-            {"symbol": "CL=F", "exchange": None, "disable_compact_variants": True},
-            {"symbol": "CL1!", "exchange": "NYMEX", "disable_compact_variants": True},
+            {"symbol": "WTI/USD", "exchange": None, "disable_compact_variants": True},
         ],
     },
 
@@ -478,7 +475,7 @@ REALTIME_HTTP_BUDGET_PER_ASSET = max(
 )
 
 MARKET_CLOSED_GRACE_SECONDS = max(0.0, float(os.getenv("TD_MARKET_CLOSED_GRACE", "43200")))
-MARKET_CLOSED_MAX_AGE_SECONDS = max(0.0, float(os.getenv("TD_MARKET_CLOSED_MAX_AGE", "36000")))
+MARKET_CLOSED_MAX_AGE_SECONDS = max(0.0, float(os.getenv("TD_MARKET_CLOSED_MAX_AGE", "79200")))
 MAX_CONSECUTIVE_FALLBACKS = max(1, int(os.getenv("TD_MAX_CONSECUTIVE_FALLBACKS", "3")))
 US_EQUITY_OPEN_UTC = dt_time(13, 30)
 US_EQUITY_CLOSE_UTC = dt_time(20, 0)
@@ -586,6 +583,77 @@ def save_json(path: str, obj: Dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def _should_preserve_cache(paths: List[str], payload: Dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if not payload.get("fallback_previous_payload"):
+        return False
+    return all(os.path.exists(path) for path in paths)
+
+
+def _fallback_state_path(adir: str) -> str:
+    return os.path.join(adir, "_fallback_state.json")
+
+
+def _load_fallback_state(adir: str) -> Dict[str, Any]:
+    state = load_json(_fallback_state_path(adir))
+    return state if isinstance(state, dict) else {}
+
+
+def _store_fallback_state(adir: str, key: str, state: Optional[Dict[str, Any]]) -> None:
+    path = _fallback_state_path(adir)
+    current = _load_fallback_state(adir)
+    if state:
+        current[key] = state
+    else:
+        current.pop(key, None)
+    if current:
+        save_json(path, current)
+    else:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+
+def _fallback_state_info(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    if not payload.get("fallback_previous_payload"):
+        return None
+    reuse_count = payload.get("fallback_reuse_count")
+    try:
+        reuse_count_int = max(0, int(reuse_count or 0))
+    except Exception:
+        reuse_count_int = 0
+    info: Dict[str, Any] = {
+        "reuse_count": reuse_count_int,
+        "updated_at_utc": payload.get("retrieved_at_utc") or now_utc(),
+    }
+    reason = payload.get("fallback_reason") or payload.get("error") or payload.get("message")
+    if reason:
+        info["reason"] = str(reason)
+    interval = payload.get("interval")
+    if interval:
+        info["interval"] = interval
+    return info
+
+
+def _write_spot_payload(adir: str, asset: str, payload: Dict[str, Any]) -> None:
+    path = os.path.join(adir, "spot.json")
+    info = _fallback_state_info(payload)
+    if _should_preserve_cache([path], payload):
+        if info:
+            _store_fallback_state(adir, "spot", info)
+        LOGGER.debug("Preserving existing spot cache for %s due to fallback reuse", asset)
+        return
+    if info:
+        _store_fallback_state(adir, "spot", info)
+    else:
+        _store_fallback_state(adir, "spot", None)
+    save_json(path, payload)
+
+
 def load_json(path: str) -> Optional[Any]:
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -615,6 +683,13 @@ def _reuse_previous_spot(adir: str, payload: Dict[str, Any], freshness_limit: fl
         reuse_count = max(0, int(previous.get("fallback_reuse_count", 0)))
     except Exception:
         reuse_count = 0
+    state_entry = _load_fallback_state(adir).get("spot")
+    if isinstance(state_entry, dict):
+        try:
+            state_count = int(state_entry.get("reuse_count", reuse_count))
+            reuse_count = max(reuse_count, max(0, state_count))
+        except Exception:
+            pass
     if reuse_count >= MAX_CONSECUTIVE_FALLBACKS:
         asset_name = os.path.basename(adir) or "<asset>"
         LOGGER.warning(
@@ -742,6 +817,26 @@ def _write_trading_status_summary(out_dir: str) -> None:
 
 def save_series_payload(out_dir: str, name: str, payload: Dict[str, Any]) -> None:
     ensure_dir(out_dir)
+    raw_path = os.path.join(out_dir, f"{name}.json")
+    meta_path = os.path.join(out_dir, f"{name}_meta.json")
+    info = _fallback_state_info(payload)
+    state_key = f"series:{name}"
+    if _should_preserve_cache([raw_path, meta_path], payload):
+        if info:
+            _store_fallback_state(out_dir, state_key, info)
+        else:
+            _store_fallback_state(out_dir, state_key, None)
+        asset_name = os.path.basename(out_dir) or "<asset>"
+        LOGGER.debug(
+            "Preserving existing %s cache for %s due to fallback reuse",
+            name,
+            asset_name,
+        )
+        return
+    if info:
+        _store_fallback_state(out_dir, state_key, info)
+    else:
+        _store_fallback_state(out_dir, state_key, None)
     raw: Dict[str, Any] = {"values": []}
     meta: Dict[str, Any] = {}
     if isinstance(payload, dict):
@@ -749,9 +844,9 @@ def save_series_payload(out_dir: str, name: str, payload: Dict[str, Any]) -> Non
         if isinstance(raw_candidate, dict):
             raw = raw_candidate
         meta = {k: v for k, v in payload.items() if k != "raw"}
-    save_json(os.path.join(out_dir, f"{name}.json"), raw)
+    save_json(raw_path, raw)
     if meta:
-        save_json(os.path.join(out_dir, f"{name}_meta.json"), meta)
+        save_json(meta_path, meta)
 
 
 def _load_existing_series(out_dir: str, name: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
@@ -799,6 +894,13 @@ def _reuse_previous_series_payload(
         reuse_count = max(0, int(meta_prev.get("fallback_reuse_count", 0)))
     except Exception:
         reuse_count = 0
+    state_entry = _load_fallback_state(out_dir).get(f"series:{name}")
+    if isinstance(state_entry, dict):
+        try:
+            state_count = int(state_entry.get("reuse_count", reuse_count))
+            reuse_count = max(reuse_count, max(0, state_count))
+        except Exception:
+            pass
     if reuse_count >= MAX_CONSECUTIVE_FALLBACKS:
         asset_name = os.path.basename(out_dir) or "<asset>"
         LOGGER.warning(
@@ -2262,7 +2364,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
         spot = {"ok": False, "freshness_limit_seconds": SPOT_FRESHNESS_LIMIT}
     if isinstance(spot, dict):
         spot = _reuse_previous_spot(adir, spot, SPOT_FRESHNESS_LIMIT)
-    save_json(os.path.join(adir, "spot.json"), spot)
+    _write_spot_payload(adir, asset, spot)
 
     spot_violation = bool(spot.get("freshness_violation")) if isinstance(spot, dict) else False
     force_reason: Optional[str] = None
@@ -2406,6 +2508,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
