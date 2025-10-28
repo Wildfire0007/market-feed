@@ -18,6 +18,12 @@ def _write_price_file(path: Path, values: list[dict[str, float | str]]) -> None:
         json.dump(payload, handle)
 
 
+def _write_price_csv(path: Path, values: list[dict[str, float | str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame = pd.DataFrame(values)
+    frame.to_csv(path, index=False)
+
+
 def test_update_live_validation_prefers_high_resolution_data(tmp_path):
     public_dir = tmp_path / "public"
     reports_dir = tmp_path / "reports"
@@ -79,6 +85,74 @@ def test_update_live_validation_prefers_high_resolution_data(tmp_path):
     live_df = pd.read_csv(live_validation_path)
     assert not live_df.empty
     assert live_df.loc[0, "validation_outcome"] == lt.OUTCOME_PROFIT
+
+
+def test_update_live_validation_supports_csv_prices(tmp_path):
+    public_dir = tmp_path / "public"
+    reports_dir = tmp_path / "reports"
+    journal_dir = public_dir / "journal"
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    asset_dir = public_dir / "TEST"
+    asset_dir.mkdir(parents=True, exist_ok=True)
+
+    journal_df = pd.DataFrame(
+        [
+            {
+                "journal_id": "t-csv",
+                "asset": "TEST",
+                "analysis_timestamp": "2024-01-01T10:00:00Z",
+                "signal": "buy",
+                "entry_price": 1.1,
+                "stop_loss": 1.095,
+                "take_profit_1": 1.115,
+                "spot_price": 1.1,
+                "probability_source": "rule",
+            }
+        ]
+    )
+    journal_path = journal_dir / "trade_journal.csv"
+    journal_df.to_csv(journal_path, index=False)
+
+    _write_price_csv(
+        asset_dir / "klines_5m.csv",
+        [
+            {
+                "datetime": "2024-01-01T10:00:00Z",
+                "timestamp": "2024-01-01T10:00:00Z",
+                "open": 1.1,
+                "high": 1.13,
+                "low": 1.09,
+                "close": 1.115,
+            },
+            {
+                "datetime": "2024-01-01T10:05:00Z",
+                "timestamp": "2024-01-01T10:05:00Z",
+                "open": 1.115,
+                "high": 1.12,
+                "low": 1.094,
+                "close": 1.095,
+            },
+        ],
+    )
+
+    summary_path = update_live_validation(
+        public_dir=public_dir,
+        reports_dir=reports_dir,
+        lookahead_hours=1.0,
+    )
+
+    assert summary_path is not None
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    rule_performance = summary.get("rule_based_performance")
+    assert rule_performance is not None
+    assert rule_performance["trades"] == 1
+    assert rule_performance["resolved"] == 1
+    assert rule_performance["ambiguous"] == 1
+
+    live_validation_path = reports_dir / "live_validation.csv"
+    live_df = pd.read_csv(live_validation_path)
+    assert not live_df.empty
+    assert live_df.loc[0, "validation_outcome"] == lt.OUTCOME_AMBIGUOUS
 
 
 def test_update_live_validation_applies_manual_overrides(tmp_path):
