@@ -67,11 +67,13 @@ try:
         record_analysis_run,
         get_pipeline_log_path,
         DEFAULT_MAX_LAG_SECONDS as PIPELINE_MAX_LAG_SECONDS,
+        record_ml_model_status,
     )
 except Exception:  # pragma: no cover - optional helper
     record_analysis_run = None
     get_pipeline_log_path = None
     PIPELINE_MAX_LAG_SECONDS = None
+    record_ml_model_status = None
 
 import pandas as pd
 import numpy as np
@@ -144,6 +146,7 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 ENABLE_SENTIMENT_PROBABILITY = _env_flag("ENABLE_SENTIMENT_PROBABILITY", default=False)
 ENABLE_ML_PROBABILITY = _env_flag("ENABLE_ML_PROBABILITY", default=False)
+SUPPRESS_ML_MODEL_WARNINGS = _env_flag("SUPPRESS_ML_MODEL_WARNINGS", default=False)
 # Allow hard-disabling ML scoring regardless of legacy flags.  The CI runner
 # doesn't currently set this but it gives operators a one-line escape hatch.
 if _env_flag("DISABLE_ML_PROBABILITY", default=False) or _env_flag(
@@ -5781,6 +5784,7 @@ def main():
         LOGGER.warning("ml runtime dependencies missing: %s", dep_warning)
         ml_active = False
         ml_disable_notes.append("függőségi problémák")
+    reminder_required = False
     if missing_models:
         summary["ml_models_missing"] = {
             asset: str(path) for asset, path in missing_models.items()
@@ -5789,10 +5793,12 @@ def main():
         warning = (
             "Hiányzó ML modellek: "
             f"{missing_list} – töltsd fel a public/models/<asset>_gbm.pkl fájlokat "
-            "a valószínűségi score aktiválásához; a többi asseten az ML továbbra is fut."
+            "a valószínűségi score aktiválásához; a többi asseten az ML továbbra is fut, "
+            "ezeken pedig a fallback heurisztika szolgáltatja a becslést."
         )
         summary["troubleshooting"].append(warning)
-        LOGGER.warning("ml artifacts missing: %s", warning)
+        if not SUPPRESS_ML_MODEL_WARNINGS:
+            LOGGER.warning("ml artifacts missing: %s", warning)
         ml_disable_notes.append("modell artefakt hiányzik")
     if placeholder_models:
         placeholder_payload = {
@@ -5815,8 +5821,36 @@ def main():
             "ezeken az eszközökön fallback pontozás fut, a többi asset valódi ML-t használ."
         )
         summary["troubleshooting"].append(placeholder_msg)
-        LOGGER.warning("ml placeholder artefacts detected: %s", placeholder_msg)
+        if not SUPPRESS_ML_MODEL_WARNINGS:
+            LOGGER.warning("ml placeholder artefacts detected: %s", placeholder_msg)
         ml_disable_notes.append("placeholder modell detektálva")
+    if record_ml_model_status:
+        try:
+            _, reminder_required = record_ml_model_status(
+                missing=list(sorted(missing_models)),
+                placeholders=list(sorted(placeholder_models)),
+            )
+        except Exception:
+            LOGGER.exception("Failed to persist ML model status for monitoring")
+            reminder_required = False
+    if reminder_required:
+        reminder_assets: List[str] = []
+        if missing_models:
+            reminder_assets.append(
+                "hiányzó modellek: " + ", ".join(sorted(missing_models))
+            )
+        if placeholder_models:
+            reminder_assets.append(
+                "placeholder modellek: " + ", ".join(sorted(placeholder_models))
+            )
+        reminder_text = (
+            "Heti ML modell státusz emlékeztető – " + "; ".join(reminder_assets)
+        )
+        summary["troubleshooting"].append(reminder_text)
+        if not SUPPRESS_ML_MODEL_WARNINGS:
+            LOGGER.warning("ml model reminder: %s", reminder_text)
+        else:
+            LOGGER.info("ml model reminder (suppressed warnings): %s", reminder_text)
     if not ENABLE_ML_PROBABILITY:
         ml_disable_notes.append("flag letiltva (ENABLE_ML_PROBABILITY=0)")
     ML_PROBABILITY_ACTIVE = ml_active
@@ -5863,6 +5897,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
