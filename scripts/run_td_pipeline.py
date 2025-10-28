@@ -104,6 +104,12 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         help="How long to wait for analysis summary refresh after restart (default: 180)",
     )
     parser.add_argument(
+        "--watchdog-loop-seconds",
+        type=float,
+        default=0.0,
+        help="Optional watchdog polling interval in seconds (default: run once)",
+    )
+    parser.add_argument(
         "--notify-arg",
         action="append",
         default=[],
@@ -169,10 +175,13 @@ def main(argv: List[str] | None = None) -> int:
 
     if not args.skip_watchdog:
         public_dir = Path(args.public_dir)
+        public_dir.mkdir(parents=True, exist_ok=True)
         summary_path = public_dir / "analysis_summary.json"
         monitoring_dir = public_dir / "monitoring"
+        monitoring_dir.mkdir(parents=True, exist_ok=True)
         state_path = monitoring_dir / "td_latency_watchdog.json"
         cache_bust_path = monitoring_dir / "cache_bust.json"
+        watchdog_loop = max(float(args.watchdog_loop_seconds), 0.0)
 
         watchdog_cmd: List[str] = [
             python,
@@ -184,7 +193,7 @@ def main(argv: List[str] | None = None) -> int:
             "--verify-refresh-seconds",
             f"{max(float(args.watchdog_verify_seconds), 0.0):g}",
             "--loop-seconds",
-            "0",
+            f"{watchdog_loop:g}",
             "--cache-bust",
             "--cache-bust-path",
             str(cache_bust_path),
