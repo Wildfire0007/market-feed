@@ -20,8 +20,26 @@ def _reload_settings(monkeypatch, profile=None):
     return importlib.reload(settings)
 
 
-def test_baseline_profile_configuration(monkeypatch):
+def test_default_profile_configuration(monkeypatch):
     settings = _reload_settings(monkeypatch)
+
+    assert settings.ENTRY_THRESHOLD_PROFILE_NAME == "suppressed"
+    profile = settings.describe_entry_threshold_profile()
+    assert profile["name"] == "suppressed"
+    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(30.0)
+    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(25.0)
+    assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.95)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.9)
+
+    baseline = settings.describe_entry_threshold_profile("baseline")
+    assert baseline["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(60.0)
+    assert baseline["atr_threshold_multiplier"]["default"] == pytest.approx(1.0)
+
+    _reload_settings(monkeypatch)
+
+
+def test_baseline_profile_configuration(monkeypatch):
+    settings = _reload_settings(monkeypatch, profile="baseline")
 
     assert settings.ENTRY_THRESHOLD_PROFILE_NAME == "baseline"
     profile = settings.describe_entry_threshold_profile()
@@ -49,7 +67,11 @@ def test_relaxed_profile_override(monkeypatch):
 
     # The helper exposes the list of available profiles for documentation
     # and UI surfaces.
-    assert set(settings.list_entry_threshold_profiles()) >= {"baseline", "relaxed"}
+    assert set(settings.list_entry_threshold_profiles()) >= {
+        "baseline",
+        "relaxed",
+        "suppressed",
+    }
 
     # Restore the default profile for subsequent tests.
     _reload_settings(monkeypatch)
