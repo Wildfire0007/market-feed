@@ -149,7 +149,46 @@ SERIES_FRESHNESS_LIMITS = {
     "1h": 3600.0 + 5400.0,  # 1h candle + 90m tolerance
     "4h": 4 * 3600.0 + 21600.0,  # 4h candle + 6h tolerance
 }
-SPOT_FRESHNESS_LIMIT = float(os.getenv("TD_SPOT_FRESHNESS_LIMIT", "900"))
+try:
+    from config.analysis_settings import SPOT_MAX_AGE_SECONDS as _ANALYSIS_SPOT_MAX_AGE_SECONDS
+except Exception:  # pragma: no cover - optional dependency during tests
+    _ANALYSIS_SPOT_MAX_AGE_SECONDS = {}
+
+_SPOT_FRESHNESS_ENV = os.getenv("TD_SPOT_FRESHNESS_LIMIT")
+_SPOT_FRESHNESS_DEFAULT = float(_SPOT_FRESHNESS_ENV) if _SPOT_FRESHNESS_ENV else 900.0
+_SPOT_FRESHNESS_OVERRIDES: Dict[str, float] = {}
+
+if isinstance(_ANALYSIS_SPOT_MAX_AGE_SECONDS, dict):
+    cfg_default = _ANALYSIS_SPOT_MAX_AGE_SECONDS.get("default")
+    if cfg_default is not None and _SPOT_FRESHNESS_ENV is None:
+        try:
+            _SPOT_FRESHNESS_DEFAULT = float(cfg_default)
+        except (TypeError, ValueError):
+            pass
+    for name, value in _ANALYSIS_SPOT_MAX_AGE_SECONDS.items():
+        if name is None:
+            continue
+        key = str(name).strip()
+        if not key:
+            continue
+        if key.lower() == "default":
+            continue
+        try:
+            _SPOT_FRESHNESS_OVERRIDES[key.upper()] = float(value)
+        except (TypeError, ValueError):
+            continue
+
+
+def _spot_freshness_limit(asset: str) -> float:
+    key = str(asset or "").upper()
+    return _SPOT_FRESHNESS_OVERRIDES.get(key, _SPOT_FRESHNESS_DEFAULT)
+
+
+# Backwards compatibility: retain the module level constant for external callers
+# that previously imported ``Trading.SPOT_FRESHNESS_LIMIT``.  The default value
+# continues to mirror the synchronised analysis threshold while per-asset
+# overrides are served through ``_spot_freshness_limit``.
+SPOT_FRESHNESS_LIMIT = _SPOT_FRESHNESS_DEFAULT
 
 # Reduce the volume of large timeframe requests to keep latency in check.  The
 # short-term series now default to a lighter 300 bar history, while the heavier
@@ -373,6 +412,12 @@ ASSETS = {
         "mic": "XNGS",
         "currency": "USD",
         "supports_prepost": True,
+        "alt": [
+            {"symbol": "NVDA", "exchange": "XNGS"},
+            {"symbol": "NVDA", "exchange": "XNAS"},
+            "NVDA:XNGS",
+            "NVDA:XNAS",
+        ],
     },
     "XAGUSD": {
         "symbol": "XAG/USD",
@@ -1539,10 +1584,11 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
     price = q.get("price") if isinstance(q, dict) else None
     utc = q.get("utc") if isinstance(q, dict) else None
     fallback_used = False
+    fallback_interval = "5min"
 
     if price is None:
         try:
-            px, ts = td_last_close(symbol, "5min", exchange)
+            px, ts = td_last_close(symbol, fallback_interval, exchange)
         except TDError as exc:
             px, ts = None, None
             if isinstance(q, dict):
@@ -1564,7 +1610,7 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
 
     source = "twelvedata:quote"
     if fallback_used:
-        source = "twelvedata:quote+series_fallback"
+        source = "twelvedata:quote+time_series_fallback"
 
     result: Dict[str, Any] = {
         "asset": symbol,
@@ -1579,6 +1625,9 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
         "used_symbol": symbol,
         "used_exchange": exchange,
     }
+
+    if fallback_used:
+        result["interval"] = fallback_interval
 
     if isinstance(q, dict):
         if q.get("error"):
@@ -2370,19 +2419,20 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     attempt_memory = AttemptMemory()
 
     # 1) Spot (quote → 5m close fallback), több tickerrel
+    spot_limit = _spot_freshness_limit(asset)
     spot = fetch_with_freshness(
         attempts,
         lambda s, ex: td_spot_with_fallback(s, ex),
-        freshness_limit=SPOT_FRESHNESS_LIMIT,
+        freshness_limit=spot_limit,
         max_refreshes=1,
         attempt_memory=attempt_memory,
     )
     if isinstance(spot, dict):
-        spot.setdefault("freshness_limit_seconds", SPOT_FRESHNESS_LIMIT)
+        spot.setdefault("freshness_limit_seconds", spot_limit)
     else:
-        spot = {"ok": False, "freshness_limit_seconds": SPOT_FRESHNESS_LIMIT}
+        spot = {"ok": False, "freshness_limit_seconds": spot_limit}
     if isinstance(spot, dict):
-        spot = _reuse_previous_spot(adir, spot, SPOT_FRESHNESS_LIMIT)
+        spot = _reuse_previous_spot(adir, spot, spot_limit)
     _write_spot_payload(adir, asset, spot)
 
     spot_violation = bool(spot.get("freshness_violation")) if isinstance(spot, dict) else False
@@ -2392,7 +2442,8 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     elif spot_violation:
         force_reason = "spot_stale"
     elif spot.get("fallback_used") or spot.get("fallback_previous_payload"):
-        force_reason = "spot_fallback"
+        if not spot.get("market_closed_assumed"):
+            force_reason = "spot_fallback"
     series_payloads = _collect_series_payloads(attempts, attempt_memory, adir)
     k5 = series_payloads.get("klines_5m")
     if not isinstance(k5, dict):
@@ -2527,6 +2578,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
