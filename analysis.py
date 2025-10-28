@@ -11,6 +11,7 @@ Kimenet:
 import json
 import logging
 import os
+import subprocess
 import sys
 from copy import deepcopy
 from datetime import datetime, timezone, timedelta
@@ -2122,6 +2123,93 @@ def save_json(path: str, obj: Any) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
+
+
+def detect_analysis_revision() -> Optional[Dict[str, Any]]:
+    """Return git metadata for the analysis build, if available."""
+
+    script_dir = Path(__file__).resolve().parent
+    try:
+        repo_root = (
+            subprocess.check_output(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=script_dir,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            .strip()
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+
+    if not repo_root:
+        return None
+
+    metadata: Dict[str, Any] = {}
+    try:
+        commit = (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_root,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            .strip()
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+
+    if not commit:
+        return None
+
+    metadata["commit"] = commit
+
+    try:
+        branch = (
+            subprocess.check_output(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=repo_root,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            .strip()
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        branch = ""
+    if branch and branch != "HEAD":
+        metadata["branch"] = branch
+
+    try:
+        describe = (
+            subprocess.check_output(
+                ["git", "describe", "--tags", "--always"],
+                cwd=repo_root,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            .strip()
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        describe = ""
+    if describe and describe != commit:
+        metadata["describe"] = describe
+
+    try:
+        status = (
+            subprocess.check_output(
+                ["git", "status", "--porcelain"],
+                cwd=repo_root,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            .strip()
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        status = ""
+    if status:
+        metadata["dirty"] = True
+
+    return metadata
 
 def load_json(path: str) -> Optional[Any]:
     try:
@@ -5475,6 +5563,12 @@ def main():
         "latency_flags": [],
         "troubleshooting": list(REFRESH_TIPS),
     }
+    revision_info = detect_analysis_revision()
+    if revision_info:
+        summary["analysis_revision"] = revision_info
+        commit = revision_info.get("commit", "unknown")
+        dirty_suffix = " (dirty)" if revision_info.get("dirty") else ""
+        LOGGER.info("Analysis build revision: %s%s", commit, dirty_suffix)
     if pipeline_payload:
         summary["pipeline_monitoring"] = pipeline_payload
         analysis_meta = pipeline_payload.get("analysis") if isinstance(pipeline_payload, dict) else None
@@ -5588,6 +5682,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
