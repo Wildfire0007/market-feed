@@ -10,6 +10,11 @@ but operators can override it with ``--restart-cmd``.
 
 The script keeps a state file under ``public/monitoring`` to avoid spamming the
 restart command and to provide observability for operators.
+
+Run the watchdog every few minutes (``--loop-seconds 300`` is a good starting
+point) so that stale feeds are detected promptly.  After a restart the
+``--verify-refresh-seconds`` option polls the summary again to ensure fresh data
+arrived before clearing the alert.
 """
 
 from __future__ import annotations
@@ -31,10 +36,11 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 LOGGER = logging.getLogger("td_latency_watchdog")
 FLAG_PATTERN = re.compile(r"\b(k\d+m)\b.*?(\d+)\s+perc", re.IGNORECASE)
 DEFAULT_TIMEFRAMES = ("k1m", "k5m")
-DEFAULT_THRESHOLD_MINUTES = float(os.getenv("TD_WATCHDOG_THRESHOLD_MINUTES", "30"))
+DEFAULT_THRESHOLD_MINUTES = float(os.getenv("TD_WATCHDOG_THRESHOLD_MINUTES", "15"))
 DEFAULT_COOLDOWN_MINUTES = float(os.getenv("TD_WATCHDOG_COOLDOWN_MINUTES", "10"))
-DEFAULT_VERIFY_SECONDS = float(os.getenv("TD_WATCHDOG_VERIFY_SECONDS", "0"))
+DEFAULT_VERIFY_SECONDS = float(os.getenv("TD_WATCHDOG_VERIFY_SECONDS", "120"))
 DEFAULT_VERIFY_POLL_SECONDS = float(os.getenv("TD_WATCHDOG_VERIFY_POLL_SECONDS", "5"))
+DEFAULT_LOOP_SECONDS = float(os.getenv("TD_WATCHDOG_LOOP_SECONDS", "0"))
 
 
 @dataclass
@@ -341,7 +347,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--threshold-minutes",
         type=float,
         default=DEFAULT_THRESHOLD_MINUTES,
-        help="Latency threshold in minutes before triggering a restart (default: 30)",
+        help=(
+            "Latency threshold in minutes before triggering a restart "
+            f"(default: {DEFAULT_THRESHOLD_MINUTES:g})"
+        ),
     )
     parser.add_argument(
         "--timeframes",
@@ -358,13 +367,24 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--verify-refresh-seconds",
         type=float,
         default=DEFAULT_VERIFY_SECONDS,
-        help="After a successful restart, wait up to N seconds for the summary to refresh (default: 0 - disabled)",
+        help=(
+            "After a successful restart, wait up to N seconds for the summary to refresh "
+            f"(default: {DEFAULT_VERIFY_SECONDS:g} — 0 disables the check)"
+        ),
     )
     parser.add_argument(
         "--verify-refresh-poll",
         type=float,
         default=DEFAULT_VERIFY_POLL_SECONDS,
         help="Polling interval while waiting for a refreshed summary (default: 5)",
+    )
+    parser.add_argument(
+        "--loop-seconds",
+        type=float,
+        default=DEFAULT_LOOP_SECONDS,
+        help=(
+            "Run continuously and sleep N seconds between checks (default: 0 — run once)"
+        ),
     )
     parser.add_argument(
         "--state-path",
@@ -396,10 +416,7 @@ def _resolve_path(path_value: str) -> Path:
     return candidate
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = parse_args(argv)
-    _configure_logging(args.verbose)
-
+def _execute_watchdog_once(args: argparse.Namespace) -> int:
     summary_path = _resolve_path(args.summary)
     if not summary_path.exists():
         LOGGER.error("analysis_summary.json not found at %s", summary_path)
@@ -543,6 +560,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         LOGGER.info("Cache-busting token written to %s", cache_bust_path)
 
     return 0
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parse_args(argv)
+    _configure_logging(args.verbose)
+
+    loop_seconds = max(float(args.loop_seconds), 0.0)
+    if loop_seconds <= 0:
+        return _execute_watchdog_once(args)
+
+    LOGGER.info("Starting watchdog loop with %.1f second interval", loop_seconds)
+    exit_code = 0
+    try:
+        while True:
+            exit_code = _execute_watchdog_once(args)
+            time.sleep(loop_seconds)
+    except KeyboardInterrupt:
+        LOGGER.info("Watchdog loop interrupted by user")
+        return exit_code
+
+    return exit_code
 
 
 if __name__ == "__main__":
