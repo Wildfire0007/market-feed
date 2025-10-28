@@ -155,6 +155,18 @@ if _env_flag("DISABLE_ML_PROBABILITY", default=False) or _env_flag(
 # silently disabling probabilities when only ``USE_ML`` is set.
 if not ENABLE_ML_PROBABILITY and _env_flag("USE_ML", default=False):
     ENABLE_ML_PROBABILITY = True
+
+# --- Temporary override ---------------------------------------------------
+# A modell tréningje még folyamatban van, ezért az ML valószínűség számítást
+# teljesen kiiktatjuk, hogy ne befolyásolja a belépési döntéseket.  Amint a
+# betanított modell elérhető, ezt a kapcsolót vissza lehet állítani ``False``-ra
+# vagy eltávolítani.
+ML_PROBABILITY_MANUAL_OVERRIDE = True
+ML_PROBABILITY_MANUAL_REASON = (
+    "ML valószínűség manuálisan letiltva: modell tréning alatt"
+)
+if ML_PROBABILITY_MANUAL_OVERRIDE:
+    ENABLE_ML_PROBABILITY = False
 ML_PROBABILITY_ACTIVE = ENABLE_ML_PROBABILITY
 ML_PROBABILITY_PLACEHOLDER_BLOCKLIST: Set[str] = set()
 ML_PROBABILITY_PLACEHOLDER_INFO: Dict[str, Dict[str, Any]] = {}
@@ -5755,6 +5767,8 @@ def main():
     global ML_PROBABILITY_ACTIVE
     ml_active = ENABLE_ML_PROBABILITY
     ml_disable_notes: List[str] = []
+    if ML_PROBABILITY_MANUAL_OVERRIDE:
+        ml_disable_notes.append(ML_PROBABILITY_MANUAL_REASON)
     if dependency_issues:
         summary["ml_runtime_issues"] = dependency_issues
         issue_names = ", ".join(sorted(dependency_issues))
@@ -5849,6 +5863,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
