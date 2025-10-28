@@ -358,6 +358,12 @@ ASSETS = {
         "exchange_display": "Commodity",
         "currency": "USD",
         "disable_compact_variants": True,
+        "alt": [
+            {"symbol": "WTIUSD", "exchange": "COMMODITY", "disable_compact_variants": True},
+            {"symbol": "WTIUSD", "exchange": None, "disable_compact_variants": True},
+            {"symbol": "CL=F", "exchange": None, "disable_compact_variants": True},
+            {"symbol": "CL1!", "exchange": "NYMEX", "disable_compact_variants": True},
+        ],
     },
 
 # Egyedi részvény és ETF kiterjesztések
@@ -379,6 +385,12 @@ ASSETS = {
         "exchange_display": "Physical Metal",
         "currency": "USD",
         "disable_compact_variants": True,
+        "alt": [
+            {"symbol": "XAG/USD", "exchange": None, "disable_compact_variants": True},
+            {"symbol": "XAGUSD", "exchange": None, "disable_compact_variants": True},
+            {"symbol": "XAGUSD", "exchange": "FOREX", "disable_compact_variants": True},
+            "XAG/USD:FOREX",
+        ],
     },
 }
 
@@ -466,6 +478,8 @@ REALTIME_HTTP_BUDGET_PER_ASSET = max(
 )
 
 MARKET_CLOSED_GRACE_SECONDS = max(0.0, float(os.getenv("TD_MARKET_CLOSED_GRACE", "43200")))
+MARKET_CLOSED_MAX_AGE_SECONDS = max(0.0, float(os.getenv("TD_MARKET_CLOSED_MAX_AGE", "36000")))
+MAX_CONSECUTIVE_FALLBACKS = max(1, int(os.getenv("TD_MAX_CONSECUTIVE_FALLBACKS", "3")))
 US_EQUITY_OPEN_UTC = dt_time(13, 30)
 US_EQUITY_CLOSE_UTC = dt_time(20, 0)
 
@@ -589,10 +603,26 @@ def _format_attempts(attempts: List[Tuple[str, Optional[str]]]) -> List[Dict[str
 
 def _reuse_previous_spot(adir: str, payload: Dict[str, Any], freshness_limit: float) -> Dict[str, Any]:
     if payload.get("ok") and payload.get("price") is not None:
+        payload.pop("fallback_reuse_count", None)
         return payload
 
     previous = load_json(os.path.join(adir, "spot.json"))
     if not isinstance(previous, dict) or not previous.get("ok"):
+        return payload
+
+    reuse_count = 0
+    try:
+        reuse_count = max(0, int(previous.get("fallback_reuse_count", 0)))
+    except Exception:
+        reuse_count = 0
+    if reuse_count >= MAX_CONSECUTIVE_FALLBACKS:
+        asset_name = os.path.basename(adir) or "<asset>"
+        LOGGER.warning(
+            "Skipping spot fallback for %s after %d consecutive reuses",
+            asset_name,
+            reuse_count,
+        )
+        payload.pop("fallback_reuse_count", None)
         return payload
 
     price = previous.get("price")
@@ -612,6 +642,7 @@ def _reuse_previous_spot(adir: str, payload: Dict[str, Any], freshness_limit: fl
     if reason:
         reused["fallback_reason"] = str(reason)
     reused.setdefault("freshness_limit_seconds", freshness_limit)
+    reused["fallback_reuse_count"] = reuse_count + 1
     return reused
 
 
@@ -763,6 +794,21 @@ def _reuse_previous_series_payload(
     if not meta_prev or not raw_prev:
         return payload
 
+    reuse_count = 0
+    try:
+        reuse_count = max(0, int(meta_prev.get("fallback_reuse_count", 0)))
+    except Exception:
+        reuse_count = 0
+    if reuse_count >= MAX_CONSECUTIVE_FALLBACKS:
+        asset_name = os.path.basename(out_dir) or "<asset>"
+        LOGGER.warning(
+            "Skipping %s fallback for %s after %d consecutive reuses",
+            name,
+            asset_name,
+            reuse_count,
+        )
+        return payload
+
     prev_values = raw_prev.get("values") if isinstance(raw_prev, dict) else None
     if not prev_values:
         return payload
@@ -785,6 +831,7 @@ def _reuse_previous_series_payload(
     reason = payload.get("error") or payload.get("message")
     if reason:
         reused["fallback_reason"] = str(reason)
+    reused["fallback_reuse_count"] = reuse_count + 1
     return reused
 
 
@@ -830,6 +877,9 @@ def _finalize_series_payload(
 
     if not data.get("ok") or not data.get("raw", {}).get("values"):
         data = _reuse_previous_series_payload(out_dir, name, data, freshness_limit)
+
+    if not data.get("fallback_previous_payload"):
+        data.pop("fallback_reuse_count", None)
 
     save_series_payload(out_dir, name, data)
     return data
@@ -2059,13 +2109,22 @@ def _accept_market_closed_staleness(
         return False
     latest_iso = payload.get("latest_utc") or payload.get("utc")
     age = _age_seconds_from_iso(latest_iso)
+    asset_key, asset_cfg = _resolve_asset_from_payload(payload)
     if age is None:
+        return False
+    if MARKET_CLOSED_MAX_AGE_SECONDS and age > MARKET_CLOSED_MAX_AGE_SECONDS:
+        if asset_key:
+            LOGGER.warning(
+                "Rejecting market-closed fallback for %s: latency %.1f min exceeds hard cap %.1f min",
+                asset_key,
+                age / 60.0,
+                MARKET_CLOSED_MAX_AGE_SECONDS / 60.0,
+            )
         return False
     latest_dt = _parse_iso_utc(latest_iso)
     now_dt = datetime.now(timezone.utc)
     if latest_dt is None:
         return False
-    asset_key, asset_cfg = _resolve_asset_from_payload(payload)
     closed_reason = _asset_market_closed_reason(asset_key, asset_cfg, latest_dt, now_dt)
     if closed_reason is None:
         # Fall back to the historical behaviour for assets without explicit
@@ -2347,6 +2406,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
