@@ -356,11 +356,11 @@ ASSETS = {
         "asset_class": "Commodity",
         "exchange": "COMMODITY",
         "exchange_display": "Commodity",
+        "exchange_timezone": "Australia/Sydney",
+        "mic": "COMMODITY",
         "currency": "USD",
         "disable_compact_variants": True,
-        "alt": [
-            {"symbol": "WTI/USD", "exchange": None, "disable_compact_variants": True},
-        ],
+        "disable_exchange_fallbacks": True,
     },
 
 # Egyedi részvény és ETF kiterjesztések
@@ -2001,6 +2001,7 @@ def _symbol_attempt_variants(
     exchange: Optional[str],
     *,
     allow_compact: bool = True,
+    allow_exchange_fallback: bool = True,
 ) -> List[Tuple[str, Optional[str]]]:
     """Generate fallback symbol/exchange combinations for Twelve Data requests."""
 
@@ -2011,20 +2012,21 @@ def _symbol_attempt_variants(
     base = (symbol, exchange)
     variants.append(base)
 
-    if exchange:
-        variants.append((symbol, None))
-        if ":" not in symbol:
-            exchange_str = str(exchange)
-            if exchange_str and not any(ch.isspace() for ch in exchange_str):
-                variants.append((f"{symbol}:{exchange_str}", None))
-    elif ":" not in symbol and "/" not in symbol:
-        variants.append((symbol, None))
+    if allow_exchange_fallback:
+        if exchange:
+            variants.append((symbol, None))
+            if ":" not in symbol:
+                exchange_str = str(exchange)
+                if exchange_str and not any(ch.isspace() for ch in exchange_str):
+                    variants.append((f"{symbol}:{exchange_str}", None))
+        elif ":" not in symbol and "/" not in symbol:
+            variants.append((symbol, None))
 
     if allow_compact and "/" in symbol:
         compact = symbol.replace("/", "")
         if compact:
             variants.append((compact, exchange if exchange else None))
-            if exchange is not None:
+            if allow_exchange_fallback and exchange is not None:
                 variants.append((compact, None))
 
     return variants
@@ -2035,26 +2037,40 @@ def _normalize_symbol_attempts(cfg: Dict[str, Any]) -> List[Tuple[str, Optional[
     base_exchange = cfg.get("exchange")
     attempts: List[Tuple[str, Optional[str]]] = []
     allow_compact = not bool(cfg.get("disable_compact_variants"))
+    allow_exchange = not bool(cfg.get("disable_exchange_fallbacks"))
 
     def push(
         symbol: Optional[str],
         exchange: Optional[str],
         *,
         allow_compact_override: Optional[bool] = None,
+        allow_exchange_override: Optional[bool] = None,
     ) -> None:
         if not symbol:
             return
         compact_allowed = (
             allow_compact if allow_compact_override is None else allow_compact_override
         )
+        exchange_allowed = (
+            allow_exchange if allow_exchange_override is None else allow_exchange_override
+        )
         attempts.extend(
-            _symbol_attempt_variants(symbol, exchange, allow_compact=compact_allowed)
+            _symbol_attempt_variants(
+                symbol,
+                exchange,
+                allow_compact=compact_allowed,
+                allow_exchange_fallback=exchange_allowed,
+            )
         )
 
-    push(base_symbol, base_exchange)
+    push(
+        base_symbol,
+        base_exchange,
+        allow_exchange_override=allow_exchange,
+    )
     for alt in cfg.get("alt", []):
         if isinstance(alt, str):
-            push(alt, base_exchange)
+            push(alt, base_exchange, allow_exchange_override=allow_exchange)
         elif isinstance(alt, dict):
             push(
                 alt.get("symbol", base_symbol),
@@ -2062,11 +2078,14 @@ def _normalize_symbol_attempts(cfg: Dict[str, Any]) -> List[Tuple[str, Optional[
                 allow_compact_override=None
                 if alt.get("disable_compact_variants") is None
                 else not bool(alt.get("disable_compact_variants")),
+                allow_exchange_override=None
+                if alt.get("disable_exchange_fallbacks") is None
+                else not bool(alt.get("disable_exchange_fallbacks")),
             )
         elif isinstance(alt, (list, tuple)) and alt:
             symbol = alt[0]
             exchange = alt[1] if len(alt) > 1 else base_exchange
-            push(symbol, exchange)
+            push(symbol, exchange, allow_exchange_override=allow_exchange)
 
     seen: set[Tuple[str, Optional[str]]] = set()
     unique: List[Tuple[str, Optional[str]]] = []
@@ -2508,6 +2527,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
