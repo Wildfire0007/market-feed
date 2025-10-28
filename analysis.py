@@ -5889,7 +5889,11 @@ def main():
     except Exception:
         pass
 
-    reports_dir = Path(os.getenv("REPORTS_DIR", "reports"))
+    reports_env = os.getenv("REPORTS_DIR")
+    if reports_env:
+        reports_dir = Path(reports_env)
+    else:
+        reports_dir = Path(PUBLIC_DIR) / "reports"
     try:
         update_live_validation(Path(PUBLIC_DIR), reports_dir)
     except Exception:
@@ -5897,6 +5901,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
