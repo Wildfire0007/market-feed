@@ -2770,11 +2770,23 @@ def main():
                 client_lines,
                 ratio,
             )
+        exception_types = warning_summary.get("exception_types") or {}
+        if exception_types:
+            formatted = ", ".join(
+                f"{name}:{count}" for name, count in sorted(exception_types.items())
+            )
+            logger.warning("Pipeline exceptions detected: %s", formatted)
+        sentiment_events = warning_summary.get("sentiment_exit_events") or []
+        if sentiment_events:
+            latest_event = sentiment_events[-1]
+            detail = latest_event.get("detail") or "sentiment exit triggered"
+            logger.info("Latest sentiment exit event: %s", detail)
     except Exception as exc:
         logger.warning("Failed to summarize pipeline warnings: %s", exc)
 
 if __name__ == "__main__":
     main()
+
 
 
 
