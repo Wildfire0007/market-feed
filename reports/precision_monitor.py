@@ -26,7 +26,7 @@ ASSET_SUMMARY_PATH = Path(
 DEFAULT_LOOKBACK_DAYS = int(os.getenv("PRECISION_MONITOR_LOOKBACK_DAYS", "7"))
 
 PRECISION_PATTERNS: Dict[str, str] = {
-    "precision_score": "precision_score>=70",
+    "precision_score": "precision_score>=65",
     "precision_flow_alignment": "precision_flow_alignment",
     "precision_trigger_sync": "precision_trigger_sync",
 }
