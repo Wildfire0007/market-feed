@@ -138,6 +138,21 @@ REALTIME_HTTP_MAX_SAMPLES = int(os.getenv("TD_REALTIME_HTTP_MAX_SAMPLES", "6"))
 REALTIME_HTTP_DURATION = max(1.0, _env_float("TD_REALTIME_HTTP_DURATION", 8.0))
 _REALTIME_HTTP_BACKGROUND_FLAG = _env_flag("TD_REALTIME_HTTP_BACKGROUND")
 
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
+FINNHUB_BASE_URL = os.getenv("FINNHUB_BASE_URL", "https://finnhub.io/api/v1").rstrip("/")
+FINNHUB_TIMEOUT = max(1.0, _env_float("FINNHUB_TIMEOUT", 4.0))
+_FINNHUB_DISABLED_RAW = os.getenv("DISABLE_FINNHUB_FALLBACK", "")
+FINNHUB_SYMBOL_MAP = {
+    "EURUSD": "OANDA:EUR_USD",
+    "GOLD_CFD": "OANDA:XAU_USD",
+    "XAGUSD": "OANDA:XAG_USD",
+    "BTCUSD": "COINBASE:BTC-USD",
+    "USOIL": "OANDA:WTICO_USD",
+    "NVDA": "NVDA",
+}
+_FINNHUB_SESSION = requests.Session()
+_FINNHUB_SESSION.headers.update({"User-Agent": "market-feed/finnhub-fallback/1.0"})
+
 # ───────────────────────────── Data freshness guards ──────────────────────
 # Align the freshness limits with ``analysis.py`` tolerances so we can fall
 # back to alternative symbols whenever the primary feed lags behind.  The
@@ -1435,6 +1450,187 @@ def _iso_from_td_ts(ts: Any) -> Optional[str]:
     return None
 
 
+def _finnhub_available() -> bool:
+    flag = _FINNHUB_DISABLED_RAW.strip().lower()
+    if flag in {"1", "true", "yes", "on"}:
+        return False
+    return bool(FINNHUB_API_KEY)
+
+
+def _resolve_finnhub_symbol(asset: str, preferred_symbol: Optional[str] = None) -> Optional[str]:
+    key = (asset or "").strip().upper()
+    if not key:
+        return None
+    env_override = os.getenv(f"FINNHUB_SYMBOL_{key}", "").strip()
+    if env_override:
+        return env_override
+    mapping = FINNHUB_SYMBOL_MAP.get(key)
+    if mapping:
+        return mapping
+    if preferred_symbol:
+        symbol = preferred_symbol.strip()
+        if not symbol:
+            return None
+        if ":" in symbol:
+            return symbol
+        normalized = symbol.replace("/", "_").replace("-", "_")
+        if key.endswith("USD"):
+            return f"OANDA:{normalized}"
+        return symbol
+    return None
+
+
+def _fetch_finnhub_spot(asset: str, *, preferred_symbol: Optional[str] = None) -> Dict[str, Any]:
+    symbol = _resolve_finnhub_symbol(asset, preferred_symbol)
+    if not symbol:
+        return {"ok": False, "error": "finnhub symbol mapping missing"}
+    if not FINNHUB_API_KEY:
+        return {"ok": False, "error": "FINNHUB_API_KEY not configured"}
+
+    params = {"symbol": symbol, "token": FINNHUB_API_KEY}
+    url = f"{FINNHUB_BASE_URL}/quote"
+    try:
+        response = _FINNHUB_SESSION.get(url, params=params, timeout=FINNHUB_TIMEOUT)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        return {"ok": False, "error": f"Finnhub request failed: {exc}"}
+
+    retrieved_at = now_utc()
+    try:
+        payload = response.json()
+    except ValueError:
+        return {"ok": False, "error": "Finnhub returned invalid JSON"}
+
+    price = _coerce_float(
+        (payload.get("c") if isinstance(payload, dict) else None)
+        or (payload.get("p") if isinstance(payload, dict) else None)
+        or (payload.get("lastPrice") if isinstance(payload, dict) else None)
+        or (payload.get("last") if isinstance(payload, dict) else None)
+        or (payload.get("close") if isinstance(payload, dict) else None)
+    )
+    utc_iso = retrieved_at
+    latency: Optional[float] = None
+    if isinstance(payload, dict):
+        ts_value = payload.get("t")
+        if isinstance(ts_value, (int, float)) and ts_value > 0:
+            try:
+                stamp = datetime.fromtimestamp(float(ts_value), timezone.utc).replace(microsecond=0)
+            except (OverflowError, ValueError):
+                stamp = None
+            if stamp is not None:
+                utc_iso = stamp.isoformat()
+                latency = max(0.0, (datetime.now(timezone.utc) - stamp).total_seconds())
+
+    result: Dict[str, Any] = {
+        "asset": asset,
+        "source": "finnhub:quote",
+        "ok": price is not None,
+        "retrieved_at_utc": retrieved_at,
+        "utc": utc_iso,
+        "price": price,
+        "price_usd": price,
+        "latency_seconds": latency,
+        "used_symbol": symbol,
+    }
+    if isinstance(payload, dict):
+        exchange = payload.get("exchange")
+        if exchange:
+            result["used_exchange"] = exchange
+        compact_raw = {k: payload.get(k) for k in ("c", "h", "l", "o", "pc", "t") if k in payload}
+        if compact_raw:
+            result["raw"] = compact_raw
+    return result
+
+
+def _maybe_use_secondary_spot(asset: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return payload
+    if not asset:
+        return payload
+    if not _finnhub_available():
+        return payload
+
+    limit = _coerce_float(payload.get("freshness_limit_seconds"))
+    latency = _coerce_float(payload.get("latency_seconds"))
+    needs_fallback = False
+    reason: Optional[str] = None
+
+    if not payload.get("ok") or payload.get("price") is None:
+        needs_fallback = True
+        reason = payload.get("error") or payload.get("message") or "primary feed unavailable"
+    elif bool(payload.get("freshness_violation")):
+        needs_fallback = True
+        reason = "primary feed stale"
+    elif limit is not None and latency is not None and latency > limit:
+        needs_fallback = True
+        reason = "primary feed stale"
+
+    if not needs_fallback:
+        return payload
+
+    fallback = _fetch_finnhub_spot(asset, preferred_symbol=payload.get("used_symbol"))
+    if not fallback.get("ok"):
+        attempts = payload.setdefault("fallback_attempts", [])
+        if isinstance(attempts, list):
+            attempts.append(
+                {
+                    "provider": "finnhub",
+                    "ok": False,
+                    "error": fallback.get("error"),
+                }
+            )
+        LOGGER.warning(
+            "Finnhub fallback failed for %s: %s",
+            asset,
+            fallback.get("error") or "unknown error",
+        )
+        return payload
+
+    fallback_latency = _coerce_float(fallback.get("latency_seconds"))
+    primary_latency = latency
+    fallback_limit = limit if limit is not None else _coerce_float(fallback.get("freshness_limit_seconds"))
+    if fallback_limit is not None:
+        fallback["freshness_limit_seconds"] = fallback_limit
+        if fallback_latency is not None:
+            fallback["freshness_violation"] = fallback_latency > fallback_limit
+        else:
+            fallback.setdefault("freshness_violation", False)
+    else:
+        fallback.setdefault("freshness_violation", False)
+
+    fallback_violation = bool(fallback.get("freshness_violation"))
+    if payload.get("ok") and primary_latency is not None and fallback_latency is not None:
+        if fallback_violation and fallback_latency >= primary_latency:
+            LOGGER.info(
+                "Finnhub fallback skipped for %s — latency %.1fs >= primary %.1fs",
+                asset,
+                fallback_latency,
+                primary_latency,
+            )
+            return payload
+
+    if not fallback.get("used_exchange") and payload.get("used_exchange"):
+        fallback["used_exchange"] = payload.get("used_exchange")
+
+    fallback["fallback_used"] = True
+    fallback["fallback_provider"] = "finnhub"
+    if reason:
+        fallback["fallback_reason"] = reason
+    fallback["primary_source"] = payload.get("source")
+    fallback["primary_latency_seconds"] = primary_latency
+    fallback["primary_freshness_violation"] = bool(payload.get("freshness_violation"))
+    fallback.setdefault("price_usd", fallback.get("price"))
+
+    latency_display = fallback_latency if fallback_latency is not None else float("nan")
+    LOGGER.info(
+        "Finnhub fallback engaged for %s (reason: %s, latency %.1fs)",
+        asset,
+        reason or "unspecified",
+        latency_display,
+    )
+    return fallback
+
+
 def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
@@ -2428,6 +2624,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
         attempt_memory=attempt_memory,
     )
     if isinstance(spot, dict):
+        spot = _maybe_use_secondary_spot(asset, spot)
         spot.setdefault("freshness_limit_seconds", spot_limit)
     else:
         spot = {"ok": False, "freshness_limit_seconds": spot_limit}
@@ -2578,6 +2775,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
