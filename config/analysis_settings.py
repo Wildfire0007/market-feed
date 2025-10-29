@@ -308,6 +308,36 @@ SPOT_MAX_AGE_SECONDS: Dict[str, int] = {
 INTERVENTION_WATCH_DEFAULT: Dict[str, Any] = dict(_get_config_value("intervention_watch_default") or {})
 SESSION_WEEKDAYS: Dict[str, Any] = dict(_get_config_value("session_weekdays") or {})
 SESSION_TIME_RULES: Dict[str, Dict[str, Any]] = load_config()["session_time_rules"]
+ATR_PERCENTILE_TOD: Dict[str, Any] = dict(_get_config_value("atr_percentile_min_by_tod") or {})
+P_SCORE_TIME_BONUS: Dict[str, Any] = dict(_get_config_value("p_score_time_bonus") or {})
+ADX_RR_BANDS: Dict[str, Any] = dict(_get_config_value("adx_rr_bands") or {})
+
+_RAW_SPREAD_MAX = dict(_get_config_value("spread_max_atr_pct") or {})
+SPREAD_MAX_ATR_PCT: Dict[str, float] = {}
+for key, value in _RAW_SPREAD_MAX.items():
+    try:
+        SPREAD_MAX_ATR_PCT[str(key)] = float(value)
+    except (TypeError, ValueError):
+        continue
+
+_RAW_VWAP_BAND_MULT = dict(_get_config_value("vwap_band_mult") or {})
+VWAP_BAND_MULT: Dict[str, float] = {}
+for key, value in _RAW_VWAP_BAND_MULT.items():
+    try:
+        VWAP_BAND_MULT[str(key)] = float(value)
+    except (TypeError, ValueError):
+        continue
+
+_RAW_OFI_Z = dict(_get_config_value("ofi_z_th") or {})
+OFI_Z_SETTINGS: Dict[str, float] = {}
+for key, value in _RAW_OFI_Z.items():
+    try:
+        OFI_Z_SETTINGS[str(key)] = float(value)
+    except (TypeError, ValueError):
+        continue
+
+NEWS_MODE_SETTINGS: Dict[str, Any] = dict(_get_config_value("news_mode_settings") or {})
+FUNDING_RATE_RULES: Dict[str, Any] = dict(_get_config_value("funding_rate_rules") or {})
 
 
 def get_p_score_min(asset: str) -> float:
