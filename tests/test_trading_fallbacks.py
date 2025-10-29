@@ -159,3 +159,86 @@ def test_market_closed_staleness_enforces_hard_cap(monkeypatch: pytest.MonkeyPat
     accepted = Trading._accept_market_closed_staleness(dict(payload), freshness_limit=300.0)
 
     assert not accepted
+
+
+def test_finnhub_fallback_replaces_stale_spot(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Trading, "FINNHUB_API_KEY", "token")
+    monkeypatch.setattr(Trading, "_finnhub_available", lambda: True)
+
+    fallback_payload = {
+        "ok": True,
+        "source": "finnhub:quote",
+        "price": 1.1010,
+        "price_usd": 1.1010,
+        "latency_seconds": 90.0,
+        "retrieved_at_utc": "2024-01-01T10:00:00+00:00",
+        "utc": "2024-01-01T09:58:30+00:00",
+        "used_symbol": "OANDA:EUR_USD",
+    }
+
+    monkeypatch.setattr(Trading, "_fetch_finnhub_spot", lambda asset, preferred_symbol=None: dict(fallback_payload))
+
+    primary = {
+        "ok": True,
+        "price": 1.0999,
+        "source": "twelvedata:quote",
+        "latency_seconds": 3600.0,
+        "freshness_limit_seconds": 600.0,
+        "freshness_violation": True,
+        "used_symbol": "EUR/USD",
+    }
+
+    updated = Trading._maybe_use_secondary_spot("EURUSD", dict(primary))
+
+    assert updated["source"] == "finnhub:quote"
+    assert updated["fallback_provider"] == "finnhub"
+    assert updated["price"] == fallback_payload["price"]
+    assert updated.get("freshness_violation") is False
+    assert updated.get("primary_source") == "twelvedata:quote"
+
+
+def test_finnhub_fallback_skips_when_not_improved(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Trading, "_finnhub_available", lambda: True)
+
+    def _slow_fetch(asset: str, preferred_symbol: str | None = None) -> dict:
+        return {
+            "ok": True,
+            "source": "finnhub:quote",
+            "price": 1.0,
+            "latency_seconds": 900.0,
+            "freshness_violation": True,
+        }
+
+    monkeypatch.setattr(Trading, "_fetch_finnhub_spot", _slow_fetch)
+
+    primary = {
+        "ok": True,
+        "price": 1.0,
+        "source": "twelvedata:quote",
+        "latency_seconds": 600.0,
+        "freshness_limit_seconds": 540.0,
+        "freshness_violation": True,
+    }
+
+    updated = Trading._maybe_use_secondary_spot("EURUSD", dict(primary))
+
+    assert updated["source"] == "twelvedata:quote"
+    assert "fallback_provider" not in updated
+
+
+def test_finnhub_fallback_records_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Trading, "_finnhub_available", lambda: True)
+
+    def _fail_fetch(asset: str, preferred_symbol: str | None = None) -> dict:
+        return {"ok": False, "error": "boom"}
+
+    monkeypatch.setattr(Trading, "_fetch_finnhub_spot", _fail_fetch)
+
+    primary = {"ok": False, "freshness_limit_seconds": 900.0}
+
+    updated = Trading._maybe_use_secondary_spot("EURUSD", dict(primary))
+
+    assert updated.get("fallback_attempts")
+    attempt = updated["fallback_attempts"][0]
+    assert attempt["provider"] == "finnhub"
+    assert attempt["ok"] is False
