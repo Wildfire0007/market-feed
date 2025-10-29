@@ -875,6 +875,53 @@ def _write_trading_status_summary(out_dir: str) -> None:
     save_json(os.path.join(pipeline_dir, "trading_status.json"), payload)
 
 
+def _series_row_timestamp(row: Dict[str, Any]) -> Optional[float]:
+    if not isinstance(row, dict):
+        return None
+    for field in ("datetime", "time", "timestamp"):
+        if field not in row:
+            continue
+        value = row.get(field)
+        iso = _iso_from_td_ts(value)
+        if iso:
+            parsed = _parse_iso_utc(iso)
+            if parsed is not None:
+                return parsed.timestamp()
+        try:
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                stripped = value.strip()
+                if not stripped:
+                    continue
+                return float(stripped)
+        except Exception:
+            continue
+    return None
+
+
+def _sort_series_values(raw: Dict[str, Any]) -> Dict[str, Any]:
+    values = raw.get("values") if isinstance(raw, dict) else None
+    if not isinstance(values, list) or len(values) <= 1:
+        return raw
+    keyed: List[Tuple[float, int, Any]] = []
+    has_timestamp = False
+    for idx, row in enumerate(values):
+        ts = _series_row_timestamp(row)
+        if ts is not None:
+            has_timestamp = True
+            keyed.append((ts, idx, row))
+        else:
+            keyed.append((float("inf"), idx, row))
+    if not has_timestamp:
+        return raw
+    keyed.sort(key=lambda item: (item[0], item[1]))
+    sorted_values = [item[2] for item in keyed]
+    new_raw = dict(raw)
+    new_raw["values"] = sorted_values
+    return new_raw
+
+
 def save_series_payload(out_dir: str, name: str, payload: Dict[str, Any]) -> None:
     ensure_dir(out_dir)
     raw_path = os.path.join(out_dir, f"{name}.json")
@@ -902,7 +949,7 @@ def save_series_payload(out_dir: str, name: str, payload: Dict[str, Any]) -> Non
     if isinstance(payload, dict):
         raw_candidate = payload.get("raw")
         if isinstance(raw_candidate, dict):
-            raw = raw_candidate
+            raw = _sort_series_values(raw_candidate)
         meta = {k: v for k, v in payload.items() if k != "raw"}
     save_json(raw_path, raw)
     if meta:
@@ -2086,9 +2133,12 @@ def _collect_realtime_spot_impl(
     frames: List[Dict[str, Any]] = []
     transport: Optional[str] = None
     abort_reason: Optional[str] = None
+    ws_attempted = False
+    http_attempted = False
 
     deadline = time.time() + duration
     if use_ws:
+        ws_attempted = True
         frames = _collect_ws_frames(asset, symbol_cycle, deadline)
         if frames:
             transport = "websocket"
@@ -2097,6 +2147,7 @@ def _collect_realtime_spot_impl(
         remaining = max(0.0, deadline - time.time())
         if remaining > 0:
             deadline_http = time.time() + remaining
+            http_attempted = True
             frames, abort_reason = _collect_http_frames(
                 symbol_cycle,
                 deadline_http,
@@ -2108,6 +2159,22 @@ def _collect_realtime_spot_impl(
                 transport = "http"
 
     if not frames:
+        attempted: List[str] = []
+        if transport:
+            attempted.append(transport)
+        else:
+            if ws_attempted:
+                attempted.append("websocket")
+            if http_attempted:
+                attempted.append("http")
+        transport_display = "+".join(attempted) if attempted else "none"
+        LOGGER.info(
+            "Realtime spot unavailable for %s transport=%s abort_reason=%s forced=%s",
+            asset,
+            transport_display,
+            abort_reason or "none",
+            "yes" if force else "no",
+        )
         return
 
     prices = [float(frame["price"]) for frame in frames if frame.get("price") is not None]
@@ -2152,6 +2219,25 @@ def _collect_realtime_spot_impl(
         payload["http_abort_reason"] = abort_reason
     if transport == "websocket" and isinstance(last_frame.get("raw"), dict):
         payload["raw_last_frame"] = last_frame["raw"]
+
+    transport_label = payload.get("transport") or (
+        "websocket" if ws_attempted and not http_attempted else "http" if http_attempted else "unknown"
+    )
+    latency_avg = stats.get("latency_avg") if isinstance(stats, dict) else None
+    latency_display = (
+        f"{float(latency_avg):.3f}"
+        if isinstance(latency_avg, (int, float))
+        else "n/a"
+    )
+    LOGGER.info(
+        "Realtime spot collected for %s transport=%s samples=%s latency_avg=%s abort_reason=%s forced=%s",
+        asset,
+        transport_label,
+        stats.get("samples") if isinstance(stats, dict) else None,
+        latency_display,
+        payload.get("http_abort_reason") or "none",
+        "yes" if force else "no",
+    )
 
     if update_anchor_metrics and payload.get("price") is not None:
         anchor_extras = {
@@ -2786,6 +2872,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
