@@ -131,6 +131,11 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         default=os.getenv("PUBLIC_DIR", "public"),
         help="Public artefact directory shared across steps",
     )
+    parser.add_argument(
+        "--skip-env-sync",
+        action="store_true",
+        help="Skip pipeline environment synchronisation",
+    )
     return parser.parse_args(argv)
 
 
@@ -139,6 +144,10 @@ def main(argv: List[str] | None = None) -> int:
     args = parse_args(argv)
     python = sys.executable or "python3"
 
+    if not args.skip_env_sync:
+        env_cmd = [python, "scripts/sync_pipeline_env.py", "--public-dir", args.public_dir]
+        _run_step("Pipeline environment", env_cmd)
+        
     if not args.skip_trading:
         _run_step("Trading", [python, "Trading.py"])
 
