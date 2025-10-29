@@ -4675,33 +4675,6 @@ def analyze(asset: str) -> Dict[str, Any]:
     except Exception:
         ofi_zscore = None
 
-    structure_components: Dict[str, bool] = {"bos": False, "liquidity": False, "ofi": False}
-    if effective_bias == "long":
-        bos_signal = bool(bos5m_long or micro_bos_long)
-        if asset == "NVDA":
-            bos_signal = bos_signal or nvda_cross_long
-        structure_components["bos"] = bos_signal and not recent_break_short
-    elif effective_bias == "short":
-        bos_signal = bool(bos5m_short or micro_bos_short)
-        if asset == "NVDA":
-            bos_signal = bos_signal or nvda_cross_short
-        structure_components["bos"] = bos_signal and not recent_break_long
-    structure_components["liquidity"] = bool(
-        liquidity_ok
-        or liquidity_ok_base
-        or vwap_confluence.get("trend_pullback")
-        or vwap_confluence.get("mean_revert")
-    )
-    if ofi_zscore is not None and OFI_Z_TRIGGER > 0:
-        if effective_bias == "long":
-            structure_components["ofi"] = ofi_zscore >= OFI_Z_TRIGGER
-        elif effective_bias == "short":
-            structure_components["ofi"] = ofi_zscore <= -OFI_Z_TRIGGER
-    if structure_components.get("ofi") and ofi_zscore is not None:
-        structure_notes.append(f"OFI z-score {ofi_zscore:.2f} támogatja az irányt")
-    structure_gate = sum(1 for flag in structure_components.values() if flag) >= 2
-    entry_thresholds_meta["structure_components"] = structure_components
-
     # 7) P-score — volatilitás-adaptív súlyozás
     P, reasons = 15.0, []
     if bias_gate_notes:
@@ -5075,7 +5048,11 @@ def analyze(asset: str) -> Dict[str, Any]:
             or (effective_bias == "short" and struct_retest_short)
         )
     liquidity_relaxed = False
-    liquidity_ok = liquidity_ok_base or bool(vwap_confluence.get("trend_pullback")) or bool(vwap_confluence.get("mean_revert"))
+    liquidity_ok = (
+        liquidity_ok_base
+        or bool(vwap_confluence.get("trend_pullback"))
+        or bool(vwap_confluence.get("mean_revert"))
+    )
     structure_notes: List[str] = []
     if vwap_confluence.get("trend_pullback"):
         structure_notes.append("VWAP pullback konfluencia aktív — trend pullback engedve")
@@ -5094,6 +5071,33 @@ def analyze(asset: str) -> Dict[str, Any]:
         if high_atr_push and directional_confirmation:
             liquidity_ok = True
             liquidity_relaxed = True
+
+    structure_components: Dict[str, bool] = {"bos": False, "liquidity": False, "ofi": False}
+    if effective_bias == "long":
+        bos_signal = bool(bos5m_long or micro_bos_long)
+        if asset == "NVDA":
+            bos_signal = bos_signal or nvda_cross_long
+        structure_components["bos"] = bos_signal and not recent_break_short
+    elif effective_bias == "short":
+        bos_signal = bool(bos5m_short or micro_bos_short)
+        if asset == "NVDA":
+            bos_signal = bos_signal or nvda_cross_short
+        structure_components["bos"] = bos_signal and not recent_break_long
+    structure_components["liquidity"] = bool(
+        liquidity_ok
+        or liquidity_ok_base
+        or vwap_confluence.get("trend_pullback")
+        or vwap_confluence.get("mean_revert")
+    )
+    if ofi_zscore is not None and OFI_Z_TRIGGER > 0:
+        if effective_bias == "long":
+            structure_components["ofi"] = ofi_zscore >= OFI_Z_TRIGGER
+        elif effective_bias == "short":
+            structure_components["ofi"] = ofi_zscore <= -OFI_Z_TRIGGER
+    if structure_components.get("ofi") and ofi_zscore is not None:
+        structure_notes.append(f"OFI z-score {ofi_zscore:.2f} támogatja az irányt")
+    structure_gate = sum(1 for flag in structure_components.values() if flag) >= 2
+    entry_thresholds_meta["structure_components"] = structure_components
 
     p_score_min_base = get_p_score_min(asset)
     p_score_min_local = p_score_min_base
@@ -6711,6 +6715,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
