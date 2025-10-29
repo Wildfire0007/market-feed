@@ -6,6 +6,7 @@ import json
 import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+import re
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 PUBLIC_DIR = Path(os.getenv("PUBLIC_DIR", "public"))
@@ -180,6 +181,21 @@ def record_ml_model_status(
     return payload, reminder_due
 
 
+def _parse_log_line(line: str) -> Tuple[Optional[datetime], Optional[str], str]:
+    parts = line.split(" ", 3)
+    if len(parts) >= 4:
+        timestamp_str = f"{parts[0]} {parts[1]}"
+        level = parts[2]
+        message = parts[3]
+        try:
+            timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S,%fZ")
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        except ValueError:
+            timestamp = None
+        return timestamp, level, message
+    return None, None, line
+
+
 def summarize_pipeline_warnings(path: Optional[Path] = None) -> Dict[str, Any]:
     """Parse the pipeline log and compute warning/client-error ratios."""
 
@@ -188,24 +204,97 @@ def summarize_pipeline_warnings(path: Optional[Path] = None) -> Dict[str, Any]:
         "total_lines": 0,
         "warning_lines": 0,
         "client_error_lines": 0,
+        "error_lines": 0,
+        "exception_lines": 0,
+        "exception_types": {},
         "client_error_ratio": 0.0,
+        "last_timestamp_utc": None,
+        "last_error": None,
+        "last_exception": None,
+        "sentiment_exit_events": [],
         "updated_utc": _to_iso(_now()),
     }
     if not target.exists():
         return summary
 
+    latest_timestamp: Optional[datetime] = None
+    sentiment_marker = "[sentiment_exit]"
+    in_traceback = False
+    traceback_timestamp: Optional[datetime] = None
+    
     try:
         with target.open("r", encoding="utf-8") as handle:
             for raw_line in handle:
-                line = raw_line.strip()
-                if not line:
+                line = raw_line.rstrip("\n")
+                if not line.strip():
                     continue
                 summary["total_lines"] += 1
+
+                timestamp, level, message = _parse_log_line(line.strip())
+                if timestamp and (latest_timestamp is None or timestamp > latest_timestamp):
+                    latest_timestamp = timestamp
+                    
                 lower = line.lower()
                 if "warning" in lower:
                     summary["warning_lines"] += 1
                     if "404" in lower or "400" in lower or "client error" in lower:
                         summary["client_error_lines"] += 1
+
+                if level and level.upper() == "ERROR":
+                    summary["error_lines"] += 1
+                    summary["last_error"] = {
+                        "timestamp_utc": _to_iso(timestamp) if timestamp else None,
+                        "level": level,
+                        "message": message,
+                    }
+
+                if sentiment_marker in line:
+                    detail = line.split(sentiment_marker, 1)[1].strip()
+                    summary["sentiment_exit_events"].append(
+                        {
+                            "timestamp_utc": _to_iso(timestamp) if timestamp else None,
+                            "level": level,
+                            "detail": detail,
+                        }
+                    )
+
+                if "traceback (most recent call last" in lower:
+                    in_traceback = True
+                    traceback_timestamp = timestamp
+                    summary["exception_lines"] += 1
+                    continue
+
+                if in_traceback:
+                    summary["exception_lines"] += 1
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    exception_match = re.match(r"(?P<name>[A-Za-z_][A-Za-z0-9_]*(Error|Exception))", stripped)
+                    if exception_match:
+                        exc_name = exception_match.group("name")
+                        summary["exception_types"][exc_name] = summary["exception_types"].get(exc_name, 0) + 1
+                        summary["last_exception"] = {
+                            "timestamp_utc": _to_iso(traceback_timestamp) if traceback_timestamp else None,
+                            "type": exc_name,
+                            "message": stripped,
+                        }
+                        in_traceback = False
+                        traceback_timestamp = None
+                    elif not stripped.startswith("File "):
+                        in_traceback = False
+                        traceback_timestamp = None
+                    continue
+
+                if "error" in lower and "warning" not in lower and "traceback" not in lower:
+                    exception_match = re.search(r"([A-Za-z_][A-Za-z0-9_]*(Error|Exception))", line)
+                    if exception_match:
+                        exc_name = exception_match.group(1)
+                        summary["exception_types"][exc_name] = summary["exception_types"].get(exc_name, 0) + 1
+                        summary["last_exception"] = {
+                            "timestamp_utc": _to_iso(timestamp) if timestamp else None,
+                            "type": exc_name,
+                            "message": message if message else line,
+                        }
     except Exception:
         return summary
 
@@ -213,6 +302,8 @@ def summarize_pipeline_warnings(path: Optional[Path] = None) -> Dict[str, Any]:
     client_errors = summary.get("client_error_lines") or 0
     if warnings:
         summary["client_error_ratio"] = round(client_errors / warnings, 3)
+    if latest_timestamp is not None:
+        summary["last_timestamp_utc"] = _to_iso(latest_timestamp)
     return summary
     
     
