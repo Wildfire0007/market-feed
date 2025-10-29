@@ -5606,37 +5606,37 @@ def analyze(asset: str) -> Dict[str, Any]:
                 reasons.append(score_note)
 
     if decision in ("buy", "sell") and entry is not None and sl is not None:
-            direction_label = "Long" if decision == "buy" else "Short"
+        direction_label = "Long" if decision == "buy" else "Short"
+        execution_playbook.append(
+            {
+                "step": "entry",
+                "description": f"{direction_label} belépő {entry:.5f} környékén",
+                "risk_abs": last_computed_risk,
+                "confidence": realtime_confidence,
+            }
+        )
+        if position_size_scale < 1.0:
             execution_playbook.append(
                 {
-                    "step": "entry",
-                    "description": f"{direction_label} belépő {entry:.5f} környékén",
-                    "risk_abs": last_computed_risk,
-                    "confidence": realtime_confidence,
+                    "step": "position_scale",
+                    "description": f"Pozícióméret skálázás ×{position_size_scale:.2f}",
+                    "scale": position_size_scale,
                 }
             )
-            if position_size_scale < 1.0:
+        if precision_plan:
+            window = precision_plan.get("entry_window")
+            if (
+                isinstance(window, (list, tuple))
+                and len(window) == 2
+                and all(isinstance(v, (int, float)) for v in window if v is not None)
+            ):
                 execution_playbook.append(
                     {
-                        "step": "position_scale",
-                        "description": f"Pozícióméret skálázás ×{position_size_scale:.2f}",
-                        "scale": position_size_scale,
+                        "step": "scalp_window",
+                        "description": f"Precision belépő zóna {window[0]:.5f}–{window[1]:.5f}",
+                        "confidence": precision_plan.get("confidence"),
                     }
                 )
-            if precision_plan:
-                window = precision_plan.get("entry_window")
-                if (
-                    isinstance(window, (list, tuple))
-                    and len(window) == 2
-                    and all(isinstance(v, (int, float)) for v in window if v is not None)
-                ):
-                    execution_playbook.append(
-                        {
-                            "step": "scalp_window",
-                            "description": f"Precision belépő zóna {window[0]:.5f}–{window[1]:.5f}",
-                            "confidence": precision_plan.get("confidence"),
-                        }
-                    )
         if tp1 is not None:
             execution_playbook.append(
                 {
@@ -5662,12 +5662,13 @@ def analyze(asset: str) -> Dict[str, Any]:
                     "lock_ratio": momentum_trailing_plan.get("lock_ratio"),
                 }
             )
-        if decision in ("buy", "sell") and range_time_stop_plan:
+        if range_time_stop_plan:
             execution_playbook.append(
                 {
                     "step": "time_stop",
                     "description": (
-                        f"Time-stop {range_time_stop_plan['timeout']} percig, ha nem érjük el {range_time_stop_plan['breakeven_trigger']:.2f}R-t"
+                        f"Time-stop {range_time_stop_plan['timeout']} percig, ha nem érjük el "
+                        f"{range_time_stop_plan['breakeven_trigger']:.2f}R-t"
                     ),
                     "timeout_minutes": range_time_stop_plan["timeout"],
                     "breakeven_trigger_r": range_time_stop_plan["breakeven_trigger"],
@@ -6664,6 +6665,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
