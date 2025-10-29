@@ -4739,6 +4739,9 @@ def analyze(asset: str) -> Dict[str, Any]:
     except Exception:
         ofi_zscore = None
 
+   structure_notes: List[str] = []
+    structure_components: Dict[str, bool] = {"bos": False, "liquidity": False, "ofi": False}
+
     # 7) P-score — volatilitás-adaptív súlyozás
     P, reasons = 15.0, []
     if bias_gate_notes:
@@ -4795,11 +4798,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         else:
             reasons.append("1m BOS + 5m retest — várjuk a 5m megerősítést")
 
-    for note in structure_notes:
-        if note not in reasons:
-            reasons.append(note)
-
-    if not spread_gate_ok:
+     if not spread_gate_ok:
         reasons.append("Spread gate: aktuális spread meghaladja az ATR arány limitet")
 
     minute_now = _min_of_day(analysis_now.hour, analysis_now.minute)
@@ -5117,7 +5116,6 @@ def analyze(asset: str) -> Dict[str, Any]:
         or bool(vwap_confluence.get("trend_pullback"))
         or bool(vwap_confluence.get("mean_revert"))
     )
-    structure_notes: List[str] = []
     if vwap_confluence.get("trend_pullback"):
         structure_notes.append("VWAP pullback konfluencia aktív — trend pullback engedve")
     if vwap_confluence.get("mean_revert"):
@@ -5136,7 +5134,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             liquidity_ok = True
             liquidity_relaxed = True
 
-    structure_components: Dict[str, bool] = {"bos": False, "liquidity": False, "ofi": False}
+    structure_components = {"bos": False, "liquidity": False, "ofi": False}
     if effective_bias == "long":
         bos_signal = bool(bos5m_long or micro_bos_long)
         if asset == "NVDA":
@@ -5228,6 +5226,10 @@ def analyze(asset: str) -> Dict[str, Any]:
                 funding_reason = f"Funding {funding_value:.3f} → pozícióméret skálázás"
     if funding_reason:
         structure_notes.append(funding_reason)
+
+    for note in structure_notes:
+        if note not in reasons:
+            reasons.append(note)
 
     entry_thresholds_meta["position_size_scale"] = position_size_scale
     if funding_dir_filter:
@@ -6784,6 +6786,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
