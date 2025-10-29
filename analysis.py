@@ -150,6 +150,10 @@ def _env_flag(name: str, default: bool = False) -> bool:
 ENABLE_SENTIMENT_PROBABILITY = _env_flag("ENABLE_SENTIMENT_PROBABILITY", default=False)
 ENABLE_ML_PROBABILITY = _env_flag("ENABLE_ML_PROBABILITY", default=False)
 SUPPRESS_ML_MODEL_WARNINGS = _env_flag("SUPPRESS_ML_MODEL_WARNINGS", default=False)
+# ``PIPELINE_ENV`` allows operators to expose environment-specific toggles.
+PIPELINE_ENV = (os.getenv("PIPELINE_ENV", "") or "").strip().lower()
+_ML_OVERRIDE_DISABLED_ENVS = {"ci", "qa", "test"}
+_ML_OVERRIDE_DEFAULT = PIPELINE_ENV not in _ML_OVERRIDE_DISABLED_ENVS
 # Allow hard-disabling ML scoring regardless of legacy flags.  The CI runner
 # doesn't currently set this but it gives operators a one-line escape hatch.
 if _env_flag("DISABLE_ML_PROBABILITY", default=False) or _env_flag(
@@ -164,12 +168,16 @@ if not ENABLE_ML_PROBABILITY and _env_flag("USE_ML", default=False):
 
 # --- Temporary override ---------------------------------------------------
 # A modell tréningje még folyamatban van, ezért az ML valószínűség számítást
-# teljesen kiiktatjuk, hogy ne befolyásolja a belépési döntéseket.  Amint a
-# betanított modell elérhető, ezt a kapcsolót vissza lehet állítani ``False``-ra
-# vagy eltávolítani.
-ML_PROBABILITY_MANUAL_OVERRIDE = True
-ML_PROBABILITY_MANUAL_REASON = (
-    "ML valószínűség manuálisan letiltva: modell tréning alatt"
+# alapértelmezetten csak az éles környezetben tiltjuk le.  A ``PIPELINE_ENV``
+# változó CI/QA környezetben automatikusan visszakapcsolja a scoringot, így
+# amint elérhető az artefakt, ott nem szükséges manuálisan beavatkozni.
+ML_PROBABILITY_MANUAL_OVERRIDE = _env_flag(
+    "ML_PROBABILITY_MANUAL_OVERRIDE",
+    default=_ML_OVERRIDE_DEFAULT,
+)
+ML_PROBABILITY_MANUAL_REASON = os.getenv(
+    "ML_PROBABILITY_MANUAL_REASON",
+    "ML valószínűség manuálisan letiltva: modell tréning alatt",
 )
 if ML_PROBABILITY_MANUAL_OVERRIDE:
     ENABLE_ML_PROBABILITY = False
@@ -6015,6 +6023,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
