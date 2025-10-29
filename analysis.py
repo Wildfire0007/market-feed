@@ -2236,6 +2236,70 @@ def build_data_gap_signal(
         "reasons": reasons_payload,
     }
 
+
+def build_analysis_error_signal(asset: str, error: Exception) -> Dict[str, Any]:
+    """Return a fallback signal payload when ``analyze`` raises an exception."""
+
+    outdir = os.path.join(PUBLIC_DIR, asset)
+    spot = load_json(os.path.join(outdir, "spot.json")) or {}
+    if not isinstance(spot, dict):
+        spot = {}
+
+    raw_price = spot.get("price") if spot.get("price") is not None else spot.get("price_usd")
+    display_price = safe_float(raw_price)
+    spot_utc = str(spot.get("utc") or spot.get("timestamp") or "-")
+    retrieved = str(spot.get("retrieved_at_utc") or spot.get("retrieved") or nowiso())
+    message = f"analysis error: {error}".strip()
+
+    probability_stack = ensure_probability_metadata(
+        {
+            "source": "sklearn",
+            "status": "analysis_error",
+            "unavailable_reason": "analysis_error",
+            "detail": message[:280],
+        }
+    )
+
+    diagnostics = {
+        "error": {
+            "type": type(error).__name__,
+            "message": str(error),
+        }
+    }
+
+    return {
+        "asset": asset,
+        "ok": False,
+        "retrieved_at_utc": nowiso(),
+        "source": "analysis.py",
+        "spot": {
+            "price": display_price,
+            "utc": spot_utc,
+            "retrieved_at_utc": retrieved,
+        },
+        "signal": "error",
+        "probability": 0,
+        "probability_model": None,
+        "probability_model_raw": None,
+        "probability_calibrated": None,
+        "probability_threshold": None,
+        "probability_model_source": "sklearn",
+        "probability_stack": probability_stack,
+        "entry": None,
+        "sl": None,
+        "tp1": None,
+        "tp2": None,
+        "rr": None,
+        "leverage": LEVERAGE.get(asset, 1.0),
+        "gates": {
+            "mode": "analysis_error",
+            "required": [],
+            "missing": ["analysis"],
+        },
+        "diagnostics": diagnostics,
+        "reasons": [message[:140]] if message else ["analysis error"],
+    }
+
 def save_json(path: str, obj: Any) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -6680,6 +6744,11 @@ def main():
         except Exception as exc:
             LOGGER.exception("Analysis failed for asset %s", asset)
             summary["assets"][asset] = {"asset": asset, "ok": False, "error": str(exc)}
+            try:
+                failure_payload = build_analysis_error_signal(asset, exc)
+                save_json(os.path.join(PUBLIC_DIR, asset, "signal.json"), failure_payload)
+            except Exception:
+                LOGGER.exception("Failed to persist analysis error placeholder for %s", asset)
     save_json(os.path.join(PUBLIC_DIR, "analysis_summary.json"), summary)
 
     html = "<!doctype html><meta charset='utf-8'><title>Analysis Summary</title>"
@@ -6715,6 +6784,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
