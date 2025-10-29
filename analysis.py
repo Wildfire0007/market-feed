@@ -90,9 +90,12 @@ from config.analysis_settings import (
     ATR_LOW_TH_ASSET,
     ATR_LOW_TH_DEFAULT,
     ATR_VOL_HIGH_REL,
+    ATR_PERCENTILE_TOD,
     ASSETS,
     COST_MULT_DEFAULT,
     COST_MULT_HIGH_VOL,
+    ADX_RR_BANDS,
+    FUNDING_RATE_RULES,
     CORE_RR_MIN,
     DEFAULT_COST_MODEL,
     ENABLE_MOMENTUM_ASSETS,
@@ -100,6 +103,7 @@ from config.analysis_settings import (
     EMA_SLOPE_SIGN_ENFORCED,
     EMA_SLOPE_TH_ASSET,
     EMA_SLOPE_TH_DEFAULT,
+    NEWS_MODE_SETTINGS,
     FX_TP_TARGETS,
     GOLD_HIGH_VOL_WINDOWS,
     GOLD_LOW_VOL_TH,
@@ -109,11 +113,14 @@ from config.analysis_settings import (
     LEVERAGE,
     MIN_RISK_ABS,
     MOMENTUM_RR_MIN,
+    OFI_Z_SETTINGS,
     NVDA_EXTENDED_ATR_REL,
     NVDA_MOMENTUM_ATR_REL,
+    P_SCORE_TIME_BONUS,
     SESSION_TIME_RULES,
     SESSION_WEEKDAYS,
     SESSION_WINDOWS_UTC,
+    SPREAD_MAX_ATR_PCT,
     SL_BUFFER_RULES,
     SMT_AUTO_CONFIG,
     SMT_PENALTY_VALUE,
@@ -123,6 +130,7 @@ from config.analysis_settings import (
     TP_MIN_PCT,
     TP_NET_MIN_ASSET,
     TP_NET_MIN_DEFAULT,
+    VWAP_BAND_MULT,
     get_atr_threshold_multiplier,
     get_p_score_min,
 )
@@ -198,6 +206,39 @@ MIN_STOPLOSS_PCT = 0.01
 MOMENTUM_BOS_LB = 36
 # Number of recent bars to inspect for EMA cross momentum confirmation
 MOMENTUM_BARS = 12
+
+ATR_PERCENTILE_LOOKBACK_DAYS = int(ATR_PERCENTILE_TOD.get("lookback_days") or 0)
+ATR_PERCENTILE_BUCKETS = list(ATR_PERCENTILE_TOD.get("buckets") or [])
+ATR_PERCENTILE_OVERLAP = dict(ATR_PERCENTILE_TOD.get("overlap") or {})
+ATR_PERCENTILE_RANGE_FLOOR = float(ATR_PERCENTILE_TOD.get("range_floor_percentile") or 0.0)
+ATR_PERCENTILE_RANGE_ADX = float(ATR_PERCENTILE_TOD.get("range_adx_threshold") or 0.0)
+
+P_SCORE_TIME_WINDOWS = dict(P_SCORE_TIME_BONUS.get("default") or {})
+P_SCORE_OFI_BONUS = float(P_SCORE_TIME_BONUS.get("ofi_bonus") or 0.0)
+
+ADX_TREND_BAND = dict(ADX_RR_BANDS.get("trend") or {})
+ADX_RANGE_BAND = dict(ADX_RR_BANDS.get("range") or {})
+ADX_TREND_MIN = float(ADX_TREND_BAND.get("adx_min") or 0.0)
+ADX_RANGE_MAX = float(ADX_RANGE_BAND.get("adx_max") or ADX_TREND_MIN)
+ADX_TREND_CORE_RR = float(ADX_TREND_BAND.get("core_rr_min") or MIN_R_CORE)
+ADX_TREND_MOM_RR = float(ADX_TREND_BAND.get("momentum_rr_min") or MIN_R_MOMENTUM)
+ADX_RANGE_CORE_RR = float(ADX_RANGE_BAND.get("core_rr_min") or MIN_R_CORE)
+ADX_RANGE_MOM_RR = float(ADX_RANGE_BAND.get("momentum_rr_min") or MIN_R_MOMENTUM)
+ADX_RANGE_SIZE_SCALE = float(ADX_RANGE_BAND.get("size_scale") or 1.0)
+ADX_RANGE_TIME_STOP = int(ADX_RANGE_BAND.get("time_stop_minutes") or 0)
+ADX_RANGE_BE_TRIGGER = float(ADX_RANGE_BAND.get("breakeven_trigger_r") or 0.0)
+
+OFI_Z_TRIGGER = float(OFI_Z_SETTINGS.get("trigger") or 0.0)
+OFI_Z_WEAKENING = float(OFI_Z_SETTINGS.get("weakening") or 0.0)
+OFI_Z_LOOKBACK = int(OFI_Z_SETTINGS.get("lookback_bars") or 0)
+
+VWAP_TREND_BAND = float(VWAP_BAND_MULT.get("trend") or 0.8)
+VWAP_MEAN_REVERT_BAND = float(VWAP_BAND_MULT.get("mean_revert") or 2.0)
+
+NEWS_LOCKOUT_MINUTES = int(NEWS_MODE_SETTINGS.get("lockout_minutes") or 0)
+NEWS_STABILISATION_MINUTES = int(NEWS_MODE_SETTINGS.get("stabilisation_minutes") or 0)
+NEWS_SEVERITY_THRESHOLD = float(NEWS_MODE_SETTINGS.get("severity_threshold") or 1.0)
+NEWS_CALENDAR_FILES: List[str] = list(NEWS_MODE_SETTINGS.get("calendar_files") or [])
 # Period used for EMA slope calculations
 EMA_SLOPE_PERIOD = 21
 # Historical window (number of bars) considered for EMA slope thresholds
@@ -2351,6 +2392,282 @@ def volume_ratio(df: pd.DataFrame, recent: int, baseline: int) -> Optional[float
     return float(recent_mean / baseline_mean)
 
 
+def compute_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    if df.empty:
+        return pd.Series(dtype=float)
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
+    up_move = high.diff()
+    down_move = low.diff() * -1
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    tr_components = pd.concat(
+        [
+            (high - low).abs(),
+            (high - close.shift(1)).abs(),
+            (low - close.shift(1)).abs(),
+        ],
+        axis=1,
+    )
+    tr = tr_components.max(axis=1)
+    atr_series = tr.ewm(span=period, adjust=False).mean()
+    plus_di = 100.0 * pd.Series(plus_dm, index=df.index).ewm(span=period, adjust=False).mean() / atr_series
+    minus_di = 100.0 * pd.Series(minus_dm, index=df.index).ewm(span=period, adjust=False).mean() / atr_series
+    di_sum = (plus_di + minus_di).replace(0.0, np.nan)
+    dx = (plus_di - minus_di).abs() / di_sum * 100.0
+    adx_series = dx.ewm(span=period, adjust=False).mean()
+    return adx_series.fillna(method="bfill").dropna()
+
+
+def latest_adx(df: pd.DataFrame, period: int = 14) -> Optional[float]:
+    series = compute_adx(df, period=period)
+    if series.empty:
+        return None
+    value = series.iloc[-1]
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _bucket_for_minute(minute: int, buckets: List[Dict[str, Any]]) -> str:
+    for spec in buckets:
+        try:
+            start = int(spec.get("start_minute", 0))
+            end = int(spec.get("end_minute", 1440))
+        except (TypeError, ValueError):
+            start, end = 0, 1440
+        name = str(spec.get("name") or "mid")
+        if start <= minute < end:
+            return name
+    if buckets:
+        return str(buckets[-1].get("name") or "mid")
+    return "all"
+
+
+def compute_rel_atr_percentile(
+    asset: str,
+    now: datetime,
+    df: pd.DataFrame,
+    atr_series: pd.Series,
+    adx_value: Optional[float] = None,
+) -> Tuple[Optional[float], Dict[str, Any]]:
+    details: Dict[str, Any] = {"bucket": None, "samples": 0}
+    if df.empty or atr_series.empty:
+        return None, details
+    buckets = ATR_PERCENTILE_BUCKETS
+    minute_now = _min_of_day(now.hour, now.minute)
+    bucket_name = _bucket_for_minute(minute_now, buckets)
+    details["bucket"] = bucket_name
+    percentile_target = None
+    for spec in buckets:
+        if str(spec.get("name")) == bucket_name:
+            try:
+                percentile_target = float(spec.get("percentile"))
+            except (TypeError, ValueError):
+                percentile_target = None
+            break
+    if percentile_target is None:
+        percentile_target = 0.5
+    overlap_cfg = ATR_PERCENTILE_OVERLAP
+    try:
+        overlap_assets = set(overlap_cfg.get("assets") or [])
+    except Exception:
+        overlap_assets = set()
+    if asset in overlap_assets:
+        try:
+            overlap_start = int(overlap_cfg.get("start_minute", 0))
+            overlap_end = int(overlap_cfg.get("end_minute", 0))
+            overlap_pct = float(overlap_cfg.get("percentile", percentile_target))
+        except (TypeError, ValueError):
+            overlap_start = overlap_end = 0
+            overlap_pct = percentile_target
+        if overlap_start <= minute_now <= overlap_end:
+            percentile_target = min(percentile_target, overlap_pct)
+    if adx_value is not None and ATR_PERCENTILE_RANGE_ADX and adx_value < ATR_PERCENTILE_RANGE_ADX:
+        percentile_target = max(percentile_target, ATR_PERCENTILE_RANGE_FLOOR or percentile_target)
+    percentile_target = max(0.0, min(1.0, percentile_target))
+    try:
+        close_series = df["close"].astype(float)
+    except Exception:
+        return None, details
+    rel_series = (atr_series / close_series).replace([np.inf, -np.inf], np.nan).dropna()
+    if rel_series.empty:
+        return None, details
+    if ATR_PERCENTILE_LOOKBACK_DAYS > 0:
+        cutoff = now - timedelta(days=ATR_PERCENTILE_LOOKBACK_DAYS)
+        rel_series = rel_series.loc[rel_series.index >= cutoff]
+    if rel_series.empty:
+        return None, details
+    bucket_labels = [
+        _bucket_for_minute(_min_of_day(ts.hour, ts.minute), buckets) for ts in rel_series.index
+    ]
+    rel_by_bucket = rel_series.iloc[[i for i, name in enumerate(bucket_labels) if name == bucket_name]]
+    if rel_by_bucket.empty:
+        rel_by_bucket = rel_series
+    details["samples"] = int(rel_by_bucket.size)
+    if rel_by_bucket.empty:
+        return None, details
+    try:
+        value = float(np.nanpercentile(rel_by_bucket.values, percentile_target * 100.0))
+    except Exception:
+        return None, details
+    details["percentile"] = percentile_target
+    details["threshold"] = value
+    return value, details
+
+
+def compute_ofi_zscore(k1m: pd.DataFrame, window: int) -> Optional[float]:
+    if window <= 0 or k1m.empty or "close" not in k1m.columns or "volume" not in k1m.columns:
+        return None
+    prices = k1m["close"].astype(float).copy()
+    volumes = k1m["volume"].astype(float).copy()
+    if len(prices) < window + 5:
+        return None
+    price_delta = prices.diff().fillna(0.0)
+    signed_volume = np.sign(price_delta) * volumes
+    rolling_sum = signed_volume.rolling(5, min_periods=3).sum()
+    rolling_vol = volumes.rolling(5, min_periods=3).sum()
+    imbalance = (rolling_sum / rolling_vol.replace(0.0, np.nan)).dropna()
+    if imbalance.empty:
+        return None
+    imbalance = imbalance.tail(window)
+    if imbalance.size < 10:
+        return None
+    current = imbalance.iloc[-1]
+    mean = imbalance.mean()
+    std = imbalance.std()
+    if not np.isfinite(std) or std <= 1e-6:
+        return None
+    return float((current - mean) / std)
+
+
+def compute_vwap(df: pd.DataFrame) -> Optional[pd.Series]:
+    if df.empty or "close" not in df.columns:
+        return None
+    price = df["close"].astype(float)
+    volume = df.get("volume")
+    if volume is None:
+        volume = pd.Series(np.ones(len(price)), index=price.index)
+    else:
+        volume = volume.astype(float).replace(0.0, np.nan)
+    typical_price = price
+    cumsum_price = (typical_price * volume.fillna(0.0)).cumsum()
+    cumsum_volume = volume.fillna(method="ffill").fillna(method="bfill").cumsum()
+    vwap_series = cumsum_price / cumsum_volume.replace(0.0, np.nan)
+    return vwap_series.dropna()
+
+
+def evaluate_vwap_confluence(
+    asset: str,
+    direction: Optional[str],
+    regime: str,
+    price: Optional[float],
+    atr_abs: Optional[float],
+    k1m: pd.DataFrame,
+    ofi_z: Optional[float] = None,
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"trend_pullback": False, "mean_revert": False}
+    if price is None or atr_abs is None or atr_abs <= 0:
+        return result
+    vwap_series = compute_vwap(k1m)
+    if vwap_series is None or vwap_series.empty:
+        return result
+    current_vwap = vwap_series.iloc[-1]
+    band_trend = atr_abs * VWAP_TREND_BAND
+    band_mean = atr_abs * VWAP_MEAN_REVERT_BAND
+    delta = float(price - current_vwap)
+    result["vwap"] = current_vwap
+    result["distance"] = delta
+    if abs(delta) <= band_trend and regime == "trend":
+        if direction == "long" and delta <= 0:
+            result["trend_pullback"] = True
+        elif direction == "short" and delta >= 0:
+            result["trend_pullback"] = True
+    weakening_flow = ofi_z is not None and ofi_z <= OFI_Z_WEAKENING
+    if abs(delta) >= band_mean and regime == "range" and weakening_flow:
+        if direction == "long" and delta < 0:
+            result["mean_revert"] = True
+        elif direction == "short" and delta > 0:
+            result["mean_revert"] = True
+    return result
+
+
+def load_calendar_events(asset: str) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    for name in NEWS_CALENDAR_FILES:
+        local_path = os.path.join(PUBLIC_DIR, asset, name)
+        shared_path = os.path.join(PUBLIC_DIR, name)
+        for candidate in (local_path, shared_path):
+            data = load_json(candidate)
+            if isinstance(data, dict):
+                raw_events = data.get("events") or []
+                if isinstance(raw_events, list):
+                    for evt in raw_events:
+                        if isinstance(evt, dict):
+                            evt = dict(evt)
+                            evt.setdefault("source", candidate)
+                            events.append(evt)
+            elif isinstance(data, list):
+                for evt in data:
+                    if isinstance(evt, dict):
+                        evt = dict(evt)
+                        evt.setdefault("source", candidate)
+                        events.append(evt)
+    return events
+
+
+def evaluate_news_lockout(asset: str, now: datetime) -> Tuple[bool, Optional[str]]:
+    if NEWS_LOCKOUT_MINUTES <= 0 and NEWS_STABILISATION_MINUTES <= 0:
+        return False, None
+    events = load_calendar_events(asset)
+    if not events:
+        return False, None
+    lockout = False
+    reason: Optional[str] = None
+    for event in events:
+        ts = event.get("time") or event.get("utc") or event.get("datetime")
+        if not ts:
+            continue
+        try:
+            event_time = pd.to_datetime(ts).to_pydatetime().replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+        severity = event.get("severity") or event.get("impact")
+        try:
+            severity_val = float(severity)
+        except (TypeError, ValueError):
+            severity_val = 1.0
+        if severity_val < NEWS_SEVERITY_THRESHOLD:
+            continue
+        delta_minutes = (now - event_time).total_seconds() / 60.0
+        if abs(delta_minutes) <= NEWS_LOCKOUT_MINUTES:
+            lockout = True
+            reason = event.get("title") or event.get("name") or "High impact news"
+            break
+        if 0 < delta_minutes < NEWS_STABILISATION_MINUTES:
+            lockout = True
+            reason = (event.get("title") or event.get("name") or "High impact news") + " — stabilizáció"
+            break
+    return lockout, reason
+
+
+def load_funding_snapshot(asset: str) -> Optional[float]:
+    path_candidates = [
+        os.path.join(PUBLIC_DIR, asset, "funding_rate.json"),
+        os.path.join(PUBLIC_DIR, asset, "funding.json"),
+    ]
+    for path in path_candidates:
+        data = load_json(path)
+        if isinstance(data, dict):
+            for key in ("funding_rate", "value", "rate", "last"):
+                if key in data:
+                    try:
+                        return float(data[key])
+                    except (TypeError, ValueError):
+                        continue
+    return None
 def compute_order_flow_metrics(
     k1m: pd.DataFrame,
     k5m: pd.DataFrame,
@@ -2361,6 +2678,7 @@ def compute_order_flow_metrics(
         "pressure": None,
         "delta_volume": None,
         "aggressor_ratio": None,
+        "imbalance_z": None,
     }
     if tick_metrics:
         for key in ("imbalance", "pressure", "delta", "delta_volume", "aggressor_ratio"):
@@ -2398,6 +2716,11 @@ def compute_order_flow_metrics(
         if not ref.empty:
             rel = recent["volume"].sum() / max(ref["volume"].sum(), 1e-9)
             metrics["pressure"] = float(rel * (metrics["pressure"] or 0.0))
+
+    if OFI_Z_LOOKBACK > 0:
+        z_score = compute_ofi_zscore(k1m, OFI_Z_LOOKBACK)
+        if z_score is not None and np.isfinite(z_score):
+            metrics["imbalance_z"] = float(z_score)
 
     return metrics
 
@@ -3320,6 +3643,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     avg_delay: float = float(latency_profile.get("ema_delay", 0.0) or 0.0)
     spot = load_json(os.path.join(outdir, "spot.json")) or {}
     spot_realtime = load_json(os.path.join(outdir, "spot_realtime.json")) or {}
+    funding_rate_snapshot = load_funding_snapshot(asset)
     spot_meta = spot if isinstance(spot, dict) else {}
     realtime_stats = spot_realtime.get("statistics") if isinstance(spot_realtime, dict) else {}
     k1m_raw = load_json(os.path.join(outdir, "klines_1m.json"))
@@ -3370,6 +3694,15 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     now = datetime.now(timezone.utc)
     session_ok_flag, session_meta = session_state(asset)
+    news_lockout_active, news_reason = evaluate_news_lockout(asset, now)
+    entry_thresholds_meta["news_lockout"] = bool(news_lockout_active)
+    if news_lockout_active:
+        session_ok_flag = False
+        if isinstance(session_meta, dict):
+            session_meta.setdefault("news_lockout", True)
+            notes_list = session_meta.setdefault("notes", []) if isinstance(session_meta.get("notes"), list) else session_meta.setdefault("notes", [])
+            if news_reason and news_reason not in notes_list:
+                notes_list.append(f"News lockout: {news_reason}")
 
     spot_ts_primary = parse_utc_timestamp(spot_utc)
     spot_ts_fallback = parse_utc_timestamp(spot_retrieved)
@@ -3521,7 +3854,19 @@ def analyze(asset: str) -> Dict[str, Any]:
             force_note += f" ({spot_realtime.get('force_reason')})"
         spot_latency_notes.append(force_note)
 
-    analysis_now = datetime.now(timezone.utc)
+    spread_abs: Optional[float] = None
+    if isinstance(spot_realtime, dict):
+        bid_val = safe_float(spot_realtime.get("bid") or spot_realtime.get("best_bid"))
+        ask_val = safe_float(spot_realtime.get("ask") or spot_realtime.get("best_ask"))
+        if bid_val is not None and ask_val is not None and ask_val >= bid_val:
+            spread_abs = float(ask_val - bid_val)
+    if spread_abs is None and rt_price is not None and spot_price is not None:
+        try:
+            spread_abs = abs(float(rt_price) - float(spot_price))
+        except (TypeError, ValueError):
+            spread_abs = None
+
+    analysis_now = now
 
     intervention_summary: Optional[Dict[str, Any]] = None
     intervention_band: Optional[str] = None
@@ -3851,6 +4196,19 @@ def analyze(asset: str) -> Dict[str, Any]:
     atr_series_5 = atr(k5m_closed)
     atr5 = atr_series_5.iloc[-1]
     rel_atr = float(atr5 / price_for_calc) if (atr5 and price_for_calc) else float("nan")
+    adx_value = latest_adx(k5m_closed)
+    if adx_value is not None and not np.isfinite(adx_value):
+        adx_value = None
+    entry_thresholds_meta["adx_value"] = adx_value
+    adx_regime = "unknown"
+    if adx_value is not None:
+        if ADX_TREND_MIN and adx_value >= ADX_TREND_MIN:
+            adx_regime = "trend"
+        elif adx_value < ADX_RANGE_MAX:
+            adx_regime = "range"
+        else:
+            adx_regime = "balanced"
+    entry_thresholds_meta["adx_regime_initial"] = adx_regime
     atr_profile_multiplier = get_atr_threshold_multiplier(asset)
     atr_threshold = atr_low_threshold(asset)
     entry_thresholds_meta["atr_multiplier"] = atr_profile_multiplier
@@ -3870,6 +4228,18 @@ def analyze(asset: str) -> Dict[str, Any]:
             atr_threshold = atr_threshold * intraday_relax_factor  # best effort
         entry_thresholds_meta["atr_intraday_relax"] = float(intraday_relax_factor)
         entry_thresholds_meta["atr_threshold_intraday"] = atr_threshold
+    atr_percentile_value, atr_percentile_meta = compute_rel_atr_percentile(
+        asset,
+        analysis_now,
+        k5m_closed,
+        atr_series_5,
+        adx_value,
+    )
+    if atr_percentile_meta:
+        entry_thresholds_meta["atr_percentile_meta"] = atr_percentile_meta
+    if atr_percentile_value is not None and np.isfinite(atr_percentile_value):
+        atr_threshold = max(atr_threshold, float(atr_percentile_value))
+        entry_thresholds_meta["atr_threshold_percentile"] = float(atr_percentile_value)
     volatility_overlay: Dict[str, Any] = {}
     atr_overlay_gate = True
     try:
@@ -3895,6 +4265,21 @@ def analyze(asset: str) -> Dict[str, Any]:
             atr_overlay_gate = False
     if overlay_regime in {"implied_elevated", "implied_extreme"}:
         atr_threshold *= 0.95
+    spread_gate_ok = True
+    spread_ratio = None
+    spread_limit = SPREAD_MAX_ATR_PCT.get(asset, SPREAD_MAX_ATR_PCT.get("default"))
+    if spread_limit and spread_abs is not None and atr5 is not None:
+        try:
+            spread_ratio = float(spread_abs) / float(atr5) if float(atr5) > 0 else None
+        except Exception:
+            spread_ratio = None
+        if spread_ratio is not None and np.isfinite(spread_ratio):
+            entry_thresholds_meta["spread_ratio"] = spread_ratio
+            entry_thresholds_meta["spread_limit_atr"] = float(spread_limit)
+            if spread_ratio > float(spread_limit):
+                spread_gate_ok = False
+    else:
+        entry_thresholds_meta["spread_ratio"] = spread_ratio
     atr_abs_min = ATR_ABS_MIN.get(asset)
     atr_abs_ok = True
     if atr_abs_min is not None:
@@ -3903,12 +4288,15 @@ def analyze(asset: str) -> Dict[str, Any]:
         except Exception:
             atr_abs_ok = False
     atr_ok = not (np.isnan(rel_atr) or rel_atr < atr_threshold or not atr_abs_ok)
+    if not spread_gate_ok:
+        atr_ok = False
     if not atr_overlay_gate:
         atr_ok = False
     if stale_timeframes.get("k5m"):
         atr_ok = False
 
     entry_thresholds_meta["atr_threshold_effective"] = atr_threshold
+    entry_thresholds_meta["spread_gate_ok"] = spread_gate_ok
 
     momentum_vol_ratio = volume_ratio(k5m_closed, MOMENTUM_VOLUME_RECENT, MOMENTUM_VOLUME_BASE)
     dynamic_tp_profile = compute_dynamic_tp_profile(
@@ -4030,12 +4418,20 @@ def analyze(asset: str) -> Dict[str, Any]:
     if stale_timeframes.get("k1m") or stale_timeframes.get("k5m"):
         micro_bos_long = micro_bos_short = False
 
-    nvda_cross_long = nvda_cross_short = False
-    if asset == "NVDA":
+    ema_cross_long = ema_cross_short = False
+    ema9_5m: Optional[pd.Series] = None
+    ema21_5m: Optional[pd.Series] = None
+    if asset in ENABLE_MOMENTUM_ASSETS and not k5m_closed.empty:
         ema9_5m = ema(k5m_closed["close"], 9)
         ema21_5m = ema(k5m_closed["close"], 21)
-        nvda_cross_long = ema_cross_recent(ema9_5m, ema21_5m, bars=7, direction="long")
-        nvda_cross_short = ema_cross_recent(ema9_5m, ema21_5m, bars=7, direction="short")
+        cross_bars = 7 if asset == "NVDA" else MOMENTUM_BARS
+        ema_cross_long = ema_cross_recent(ema9_5m, ema21_5m, bars=cross_bars, direction="long")
+        ema_cross_short = ema_cross_recent(ema9_5m, ema21_5m, bars=cross_bars, direction="short")
+
+    nvda_cross_long = nvda_cross_short = False
+    if asset == "NVDA":
+        nvda_cross_long = ema_cross_long
+        nvda_cross_short = ema_cross_short
 
     effective_bias = trend_bias
     bias_override_used = False
@@ -4224,19 +4620,39 @@ def analyze(asset: str) -> Dict[str, Any]:
     if stale_timeframes.get("k5m"):
         recent_break_long = recent_break_short = False
 
-    structure_ok_long = bool((bos5m_long or struct_retest_long) and not recent_break_short)
-    structure_ok_short = bool((bos5m_short or struct_retest_short) and not recent_break_long)
-    structure_gate = False
+    ofi_zscore = order_flow_metrics.get("imbalance_z") if isinstance(order_flow_metrics, dict) else None
+    try:
+        if ofi_zscore is not None and not np.isfinite(ofi_zscore):
+            ofi_zscore = None
+    except Exception:
+        ofi_zscore = None
+
+    structure_components: Dict[str, bool] = {"bos": False, "liquidity": False, "ofi": False}
     if effective_bias == "long":
-        structure_gate = structure_ok_long
+        bos_signal = bool(bos5m_long or micro_bos_long)
         if asset == "NVDA":
-            structure_gate = structure_gate or nvda_cross_long
+            bos_signal = bos_signal or nvda_cross_long
+        structure_components["bos"] = bos_signal and not recent_break_short
     elif effective_bias == "short":
-        structure_gate = structure_ok_short
+        bos_signal = bool(bos5m_short or micro_bos_short)
         if asset == "NVDA":
-            structure_gate = structure_gate or nvda_cross_short
-    else:
-        structure_gate = False
+            bos_signal = bos_signal or nvda_cross_short
+        structure_components["bos"] = bos_signal and not recent_break_long
+    structure_components["liquidity"] = bool(
+        liquidity_ok
+        or liquidity_ok_base
+        or vwap_confluence.get("trend_pullback")
+        or vwap_confluence.get("mean_revert")
+    )
+    if ofi_zscore is not None and OFI_Z_TRIGGER > 0:
+        if effective_bias == "long":
+            structure_components["ofi"] = ofi_zscore >= OFI_Z_TRIGGER
+        elif effective_bias == "short":
+            structure_components["ofi"] = ofi_zscore <= -OFI_Z_TRIGGER
+    if structure_components.get("ofi") and ofi_zscore is not None:
+        structure_notes.append(f"OFI z-score {ofi_zscore:.2f} támogatja az irányt")
+    structure_gate = sum(1 for flag in structure_components.values() if flag) >= 2
+    entry_thresholds_meta["structure_components"] = structure_components
 
     # 7) P-score — volatilitás-adaptív súlyozás
     P, reasons = 15.0, []
@@ -4293,6 +4709,64 @@ def analyze(asset: str) -> Dict[str, Any]:
             reasons.append(f"Micro BOS megerősítés (1m szerkezet + magas ATR) (+{MICRO_BOS_P_BONUS})")
         else:
             reasons.append("1m BOS + 5m retest — várjuk a 5m megerősítést")
+
+    for note in structure_notes:
+        if note not in reasons:
+            reasons.append(note)
+
+    if not spread_gate_ok:
+        reasons.append("Spread gate: aktuális spread meghaladja az ATR arány limitet")
+
+    minute_now = _min_of_day(analysis_now.hour, analysis_now.minute)
+    time_penalty_total = 0.0
+    time_penalty_notes: List[str] = []
+    open_cfg = P_SCORE_TIME_WINDOWS.get("open") or {}
+    try:
+        open_window = int(open_cfg.get("window_minutes") or 0)
+        open_penalty = float(open_cfg.get("penalty") or 0.0)
+    except (TypeError, ValueError):
+        open_window, open_penalty = 0, 0.0
+    if open_window > 0 and minute_now <= open_window:
+        time_penalty_total += open_penalty
+        time_penalty_notes.append(f"Nyitási illikviditás hatás ({open_penalty:+.1f})")
+    close_cfg = P_SCORE_TIME_WINDOWS.get("close") or {}
+    try:
+        close_window = int(close_cfg.get("window_minutes") or 0)
+        close_penalty = float(close_cfg.get("penalty") or 0.0)
+    except (TypeError, ValueError):
+        close_window, close_penalty = 0, 0.0
+    if close_window > 0 and minute_now >= max(0, 1440 - close_window):
+        time_penalty_total += close_penalty
+        time_penalty_notes.append(f"Zárási sáv likviditás büntetés ({close_penalty:+.1f})")
+    overlap_cfg = P_SCORE_TIME_WINDOWS.get("overlap") or {}
+    overlap_start = ATR_PERCENTILE_OVERLAP.get("start_minute") if ATR_PERCENTILE_OVERLAP else None
+    overlap_end = ATR_PERCENTILE_OVERLAP.get("end_minute") if ATR_PERCENTILE_OVERLAP else None
+    try:
+        overlap_penalty = float(overlap_cfg.get("penalty") or 0.0)
+        overlap_window = int(overlap_cfg.get("window_minutes") or 0)
+    except (TypeError, ValueError):
+        overlap_penalty = 0.0
+        overlap_window = 0
+    if overlap_start is not None and overlap_end is not None:
+        if overlap_start <= minute_now <= overlap_end:
+            time_penalty_total += overlap_penalty
+            time_penalty_notes.append(f"London–NY overlap profil ({overlap_penalty:+.1f})")
+    elif overlap_window > 0 and 720 - overlap_window <= minute_now <= 720 + overlap_window:
+        time_penalty_total += overlap_penalty
+        time_penalty_notes.append(f"Overlap ablak penalty ({overlap_penalty:+.1f})")
+    if time_penalty_total:
+        P += time_penalty_total
+        reasons.append("; ".join(time_penalty_notes))
+
+    if (
+        not structure_components.get("bos")
+        and structure_components.get("ofi")
+        and P_SCORE_OFI_BONUS
+    ):
+        P += P_SCORE_OFI_BONUS
+        reasons.append(f"OFI megerősítés (+{P_SCORE_OFI_BONUS:.1f})")
+
+    P = max(0.0, min(100.0, P))
 
     atr_ratio = 0.0
     if not np.isnan(rel_atr) and atr_threshold > 0:
@@ -4393,6 +4867,16 @@ def analyze(asset: str) -> Dict[str, Any]:
             P -= 4.0
             reasons.append("Order flow ellentétes irányba tolódik (−4)")
 
+    if ofi_zscore is not None and effective_bias in {"long", "short"} and OFI_Z_TRIGGER > 0:
+        if effective_bias == "long" and ofi_zscore <= -OFI_Z_TRIGGER:
+            penalty = min(8.0, (abs(ofi_zscore) - OFI_Z_TRIGGER + 1.0) * 3.0)
+            P -= penalty
+            reasons.append(f"OFI toxikus long irányra (−{penalty:.1f})")
+        elif effective_bias == "short" and ofi_zscore >= OFI_Z_TRIGGER:
+            penalty = min(8.0, (abs(ofi_zscore) - OFI_Z_TRIGGER + 1.0) * 3.0)
+            P -= penalty
+            reasons.append(f"OFI toxikus short irányra (−{penalty:.1f})")
+
     aggressor_ratio = order_flow_metrics.get("aggressor_ratio")
     if aggressor_ratio is not None and effective_bias in {"long", "short"}:
         if effective_bias == "long" and aggressor_ratio > 0.6:
@@ -4433,8 +4917,11 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     smt_pen, smt_reason = smt_penalty(asset, k5m_closed)
     if smt_pen and smt_reason:
-        P -= smt_pen
-        reasons.append(f"SMT büntetés −{smt_pen}% ({smt_reason})")
+        effective_smt_pen = smt_pen
+        if asset == "EURUSD":
+            effective_smt_pen = min(effective_smt_pen, 3)
+        P -= effective_smt_pen
+        reasons.append(f"SMT büntetés −{effective_smt_pen}% ({smt_reason})")
 
     if sentiment_signal and ENABLE_SENTIMENT_PROBABILITY:
         sentiment_points = 0.0
@@ -4504,6 +4991,25 @@ def analyze(asset: str) -> Dict[str, Any]:
                 "Cash sessionen kívül — ATR nem elég magas a kereskedéshez"
             )
 
+    entry_thresholds_meta["ofi_z"] = ofi_zscore
+
+    atr_abs_for_vwap = None
+    try:
+        if atr5 is not None and np.isfinite(float(atr5)):
+            atr_abs_for_vwap = float(atr5)
+    except Exception:
+        atr_abs_for_vwap = None
+    vwap_confluence = evaluate_vwap_confluence(
+        asset,
+        effective_bias if effective_bias in {"long", "short"} else None,
+        "trend" if adx_regime == "trend" else "range" if adx_regime == "range" else "balanced",
+        price_for_calc if price_for_calc is not None else None,
+        atr_abs_for_vwap,
+        k1m_closed,
+        ofi_zscore,
+    )
+    entry_thresholds_meta["vwap_confluence"] = vwap_confluence
+
     if asset in {"EURUSD", "BTCUSD"}:
         liquidity_ok_base = bool(fib_ok)
     elif asset == "NVDA":
@@ -4521,7 +5027,12 @@ def analyze(asset: str) -> Dict[str, Any]:
             or (effective_bias == "short" and struct_retest_short)
         )
     liquidity_relaxed = False
-    liquidity_ok = liquidity_ok_base
+    liquidity_ok = liquidity_ok_base or bool(vwap_confluence.get("trend_pullback")) or bool(vwap_confluence.get("mean_revert"))
+    structure_notes: List[str] = []
+    if vwap_confluence.get("trend_pullback"):
+        structure_notes.append("VWAP pullback konfluencia aktív — trend pullback engedve")
+    if vwap_confluence.get("mean_revert"):
+        structure_notes.append("VWAP túlnyúlás → mean reversion setup")
     directional_confirmation = False
     if candidate_dir == "long":
         directional_confirmation = bool(bos5m_long or micro_bos_long)
@@ -4557,6 +5068,56 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     core_rr_min = CORE_RR_MIN.get(asset, CORE_RR_MIN["default"])
     momentum_rr_min = MOMENTUM_RR_MIN.get(asset, MOMENTUM_RR_MIN["default"])
+    position_size_scale = 1.0
+    funding_dir_filter: Optional[str] = None
+    funding_reason: Optional[str] = None
+    range_time_stop_plan: Optional[Dict[str, Any]] = None
+    if adx_regime == "trend":
+        core_rr_min = max(core_rr_min, ADX_TREND_CORE_RR)
+        momentum_rr_min = max(momentum_rr_min, ADX_TREND_MOM_RR)
+    elif adx_regime == "range":
+        if ADX_RANGE_CORE_RR:
+            core_rr_min = min(core_rr_min, ADX_RANGE_CORE_RR)
+        if ADX_RANGE_MOM_RR:
+            momentum_rr_min = min(momentum_rr_min, ADX_RANGE_MOM_RR)
+        if ADX_RANGE_SIZE_SCALE and ADX_RANGE_SIZE_SCALE > 0:
+            position_size_scale = min(position_size_scale, ADX_RANGE_SIZE_SCALE)
+        if ADX_RANGE_TIME_STOP > 0 and ADX_RANGE_BE_TRIGGER > 0:
+            range_time_stop_plan = {
+                "timeout": ADX_RANGE_TIME_STOP,
+                "breakeven_trigger": ADX_RANGE_BE_TRIGGER,
+            }
+    entry_thresholds_meta["adx_regime"] = adx_regime
+
+    funding_rules = FUNDING_RATE_RULES.get(asset, {})
+    funding_value: Optional[float] = None
+    if funding_rules and funding_rate_snapshot is not None:
+        try:
+            funding_value = float(funding_rate_snapshot)
+        except (TypeError, ValueError):
+            funding_value = None
+        if funding_value is not None:
+            pos_ext = float(funding_rules.get("positive_extreme") or 0.0)
+            neg_ext = float(funding_rules.get("negative_extreme") or 0.0)
+            moderate = abs(float(funding_rules.get("moderate_band") or 0.0))
+            size_scale = float(funding_rules.get("size_scale") or 1.0)
+            if funding_value >= pos_ext and pos_ext:
+                funding_dir_filter = "short"
+                funding_reason = f"Funding +{funding_value:.3f} → csak short"
+            elif funding_value <= neg_ext and neg_ext:
+                funding_dir_filter = "long"
+                funding_reason = f"Funding {funding_value:.3f} → csak long"
+            elif moderate and abs(funding_value) >= moderate and size_scale > 0:
+                position_size_scale = min(position_size_scale, size_scale)
+                funding_reason = f"Funding {funding_value:.3f} → pozícióméret skálázás"
+    if funding_reason:
+        structure_notes.append(funding_reason)
+
+    entry_thresholds_meta["position_size_scale"] = position_size_scale
+    if funding_dir_filter:
+        entry_thresholds_meta["funding_filter"] = funding_dir_filter
+    if funding_value is not None:
+        entry_thresholds_meta["funding_rate"] = funding_value
 
     core_tp1_mult = dynamic_tp_profile["core"]["tp1"]
     core_tp2_mult = dynamic_tp_profile["core"]["tp2"]
@@ -4565,20 +5126,14 @@ def analyze(asset: str) -> Dict[str, Any]:
     mom_tp2_mult = dynamic_tp_profile["momentum"]["tp2"]
     momentum_rr_min = max(momentum_rr_min, dynamic_tp_profile["momentum"]["rr"])
 
-    liquidity_label = "liquidity(fib|sweep|ema21|retest)"
-    if asset in {"EURUSD", "BTCUSD"}:
-        liquidity_label = "liquidity(fib zone)"
-    elif asset == "NVDA":
-        liquidity_label = "liquidity(fib|retest)"
-
     range_guard_label = "intraday_range_guard"
+    structure_label = "structure(2of3)"
 
     core_required = [
         "session",
         "regime",
         "bias",
-        "bos5m",
-        liquidity_label,
+        structure_label,
         range_guard_label,
         "atr",
         f"rr_math>={core_rr_min:.1f}",
@@ -4589,16 +5144,20 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     conds_core = {
         "session": bool(session_ok_flag),
-        "regime":  bool(regime_ok),
-        "bias":    effective_bias in ("long","short"),
-        "bos5m":   bool(structure_gate),
-        "liquidity": liquidity_ok,
-        "atr":     bool(atr_ok),
+        "regime": bool(regime_ok),
+        "bias": effective_bias in ("long", "short"),
+        structure_label: bool(structure_gate),
+        "atr": bool(atr_ok),
         range_guard_label: range_guard_ok,
     }
-    base_core_ok = all(v for k, v in conds_core.items() if k != "bos5m")
-    bos_gate_ok = conds_core["bos5m"] or micro_bos_active
-    can_enter_core = (P >= p_score_min_local) and base_core_ok and bos_gate_ok
+    if funding_dir_filter:
+        core_required.append("funding_alignment")
+        if effective_bias in ("long", "short"):
+            conds_core["funding_alignment"] = effective_bias == funding_dir_filter
+        else:
+            conds_core["funding_alignment"] = False
+    base_core_ok = all(conds_core.values())
+    can_enter_core = (P >= p_score_min_local) and base_core_ok
     missing_core = [k for k, v in conds_core.items() if not v]
     if P < p_score_min_local:
         if float(p_score_min_local).is_integer():
@@ -4606,9 +5165,6 @@ def analyze(asset: str) -> Dict[str, Any]:
         else:
             p_score_label = f"{p_score_min_local:.1f}"
         missing_core.append(f"P_score>={p_score_label}")
-    if micro_bos_active and not conds_core["bos5m"]:
-        if "bos5m" not in missing_core:
-            missing_core.append("bos5m")
     if liquidity_relaxed:
         reasons.append("Likviditási kapu lazítva erős momentum miatt")
 
@@ -4620,15 +5176,16 @@ def analyze(asset: str) -> Dict[str, Any]:
         "regime",
         "bias",
         "momentum_trigger",
-        "bos5m",
+        structure_label,
         "atr",
-        "liquidity",
         f"rr_math>={momentum_rr_min:.1f}",
         "tp_min_profit",
         "min_stoploss",
         tp_net_label,
         range_guard_label,
     ]
+    if funding_dir_filter:
+        mom_required.append("funding_alignment")
     missing_mom: List[str] = []
     mom_trigger_desc: Optional[str] = None
 
@@ -4641,6 +5198,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             missing_mom.append("regime")
         if direction is None:
             missing_mom.append("bias")
+        if funding_dir_filter and direction in {"long", "short"}:
+            if direction != funding_dir_filter:
+                missing_mom.append("funding_alignment")
         if not range_guard_ok:
             missing_mom.append(range_guard_label)
 
@@ -4660,14 +5220,38 @@ def analyze(asset: str) -> Dict[str, Any]:
             elif direction == "short" and of_pressure > -ORDER_FLOW_PRESSURE_TH:
                 momentum_liquidity_ok = False
                 missing_mom.append("order_flow_pressure")
+        ofi_confirm = True
+        if ofi_zscore is not None and OFI_Z_TRIGGER > 0 and direction in {"long", "short"}:
+            if direction == "long":
+                ofi_confirm = ofi_zscore >= OFI_Z_TRIGGER
+            else:
+                ofi_confirm = ofi_zscore <= -OFI_Z_TRIGGER
+        if not ofi_confirm:
+            missing_mom.append("ofi")
 
-        if asset == "NVDA" and direction is not None:
-            mom_atr_ok = not np.isnan(rel_atr) and rel_atr >= NVDA_MOMENTUM_ATR_REL and atr_abs_ok
-            cross_flag = nvda_cross_long if direction == "long" else nvda_cross_short
-            if session_ok_flag and regime_ok and mom_atr_ok and cross_flag and momentum_liquidity_ok:
+        if direction is not None:
+            cross_flag = False
+            mom_atr_ok = False
+            if asset == "NVDA":
+                mom_atr_ok = not np.isnan(rel_atr) and rel_atr >= NVDA_MOMENTUM_ATR_REL and atr_abs_ok
+                cross_flag = nvda_cross_long if direction == "long" else nvda_cross_short
+            else:
+                mom_atr_ok = bool(atr_ok and not np.isnan(rel_atr))
+                cross_flag = ema_cross_long if direction == "long" else ema_cross_short
+            if (
+                session_ok_flag
+                and regime_ok
+                and mom_atr_ok
+                and cross_flag
+                and momentum_liquidity_ok
+                and ofi_confirm
+            ):
                 mom_dir = "buy" if direction == "long" else "sell"
                 mom_trigger_desc = "EMA9×21 momentum cross"
                 missing_mom = []
+                if funding_dir_filter and ((funding_dir_filter == "long" and mom_dir != "buy") or (funding_dir_filter == "short" and mom_dir != "sell")):
+                    mom_dir = None
+                    missing_mom.append("funding_alignment")
             else:
                 if not mom_atr_ok:
                     missing_mom.append("atr")
@@ -4823,30 +5407,60 @@ def analyze(asset: str) -> Dict[str, Any]:
             if not compute_levels(decision, momentum_rr_min, mom_tp1_mult, mom_tp2_mult):
                 decision = "no entry"
             else:
-                reason_msg = "Momentum override"
-                if mom_trigger_desc:
-                    reason_msg += f" ({mom_trigger_desc})"
-                reasons.append(reason_msg)
-                reasons.append("Momentum: rész-realizálás javasolt 2.0R-n és trailing SL aktiválása")
-                if momentum_vol_ratio is not None:
-                    reasons.append(
-                        f"Momentum volume ratio ≈ {momentum_vol_ratio:.2f}"
-                    )
-                if last_computed_risk is not None and entry is not None:
+                no_chase_violation = False
+                slip_info: Dict[str, Any] = {}
+                if (
+                    decision in ("buy", "sell")
+                    and last_computed_risk is not None
+                    and price_for_calc is not None
+                    and last5_close is not None
+                ):
+                    allowed_slip = 0.2 * last_computed_risk
                     if decision == "buy":
-                        trail_price = entry + last_computed_risk * MOMENTUM_TRAIL_LOCK
+                        slip = max(0.0, price_for_calc - last5_close)
                     else:
-                        trail_price = entry - last_computed_risk * MOMENTUM_TRAIL_LOCK
-                    momentum_trailing_plan = {
-                        "activation_rr": MOMENTUM_TRAIL_TRIGGER_R,
-                        "trail_price": trail_price,
-                        "lock_ratio": MOMENTUM_TRAIL_LOCK,
+                        slip = max(0.0, last5_close - price_for_calc)
+                    slip_info = {
+                        "slip": float(slip),
+                        "allowed": float(allowed_slip),
                     }
-                P = max(P, 75)
-                if tp1_net_pct_value is not None:
-                    msg_net = f"TP1 nettó profit ≈ {tp1_net_pct_value*100:.2f}%"
-                    if msg_net not in reasons:
-                        reasons.append(msg_net)
+                    if slip > allowed_slip + 1e-9:
+                        no_chase_violation = True
+                if slip_info:
+                    slip_info["violated"] = no_chase_violation
+                    entry_thresholds_meta["momentum_no_chase"] = slip_info
+                if no_chase_violation:
+                    reasons.append(
+                        "Momentum no-chase szabály: aktuális ár kedvezőtlenebb mint 0.2R"
+                    )
+                    decision = "no entry"
+                    momentum_used = False
+                    missing = ["no_chase"]
+                else:
+                    reason_msg = "Momentum override"
+                    if mom_trigger_desc:
+                        reason_msg += f" ({mom_trigger_desc})"
+                    reasons.append(reason_msg)
+                    reasons.append("Momentum: rész-realizálás javasolt 2.0R-n és trailing SL aktiválása")
+                    if momentum_vol_ratio is not None:
+                        reasons.append(
+                            f"Momentum volume ratio ≈ {momentum_vol_ratio:.2f}"
+                        )
+                    if last_computed_risk is not None and entry is not None:
+                        if decision == "buy":
+                            trail_price = entry + last_computed_risk * MOMENTUM_TRAIL_LOCK
+                        else:
+                            trail_price = entry - last_computed_risk * MOMENTUM_TRAIL_LOCK
+                        momentum_trailing_plan = {
+                            "activation_rr": MOMENTUM_TRAIL_TRIGGER_R,
+                            "trail_price": trail_price,
+                            "lock_ratio": MOMENTUM_TRAIL_LOCK,
+                        }
+                    P = max(P, 75)
+                    if tp1_net_pct_value is not None:
+                        msg_net = f"TP1 nettó profit ≈ {tp1_net_pct_value*100:.2f}%"
+                        if msg_net not in reasons:
+                            reasons.append(msg_net)
         elif asset in ENABLE_MOMENTUM_ASSETS and missing_mom:
             mode = "momentum"
             required_list = list(mom_required)
@@ -4992,29 +5606,37 @@ def analyze(asset: str) -> Dict[str, Any]:
                 reasons.append(score_note)
 
     if decision in ("buy", "sell") and entry is not None and sl is not None:
-        direction_label = "Long" if decision == "buy" else "Short"
-        execution_playbook.append(
-            {
-                "step": "entry",
-                "description": f"{direction_label} belépő {entry:.5f} környékén",
-                "risk_abs": last_computed_risk,
-                "confidence": realtime_confidence,
-            }
-        )
-        if precision_plan:
-            window = precision_plan.get("entry_window")
-            if (
-                isinstance(window, (list, tuple))
-                and len(window) == 2
-                and all(isinstance(v, (int, float)) for v in window if v is not None)
-            ):
+            direction_label = "Long" if decision == "buy" else "Short"
+            execution_playbook.append(
+                {
+                    "step": "entry",
+                    "description": f"{direction_label} belépő {entry:.5f} környékén",
+                    "risk_abs": last_computed_risk,
+                    "confidence": realtime_confidence,
+                }
+            )
+            if position_size_scale < 1.0:
                 execution_playbook.append(
                     {
-                        "step": "scalp_window",
-                        "description": f"Precision belépő zóna {window[0]:.5f}–{window[1]:.5f}",
-                        "confidence": precision_plan.get("confidence"),
+                        "step": "position_scale",
+                        "description": f"Pozícióméret skálázás ×{position_size_scale:.2f}",
+                        "scale": position_size_scale,
                     }
                 )
+            if precision_plan:
+                window = precision_plan.get("entry_window")
+                if (
+                    isinstance(window, (list, tuple))
+                    and len(window) == 2
+                    and all(isinstance(v, (int, float)) for v in window if v is not None)
+                ):
+                    execution_playbook.append(
+                        {
+                            "step": "scalp_window",
+                            "description": f"Precision belépő zóna {window[0]:.5f}–{window[1]:.5f}",
+                            "confidence": precision_plan.get("confidence"),
+                        }
+                    )
         if tp1 is not None:
             execution_playbook.append(
                 {
@@ -5038,6 +5660,17 @@ def analyze(asset: str) -> Dict[str, Any]:
                     "description": "Momentum trail aktiválás a jelzett R-szinten",
                     "trigger_rr": momentum_trailing_plan.get("activation_rr"),
                     "lock_ratio": momentum_trailing_plan.get("lock_ratio"),
+                }
+            )
+        if decision in ("buy", "sell") and range_time_stop_plan:
+            execution_playbook.append(
+                {
+                    "step": "time_stop",
+                    "description": (
+                        f"Time-stop {range_time_stop_plan['timeout']} percig, ha nem érjük el {range_time_stop_plan['breakeven_trigger']:.2f}R-t"
+                    ),
+                    "timeout_minutes": range_time_stop_plan["timeout"],
+                    "breakeven_trigger_r": range_time_stop_plan["breakeven_trigger"],
                 }
             )
 
@@ -5372,6 +6005,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         "tp2": tp2,
         "rr": (round(rr, 2) if rr else None),
         "leverage": lev,
+        "position_size_scale": position_size_scale,
+        "range_time_stop": range_time_stop_plan,
+        "funding_filter": funding_dir_filter,
+        "funding_rate": funding_value,
         "stale_timeframes": dict(stale_timeframes),
         "biases": {
             "raw_4h": raw_bias4h,
@@ -5386,6 +6023,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         or ["no signal"],
         "realtime_transport": realtime_transport,
     }
+    if news_lockout_active:
+        decision_obj["news_lockout_active"] = True
+        if news_reason:
+            decision_obj["news_lockout_reason"] = news_reason
     if probability_source:
         decision_obj["probability_model_source"] = probability_source
     if fallback_meta:
@@ -6023,6 +6664,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
