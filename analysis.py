@@ -5453,6 +5453,52 @@ def analyze(asset: str) -> Dict[str, Any]:
     if exit_signal:
         decision_obj["position_exit_signal"] = exit_signal
 
+    sentiment_exit_summary: Optional[Dict[str, Any]] = None
+    if exit_signal and exit_signal.get("category") == "sentiment_risk":
+        sentiment_exit_summary = {
+            "state": exit_signal.get("state"),
+            "severity_label": exit_signal.get("severity"),
+            "severity_score": exit_signal.get("sentiment_severity"),
+            "score": exit_signal.get("sentiment_score"),
+            "bias": exit_signal.get("sentiment_bias"),
+            "direction": exit_signal.get("direction"),
+            "category": exit_signal.get("sentiment_category")
+            or exit_signal.get("category"),
+            "triggered_at": exit_signal.get("triggered_at"),
+        }
+        if sentiment_signal and sentiment_signal.headline:
+            sentiment_exit_summary["headline"] = sentiment_signal.headline
+        else:
+            headlines = exit_signal.get("headlines") or []
+            if headlines:
+                sentiment_exit_summary["headline"] = headlines[0]
+        sentiment_exit_summary = {
+            key: value
+            for key, value in sentiment_exit_summary.items()
+            if value is not None
+        }
+        decision_obj["sentiment_exit_summary"] = sentiment_exit_summary
+        score_repr = sentiment_exit_summary.get("score")
+        severity_repr = sentiment_exit_summary.get("severity_score")
+        try:
+            score_text = f"{float(score_repr):+.2f}" if score_repr is not None else "n/a"
+        except (TypeError, ValueError):
+            score_text = "n/a"
+        try:
+            severity_text = (
+                f"{float(severity_repr):.2f}" if severity_repr is not None else "n/a"
+            )
+        except (TypeError, ValueError):
+            severity_text = "n/a"
+        LOGGER.warning(
+            "[sentiment_exit] %s state=%s score=%s severity=%s bias=%s",
+            asset,
+            sentiment_exit_summary.get("state") or "unknown",
+            score_text,
+            severity_text,
+            sentiment_exit_summary.get("bias") or "n/a",
+        )
+
     action_plan = build_action_plan(
         asset=asset,
         decision=decision,
@@ -5746,6 +5792,7 @@ def main():
         "analysis_started_utc": to_utc_iso(analysis_started_at),
         "assets": {},
         "latency_flags": [],
+        "sentiment_alerts": [],
         "troubleshooting": list(REFRESH_TIPS),
     }
     revision_info = detect_analysis_revision()
@@ -5871,6 +5918,65 @@ def main():
             flags = diag.get("latency_flags") if isinstance(diag, dict) else None
             if flags:
                 summary["latency_flags"].extend(flags)
+            if isinstance(res, dict):
+                sentiment_payload = res.get("sentiment_exit_summary")
+                if not sentiment_payload:
+                    exit_payload = res.get("position_exit_signal")
+                    if not exit_payload and isinstance(res.get("active_position_meta"), dict):
+                        exit_payload = res["active_position_meta"].get("exit_signal")
+                    if isinstance(exit_payload, dict) and exit_payload.get("category") == "sentiment_risk":
+                        sentiment_payload = {
+                            key: exit_payload.get(key)
+                            for key in (
+                                "state",
+                                "severity",
+                                "sentiment_severity",
+                                "sentiment_score",
+                                "sentiment_bias",
+                                "sentiment_category",
+                                "triggered_at",
+                            )
+                        }
+                        headlines = exit_payload.get("headlines")
+                        if isinstance(headlines, (list, tuple)) and headlines:
+                            headline = headlines[0]
+                            if isinstance(headline, str):
+                                sentiment_payload["headline"] = headline
+                    if sentiment_payload:
+                        mapped = {
+                            "state": sentiment_payload.get("state"),
+                            "severity_label": sentiment_payload.get("severity"),
+                            "severity_score": sentiment_payload.get("sentiment_severity"),
+                            "score": sentiment_payload.get("sentiment_score"),
+                            "bias": sentiment_payload.get("sentiment_bias"),
+                            "category": sentiment_payload.get("sentiment_category"),
+                            "triggered_at": sentiment_payload.get("triggered_at"),
+                        }
+                        if "headline" in sentiment_payload:
+                            mapped["headline"] = sentiment_payload["headline"]
+                        sentiment_payload = mapped
+                if sentiment_payload:
+                    alert_payload = {"asset": asset}
+                    alert_payload.update(
+                        {
+                            key: sentiment_payload.get(key)
+                            for key in (
+                                "state",
+                                "severity_label",
+                                "severity_score",
+                                "score",
+                                "bias",
+                                "category",
+                                "triggered_at",
+                                "headline",
+                            )
+                        }
+                    )
+                    alert_payload = {
+                        key: value for key, value in alert_payload.items() if value is not None
+                    }
+                    if alert_payload not in summary["sentiment_alerts"]:
+                        summary["sentiment_alerts"].append(alert_payload)
         except Exception as exc:
             LOGGER.exception("Analysis failed for asset %s", asset)
             summary["assets"][asset] = {"asset": asset, "ok": False, "error": str(exc)}
@@ -5909,6 +6015,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
