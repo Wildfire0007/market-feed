@@ -2160,6 +2160,24 @@ def build_data_gap_signal(
             if status_note and status_note not in reasons_payload:
                 reasons_payload.insert(0, status_note)
 
+    detail_text = "; ".join(
+        str(reason) for reason in reasons_payload if isinstance(reason, str)
+    )
+    probability_stack = {
+        "source": "sklearn",
+        "status": "data_gap",
+        "unavailable_reason": "data_gap",
+    }
+    if detail_text:
+        probability_stack["detail"] = detail_text
+    placeholder_meta = ML_PROBABILITY_PLACEHOLDER_INFO.get(asset.upper())
+    if isinstance(placeholder_meta, dict) and placeholder_meta:
+        probability_stack["placeholder_model"] = {
+            key: value
+            for key, value in placeholder_meta.items()
+            if key not in {"asset"} and value is not None
+        }
+
     return {
         "asset": asset,
         "ok": False,
@@ -2172,6 +2190,12 @@ def build_data_gap_signal(
         },
         "signal": signal,
         "probability": 0,
+        "probability_model": None,
+        "probability_model_raw": None,
+        "probability_calibrated": None,
+        "probability_threshold": None,
+        "probability_model_source": "sklearn",
+        "probability_stack": probability_stack,
         "entry": None,
         "sl": None,
         "tp1": None,
@@ -6665,6 +6689,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
