@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,24 @@ def _parse_iso(value: Optional[str]) -> Optional[datetime]:
         if value.endswith("Z"):
             value = value[:-1] + "+00:00"
         return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            result = float(value)
+        else:
+            text = str(value).strip()
+            if not text:
+                return None
+            result = float(text)
+        if math.isnan(result) or math.isinf(result):
+            return None
+        return result
     except Exception:
         return None
 
@@ -115,4 +134,115 @@ def update_signal_health_report(public_dir: Path = PUBLIC_DIR, summary: Optional
     return report_path
 
 
-__all__ = ["update_signal_health_report"]
+def update_data_latency_report(public_dir: Path = PUBLIC_DIR, summary: Optional[Dict[str, Any]] = None) -> Optional[Path]:
+    """Generate a per-asset latency snapshot to surface stale feeds quickly."""
+
+    if summary is None:
+        summary_path = Path(public_dir) / "analysis_summary.json"
+        if summary_path.exists():
+            try:
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            except Exception:
+                summary = None
+    if not summary or "assets" not in summary:
+        return None
+
+    monitor_dir = Path(public_dir) / "monitoring"
+    monitor_dir.mkdir(parents=True, exist_ok=True)
+
+    assets = summary.get("assets")
+    if not isinstance(assets, dict):
+        return None
+
+    rows: List[Dict[str, Any]] = []
+    alerts: List[str] = []
+    now = _now()
+
+    for asset, payload in assets.items():
+        if not isinstance(payload, dict):
+            continue
+        diagnostics = payload.get("diagnostics") or {}
+        timeframes = diagnostics.get("timeframes") or {}
+        if not isinstance(timeframes, dict):
+            timeframes = {}
+
+        spot_meta = timeframes.get("spot") or {}
+        spot_latency = _coerce_float(spot_meta.get("latency_seconds"))
+        spot_limit = _coerce_float(
+            spot_meta.get("freshness_limit_seconds")
+            or spot_meta.get("expected_max_delay_seconds")
+        )
+        spot_violation = bool(spot_meta.get("freshness_violation"))
+        if not spot_violation and spot_latency is not None and spot_limit is not None:
+            spot_violation = spot_latency > spot_limit
+
+        stale_frames: List[str] = []
+        critical_frames: List[str] = []
+        max_frame_latency = spot_latency
+        for name, meta in timeframes.items():
+            if not isinstance(meta, dict) or name == "spot":
+                continue
+            latency_value = _coerce_float(meta.get("latency_seconds"))
+            if latency_value is not None:
+                if max_frame_latency is None or latency_value > max_frame_latency:
+                    max_frame_latency = latency_value
+            if meta.get("stale_for_signals"):
+                stale_frames.append(name)
+            if meta.get("critical_stale"):
+                critical_frames.append(name)
+
+        spot_payload = payload.get("spot") if isinstance(payload.get("spot"), dict) else {}
+        fallback_provider = None
+        if isinstance(spot_payload, dict):
+            fallback_provider = spot_payload.get("fallback_provider")
+
+        row = {
+            "asset": asset,
+            "signal": payload.get("signal"),
+            "spot_latency_seconds": spot_latency,
+            "spot_limit_seconds": spot_limit,
+            "spot_violation": bool(spot_violation),
+            "fallback_provider": fallback_provider,
+            "stale_timeframes": stale_frames,
+            "critical_timeframes": critical_frames,
+            "max_timeframe_latency_seconds": max_frame_latency,
+        }
+        rows.append(row)
+
+        if spot_violation and spot_latency is not None:
+            if spot_limit is not None:
+                alerts.append(
+                    f"{asset}: spot latency {spot_latency / 60.0:.1f} min (limit {spot_limit / 60.0:.1f} min)"
+                )
+            else:
+                alerts.append(f"{asset}: spot latency {spot_latency / 60.0:.1f} min")
+        if critical_frames:
+            alerts.append(
+                f"{asset}: critical stale frames {', '.join(sorted(set(critical_frames)))}"
+            )
+
+    report_path = monitor_dir / "data_latency.json"
+    payload = {
+        "generated_utc": now.isoformat(),
+        "assets": rows,
+        "alerts": alerts,
+    }
+    with report_path.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+
+    csv_path = monitor_dir / "data_latency.csv"
+    if rows:
+        serializable_rows = []
+        for row in rows:
+            csv_row = dict(row)
+            csv_row["stale_timeframes"] = ",".join(row.get("stale_timeframes", []))
+            csv_row["critical_timeframes"] = ",".join(row.get("critical_timeframes", []))
+            serializable_rows.append(csv_row)
+        pd.DataFrame(serializable_rows).to_csv(csv_path, index=False)
+    elif csv_path.exists():
+        csv_path.unlink()
+
+    return report_path
+
+
+__all__ = ["update_signal_health_report", "update_data_latency_report"]
