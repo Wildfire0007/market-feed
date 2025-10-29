@@ -65,3 +65,34 @@ def test_record_ml_model_status_resets_payload(tmp_path):
     assert remind is False
     assert payload["ml_models"]["status"]["missing"] == []
     assert payload["ml_models"]["status"]["placeholders"] == []
+
+
+def test_summarize_pipeline_warnings_detects_exceptions(tmp_path):
+    log_path = tmp_path / "pipeline.log"
+    log_path.write_text(
+        "\n".join(
+            [
+                "2024-06-01 10:00:00,000Z WARNING Slow response from feed",
+                "2024-06-01 10:01:00,000Z WARNING Client error 404 while fetching feed",
+                "2024-06-01 10:02:00,000Z ERROR Failed to compute metrics",
+                "Traceback (most recent call last):",
+                '  File "analysis.py", line 10, in <module>',
+                "NameError: name 'foo' is not defined",
+                "2024-06-01 10:03:00,000Z WARNING [sentiment_exit] EURUSD state=scale_out score=-0.80 severity=0.90",
+            ]
+        )
+    )
+
+    summary = pipeline_monitor.summarize_pipeline_warnings(log_path)
+
+    assert summary["warning_lines"] == 3
+    assert summary["client_error_lines"] == 1
+    assert summary["error_lines"] == 1
+    assert summary["exception_lines"] >= 3
+    assert summary["client_error_ratio"] == 0.333
+    assert summary["exception_types"].get("NameError") == 1
+    assert summary["last_exception"]["type"] == "NameError"
+    assert summary["last_error"]["message"] == "Failed to compute metrics"
+    assert summary["sentiment_exit_events"]
+    assert "EURUSD" in summary["sentiment_exit_events"][-1]["detail"]
+    assert summary["last_timestamp_utc"] == "2024-06-01T10:03:00Z"
