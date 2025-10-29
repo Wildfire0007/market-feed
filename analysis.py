@@ -39,9 +39,12 @@ except Exception:  # pragma: no cover - optional dependency guard
         return None
 
 try:
-    from reports.monitoring import update_signal_health_report
+    from reports.monitoring import update_signal_health_report, update_data_latency_report
 except Exception:  # pragma: no cover - optional dependency guard
     def update_signal_health_report(*_args, **_kwargs):
+        return None
+
+    def update_data_latency_report(*_args, **_kwargs):
         return None
 
 try:
@@ -5885,6 +5888,11 @@ def main():
         pass
 
     try:
+        update_data_latency_report(Path(PUBLIC_DIR), summary)
+    except Exception:
+        pass
+
+    try:
         update_precision_gate_report()
     except Exception:
         pass
@@ -5901,6 +5909,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
