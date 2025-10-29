@@ -2120,6 +2120,25 @@ def classify_critical_staleness(
     return critical_flags, reasons
 
 
+# Probability stack helpers -------------------------------------------------
+
+
+def ensure_probability_metadata(
+    metadata: Optional[Dict[str, Any]],
+    default_source: str = "sklearn",
+) -> Dict[str, Any]:
+    """Return a serialisable metadata payload with a guaranteed ``source`` field."""
+
+    normalised: Dict[str, Any] = {}
+    if isinstance(metadata, dict):
+        normalised = {key: value for key, value in metadata.items() if value is not None}
+
+    if not normalised.get("source"):
+        normalised["source"] = default_source
+
+    return normalised
+
+
 def build_data_gap_signal(
     asset: str,
     spot_price: Any,
@@ -2163,20 +2182,25 @@ def build_data_gap_signal(
     detail_text = "; ".join(
         str(reason) for reason in reasons_payload if isinstance(reason, str)
     )
-    probability_stack = {
-        "source": "sklearn",
-        "status": "data_gap",
-        "unavailable_reason": "data_gap",
-    }
+    probability_stack = ensure_probability_metadata(
+        {
+            "source": "sklearn",
+            "status": "data_gap",
+            "unavailable_reason": "data_gap",
+        }
+    )
     if detail_text:
         probability_stack["detail"] = detail_text
     placeholder_meta = ML_PROBABILITY_PLACEHOLDER_INFO.get(asset.upper())
     if isinstance(placeholder_meta, dict) and placeholder_meta:
-        probability_stack["placeholder_model"] = {
-            key: value
-            for key, value in placeholder_meta.items()
-            if key not in {"asset"} and value is not None
-        }
+        probability_stack.setdefault("placeholder_model", {})
+        probability_stack["placeholder_model"].update(
+            {
+                key: value
+                for key, value in placeholder_meta.items()
+                if key not in {"asset"} and value is not None
+            }
+        )
 
     return {
         "asset": asset,
@@ -5941,30 +5965,29 @@ def analyze(asset: str) -> Dict[str, Any]:
     ml_probability = ml_prediction.probability
     ml_probability_raw = ml_prediction.raw_probability
     ml_threshold = ml_prediction.threshold
-    probability_source = None
+    probability_metadata = ensure_probability_metadata(ml_prediction.metadata)
+    probability_source = probability_metadata.get("source")
     fallback_meta: Optional[Dict[str, Any]] = None
-    if ml_prediction.metadata:
-        probability_source = ml_prediction.metadata.get("source")
-        meta_reason = ml_prediction.metadata.get("unavailable_reason")
-        raw_fallback = ml_prediction.metadata.get("fallback")
-        if isinstance(raw_fallback, dict):
-            fallback_meta = raw_fallback
-        if fallback_meta and probability_source == "fallback":
-            fallback_reason = fallback_meta.get("reason") or meta_reason
-            reason_map = {
-                "model_missing": "ML fallback: modell hiányzik — heurisztikus pontozás aktív",
-                "sklearn_missing": "ML fallback: scikit-learn hiányzik — heurisztikus pontozás aktív",
-                "model_type_mismatch": "ML fallback: modell típus inkompatibilis",
-            }
-            if isinstance(fallback_reason, str):
-                reason_text = reason_map.get(
-                    fallback_reason,
-                    f"ML fallback aktív ({fallback_reason})",
-                )
-            else:
-                reason_text = "ML fallback aktív"
-            if reason_text not in reasons:
-                reasons.append(reason_text)
+    meta_reason = probability_metadata.get("unavailable_reason")
+    raw_fallback = probability_metadata.get("fallback")
+    if isinstance(raw_fallback, dict):
+        fallback_meta = raw_fallback
+    if fallback_meta and probability_source == "fallback":
+        fallback_reason = fallback_meta.get("reason") or meta_reason
+        reason_map = {
+            "model_missing": "ML fallback: modell hiányzik — heurisztikus pontozás aktív",
+            "sklearn_missing": "ML fallback: scikit-learn hiányzik — heurisztikus pontozás aktív",
+            "model_type_mismatch": "ML fallback: modell típus inkompatibilis",
+        }
+        if isinstance(fallback_reason, str):
+            reason_text = reason_map.get(
+                fallback_reason,
+                f"ML fallback aktív ({fallback_reason})",
+            )
+        else:
+            reason_text = "ML fallback aktív"
+        if reason_text not in reasons:
+            reasons.append(reason_text)
 
     combined_probability = P / 100.0
     if ml_probability is not None:
@@ -6068,8 +6091,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     decision_obj["probability_threshold"] = (
         float(ml_threshold) if ml_threshold is not None else None
     )
-    if ml_prediction.metadata:
-        decision_obj["probability_stack"] = ml_prediction.metadata
+    decision_obj["probability_stack"] = probability_metadata
     if ml_confidence_block:
         decision_obj["ml_confidence_blocked"] = True
     decision_obj["ema21_slope_1h"] = regime_slope_signed
@@ -6689,6 +6711,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
