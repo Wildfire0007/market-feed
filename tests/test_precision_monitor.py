@@ -17,7 +17,7 @@ def test_precision_monitor_generates_reports(tmp_path):
             "asset": "EURUSD",
             "analysis_timestamp": "2025-01-01T10:00:00Z",
             "signal": "no entry",
-            "notes": "missing: precision_score>=70, precision_flow_alignment",
+            "notes": "missing: precision_score>=65, precision_flow_alignment",
         },
         {
             "journal_id": "2",
@@ -45,7 +45,7 @@ def test_precision_monitor_generates_reports(tmp_path):
             "asset": "GOLD_CFD",
             "analysis_timestamp": "",
             "signal": "no entry",
-            "notes": "missing: precision_score>=70",
+            "notes": "missing: precision_score>=65",
         },
     ]
     journal_path = tmp_path / "journal.csv"
