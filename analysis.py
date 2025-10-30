@@ -4892,6 +4892,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         if effective_bias in ("long", "short")
         else (bias1h if bias1h in ("long", "short") else None)
     )
+    btc_momentum_override = False
     strong_momentum = False
     if candidate_dir == "long":
         strong_momentum = bool(
@@ -4937,6 +4938,23 @@ def analyze(asset: str) -> Dict[str, Any]:
         elif range_expansion and strong_momentum:
             P += 3.0
             reasons.append("Range expanzió támogatja a momentumot (+3.0)")
+
+    if asset == "BTCUSD":
+        volume_factor = momentum_vol_ratio if momentum_vol_ratio is not None else 0.0
+        btc_range_drive = bool(
+            isinstance(intraday_profile, dict) and intraday_profile.get("range_expansion")
+        )
+        high_atr_drive = bool(np.isfinite(atr_ratio) and atr_ratio >= 1.6)
+        btc_momentum_override = bool(
+            strong_momentum and (high_atr_drive or volume_factor >= 1.45 or btc_range_drive)
+        )
+        entry_thresholds_meta["btc_atr_ratio"] = float(atr_ratio if np.isfinite(atr_ratio) else 0.0)
+        entry_thresholds_meta["btc_volume_ratio"] = float(volume_factor)
+        entry_thresholds_meta["btc_range_expansion"] = btc_range_drive
+        if btc_momentum_override:
+            override_note = "BTC momentum override — szerkezeti kapuk lazítva erős trendben"
+            if override_note not in reasons:
+                reasons.append(override_note)
 
     if fib_ok:
         fib_points = 18.0
@@ -5153,6 +5171,12 @@ def analyze(asset: str) -> Dict[str, Any]:
             liquidity_ok = True
             liquidity_relaxed = True
 
+    if asset == "BTCUSD" and btc_momentum_override and not liquidity_ok:
+        liquidity_ok = True
+        liquidity_relaxed = True
+        if "BTC momentum override — likviditási kapu lazítva" not in structure_notes:
+            structure_notes.append("BTC momentum override — likviditási kapu lazítva")
+
     structure_components = {"bos": False, "liquidity": False, "ofi": False}
     if effective_bias == "long":
         bos_signal = bool(bos5m_long or micro_bos_long)
@@ -5188,6 +5212,51 @@ def analyze(asset: str) -> Dict[str, Any]:
         if effective_bias == "short" and price_below_vwap:
             structure_components["liquidity"] = True
 
+    elif asset == "BTCUSD" and effective_bias in {"long", "short"}:
+        vwap_distance = safe_float(vwap_confluence.get("distance")) if isinstance(vwap_confluence, dict) else None
+        price_above_vwap = vwap_distance is not None and vwap_distance >= 0
+        price_below_vwap = vwap_distance is not None and vwap_distance <= 0
+        vwap_trend_pullback = bool(vwap_confluence.get("trend_pullback"))
+        if effective_bias == "long":
+            higher_timeframe_break = bool(
+                (bos1h_long and (bos5m_long or micro_bos_long))
+                or (bos5m_long and micro_bos_long)
+            )
+            vwap_ok = price_above_vwap or vwap_trend_pullback
+            structure_components["bos"] = higher_timeframe_break and vwap_ok and not recent_break_short
+            if structure_components["bos"]:
+                structure_notes.append("BTC H1/5m BOS + VWAP felett — bullish trend megerősítve")
+            elif higher_timeframe_break and not vwap_ok:
+                structure_notes.append("BTC BOS aktív, de VWAP alatt → türelem")
+            if vwap_ok:
+                structure_components["liquidity"] = True
+        elif effective_bias == "short":
+            higher_timeframe_break = bool(
+                (bos1h_short and (bos5m_short or micro_bos_short))
+                or (bos5m_short and micro_bos_short)
+            )
+            vwap_ok = price_below_vwap or vwap_trend_pullback
+            structure_components["bos"] = higher_timeframe_break and vwap_ok and not recent_break_long
+            if structure_components["bos"]:
+                structure_notes.append("BTC H1/5m BOS + VWAP alatt — bearish trend megerősítve")
+            elif higher_timeframe_break and not vwap_ok:
+                structure_notes.append("BTC BOS aktív, de VWAP felett → türelem")
+            if vwap_ok:
+                structure_components["liquidity"] = True
+        if btc_momentum_override and directional_confirmation:
+            if effective_bias == "long" and not price_above_vwap:
+                price_above_vwap = vwap_trend_pullback
+            if effective_bias == "short" and not price_below_vwap:
+                price_below_vwap = vwap_trend_pullback
+            if effective_bias == "long" and price_above_vwap:
+                structure_components["bos"] = True
+                structure_components["liquidity"] = True
+                structure_notes.append("BTC momentum override — mikro BOS elfogadva VWAP fölött")
+            if effective_bias == "short" and price_below_vwap:
+                structure_components["bos"] = True
+                structure_components["liquidity"] = True
+                structure_notes.append("BTC momentum override — mikro BOS elfogadva VWAP alatt")
+
     structure_components["liquidity"] = bool(
         structure_components["liquidity"]
         or liquidity_ok
@@ -5203,7 +5272,14 @@ def analyze(asset: str) -> Dict[str, Any]:
     if structure_components.get("ofi") and ofi_zscore is not None:
         structure_notes.append(f"OFI z-score {ofi_zscore:.2f} támogatja az irányt")
     structure_gate = sum(1 for flag in structure_components.values() if flag) >= 2
+    if asset == "BTCUSD" and btc_momentum_override and not structure_gate:
+        if structure_components.get("bos") and structure_components.get("ofi"):
+            structure_gate = True
+        elif structure_components.get("liquidity") and structure_components.get("ofi"):
+            structure_gate = True
     entry_thresholds_meta["structure_components"] = structure_components
+    if asset == "BTCUSD":
+        entry_thresholds_meta["btc_momentum_override"] = btc_momentum_override
 
     p_score_min_base = get_p_score_min(asset)
     p_score_min_local = p_score_min_base
@@ -5291,6 +5367,15 @@ def analyze(asset: str) -> Dict[str, Any]:
             position_size_scale = min(position_size_scale, 0.8)
         entry_thresholds_meta["gold_atr_ratio"] = gold_atr_ratio
 
+    if asset == "BTCUSD":
+        if btc_momentum_override:
+            position_size_scale = min(position_size_scale, 0.55)
+            if "BTC momentum override — pozícióméret csökkentve" not in reasons:
+                reasons.append("BTC momentum override — pozícióméret csökkentve")
+        else:
+            position_size_scale = min(position_size_scale, 0.75)
+        entry_thresholds_meta["btc_position_scale"] = position_size_scale
+
     for note in structure_notes:
         if note not in reasons:
             reasons.append(note)
@@ -5300,6 +5385,38 @@ def analyze(asset: str) -> Dict[str, Any]:
         entry_thresholds_meta["funding_filter"] = funding_dir_filter
     if funding_value is not None:
         entry_thresholds_meta["funding_rate"] = funding_value
+
+    if asset == "BTCUSD":
+        core_profile = dynamic_tp_profile.setdefault(
+            "core",
+            {"tp1": TP1_R, "tp2": TP2_R, "rr": CORE_RR_MIN.get(asset, MIN_R_CORE)},
+        )
+        mom_profile = dynamic_tp_profile.setdefault(
+            "momentum",
+            {
+                "tp1": TP1_R_MOMENTUM,
+                "tp2": TP2_R_MOMENTUM,
+                "rr": MOMENTUM_RR_MIN.get(asset, MIN_R_MOMENTUM),
+            },
+        )
+        if btc_momentum_override:
+            core_profile["rr"] = float(max(1.0, min(core_profile.get("rr", 2.3), 1.5)))
+            core_profile["tp1"] = float(max(1.3, min(core_profile.get("tp1", TP1_R), 1.7)))
+            core_profile["tp2"] = float(
+                max(core_profile["tp1"] + 0.3, min(core_profile.get("tp2", TP2_R), 2.3))
+            )
+            mom_profile["rr"] = float(max(1.0, min(mom_profile.get("rr", 1.6), 1.3)))
+            mom_profile["tp1"] = float(max(1.0, min(mom_profile.get("tp1", TP1_R_MOMENTUM), 1.4)))
+            mom_profile["tp2"] = float(
+                max(mom_profile["tp1"] + 0.2, min(mom_profile.get("tp2", TP2_R_MOMENTUM), 1.9))
+            )
+        else:
+            core_profile["rr"] = float(max(2.3, core_profile.get("rr", 0.0)))
+            core_profile["tp1"] = float(max(1.9, core_profile.get("tp1", TP1_R)))
+            core_profile["tp2"] = float(max(2.8, core_profile.get("tp2", TP2_R)))
+            mom_profile["rr"] = float(max(1.6, mom_profile.get("rr", 0.0)))
+            mom_profile["tp1"] = float(max(1.5, mom_profile.get("tp1", TP1_R_MOMENTUM)))
+            mom_profile["tp2"] = float(max(2.3, mom_profile.get("tp2", TP2_R_MOMENTUM)))
 
     core_tp1_mult = dynamic_tp_profile["core"]["tp1"]
     core_tp2_mult = dynamic_tp_profile["core"]["tp2"]
@@ -5528,6 +5645,36 @@ def analyze(asset: str) -> Dict[str, Any]:
                     adjust_note = f"GOLD stop lazítás: ATR alapú kockázat ×{risk_ratio:.2f}"
                     if adjust_note not in reasons:
                         reasons.append(adjust_note)
+
+        if asset == "BTCUSD" and atr5_val > 0:
+            lower_mult = 0.9 if btc_momentum_override else 1.0
+            upper_mult = 1.6 if btc_momentum_override else 2.2
+            desired_min = lower_mult * atr5_val
+            desired_max = upper_mult * atr5_val
+            target_risk = risk
+            if risk < desired_min:
+                target_risk = desired_min
+            elif risk > desired_max:
+                target_risk = desired_max
+            if not np.isclose(target_risk, risk):
+                if decision_side == "buy":
+                    sl = entry - target_risk
+                    risk = entry - sl
+                    tp1 = entry + tp1_mult * risk
+                    tp2 = entry + tp2_mult * risk
+                    tp1_dist = tp1 - entry
+                    ok_math = (sl < entry < tp1 <= tp2)
+                else:
+                    sl = entry + target_risk
+                    risk = sl - entry
+                    tp1 = entry - tp1_mult * risk
+                    tp2 = entry - tp2_mult * risk
+                    tp1_dist = entry - tp1
+                    ok_math = (tp2 <= tp1 < entry < sl)
+                risk_ratio = target_risk / atr5_val if atr5_val else 0.0
+                adjust_note = f"BTC ATR stop igazítás: kockázat ×{risk_ratio:.2f}"
+                if adjust_note not in reasons:
+                    reasons.append(adjust_note)
 
         risk_min = max(
             MIN_RISK_ABS.get(asset, MIN_RISK_ABS["default"]),
@@ -6879,6 +7026,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
