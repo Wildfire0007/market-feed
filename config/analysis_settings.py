@@ -266,6 +266,7 @@ ATR_THRESHOLD_MULT_ASSET: Dict[str, float] = {
 ATR_LOW_TH_DEFAULT: float = float(_get_config_value("atr_low_threshold_default"))
 ATR_LOW_TH_ASSET: Dict[str, float] = dict(_get_config_value("atr_low_threshold") or {})
 GOLD_HIGH_VOL_WINDOWS = _get_config_value("gold_high_vol_windows") or []
+GOLD_HIGH_VOL_TH: float = float(_get_config_value("gold_high_vol_threshold") or 0.0)
 GOLD_LOW_VOL_TH: float = float(_get_config_value("gold_low_vol_threshold") or 0.0)
 SMT_PENALTY_VALUE: int = int(_get_config_value("smt_penalty_value") or 0)
 SMT_REQUIRED_BARS: int = int(_get_config_value("smt_required_bars") or 0)
