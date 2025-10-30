@@ -1601,10 +1601,18 @@ def _fetch_finnhub_spot(asset: str, *, preferred_symbol: Optional[str] = None) -
 
 
 def _maybe_use_secondary_spot(asset: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(payload, dict):
-        return payload
     if not asset:
         return payload
+
+    if not isinstance(payload, dict):
+        placeholder: Dict[str, Any] = {"ok": False}
+        if payload is None:
+            placeholder["error"] = "primary spot payload missing"
+        else:
+            placeholder["error"] = "primary spot payload invalid"
+            placeholder["primary_payload_type"] = type(payload).__name__
+        payload = placeholder
+
     if not _finnhub_available():
         return payload
 
@@ -2947,6 +2955,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
