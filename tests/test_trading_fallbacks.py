@@ -2,7 +2,7 @@ import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
 
 import pytest
 
@@ -270,3 +270,110 @@ def test_finnhub_fallback_handles_missing_primary_payload(monkeypatch: pytest.Mo
     assert updated["source"] == "finnhub:quote"
     assert updated["fallback_provider"] == "finnhub"
     assert updated["used_symbol"] == "OANDA: XAG_USD"
+
+
+def test_finnhub_series_fallback_replaces_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Trading, "_finnhub_available", lambda: True)
+    monkeypatch.setattr(Trading, "FINNHUB_API_KEY", "token")
+
+    fallback_payload = {
+        "ok": True,
+        "source": "finnhub:candle",
+        "raw": {
+            "values": [
+                {
+                    "datetime": "2024-01-01T10:00:00+00:00",
+                    "open": "24.100000",
+                    "high": "24.300000",
+                    "low": "24.050000",
+                    "close": "24.250000",
+                }
+            ]
+        },
+        "latest_utc": "2024-01-01T10:00:00+00:00",
+        "latency_seconds": 120.0,
+        "freshness_violation": False,
+        "retrieved_at_utc": "2024-01-01T10:02:00+00:00",
+        "used_symbol": "OANDA:XAG_USD",
+    }
+
+    def _fetch_series(asset: str, interval: str, **_kwargs: Any) -> Dict[str, Any]:
+        assert asset == "XAGUSD"
+        assert interval == "1min"
+        return dict(fallback_payload)
+
+    monkeypatch.setattr(Trading, "_fetch_finnhub_series", _fetch_series)
+
+    primary = {
+        "ok": False,
+        "error": "client_error_404",
+        "freshness_limit_seconds": 600.0,
+        "raw": {"values": []},
+    }
+
+    updated = Trading._maybe_use_secondary_series("XAGUSD", "1min", dict(primary), 600.0, outputsize=300)
+
+    assert updated["source"] == "finnhub:candle"
+    assert updated["fallback_provider"] == "finnhub"
+    assert updated["fallback_reason"] == "client_error_404"
+    assert updated["raw"]["values"]
+
+
+def test_finnhub_series_fallback_records_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Trading, "_finnhub_available", lambda: True)
+
+    def _fail_fetch(asset: str, interval: str, **_kwargs: Any) -> Dict[str, Any]:
+        return {"ok": False, "error": "no_data"}
+
+    monkeypatch.setattr(Trading, "_fetch_finnhub_series", _fail_fetch)
+
+    primary = {
+        "ok": False,
+        "freshness_limit_seconds": 600.0,
+        "raw": {"values": []},
+    }
+
+    updated = Trading._maybe_use_secondary_series("XAGUSD", "1min", dict(primary), 600.0, outputsize=300)
+
+    attempts = updated.get("fallback_attempts")
+    assert isinstance(attempts, list) and attempts
+    assert attempts[0]["provider"] == "finnhub"
+    assert attempts[0]["ok"] is False
+
+
+def test_finnhub_series_fallback_skips_when_not_improved(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Trading, "_finnhub_available", lambda: True)
+
+    fallback_payload = {
+        "ok": True,
+        "source": "finnhub:candle",
+        "raw": {
+            "values": [
+                {
+                    "datetime": "2024-01-01T10:05:00+00:00",
+                    "close": "24.200000",
+                }
+            ]
+        },
+        "latest_utc": "2024-01-01T10:05:00+00:00",
+        "latency_seconds": 900.0,
+        "freshness_violation": True,
+    }
+
+    def _slow_series(asset: str, interval: str, **_kwargs: Any) -> Dict[str, Any]:
+        return dict(fallback_payload)
+
+    monkeypatch.setattr(Trading, "_fetch_finnhub_series", _slow_series)
+
+    primary = {
+        "ok": True,
+        "source": "twelvedata:time_series",
+        "raw": {"values": [{"datetime": "2024-01-01T10:04:00+00:00"}]},
+        "latency_seconds": 720.0,
+        "freshness_violation": True,
+        "freshness_limit_seconds": 600.0,
+    }
+
+    updated = Trading._maybe_use_secondary_series("XAGUSD", "1min", dict(primary), 600.0, outputsize=300)
+
+    assert updated == primary
