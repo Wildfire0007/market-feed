@@ -51,7 +51,7 @@ class TDGetErrorTests(unittest.TestCase):
                     "symbol": "XAG/USD",
                     "name": "Silver / US Dollar",
                     "currency": "USD",
-                    "exchange": "PHYSICAL METAL",
+                    "exchange": "COMMODITY",
                 }
             ],
             "request_access_via_add_on": "us",
