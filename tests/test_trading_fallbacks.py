@@ -2,6 +2,7 @@ import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -242,3 +243,30 @@ def test_finnhub_fallback_records_failure(monkeypatch: pytest.MonkeyPatch) -> No
     attempt = updated["fallback_attempts"][0]
     assert attempt["provider"] == "finnhub"
     assert attempt["ok"] is False
+
+
+def test_finnhub_fallback_handles_missing_primary_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Trading, "_finnhub_available", lambda: True)
+
+    called: dict[str, Any] = {}
+
+    def _fake_fetch(asset: str, preferred_symbol: str | None = None) -> dict:
+        called["asset"] = asset
+        called["preferred_symbol"] = preferred_symbol
+        return {
+            "ok": True,
+            "source": "finnhub:quote",
+            "price": 24.5,
+            "price_usd": 24.5,
+            "latency_seconds": 30.0,
+            "used_symbol": "OANDA: XAG_USD",
+        }
+
+    monkeypatch.setattr(Trading, "_fetch_finnhub_spot", _fake_fetch)
+
+    updated = Trading._maybe_use_secondary_spot("XAGUSD", None)
+
+    assert called == {"asset": "XAGUSD", "preferred_symbol": None}
+    assert updated["source"] == "finnhub:quote"
+    assert updated["fallback_provider"] == "finnhub"
+    assert updated["used_symbol"] == "OANDA: XAG_USD"
