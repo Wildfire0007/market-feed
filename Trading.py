@@ -438,12 +438,20 @@ ASSETS = {
         "symbol": "XAG/USD",
         "name": "Silver / US Dollar",
         "asset_class": "Commodity",
-        "exchange": "PHYSICAL METAL",
-        "exchange_display": "Physical Metal",
+        "exchange": "COMMODITY",
+        "exchange_display": "Commodity",
+        "exchange_timezone": "Australia/Sydney",
+        "mic": "COMMODITY",
         "currency": "USD",
         "disable_compact_variants": True,
         "alt": [
+            {
+                "symbol": "XAG/USD",
+                "exchange": "COMMODITY",
+                "disable_compact_variants": True,
+            },
             {"symbol": "XAG/USD", "exchange": None, "disable_compact_variants": True},
+            {"symbol": "XAGUSD", "exchange": "COMMODITY", "disable_compact_variants": True},
             {"symbol": "XAGUSD", "exchange": None, "disable_compact_variants": True},
             {"symbol": "XAGUSD", "exchange": "FOREX", "disable_compact_variants": True},
             "XAG/USD:FOREX",
@@ -2955,6 +2963,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
