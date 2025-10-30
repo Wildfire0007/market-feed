@@ -1559,6 +1559,11 @@ def _resolve_finnhub_symbol(asset: str, preferred_symbol: Optional[str] = None) 
 
 
 def _fetch_finnhub_spot(asset: str, *, preferred_symbol: Optional[str] = None) -> Dict[str, Any]:
+    if not _finnhub_available():
+        if not FINNHUB_API_KEY:
+            return {"ok": False, "error": "FINNHUB_API_KEY not configured"}
+        return {"ok": False, "error": "finnhub fallback disabled"}
+
     symbol = _resolve_finnhub_symbol(asset, preferred_symbol)
     if not symbol:
         return {"ok": False, "error": "finnhub symbol mapping missing"}
@@ -3251,6 +3256,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
