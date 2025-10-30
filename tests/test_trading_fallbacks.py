@@ -272,6 +272,16 @@ def test_finnhub_fallback_handles_missing_primary_payload(monkeypatch: pytest.Mo
     assert updated["used_symbol"] == "OANDA: XAG_USD"
 
 
+def test_fetch_finnhub_spot_respects_disable_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Trading, "FINNHUB_API_KEY", "token")
+    monkeypatch.setattr(Trading, "_finnhub_available", lambda: False)
+
+    result = Trading._fetch_finnhub_spot("EURUSD")
+
+    assert result["ok"] is False
+    assert "disabled" in str(result.get("error"))
+
+
 def test_finnhub_series_fallback_replaces_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Trading, "_finnhub_available", lambda: True)
     monkeypatch.setattr(Trading, "FINNHUB_API_KEY", "token")
