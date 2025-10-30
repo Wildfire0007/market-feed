@@ -27,7 +27,7 @@ def test_default_profile_configuration(monkeypatch):
     profile = settings.describe_entry_threshold_profile()
     assert profile["name"] == "suppressed"
     assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(25.0)
-    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(22.0)
+    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(38.0)
     assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.95)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.85)
 
@@ -46,8 +46,10 @@ def test_baseline_profile_configuration(monkeypatch):
     assert profile["name"] == "baseline"
     assert profile["p_score_min"]["default"] == pytest.approx(60.0)
     assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(60.0)
+    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(65.0)
     assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(1.0)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(1.0)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(1.2)
 
 
 def test_relaxed_profile_override(monkeypatch):
@@ -57,7 +59,9 @@ def test_relaxed_profile_override(monkeypatch):
     profile = settings.describe_entry_threshold_profile()
     assert profile["name"] == "relaxed"
     assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(60.0)
+    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(62.0)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.9)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(1.1)
     # Non-overridden assets fall back to the profile defaults.
     assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(58.0)
 
