@@ -522,6 +522,17 @@ def _asset_market_closed_reason(
             return "outside_hours"
     return None
 
+
+def _market_closed_skip_reason(asset_key: str, cfg: Dict[str, Any]) -> Optional[str]:
+    """Return a market-closed reason when requests should be skipped."""
+
+    if not asset_key or not isinstance(cfg, dict):
+        return None
+    if not _is_us_equity_asset(cfg):
+        return None
+    now_dt = datetime.now(timezone.utc)
+    return _asset_market_closed_reason(asset_key, cfg, now_dt, now_dt)
+
 _BASE_REQUESTS_PER_ASSET = 1 + len(SERIES_FETCH_PLAN)
 _BASE_REQUESTS_TOTAL = len(ASSETS) * _BASE_REQUESTS_PER_ASSET
 _DEFAULT_HTTP_BUDGET = max(1, TD_REQUESTS_PER_MINUTE - _BASE_REQUESTS_TOTAL)
@@ -2700,34 +2711,98 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     attempts = _normalize_symbol_attempts(cfg)
     attempt_memory = AttemptMemory()
 
-    # 1) Spot (quote → 5m close fallback), több tickerrel
     spot_limit = _spot_freshness_limit(asset)
-    spot = fetch_with_freshness(
-        attempts,
-        lambda s, ex: td_spot_with_fallback(s, ex),
-        freshness_limit=spot_limit,
-        max_refreshes=1,
-        attempt_memory=attempt_memory,
-    )
-    if isinstance(spot, dict):
-        spot = _maybe_use_secondary_spot(asset, spot)
-        spot.setdefault("freshness_limit_seconds", spot_limit)
-    else:
-        spot = {"ok": False, "freshness_limit_seconds": spot_limit}
-    if isinstance(spot, dict):
-        spot = _reuse_previous_spot(adir, spot, spot_limit)
-    _write_spot_payload(adir, asset, spot)
+    skip_reason = _market_closed_skip_reason(asset, cfg)
+    series_payloads: Dict[str, Dict[str, Any]]
 
-    spot_violation = bool(spot.get("freshness_violation")) if isinstance(spot, dict) else False
-    force_reason: Optional[str] = None
-    if not spot.get("ok"):
-        force_reason = "spot_error"
-    elif spot_violation:
-        force_reason = "spot_stale"
-    elif spot.get("fallback_used") or spot.get("fallback_previous_payload"):
-        if not spot.get("market_closed_assumed"):
-            force_reason = "spot_fallback"
-    series_payloads = _collect_series_payloads(attempts, attempt_memory, adir)
+    if skip_reason:
+        LOGGER.info(
+            "Skipping Twelve Data fetches for %s: market closed (%s)",
+            asset,
+            skip_reason,
+        )
+        note = "market_closed_weekend" if skip_reason == "weekend" else "market_closed_outside_hours"
+        base_symbol: Optional[str] = attempts[0][0] if attempts else cfg.get("symbol")
+        base_exchange: Optional[str] = attempts[0][1] if attempts else cfg.get("exchange")
+        placeholder_spot: Dict[str, Any] = {
+            "ok": False,
+            "asset": asset,
+            "retrieved_at_utc": now_utc(),
+            "freshness_limit_seconds": spot_limit,
+            "freshness_violation": False,
+            "market_closed_assumed": True,
+            "market_closed_reason": skip_reason,
+            "freshness_note": note,
+            "error": f"market closed ({skip_reason})",
+        }
+        if base_symbol:
+            placeholder_spot["used_symbol"] = base_symbol
+        if base_exchange:
+            placeholder_spot["used_exchange"] = base_exchange
+        spot = _reuse_previous_spot(adir, placeholder_spot, spot_limit)
+        if not isinstance(spot, dict):
+            spot = dict(placeholder_spot)
+        else:
+            spot.setdefault("market_closed_assumed", True)
+            spot.setdefault("market_closed_reason", skip_reason)
+            spot.setdefault("freshness_note", note)
+            spot.setdefault("freshness_limit_seconds", spot_limit)
+        series_payloads = {}
+        for name, interval in SERIES_FETCH_PLAN:
+            freshness_limit = SERIES_FRESHNESS_LIMITS.get(interval)
+            placeholder_series: Dict[str, Any] = {
+                "ok": False,
+                "retrieved_at_utc": now_utc(),
+                "freshness_violation": False,
+                "market_closed_assumed": True,
+                "market_closed_reason": skip_reason,
+                "freshness_note": note,
+                "error": f"market closed ({skip_reason})",
+                "raw": {"values": []},
+            }
+            payload = _finalize_series_payload(
+                attempts,
+                adir,
+                name,
+                interval,
+                freshness_limit,
+                placeholder_series,
+                attempt_memory=attempt_memory,
+            )
+            if isinstance(payload, dict):
+                payload.setdefault("market_closed_assumed", True)
+                payload.setdefault("market_closed_reason", skip_reason)
+                payload.setdefault("freshness_note", note)
+            series_payloads[name] = payload
+        spot_violation = False
+        force_reason: Optional[str] = None
+    else:
+        spot = fetch_with_freshness(
+            attempts,
+            lambda s, ex: td_spot_with_fallback(s, ex),
+            freshness_limit=spot_limit,
+            max_refreshes=1,
+            attempt_memory=attempt_memory,
+        )
+        if isinstance(spot, dict):
+            spot = _maybe_use_secondary_spot(asset, spot)
+            spot.setdefault("freshness_limit_seconds", spot_limit)
+        else:
+            spot = {"ok": False, "freshness_limit_seconds": spot_limit}
+        if isinstance(spot, dict):
+            spot = _reuse_previous_spot(adir, spot, spot_limit)
+        spot_violation = bool(spot.get("freshness_violation")) if isinstance(spot, dict) else False
+        force_reason = None
+        if not spot.get("ok"):
+            force_reason = "spot_error"
+        elif spot_violation:
+            force_reason = "spot_stale"
+        elif spot.get("fallback_used") or spot.get("fallback_previous_payload"):
+            if not spot.get("market_closed_assumed"):
+                force_reason = "spot_fallback"
+        series_payloads = _collect_series_payloads(attempts, attempt_memory, adir)
+
+    _write_spot_payload(adir, asset, spot)
     k5 = series_payloads.get("klines_5m")
     if not isinstance(k5, dict):
         k5 = {
@@ -2872,6 +2947,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
