@@ -4739,7 +4739,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     except Exception:
         ofi_zscore = None
 
-   structure_notes: List[str] = []
+    structure_notes: List[str] = []
     structure_components: Dict[str, bool] = {"bos": False, "liquidity": False, "ofi": False}
 
     # 7) P-score — volatilitás-adaptív súlyozás
@@ -4798,7 +4798,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         else:
             reasons.append("1m BOS + 5m retest — várjuk a 5m megerősítést")
 
-     if not spread_gate_ok:
+    if not spread_gate_ok:
         reasons.append("Spread gate: aktuális spread meghaladja az ATR arány limitet")
 
     minute_now = _min_of_day(analysis_now.hour, analysis_now.minute)
@@ -6786,6 +6786,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
