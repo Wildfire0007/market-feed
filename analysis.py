@@ -105,6 +105,7 @@ from config.analysis_settings import (
     EMA_SLOPE_TH_DEFAULT,
     NEWS_MODE_SETTINGS,
     FX_TP_TARGETS,
+    GOLD_HIGH_VOL_TH,
     GOLD_HIGH_VOL_WINDOWS,
     GOLD_LOW_VOL_TH,
     INTERVENTION_WATCH_DEFAULT,
@@ -1645,10 +1646,12 @@ def derive_position_management_note(
 def atr_low_threshold(asset: str) -> float:
     h, m = now_utctime_hm()
     if asset == "GOLD_CFD":
+        high_vol_base = GOLD_HIGH_VOL_TH or ATR_LOW_TH_ASSET.get(asset) or ATR_LOW_TH_DEFAULT
+        low_vol_base = GOLD_LOW_VOL_TH or ATR_LOW_TH_ASSET.get(asset) or ATR_LOW_TH_DEFAULT
         if in_any_window_utc(GOLD_HIGH_VOL_WINDOWS, h, m):
-            base = ATR_LOW_TH_DEFAULT
+            base = high_vol_base
         else:
-            base = GOLD_LOW_VOL_TH
+            base = low_vol_base
     else:
         base = ATR_LOW_TH_ASSET.get(asset, ATR_LOW_TH_DEFAULT)
     multiplier = get_atr_threshold_multiplier(asset)
@@ -3497,6 +3500,14 @@ def compute_dynamic_tp_profile(
     tp2_mom = TP2_R_MOMENTUM
     rr_mom = MOMENTUM_RR_MIN.get(asset, MOMENTUM_RR_MIN["default"])
 
+    if asset == "GOLD_CFD":
+        tp1_core = max(tp1_core, 2.2)
+        tp2_core = max(tp2_core, 3.6)
+        rr_core = max(rr_core, 2.1)
+        tp1_mom = max(tp1_mom, 1.9)
+        tp2_mom = max(tp2_mom, 3.0)
+        rr_mom = max(rr_mom, 1.75)
+
     if current <= perc20:
         regime = "low_vol"
         tp1_core = max(1.2, TP1_R * 0.8)
@@ -3507,12 +3518,19 @@ def compute_dynamic_tp_profile(
         rr_mom = max(1.3, rr_mom * 0.85)
     elif current >= perc80:
         regime = "high_vol"
-        tp1_core = TP1_R * 1.15
-        tp2_core = TP2_R * 1.2
-        rr_core = rr_core * 1.05
-        tp1_mom = TP1_R_MOMENTUM * 1.1
-        tp2_mom = TP2_R_MOMENTUM * 1.15
-        rr_mom = rr_mom * 1.05
+        tp1_core = max(tp1_core, TP1_R * 1.15)
+        tp2_core = max(tp2_core, TP2_R * 1.2)
+        rr_core = max(rr_core, rr_core * 1.05)
+        tp1_mom = max(tp1_mom, TP1_R_MOMENTUM * 1.1)
+        tp2_mom = max(tp2_mom, TP2_R_MOMENTUM * 1.15)
+        rr_mom = max(rr_mom, rr_mom * 1.05)
+        if asset == "GOLD_CFD":
+            tp1_core = max(tp1_core, 2.4)
+            tp2_core = max(tp2_core, 3.8)
+            rr_core = max(rr_core, 2.25)
+            tp1_mom = max(tp1_mom, 2.0)
+            tp2_mom = max(tp2_mom, 3.2)
+            rr_mom = max(rr_mom, 1.9)
 
     if np.isfinite(rel_atr) and price:
         if rel_atr < ATR_LOW_TH_ASSET.get(asset, ATR_LOW_TH_DEFAULT) * 0.8:
@@ -5146,8 +5164,33 @@ def analyze(asset: str) -> Dict[str, Any]:
         if asset == "NVDA":
             bos_signal = bos_signal or nvda_cross_short
         structure_components["bos"] = bos_signal and not recent_break_long
+
+    if asset == "GOLD_CFD" and effective_bias in {"long", "short"}:
+        vwap_distance = safe_float(vwap_confluence.get("distance")) if isinstance(vwap_confluence, dict) else None
+        price_above_vwap = vwap_distance is not None and vwap_distance >= 0
+        price_below_vwap = vwap_distance is not None and vwap_distance <= 0
+        if effective_bias == "long":
+            higher_timeframe_break = bool(bos1h_long or (bos5m_long and micro_bos_long))
+            structure_components["bos"] = higher_timeframe_break and price_above_vwap and not recent_break_short
+            if higher_timeframe_break and price_above_vwap:
+                structure_notes.append("H1 kitörés + VWAP felett — GOLD long konfluencia")
+            elif higher_timeframe_break and not price_above_vwap:
+                structure_notes.append("VWAP alatt — GOLD long breakout késleltetve")
+        elif effective_bias == "short":
+            higher_timeframe_break = bool(bos1h_short or (bos5m_short and micro_bos_short))
+            structure_components["bos"] = higher_timeframe_break and price_below_vwap and not recent_break_long
+            if higher_timeframe_break and price_below_vwap:
+                structure_notes.append("H1 letörés + VWAP alatt — GOLD short konfluencia")
+            elif higher_timeframe_break and not price_below_vwap:
+                structure_notes.append("VWAP felett — GOLD short breakout várakozik")
+        if effective_bias == "long" and price_above_vwap:
+            structure_components["liquidity"] = True
+        if effective_bias == "short" and price_below_vwap:
+            structure_components["liquidity"] = True
+
     structure_components["liquidity"] = bool(
-        liquidity_ok
+        structure_components["liquidity"]
+        or liquidity_ok
         or liquidity_ok_base
         or vwap_confluence.get("trend_pullback")
         or vwap_confluence.get("mean_revert")
@@ -5227,6 +5270,26 @@ def analyze(asset: str) -> Dict[str, Any]:
                 funding_reason = f"Funding {funding_value:.3f} → pozícióméret skálázás"
     if funding_reason:
         structure_notes.append(funding_reason)
+
+    if asset == "GOLD_CFD":
+        gold_atr_ratio: Optional[float] = None
+        if atr_threshold and atr_threshold > 0 and not np.isnan(rel_atr):
+            try:
+                gold_atr_ratio = float(rel_atr) / float(atr_threshold)
+            except Exception:
+                gold_atr_ratio = None
+        if gold_atr_ratio is not None:
+            if gold_atr_ratio >= 1.8:
+                position_size_scale = min(position_size_scale, 0.45)
+            elif gold_atr_ratio >= 1.4:
+                position_size_scale = min(position_size_scale, 0.55)
+            elif gold_atr_ratio >= 1.1:
+                position_size_scale = min(position_size_scale, 0.7)
+            else:
+                position_size_scale = min(position_size_scale, 0.85)
+        else:
+            position_size_scale = min(position_size_scale, 0.8)
+        entry_thresholds_meta["gold_atr_ratio"] = gold_atr_ratio
 
     for note in structure_notes:
         if note not in reasons:
@@ -5436,6 +5499,35 @@ def analyze(asset: str) -> Dict[str, Any]:
             tp2 = entry - tp2_mult * risk
             tp1_dist = entry - tp1
             ok_math = (tp2 <= tp1 < entry < sl)
+
+        if asset == "GOLD_CFD" and atr5_val > 0:
+            desired_min = 2.0 * atr5_val
+            desired_max = (3.0 if strong_momentum else 2.4) * atr5_val
+            target_risk = risk
+            if risk < desired_min:
+                target_risk = desired_min
+            elif risk > desired_max:
+                target_risk = desired_max
+            if not np.isclose(target_risk, risk):
+                if decision_side == "buy":
+                    sl = entry - target_risk
+                    risk = entry - sl
+                    tp1 = entry + tp1_mult * risk
+                    tp2 = entry + tp2_mult * risk
+                    tp1_dist = tp1 - entry
+                    ok_math = (sl < entry < tp1 <= tp2)
+                else:
+                    sl = entry + target_risk
+                    risk = sl - entry
+                    tp1 = entry - tp1_mult * risk
+                    tp2 = entry - tp2_mult * risk
+                    tp1_dist = entry - tp1
+                    ok_math = (tp2 <= tp1 < entry < sl)
+                if atr5_val > 0:
+                    risk_ratio = target_risk / atr5_val
+                    adjust_note = f"GOLD stop lazítás: ATR alapú kockázat ×{risk_ratio:.2f}"
+                    if adjust_note not in reasons:
+                        reasons.append(adjust_note)
 
         risk_min = max(
             MIN_RISK_ABS.get(asset, MIN_RISK_ABS["default"]),
@@ -6787,6 +6879,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
