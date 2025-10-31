@@ -448,6 +448,16 @@ ASSETS = {
         "alt": [
             {
                 "symbol": "XAG/USD",
+                "exchange": "PHYSICAL METAL",
+                "disable_compact_variants": True,
+            },
+            {
+                "symbol": "XAGUSD",
+                "exchange": "PHYSICAL METAL",
+                "disable_compact_variants": True,
+            },
+            {
+                "symbol": "XAG/USD",
                 "exchange": "COMMODITY",
                 "disable_compact_variants": True,
             },
@@ -3267,6 +3277,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
