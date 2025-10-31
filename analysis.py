@@ -3128,28 +3128,30 @@ def compute_precision_entry(
     factors: List[str] = []
 
     imb = order_flow_metrics.get("imbalance")
-    flow_conditions: List[bool] = []
+    flow_signal_count = 0
     flow_strength = 0.0
     flow_reasons: List[str] = []
+    flow_blockers: List[str] = []    
     if imb is not None:
         if direction == "buy" and imb > ORDER_FLOW_IMBALANCE_TH:
             score += 12.0
             flow_strength += min(1.0, float(imb) / ORDER_FLOW_IMBALANCE_TH)
             factors.append(f"order flow imbalance +{imb:.2f}")
             flow_reasons.append(f"imbalance {imb:.2f}")
-            flow_conditions.append(
-                imb >= ORDER_FLOW_IMBALANCE_TH * PRECISION_FLOW_IMBALANCE_MARGIN
-            )
+            if imb >= ORDER_FLOW_IMBALANCE_TH * PRECISION_FLOW_IMBALANCE_MARGIN:
+                flow_signal_count += 1
         elif direction == "sell" and imb < -ORDER_FLOW_IMBALANCE_TH:
             score += 12.0
             flow_strength += min(1.0, abs(float(imb)) / ORDER_FLOW_IMBALANCE_TH)
             factors.append(f"order flow imbalance {imb:.2f}")
             flow_reasons.append(f"imbalance {imb:.2f}")
-            flow_conditions.append(
-                imb <= -ORDER_FLOW_IMBALANCE_TH * PRECISION_FLOW_IMBALANCE_MARGIN
-            )
+            if imb <= -ORDER_FLOW_IMBALANCE_TH * PRECISION_FLOW_IMBALANCE_MARGIN:
+                flow_signal_count += 1
         else:
-            flow_conditions.append(False)
+            if direction == "buy" and imb <= -ORDER_FLOW_IMBALANCE_TH * PRECISION_FLOW_IMBALANCE_MARGIN:
+                flow_blockers.append(f"imbalance {imb:.2f}")
+            elif direction == "sell" and imb >= ORDER_FLOW_IMBALANCE_TH * PRECISION_FLOW_IMBALANCE_MARGIN:
+                flow_blockers.append(f"imbalance {imb:.2f}")
 
     pressure = order_flow_metrics.get("pressure")
     if pressure is not None:
@@ -3158,19 +3160,20 @@ def compute_precision_entry(
             flow_strength += min(1.0, float(pressure) / ORDER_FLOW_PRESSURE_TH)
             factors.append(f"order flow pressure +{pressure:.2f}")
             flow_reasons.append(f"pressure {pressure:.2f}")
-            flow_conditions.append(
-                pressure >= ORDER_FLOW_PRESSURE_TH * PRECISION_FLOW_PRESSURE_MARGIN
-            )
+            if pressure >= ORDER_FLOW_PRESSURE_TH * PRECISION_FLOW_PRESSURE_MARGIN:
+                flow_signal_count += 1
         elif direction == "sell" and pressure < -ORDER_FLOW_PRESSURE_TH:
             score += 10.0
             flow_strength += min(1.0, abs(float(pressure)) / ORDER_FLOW_PRESSURE_TH)
             factors.append(f"order flow pressure {pressure:.2f}")
             flow_reasons.append(f"pressure {pressure:.2f}")
-            flow_conditions.append(
-                pressure <= -ORDER_FLOW_PRESSURE_TH * PRECISION_FLOW_PRESSURE_MARGIN
-            )
+            if pressure <= -ORDER_FLOW_PRESSURE_TH * PRECISION_FLOW_PRESSURE_MARGIN:
+                flow_signal_count += 1
         else:
-            flow_conditions.append(False)
+            if direction == "buy" and pressure <= -ORDER_FLOW_PRESSURE_TH * PRECISION_FLOW_PRESSURE_MARGIN:
+                flow_blockers.append(f"pressure {pressure:.2f}")
+            elif direction == "sell" and pressure >= ORDER_FLOW_PRESSURE_TH * PRECISION_FLOW_PRESSURE_MARGIN:
+                flow_blockers.append(f"pressure {pressure:.2f}")
 
     delta_volume = order_flow_metrics.get("delta_volume")
     if delta_volume is not None:
@@ -3179,20 +3182,26 @@ def compute_precision_entry(
             if direction == "buy" and dv > 0:
                 flow_strength += min(0.5, abs(dv))
                 flow_reasons.append(f"delta +{dv:.1f}")
-                flow_conditions.append(True)
+                flow_signal_count += 1
             elif direction == "sell" and dv < 0:
                 flow_strength += min(0.5, abs(dv))
                 flow_reasons.append(f"delta {dv:.1f}")
-                flow_conditions.append(True)
+                flow_signal_count += 1
+            elif direction == "buy" and dv < 0:
+                flow_blockers.append(f"delta {dv:.1f}")
+            elif direction == "sell" and dv > 0:
+                flow_blockers.append(f"delta +{dv:.1f}")
         except (TypeError, ValueError):
             pass
 
-    flow_ready = bool(flow_conditions) and all(flow_conditions)
-    if flow_conditions:
+    flow_ready = flow_signal_count > 0 and not flow_blockers
+    if flow_signal_count:
         plan["order_flow_strength"] = round(
-            min(2.0, flow_strength / max(len(flow_conditions), 1)), 2
+            min(2.0, flow_strength / max(flow_signal_count, 1)), 2
         )
     plan["order_flow_ready"] = flow_ready
+    if flow_blockers:
+        plan["order_flow_blockers"] = flow_blockers
     if flow_reasons:
         plan["trigger_reasons"].extend(flow_reasons)
 
@@ -7773,6 +7782,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
