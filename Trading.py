@@ -388,6 +388,7 @@ ASSETS = {
         "symbol": "BTC/USD",
         "name": "Bitcoin / US Dollar (Coinbase Pro)",
         "asset_class": "Crypto",
+        "trading_schedule": "24/7",
         "exchange": "Coinbase Pro",
         "exchange_display": "Coinbase Pro",
         "currency": "USD",
@@ -514,12 +515,22 @@ def _is_us_equity_asset(cfg: Dict[str, Any]) -> bool:
     return any(tag in exchange for tag in ("NASDAQ", "NYSE", "ARCA", "BATS"))
 
 
+def _is_continuous_trading_asset(cfg: Dict[str, Any]) -> bool:
+    trading_schedule = str(cfg.get("trading_schedule") or "").strip().lower()
+    if trading_schedule in {"24/7", "247", "continuous"}:
+        return True
+    asset_class = str(cfg.get("asset_class") or "").strip().lower()
+    return asset_class == "crypto"
+
+
 def _asset_market_closed_reason(
     asset_key: Optional[str],
     cfg: Optional[Dict[str, Any]],
     latest_dt: datetime,
     now_dt: datetime,
 ) -> Optional[str]:
+    if cfg and _is_continuous_trading_asset(cfg):
+        return None
     if now_dt.weekday() >= 5 or latest_dt.weekday() >= 5:
         return "weekend"
     if not cfg:
@@ -3256,6 +3267,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
