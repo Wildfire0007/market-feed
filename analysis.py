@@ -198,6 +198,18 @@ FIB_TOL = 0.02
 # --- Kereskedési/egz. küszöbök (RR/TP) ---
 MIN_R_CORE      = 2.0
 MIN_R_MOMENTUM  = 1.6
+
+# --- EURUSD-specifikus volatilitási paraméterek ----------------------------
+EURUSD_PIP = 0.0001
+EURUSD_ATR_PIPS_TARGET = 16.0
+EURUSD_ATR_PIPS_LOW = 14.0
+EURUSD_ATR_PIPS_HIGH = 20.0
+EURUSD_ATR_REF = EURUSD_ATR_PIPS_TARGET * EURUSD_PIP
+EURUSD_P_SCORE_LOW_VOL_ADD = 6.0
+EURUSD_P_SCORE_MOMENTUM_ADD = 2.0
+EURUSD_ATR_POSITION_MULT = 1.25
+EURUSD_POSITION_SCALE_MIN = 0.4
+EURUSD_POSITION_SCALE_MAX = 1.3
 TP1_R   = 2.0
 TP2_R   = 3.0
 TP1_R_MOMENTUM = 1.5
@@ -5131,6 +5143,32 @@ def analyze(asset: str) -> Dict[str, Any]:
     )
     entry_thresholds_meta["vwap_confluence"] = vwap_confluence
 
+    eurusd_overrides: Dict[str, Any] = {}
+    eurusd_price_above_vwap = False
+    eurusd_price_below_vwap = False
+    eurusd_vwap_break_long = False
+    eurusd_vwap_break_short = False
+    if asset == "EURUSD":
+        eurusd_overrides = entry_thresholds_meta.setdefault("eurusd_overrides", {})
+        vwap_distance_val = (
+            safe_float(vwap_confluence.get("distance"))
+            if isinstance(vwap_confluence, dict)
+            else None
+        )
+        eurusd_price_above_vwap = vwap_distance_val is not None and vwap_distance_val >= 0
+        eurusd_price_below_vwap = vwap_distance_val is not None and vwap_distance_val <= 0
+        bos_alignment_long = bool(bos1h_long or bos5m_long or micro_bos_long)
+        bos_alignment_short = bool(bos1h_short or bos5m_short or micro_bos_short)
+        eurusd_vwap_break_long = bool(eurusd_price_above_vwap and bos_alignment_long)
+        eurusd_vwap_break_short = bool(eurusd_price_below_vwap and bos_alignment_short)
+        eurusd_overrides["vwap_alignment"] = {
+            "distance": vwap_distance_val,
+            "above": eurusd_price_above_vwap,
+            "below": eurusd_price_below_vwap,
+            "bos_long": bos_alignment_long,
+            "bos_short": bos_alignment_short,
+        }
+
     if asset in {"EURUSD", "BTCUSD"}:
         liquidity_ok_base = bool(fib_ok)
     elif asset == "NVDA":
@@ -5189,7 +5227,36 @@ def analyze(asset: str) -> Dict[str, Any]:
             bos_signal = bos_signal or nvda_cross_short
         structure_components["bos"] = bos_signal and not recent_break_long
 
-    if asset == "GOLD_CFD" and effective_bias in {"long", "short"}:
+    if asset == "EURUSD" and effective_bias in {"long", "short"}:
+        if effective_bias == "long":
+            higher_timeframe_break = bool(bos1h_long or bos5m_long)
+            structure_components["bos"] = (
+                eurusd_vwap_break_long and higher_timeframe_break and not recent_break_short
+            )
+            if structure_components["bos"]:
+                structure_notes.append("EURUSD BOS + VWAP felett — trend folytatás megerősítve")
+            elif higher_timeframe_break and not eurusd_price_above_vwap:
+                structure_notes.append("EURUSD BOS aktív, de VWAP alatt — türelem")
+            if eurusd_price_above_vwap or vwap_confluence.get("trend_pullback"):
+                structure_components["liquidity"] = True
+        elif effective_bias == "short":
+            higher_timeframe_break = bool(bos1h_short or bos5m_short)
+            structure_components["bos"] = (
+                eurusd_vwap_break_short and higher_timeframe_break and not recent_break_long
+            )
+            if structure_components["bos"]:
+                structure_notes.append("EURUSD BOS + VWAP alatt — bearish folytatás megerősítve")
+            elif higher_timeframe_break and not eurusd_price_below_vwap:
+                structure_notes.append("EURUSD BOS aktív, de VWAP felett — várakozás")
+            if eurusd_price_below_vwap or vwap_confluence.get("trend_pullback"):
+                structure_components["liquidity"] = True
+        if ofi_zscore is not None and structure_components["bos"]:
+            if effective_bias == "long" and ofi_zscore >= OFI_Z_TRIGGER:
+                structure_notes.append("OFI long irányt támogatja — EURUSD konfluencia")
+            elif effective_bias == "short" and ofi_zscore <= -OFI_Z_TRIGGER:
+                structure_notes.append("OFI short irányt támogatja — EURUSD konfluencia")
+
+    elif asset == "GOLD_CFD" and effective_bias in {"long", "short"}:
         vwap_distance = safe_float(vwap_confluence.get("distance")) if isinstance(vwap_confluence, dict) else None
         price_above_vwap = vwap_distance is not None and vwap_distance >= 0
         price_below_vwap = vwap_distance is not None and vwap_distance <= 0
@@ -5284,6 +5351,30 @@ def analyze(asset: str) -> Dict[str, Any]:
     p_score_min_base = get_p_score_min(asset)
     p_score_min_local = p_score_min_base
     entry_thresholds_meta["p_score_min_base"] = p_score_min_base
+    eurusd_p_score_meta: Dict[str, Any] = {}
+    if asset == "EURUSD":
+        atr1h_pips = None
+        if atr1h is not None and atr1h > 0:
+            atr1h_pips = float(atr1h) / EURUSD_PIP
+            eurusd_overrides.setdefault("atr1h_pips", atr1h_pips)
+        if atr1h_pips is not None and atr1h_pips < EURUSD_ATR_PIPS_LOW:
+            p_score_min_local += EURUSD_P_SCORE_LOW_VOL_ADD
+            eurusd_p_score_meta["low_vol_add"] = EURUSD_P_SCORE_LOW_VOL_ADD
+            reasons.append(
+                "EURUSD: ATR(1h) alacsony — P-score küszöb +6 pontra emelve"
+            )
+        if (
+            atr1h_pips is not None
+            and atr1h_pips >= EURUSD_ATR_PIPS_HIGH
+            and strong_momentum
+        ):
+            p_score_min_local += EURUSD_P_SCORE_MOMENTUM_ADD
+            eurusd_p_score_meta["momentum_add"] = EURUSD_P_SCORE_MOMENTUM_ADD
+            reasons.append(
+                "EURUSD: Momentum override aktív — extra P-score követelmény (+2)"
+            )
+        if eurusd_p_score_meta:
+            eurusd_overrides["p_score_adjustments"] = eurusd_p_score_meta
     if asset == "BTCUSD" and intervention_band in {"HIGH", "EXTREME"} and effective_bias == "long":
         p_score_min_local += INTERVENTION_P_SCORE_ADD
         note = (
@@ -5321,6 +5412,36 @@ def analyze(asset: str) -> Dict[str, Any]:
                 "timeout": ADX_RANGE_TIME_STOP,
                 "breakeven_trigger": ADX_RANGE_BE_TRIGGER,
             }
+    if asset == "EURUSD" and atr1h is not None and atr1h > 0:
+        atr1h_pips = float(atr1h) / EURUSD_PIP
+        eurusd_overrides.setdefault("atr1h_pips", atr1h_pips)
+        eurusd_rr_bias: Optional[str] = None
+        core_profile = dynamic_tp_profile.setdefault("core", {})
+        mom_profile = dynamic_tp_profile.setdefault("momentum", {})
+        if atr1h_pips >= EURUSD_ATR_PIPS_HIGH:
+            eurusd_rr_bias = "high_vol"
+            core_rr_min = max(core_rr_min, 2.0)
+            momentum_rr_min = max(momentum_rr_min, 1.6)
+            core_profile["tp1"] = float(max(core_profile.get("tp1", TP1_R), 1.6))
+            core_profile["tp2"] = float(max(core_profile.get("tp2", TP2_R), 2.4))
+            mom_profile["tp1"] = float(max(mom_profile.get("tp1", TP1_R_MOMENTUM), 1.4))
+            mom_profile["tp2"] = float(max(mom_profile.get("tp2", TP2_R_MOMENTUM), 2.0))
+            reasons.append("EURUSD: Magas volatilitás → RR célok 1:2 környékére szélesítve")
+        elif atr1h_pips <= EURUSD_ATR_PIPS_LOW:
+            eurusd_rr_bias = "low_vol"
+            core_rr_min = max(core_rr_min, 1.75)
+            momentum_rr_min = max(momentum_rr_min, 1.45)
+            core_profile["tp1"] = float(max(core_profile.get("tp1", TP1_R), 1.3))
+            core_profile["tp2"] = float(max(core_profile.get("tp2", TP2_R), 1.9))
+            mom_profile["tp1"] = float(max(mom_profile.get("tp1", TP1_R_MOMENTUM), 1.1))
+            mom_profile["tp2"] = float(max(mom_profile.get("tp2", TP2_R_MOMENTUM), 1.6))
+            reasons.append("EURUSD: Visszafogott ATR — célok szűkítve, kockázat kontroll alatt")
+        if eurusd_rr_bias:
+            eurusd_overrides["rr_bias"] = {
+                "mode": eurusd_rr_bias,
+                "atr1h_pips": atr1h_pips,
+            }
+
     entry_thresholds_meta["adx_regime"] = adx_regime
 
     funding_rules = FUNDING_RATE_RULES.get(asset, {})
@@ -5375,6 +5496,39 @@ def analyze(asset: str) -> Dict[str, Any]:
         else:
             position_size_scale = min(position_size_scale, 0.75)
         entry_thresholds_meta["btc_position_scale"] = position_size_scale
+
+    if asset == "EURUSD":
+        atr_for_position: Optional[float] = None
+        if atr1h is not None and atr1h > 0:
+            atr_for_position = float(atr1h)
+        elif atr5 is not None:
+            try:
+                atr_candidate = float(atr5)
+            except Exception:
+                atr_candidate = 0.0
+            if atr_candidate > 0:
+                atr_for_position = atr_candidate * 12.0  # durva 5m→1h fel-skálázás
+        if atr_for_position is not None and atr_for_position > 0:
+            raw_scale = EURUSD_ATR_REF / atr_for_position
+            if raw_scale >= 1.0:
+                scale_target = 1.0
+            else:
+                scale_target = max(
+                    EURUSD_POSITION_SCALE_MIN, raw_scale / EURUSD_ATR_POSITION_MULT
+                )
+            eurusd_overrides.setdefault("position_scale", {})
+            eurusd_overrides["position_scale"] = {
+                "atr_basis": atr_for_position,
+                "raw_scale": raw_scale,
+                "applied": scale_target,
+            }
+            if scale_target < position_size_scale:
+                position_size_scale = scale_target
+                msg = (
+                    f"EURUSD: ATR-alapú pozícióskálázás ×{scale_target:.2f} — volatilitás kontroll"
+                )
+                if msg not in reasons:
+                    reasons.append(msg)
 
     for note in structure_notes:
         if note not in reasons:
@@ -7026,6 +7180,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
