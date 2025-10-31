@@ -34,3 +34,12 @@ def test_normalize_symbol_attempts_respects_alt_symbols() -> None:
     assert ("XYZ/DEF", "TEST") in attempts
     assert ("ABCDEF", "ALT") in attempts
     assert ("QQQ", "TEST") in attempts
+
+
+def test_xagusd_attempts_cover_physical_metal_exchange() -> None:
+    cfg = Trading.ASSETS["XAGUSD"]
+
+    attempts = Trading._normalize_symbol_attempts(cfg)
+
+    assert ("XAG/USD", "PHYSICAL METAL") in attempts
+    assert ("XAGUSD", "PHYSICAL METAL") in attempts
