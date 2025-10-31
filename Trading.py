@@ -436,6 +436,8 @@ ASSETS = {
         ],
     },
     "XAGUSD": {
+        # Lásd: https://twelvedata.com/symbols (Metals) – csak az "XAG/USD" és az
+        # exchange nélküli "XAGUSD" tickerek szerepelnek támogatottként.
         "symbol": "XAG/USD",
         "name": "Silver / US Dollar",
         "asset_class": "Commodity",
@@ -457,15 +459,33 @@ ASSETS = {
                 "disable_compact_variants": True,
             },
             {
-                "symbol": "XAG/USD",
+                "symbol": "XAGUSD",
                 "exchange": "COMMODITY",
                 "disable_compact_variants": True,
             },
-            {"symbol": "XAG/USD", "exchange": None, "disable_compact_variants": True},
-            {"symbol": "XAGUSD", "exchange": "COMMODITY", "disable_compact_variants": True},
             {"symbol": "XAGUSD", "exchange": None, "disable_compact_variants": True},
-            {"symbol": "XAGUSD", "exchange": "FOREX", "disable_compact_variants": True},
-            "XAG/USD:FOREX",
+            {
+                "symbol": "XAG/USD",
+                "exchange": None,
+                "disable_compact_variants": True,
+            },
+            {
+                "symbol": "XAGUSD",
+                "exchange": "FOREX",
+                "disable_compact_variants": True,
+                "skip": True,
+                "note": "Twelve Data rejects the FOREX routed variant with HTTP 400.",
+            },
+            {
+                "symbol": "XAG/USD:FOREX",
+                "skip": True,
+                "note": "Colon-form FOREX suffix is not part of the documented metals universe.",
+            },
+            {
+                "symbol": "XAGUSD/CMX",
+                "skip": True,
+                "note": "Comex-style ticker is not recognised by Twelve Data.",
+            },
         ],
     },
 }
@@ -612,6 +632,37 @@ REALTIME_BACKGROUND_THREADS: List[threading.Thread] = []
 # ───────────────────────────── Attempt memory ─────────────────────────────
 
 
+_GLOBAL_SYMBOL_FAILURES: Dict[Tuple[str, Optional[str]], str] = {}
+_GLOBAL_SYMBOL_FAILURE_LOCK = threading.Lock()
+
+
+def _normalize_failure_reason(reason: str) -> str:
+    return " ".join(str(reason).split())
+
+
+def _remember_global_symbol_failure(
+    symbol: str, exchange: Optional[str], reason: str
+) -> None:
+    key = (symbol, exchange)
+    normalized = _normalize_failure_reason(reason)
+    with _GLOBAL_SYMBOL_FAILURE_LOCK:
+        existing = _GLOBAL_SYMBOL_FAILURES.get(key)
+        if existing is None:
+            _GLOBAL_SYMBOL_FAILURES[key] = normalized
+        elif normalized and normalized not in existing:
+            _GLOBAL_SYMBOL_FAILURES[key] = normalized
+
+
+def _global_symbol_failure_reason(symbol: str, exchange: Optional[str]) -> Optional[str]:
+    with _GLOBAL_SYMBOL_FAILURE_LOCK:
+        return _GLOBAL_SYMBOL_FAILURES.get((symbol, exchange))
+
+
+def _reset_global_symbol_failure_cache() -> None:
+    with _GLOBAL_SYMBOL_FAILURE_LOCK:
+        _GLOBAL_SYMBOL_FAILURES.clear()
+
+
 class AttemptMemory:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -625,7 +676,7 @@ class AttemptMemory:
         reason: str,
     ) -> None:
         key = (symbol, exchange)
-        normalized_reason = " ".join(str(reason).split())
+        normalized_reason = _normalize_failure_reason(reason)
         with self._lock:
             if key not in self._hard_failures:
                 self._hard_failures[key] = normalized_reason
@@ -635,13 +686,19 @@ class AttemptMemory:
                 if normalized_reason and normalized_reason not in existing:
                     self._hard_failures[key] = normalized_reason
             self._skip_logged.discard(key)
+        _remember_global_symbol_failure(symbol, exchange, normalized_reason)
 
     def should_skip(self, symbol: str, exchange: Optional[str]) -> Tuple[bool, Optional[str], bool]:
         key = (symbol, exchange)
         with self._lock:
             reason = self._hard_failures.get(key)
             if reason is None:
-                return False, None, False
+                global_reason = _global_symbol_failure_reason(symbol, exchange)
+                if global_reason is not None:
+                    self._hard_failures[key] = global_reason
+                    reason = global_reason
+                else:
+                    return False, None, False
             first_skip = key not in self._skip_logged
             if first_skip:
                 self._skip_logged.add(key)
@@ -2709,14 +2766,21 @@ def _normalize_symbol_attempts(cfg: Dict[str, Any]) -> List[Tuple[str, Optional[
     allow_compact = not bool(cfg.get("disable_compact_variants"))
     allow_exchange = not bool(cfg.get("disable_exchange_fallbacks"))
 
+    skipped_variants: List[Tuple[str, Optional[str], Optional[str]]] = []
+
     def push(
         symbol: Optional[str],
         exchange: Optional[str],
         *,
         allow_compact_override: Optional[bool] = None,
         allow_exchange_override: Optional[bool] = None,
+        skip: bool = False,
+        note: Optional[str] = None,
     ) -> None:
         if not symbol:
+            return
+        if skip:
+            skipped_variants.append((symbol, exchange, note))
             return
         compact_allowed = (
             allow_compact if allow_compact_override is None else allow_compact_override
@@ -2751,6 +2815,8 @@ def _normalize_symbol_attempts(cfg: Dict[str, Any]) -> List[Tuple[str, Optional[
                 allow_exchange_override=None
                 if alt.get("disable_exchange_fallbacks") is None
                 else not bool(alt.get("disable_exchange_fallbacks")),
+                skip=bool(alt.get("skip")),
+                note=str(alt.get("note")) if alt.get("note") is not None else None,
             )
         elif isinstance(alt, (list, tuple)) and alt:
             symbol = alt[0]
@@ -2765,6 +2831,22 @@ def _normalize_symbol_attempts(cfg: Dict[str, Any]) -> List[Tuple[str, Optional[
             continue
         seen.add(key)
         unique.append((sym, exch))
+
+    if skipped_variants and LOGGER.isEnabledFor(logging.DEBUG):
+        for sym, exch, note in skipped_variants:
+            if note:
+                LOGGER.debug(
+                    "Skipping configured symbol variant %s (exchange=%s): %s",
+                    sym,
+                    exch or "default",
+                    note,
+                )
+            else:
+                LOGGER.debug(
+                    "Skipping configured symbol variant %s (exchange=%s)",
+                    sym,
+                    exch or "default",
+                )
     return unique
 
 
@@ -3277,6 +3359,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
