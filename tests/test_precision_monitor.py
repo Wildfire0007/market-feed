@@ -102,3 +102,43 @@ def test_precision_monitor_generates_reports(tmp_path):
     assert asset_totals["BTCUSD"]["precision_flow_alignment"] == 1
     assert asset_totals["BTCUSD"]["precision_trigger_sync"] == 1
     assert asset_totals["GOLD_CFD"]["precision_score"] == 1
+
+
+def test_precision_monitor_filters_inactive_assets(tmp_path):
+    rows = [
+        {
+            "journal_id": "10",
+            "asset": "EURUSD",
+            "analysis_timestamp": "2025-01-01T10:00:00Z",
+            "signal": "no entry",
+            "notes": "missing: precision_score>=65",
+        },
+        {
+            "journal_id": "20",
+            "asset": "USDJPY",
+            "analysis_timestamp": "2025-01-01T10:05:00Z",
+            "signal": "no entry",
+            "notes": "missing: precision_score>=65",
+        },
+    ]
+    journal_path = tmp_path / "journal.csv"
+    pd.DataFrame(rows).to_csv(journal_path, index=False)
+
+    monitor_dir = tmp_path / "monitor"
+    summary_path = update_precision_gate_report(
+        journal_path=journal_path,
+        monitor_dir=monitor_dir,
+        lookback_days=7,
+        now=datetime(2025, 1, 2, 12, tzinfo=timezone.utc),
+    )
+
+    assert summary_path is not None
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+
+    assert payload["total"]["total_signals"] == 1
+    asset_names = {entry["asset"] for entry in payload["assets"]}
+    assert "USDJPY" not in asset_names
+
+    asset_csv = monitor_dir / "precision_gates_by_asset.csv"
+    asset_df = pd.read_csv(asset_csv)
+    assert "USDJPY" not in set(asset_df["asset"].tolist())
