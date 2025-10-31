@@ -44,6 +44,16 @@ from config.analysis_settings import ASSETS as CONFIG_ASSETS
 
 PUBLIC_DIR = "public"
 ASSETS: List[str] = list(CONFIG_ASSETS)
+STATE_ARCHIVE_PATH = f"{PUBLIC_DIR}/_notify_state.archive.json"
+ACTIVE_ASSET_SET: Set[str] = {asset.upper() for asset in ASSETS}
+DEFAULT_ASSET_STATE: Dict[str, Any] = {
+    "last": "no entry",
+    "count": 0,
+    "last_sent": None,
+    "last_sent_decision": None,
+    "last_sent_mode": None,
+    "cooldown_until": None,
+}
 
 # ---- Active position helper config ----
 TDSTATUS_PATH = f"{PUBLIC_DIR}/tdstatus.json"
@@ -441,17 +451,85 @@ def eia_countdown(now: Optional[datetime] = None) -> Tuple[Optional[str], Option
     text = format_timedelta(delta)
     return text, delta.total_seconds() / 60.0
 
+def _normalise_asset_name(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    name = str(value).strip().upper()
+    return name or None
+
+
+def _default_asset_state() -> Dict[str, Any]:
+    return dict(DEFAULT_ASSET_STATE)
+
+
+def _archive_removed_state(removed: Dict[str, Any]) -> None:
+    if not removed:
+        return
+    archive_path = Path(STATE_ARCHIVE_PATH)
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with archive_path.open("r", encoding="utf-8") as fh:
+            existing = json.load(fh)
+    except Exception:
+        existing = []
+    if not isinstance(existing, list):
+        existing = []
+    timestamp = datetime.now(timezone.utc).isoformat()
+    for asset, payload in removed.items():
+        entry = {
+            "asset": str(asset),
+            "archived_utc": timestamp,
+            "state": payload,
+        }
+        existing.append(entry)
+    with archive_path.open("w", encoding="utf-8") as fh:
+        json.dump(existing, fh, ensure_ascii=False, indent=2)
+
+
+def _ensure_state_structure(state: Any, *, persist_archive: bool = False) -> Dict[str, Any]:
+    state_dict = state if isinstance(state, dict) else {}
+    meta = state_dict.get("_meta") if isinstance(state_dict, dict) else None
+    cleaned: Dict[str, Any] = {"_meta": meta if isinstance(meta, dict) else {}}
+    recognised: Dict[str, Dict[str, Any]] = {}
+    removed: Dict[str, Any] = {}
+
+    items = state_dict.items() if isinstance(state_dict, dict) else []
+    for key, value in items:
+        if key == "_meta":
+            continue
+        normalised = _normalise_asset_name(key)
+        if normalised and normalised in ACTIVE_ASSET_SET:
+            payload = dict(value) if isinstance(value, dict) else {}
+            merged = _default_asset_state()
+            merged.update(payload)
+            recognised[normalised] = merged
+        else:
+            removed[str(key)] = value
+
+    for asset in ASSETS:
+        normalised_asset = _normalise_asset_name(asset)
+        if not normalised_asset:
+            continue
+        cleaned[normalised_asset] = recognised.get(normalised_asset, _default_asset_state())
+
+    if persist_archive and removed:
+        _archive_removed_state(removed)
+
+    return cleaned
+  
 def load_state():
     try:
         with open(STATE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except Exception:
-        return {}
+        data = {}
+    return _ensure_state_structure(data, persist_archive=True)
 
 def save_state(st):
     os.makedirs(PUBLIC_DIR, exist_ok=True)
+    normalised = _ensure_state_structure(st, persist_archive=False)
     with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(st, f, ensure_ascii=False, indent=2)
+        json.dump(normalised, f, ensure_ascii=False, indent=2)
 
 def mark_heartbeat(meta: Dict[str, Any], bud_key: str, now_iso: str) -> None:
     if meta is None:
