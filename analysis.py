@@ -5986,7 +5986,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                     risk_ratio = target_risk / atr5_val
                     adjust_note = f"GOLD stop lazítás: ATR alapú kockázat ×{risk_ratio:.2f}"
                     if adjust_note not in reasons:
-                    reasons.append(adjust_note)
+                        reasons.append(adjust_note)
 
         if asset == "NVDA":
             atr_basis = None
@@ -7402,6 +7402,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
