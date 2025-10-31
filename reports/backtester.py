@@ -15,6 +15,7 @@ recorded alongside the automatic labels.
 
 from __future__ import annotations
 
+import io
 import json
 import math
 import os
@@ -259,6 +260,29 @@ def _evaluate_trade_row(
     }
 
 
+def _write_validation_reports(
+    summary: Dict[str, Any],
+    results_df: pd.DataFrame,
+    target_dirs: Iterable[Path],
+) -> Optional[Path]:
+    summary_blob = json.dumps(summary, ensure_ascii=False, indent=2)
+    if not summary_blob.endswith("\n"):
+        summary_blob = f"{summary_blob}\n"
+    csv_buffer = io.StringIO()
+    results_df.to_csv(csv_buffer, index=False)
+    csv_data = csv_buffer.getvalue()
+    summary_path: Optional[Path] = None
+    for directory in target_dirs:
+        directory.mkdir(parents=True, exist_ok=True)
+        summary_file = directory / "live_validation.json"
+        summary_file.write_text(summary_blob, encoding="utf-8")
+        details_file = directory / "live_validation.csv"
+        details_file.write_text(csv_data, encoding="utf-8")
+        if summary_path is None:
+            summary_path = summary_file
+    return summary_path
+
+
 def update_live_validation(
     public_dir: Path = PUBLIC_DIR,
     reports_dir: Path = REPORTS_DIR,
@@ -461,16 +485,7 @@ def update_live_validation(
         if candidate not in target_dirs:
             target_dirs.append(candidate)
 
-    summary_path: Optional[Path] = None
-    for directory in target_dirs:
-        directory.mkdir(parents=True, exist_ok=True)
-        summary_file = directory / "live_validation.json"
-        with summary_file.open("w", encoding="utf-8") as fh:
-            json.dump(summary, fh, ensure_ascii=False, indent=2)
-        details_file = directory / "live_validation.csv"
-        results_df.to_csv(details_file, index=False)
-        if summary_path is None:
-            summary_path = summary_file
+    return _write_validation_reports(summary, results_df, target_dirs)
     
     return summary_path
 
