@@ -26,7 +26,7 @@ def test_default_profile_configuration(monkeypatch):
     assert settings.ENTRY_THRESHOLD_PROFILE_NAME == "suppressed"
     profile = settings.describe_entry_threshold_profile()
     assert profile["name"] == "suppressed"
-    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(25.0)
+    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(32.0)
     assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(38.0)
     assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.95)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.85)
