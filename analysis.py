@@ -4996,6 +4996,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         else (bias1h if bias1h in ("long", "short") else None)
     )
     btc_momentum_override = False
+    xag_momentum_override = False
+    xag_atr_ratio: Optional[float] = None
     strong_momentum = False
     if candidate_dir == "long":
         strong_momentum = bool(
@@ -5058,6 +5060,31 @@ def analyze(asset: str) -> Dict[str, Any]:
             override_note = "BTC momentum override — szerkezeti kapuk lazítva erős trendben"
             if override_note not in reasons:
                 reasons.append(override_note)
+    xag_overrides: Dict[str, Any] = {}
+    if asset == "XAGUSD":
+        xag_overrides = entry_thresholds_meta.setdefault("xag_overrides", {})
+        xag_atr_ratio = float(atr_ratio) if atr_ratio > 0 else None
+        if xag_atr_ratio is not None:
+            xag_overrides["atr_ratio"] = xag_atr_ratio
+        expansion_drive = bool(
+            isinstance(intraday_profile, dict) and intraday_profile.get("range_expansion")
+        )
+        high_atr_drive = bool(np.isfinite(atr_ratio) and atr_ratio >= 1.45)
+        xag_momentum_override = bool(strong_momentum and (high_atr_drive or expansion_drive))
+        entry_thresholds_meta["xag_momentum_override"] = xag_momentum_override
+        if expansion_drive:
+            xag_overrides["range_expansion"] = True
+        xag_overrides.setdefault(
+            "preferred_timeframes",
+            ["15m", "30m", "5m (scalp)"]
+        )
+        if xag_momentum_override:
+            override_note = "XAG momentum override — stop tágítva erős trendnél"
+            if override_note not in reasons:
+                reasons.append(override_note)
+            xag_overrides.setdefault("momentum_override", {})
+            xag_overrides["momentum_override"]["atr_ratio"] = xag_atr_ratio
+            xag_overrides["momentum_override"]["range_expansion"] = expansion_drive
     usoil_overrides: Dict[str, Any] = {}
     if asset == "USOIL":
         usoil_overrides = entry_thresholds_meta.setdefault("usoil_overrides", {})
@@ -5072,6 +5099,24 @@ def analyze(asset: str) -> Dict[str, Any]:
             note = (
                 f"USOIL: erős momentum — invalid zóna {USOIL_MOMENTUM_STOP_MULT:.1f}×ATR(1h)-re tágítva"
             )
+            if note not in reasons:
+                reasons.append(note)
+    if asset == "XAGUSD" and xag_momentum_override:
+        momentum_buffer = None
+        atr_mult = 1.3
+        if atr1h is not None and atr1h > 0:
+            momentum_buffer = float(atr1h) * atr_mult
+        elif atr5 is not None:
+            try:
+                momentum_buffer = float(atr5) * max(1.0, atr_mult * 0.5)
+            except Exception:
+                momentum_buffer = None
+        if momentum_buffer and (invalid_buffer is None or momentum_buffer > invalid_buffer):
+            invalid_buffer = momentum_buffer
+            xag_overrides.setdefault("momentum_stop", {})
+            xag_overrides["momentum_stop"]["atr_multiplier"] = atr_mult if atr1h is not None else None
+            xag_overrides["momentum_stop"]["buffer"] = momentum_buffer
+            note = "XAGUSD: momentum override — stop távolság 1.3×ATR-re tágítva"
             if note not in reasons:
                 reasons.append(note)
 
@@ -5504,6 +5549,49 @@ def analyze(asset: str) -> Dict[str, Any]:
         if effective_bias == "short" and price_below_vwap:
             structure_components["liquidity"] = True
 
+    elif asset == "XAGUSD" and effective_bias in {"long", "short"}:
+        vwap_distance = safe_float(vwap_confluence.get("distance")) if isinstance(vwap_confluence, dict) else None
+        price_above_vwap = vwap_distance is not None and vwap_distance >= 0
+        price_below_vwap = vwap_distance is not None and vwap_distance <= 0
+        higher_break_long = bool(bos1h_long or bos5m_long or struct_retest_long)
+        higher_break_short = bool(bos1h_short or bos5m_short or struct_retest_short)
+        micro_long = bool(micro_bos_long and not micro_bos_short)
+        micro_short = bool(micro_bos_short and not micro_bos_long)
+        xag_structure_meta: Dict[str, Any] = {
+            "price_above_vwap": price_above_vwap,
+            "price_below_vwap": price_below_vwap,
+            "higher_break_long": higher_break_long,
+            "higher_break_short": higher_break_short,
+            "micro_long": micro_long,
+            "micro_short": micro_short,
+        }
+        xag_overrides.setdefault("structure", {}).update(xag_structure_meta)
+        if effective_bias == "long":
+            long_break = bool(higher_break_long and price_above_vwap and not recent_break_short)
+            if not long_break and price_above_vwap and micro_long and (strong_momentum or xag_momentum_override):
+                long_break = True
+                structure_notes.append("XAG: mikro HL/HH + VWAP felett — gyors long reakció")
+            elif not price_above_vwap:
+                structure_notes.append("XAG: VWAP alatt — long setup türelmet igényel")
+            structure_components["bos"] = long_break
+            if price_above_vwap:
+                structure_components["liquidity"] = True
+        elif effective_bias == "short":
+            short_break = bool(higher_break_short and price_below_vwap and not recent_break_long)
+            if not short_break and price_below_vwap and micro_short and (strong_momentum or xag_momentum_override):
+                short_break = True
+                structure_notes.append("XAG: mikro LH/LL + VWAP alatt — gyors short reakció")
+            elif not price_below_vwap:
+                structure_notes.append("XAG: VWAP felett — short setup türelmet igényel")
+            structure_components["bos"] = short_break
+            if price_below_vwap:
+                structure_components["liquidity"] = True
+        if xag_momentum_override and structure_components.get("bos"):
+            structure_components["liquidity"] = True
+            momentum_note = "XAG momentum override — szerkezeti break elfogadva VWAP oldalán"
+            if momentum_note not in structure_notes:
+                structure_notes.append(momentum_note)
+
     elif asset == "BTCUSD" and effective_bias in {"long", "short"}:
         vwap_distance = safe_float(vwap_confluence.get("distance")) if isinstance(vwap_confluence, dict) else None
         price_above_vwap = vwap_distance is not None and vwap_distance >= 0
@@ -5729,6 +5817,29 @@ def analyze(asset: str) -> Dict[str, Any]:
         if nvda_rr_meta:
             entry_thresholds_meta.setdefault("nvda_overrides", {})
             entry_thresholds_meta["nvda_overrides"]["rr"] = nvda_rr_meta
+    if asset == "XAGUSD":
+        xag_rr_meta: Dict[str, Any] = {}
+        if xag_atr_ratio is not None:
+            xag_rr_meta["atr_ratio"] = xag_atr_ratio
+        if xag_momentum_override:
+            core_rr_min = min(core_rr_min, 1.45)
+            momentum_rr_min = min(momentum_rr_min, 1.3)
+            xag_rr_meta["regime"] = "momentum"
+            msg = "XAGUSD: momentum kitörés — RR cél 1:1.45-re szűkítve"
+            if msg not in reasons:
+                reasons.append(msg)
+        elif xag_atr_ratio is not None and xag_atr_ratio <= 1.1:
+            core_rr_min = max(core_rr_min, 1.7)
+            momentum_rr_min = max(momentum_rr_min, 1.5)
+            xag_rr_meta["regime"] = "consolidation"
+            msg = "XAGUSD: visszafogott ATR — RR cél 1:1.7-re emelve"
+            if msg not in reasons:
+                reasons.append(msg)
+        else:
+            xag_rr_meta["regime"] = "balanced"
+        xag_rr_meta["core_rr_min_effective"] = core_rr_min
+        xag_rr_meta["momentum_rr_min_effective"] = momentum_rr_min
+        xag_overrides.setdefault("rr", {}).update(xag_rr_meta)
     if asset == "USOIL" and atr1h is not None and atr1h > 0:
         usoil_rr_meta: Dict[str, Any] = {
             "atr1h": float(atr1h),
@@ -5849,6 +5960,31 @@ def analyze(asset: str) -> Dict[str, Any]:
         else:
             position_size_scale = min(position_size_scale, 0.8)
         entry_thresholds_meta["gold_atr_ratio"] = gold_atr_ratio
+
+    if asset == "XAGUSD":
+        xag_scale_meta: Dict[str, Any] = {}
+        if xag_atr_ratio is not None:
+            xag_scale_meta["atr_ratio"] = xag_atr_ratio
+        if xag_atr_ratio is not None:
+            if xag_atr_ratio >= 1.7:
+                target_scale = 0.55
+            elif xag_atr_ratio >= 1.4:
+                target_scale = 0.62
+            else:
+                target_scale = 0.7
+        else:
+            target_scale = 0.68
+        if xag_momentum_override:
+            target_scale = min(target_scale, 0.55)
+            if "XAG momentum override — pozícióméret csökkentve" not in reasons:
+                reasons.append("XAG momentum override — pozícióméret csökkentve")
+        if target_scale < position_size_scale:
+            position_size_scale = target_scale
+            msg = f"XAGUSD: ATR-alapú pozícióskálázás ×{target_scale:.2f}"
+            if msg not in reasons:
+                reasons.append(msg)
+        xag_scale_meta["applied"] = position_size_scale
+        xag_overrides.setdefault("position_scale", {}).update(xag_scale_meta)
 
     if asset == "BTCUSD":
         if btc_momentum_override:
@@ -7638,6 +7774,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
