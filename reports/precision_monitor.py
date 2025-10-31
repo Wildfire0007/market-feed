@@ -2,7 +2,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
@@ -24,6 +24,9 @@ ASSET_SUMMARY_PATH = Path(
     )
 )
 DEFAULT_LOOKBACK_DAYS = int(os.getenv("PRECISION_MONITOR_LOOKBACK_DAYS", "7"))
+SETTINGS_PATH = Path(
+    os.getenv("ANALYSIS_SETTINGS_PATH", "config/analysis_settings.json")
+)
 
 PRECISION_PATTERNS: Dict[str, str] = {
     "precision_score": "precision_score>=65",
@@ -39,10 +42,36 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _load_active_assets(settings_path: Path = SETTINGS_PATH) -> Optional[Set[str]]:
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError):
+        return None
+    except json.JSONDecodeError:
+        return None
+    assets = data.get("assets") if isinstance(data, dict) else None
+    if not isinstance(assets, list):
+        return None
+    active_assets = {str(asset).strip().upper() for asset in assets if str(asset).strip()}
+    return active_assets or None
+
+
 def _safe_pct(numerator: int, denominator: int) -> Optional[float]:
     if denominator:
         return round(float(numerator) / float(denominator), 4)
     return None
+
+
+def _filter_to_active_assets(
+    df: pd.DataFrame, active_assets: Optional[Set[str]]
+) -> pd.DataFrame:
+    if not active_assets or df.empty:
+        return df
+    asset_series = df.get("asset")
+    if asset_series is None:
+        return df
+    mask = asset_series.astype(str).str.upper().isin(active_assets)
+    return df[mask].copy()
 
 
 def _prepare_dataframe(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, str]]:
@@ -187,6 +216,9 @@ def update_precision_gate_report(
         return None
 
     prepared, flag_columns = _prepare_dataframe(df)
+    active_assets = _load_active_assets()
+    if active_assets:
+        prepared = _filter_to_active_assets(prepared, active_assets)
 
     reference_time = now or _now()
     lookback = lookback_days if lookback_days is not None else DEFAULT_LOOKBACK_DAYS
@@ -197,6 +229,9 @@ def update_precision_gate_report(
     else:
         prepared_recent = prepared
 
+    if active_assets:
+        prepared_recent = _filter_to_active_assets(prepared_recent, active_assets)
+        
     monitor_path = Path(monitor_dir or MONITOR_DIR)
     monitor_path.mkdir(parents=True, exist_ok=True)
 
