@@ -41,8 +41,9 @@ def test_xagusd_attempts_cover_physical_metal_exchange() -> None:
 
     attempts = Trading._normalize_symbol_attempts(cfg)
 
-    assert ("XAG/USD", "PHYSICAL METAL") in attempts
-    assert ("XAGUSD", "PHYSICAL METAL") in attempts
+    assert attempts[0] == ("XAG/USD", "COMMODITY")
+    assert ("XAG/USD", None) in attempts
+    assert all(symbol != "XAGUSD" for symbol, _ in attempts)
 
 
 def test_skip_flag_removes_configured_variants() -> None:
