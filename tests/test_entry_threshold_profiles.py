@@ -27,7 +27,7 @@ def test_default_profile_configuration(monkeypatch):
     profile = settings.describe_entry_threshold_profile()
     assert profile["name"] == "suppressed"
     assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(32.0)
-    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(38.0)
+    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(44.0)
     assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.95)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.85)
 
@@ -46,10 +46,10 @@ def test_baseline_profile_configuration(monkeypatch):
     assert profile["name"] == "baseline"
     assert profile["p_score_min"]["default"] == pytest.approx(60.0)
     assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(60.0)
-    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(65.0)
+    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(52.0)
     assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(1.0)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(1.0)
-    assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(1.2)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(1.0)
 
 
 def test_relaxed_profile_override(monkeypatch):
@@ -59,9 +59,9 @@ def test_relaxed_profile_override(monkeypatch):
     profile = settings.describe_entry_threshold_profile()
     assert profile["name"] == "relaxed"
     assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(60.0)
-    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(62.0)
+    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(48.0)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.9)
-    assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(1.1)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(1.0)
     # Non-overridden assets fall back to the profile defaults.
     assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(58.0)
 
@@ -109,5 +109,28 @@ def test_intraday_bias_and_atr_overrides(monkeypatch):
         scenario["direction"] == "long" and "momentum_volume" in scenario["requires"]
         for scenario in btc_bias["scenarios"]
     )
+
+    _reload_settings(monkeypatch)
+
+
+def test_btc_profile_overrides(monkeypatch):
+    baseline_settings = _reload_settings(monkeypatch, profile="baseline")
+
+    assert "BTCUSD" in baseline_settings.ENABLE_MOMENTUM_ASSETS
+
+    overrides = baseline_settings.BTC_PROFILE_OVERRIDES
+    assert overrides["baseline"]["atr_floor_usd"] == pytest.approx(60.0)
+    assert overrides["baseline"]["tp_min_pct"] == pytest.approx(0.008)
+    assert overrides["baseline"]["sl_buffer"]["atr_mult"] == pytest.approx(0.3)
+    assert overrides["baseline"]["momentum_override"]["rr_min"] == pytest.approx(1.4)
+
+    relaxed = overrides["relaxed"]
+    assert relaxed["rr"]["range_time_stop"] == 15
+    assert relaxed["momentum_override"]["max_slippage_r"] == pytest.approx(0.15)
+
+    suppressed = overrides["suppressed"]
+    assert suppressed["rr"]["range_breakeven"] == pytest.approx(0.25)
+    assert suppressed["momentum_override"]["no_chase_r"] == pytest.approx(0.12)
+    assert suppressed["range_guard_requires_override"] is True
 
     _reload_settings(monkeypatch)
