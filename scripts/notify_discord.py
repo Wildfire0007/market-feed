@@ -52,6 +52,7 @@ DEFAULT_ASSET_STATE: Dict[str, Any] = {
     "last_sent": None,
     "last_sent_decision": None,
     "last_sent_mode": None,
+    "last_sent_known": False,
     "cooldown_until": None,
 }
 
@@ -94,6 +95,8 @@ ACTIVE_WATCHER_CONFIG = {
 STATE_PATH = f"{PUBLIC_DIR}/_notify_state.json"
 STABILITY_RUNS = 2
 HEARTBEAT_STALE_MIN = 55  # ennyi perc után küldünk összefoglalót akkor is, ha az óra nem váltott
+LAST_SENT_RETENTION_DAYS = 120  # ennyi nap után töröljük/archiváljuk a last_sent mezőt
+LAST_SENT_FUTURE_GRACE_MIN = 15  # jövőbe mutató timestamp esetén ennyi percet engedünk meg
 def int_env(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
@@ -462,6 +465,93 @@ def _default_asset_state() -> Dict[str, Any]:
     return dict(DEFAULT_ASSET_STATE)
 
 
+def _archive_last_sent_entries(entries: List[Dict[str, Any]]) -> None:
+    if not entries:
+        return
+
+    archive_path = Path(STATE_ARCHIVE_PATH)
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with archive_path.open("r", encoding="utf-8") as fh:
+            existing = json.load(fh)
+    except Exception:
+        existing = []
+
+    if not isinstance(existing, list):
+        existing = []
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    for entry in entries:
+        payload = dict(entry)
+        payload["archived_utc"] = timestamp
+        existing.append(payload)
+
+    with archive_path.open("w", encoding="utf-8") as fh:
+        json.dump(existing, fh, ensure_ascii=False, indent=2)
+
+
+def _sanitize_last_sent(
+    asset: str,
+    state: Dict[str, Any],
+    archived: List[Dict[str, Any]],
+    *,
+    now: Optional[datetime] = None,
+) -> None:
+    raw_value = state.get("last_sent")
+    state["last_sent_known"] = bool(state.get("last_sent_known"))
+
+    if raw_value in (None, ""):
+        state["last_sent"] = None
+        if raw_value:
+            state["last_sent_known"] = True
+        return
+
+    parsed = None
+    parsed_reason = None
+
+    if isinstance(raw_value, (int, float)):
+        try:
+            parsed = datetime.fromtimestamp(float(raw_value), tz=timezone.utc)
+        except Exception:
+            parsed = None
+            parsed_reason = "invalid-type"
+    elif isinstance(raw_value, str):
+        parsed = parse_utc(raw_value)
+        if parsed is None:
+            parsed_reason = "invalid-format"
+    else:
+        parsed_reason = "invalid-type"
+
+    if parsed is not None and parsed_reason is None:
+        now = now or datetime.now(timezone.utc)
+        future_threshold = now + timedelta(minutes=LAST_SENT_FUTURE_GRACE_MIN)
+        stale_threshold = now - timedelta(days=LAST_SENT_RETENTION_DAYS)
+
+        if parsed > future_threshold:
+            parsed_reason = "future"
+        elif parsed < stale_threshold:
+            parsed_reason = "stale"
+        else:
+            state["last_sent"] = to_utc_iso(parsed)
+            state["last_sent_known"] = True
+            return
+
+    # Ha idáig eljutottunk, a timestamp-et töröljük, de megjegyezzük, hogy volt érték
+    state["last_sent"] = None
+    if raw_value not in (None, ""):
+        state["last_sent_known"] = True
+
+    archived.append(
+        {
+            "asset": asset,
+            "last_sent_raw": raw_value,
+            "reason": parsed_reason or "unknown",
+            "last_sent_decision": state.get("last_sent_decision"),
+        }
+    )
+
+
 def _archive_removed_state(removed: Dict[str, Any]) -> None:
     if not removed:
         return
@@ -492,6 +582,7 @@ def _ensure_state_structure(state: Any, *, persist_archive: bool = False) -> Dic
     cleaned: Dict[str, Any] = {"_meta": meta if isinstance(meta, dict) else {}}
     recognised: Dict[str, Dict[str, Any]] = {}
     removed: Dict[str, Any] = {}
+    archived_last_sent: List[Dict[str, Any]] = []
 
     items = state_dict.items() if isinstance(state_dict, dict) else []
     for key, value in items:
@@ -502,6 +593,7 @@ def _ensure_state_structure(state: Any, *, persist_archive: bool = False) -> Dic
             payload = dict(value) if isinstance(value, dict) else {}
             merged = _default_asset_state()
             merged.update(payload)
+            _sanitize_last_sent(normalised, merged, archived_last_sent)
             recognised[normalised] = merged
         else:
             removed[str(key)] = value
@@ -514,6 +606,8 @@ def _ensure_state_structure(state: Any, *, persist_archive: bool = False) -> Dic
 
     if persist_archive and removed:
         _archive_removed_state(removed)
+    if persist_archive and archived_last_sent:
+        _archive_last_sent_entries(archived_last_sent)
 
     return cleaned
   
@@ -1373,6 +1467,7 @@ def main():
             "last_sent": None,
             "last_sent_decision": None,
             "last_sent_mode": None,
+            "last_sent_known": False,
             "cooldown_until": None,
         })
 
@@ -1440,11 +1535,13 @@ def main():
                 st["last_sent"] = now_iso
                 st["last_sent_decision"] = eff
                 st["last_sent_mode"] = mode_current
+                st["last_sent_known"] = True
                 mark_heartbeat(meta, bud_key, now_iso)
             elif send_kind == "invalidate":
                 st["last_sent"] = now_iso
                 st["last_sent_decision"] = "no entry"
                 st["last_sent_mode"] = None
+                st["last_sent_known"] = True
                 mark_heartbeat(meta, bud_key, now_iso)
 
         state[asset] = st
