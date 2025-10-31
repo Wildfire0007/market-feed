@@ -304,7 +304,7 @@ def update_precision_gate_report(
 
     total_summary = _summarise_dataframe(prepared, flag_columns)
     recent_summary = _summarise_dataframe(prepared_recent, flag_columns)
-   asset_summaries = _summarise_assets(
+    asset_summaries = _summarise_assets(
         prepared,
         flag_columns,
         active_assets=active_asset_set,
