@@ -103,6 +103,7 @@ from config.analysis_settings import (
     EMA_SLOPE_SIGN_ENFORCED,
     EMA_SLOPE_TH_ASSET,
     EMA_SLOPE_TH_DEFAULT,
+    BTC_PROFILE_OVERRIDES,
     NEWS_MODE_SETTINGS,
     FX_TP_TARGETS,
     GOLD_HIGH_VOL_TH,
@@ -143,6 +144,15 @@ from config.analysis_settings import (
     get_atr_threshold_multiplier,
     get_p_score_min,
 )
+
+BTC_PROFILE_CONFIG: Dict[str, Any] = dict(
+    BTC_PROFILE_OVERRIDES.get(ENTRY_THRESHOLD_PROFILE_NAME) or {}
+)
+
+
+def _btc_profile_section(name: str) -> Dict[str, Any]:
+    section = BTC_PROFILE_CONFIG.get(name)
+    return dict(section) if isinstance(section, dict) else {}
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1688,6 +1698,13 @@ def atr_low_threshold(asset: str) -> float:
 
 def tp_min_pct_for(asset: str, rel_atr: float, session_flag: bool) -> float:
     base = TP_MIN_PCT.get(asset, TP_MIN_PCT["default"])
+    if asset == "BTCUSD":
+        override_tp = BTC_PROFILE_CONFIG.get("tp_min_pct")
+        if override_tp is not None:
+            try:
+                return float(override_tp)
+            except (TypeError, ValueError):
+                pass
     if np.isnan(rel_atr):
         return base
     return base
@@ -2615,6 +2632,15 @@ def compute_rel_atr_percentile(
             break
     if percentile_target is None:
         percentile_target = 0.5
+    if asset == "BTCUSD":
+        btc_percentiles = _btc_profile_section("atr_percentiles")
+        if btc_percentiles:
+            override = btc_percentiles.get(bucket_name, btc_percentiles.get("default"))
+            if override is not None:
+                try:
+                    percentile_target = float(override)
+                except (TypeError, ValueError):
+                    pass
     overlap_cfg = ATR_PERCENTILE_OVERLAP
     try:
         overlap_assets = set(overlap_cfg.get("assets") or [])
@@ -3890,6 +3916,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     realtime_confidence: float = 1.0
     realtime_transport = str(spot_realtime.get("transport") or "http").lower() if isinstance(spot_realtime, dict) else "http"
     entry_thresholds_meta: Dict[str, Any] = {"profile": ENTRY_THRESHOLD_PROFILE_NAME}
+    btc_atr_floor_ratio: Optional[float] = None
+    btc_atr_floor_passed = False
     if spot:
         spot_price = spot.get("price") if spot.get("price") is not None else spot.get("price_usd")
         spot_utc = spot.get("utc") or spot.get("timestamp") or "-"
@@ -3986,6 +4014,15 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     tick_order_flow = load_tick_order_flow(asset, outdir)
     order_flow_metrics = compute_order_flow_metrics(k1m_closed, k5m_closed, tick_order_flow)
+
+    ofi_zscore = None
+    if isinstance(order_flow_metrics, dict):
+        ofi_zscore = order_flow_metrics.get("imbalance_z")
+        try:
+            if ofi_zscore is not None and not np.isfinite(ofi_zscore):
+                ofi_zscore = None
+        except Exception:
+            ofi_zscore = None
 
     anchor_state = current_anchor_state()
     anchor_record = anchor_state.get(asset.upper()) if isinstance(anchor_state, dict) else None
@@ -4431,6 +4468,19 @@ def analyze(asset: str) -> Dict[str, Any]:
     entry_thresholds_meta["adx_regime_initial"] = adx_regime
     atr_profile_multiplier = get_atr_threshold_multiplier(asset)
     atr_threshold = atr_low_threshold(asset)
+    if asset == "BTCUSD":
+        atr_floor_usd = BTC_PROFILE_CONFIG.get("atr_floor_usd")
+        if atr_floor_usd is not None and price_for_calc:
+            try:
+                btc_atr_floor_ratio = float(atr_floor_usd) / float(price_for_calc)
+            except (TypeError, ValueError, ZeroDivisionError):
+                btc_atr_floor_ratio = None
+        if btc_atr_floor_ratio is not None and np.isfinite(btc_atr_floor_ratio):
+            atr_threshold = max(float(atr_threshold), btc_atr_floor_ratio)
+            btc_atr_floor_passed = bool(not np.isnan(rel_atr) and rel_atr >= btc_atr_floor_ratio)
+            entry_thresholds_meta["btc_atr_floor_usd"] = float(atr_floor_usd)
+            entry_thresholds_meta["btc_atr_floor_ratio"] = btc_atr_floor_ratio
+            entry_thresholds_meta["btc_atr_floor_passed"] = btc_atr_floor_passed
     entry_thresholds_meta["atr_multiplier"] = atr_profile_multiplier
     if atr_profile_multiplier not in {None, 0.0}:
         try:
@@ -4697,6 +4747,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         bias_override_used = True
         bias_override_reason = "Bias override: NVDA 1h trend cash-session megerősítés"
 
+    btc_bias_cfg = _btc_profile_section("bias_relax") if asset == "BTCUSD" else {}
+    btc_momentum_cfg = _btc_profile_section("momentum_override") if asset == "BTCUSD" else {}
+    btc_rr_cfg = _btc_profile_section("rr") if asset == "BTCUSD" else {}
+
     if effective_bias == "neutral":
         relax_cfg = INTRADAY_BIAS_RELAX.get(asset)
         if relax_cfg:
@@ -4729,10 +4783,18 @@ def analyze(asset: str) -> Dict[str, Any]:
                     except Exception:
                         return False
                 if token == "momentum_volume":
-                    return (
+                    ratio_ok = (
                         momentum_vol_ratio is not None
                         and momentum_vol_ratio >= MOMENTUM_VOLUME_RATIO_TH
                     )
+                    if asset == "BTCUSD" and btc_bias_cfg:
+                        ofi_th = float(btc_bias_cfg.get("ofi_sub_threshold", 0.0) or 0.0)
+                        if ofi_th > 0 and ofi_zscore is not None:
+                            if direction == "long":
+                                ratio_ok = ratio_ok or ofi_zscore >= ofi_th
+                            elif direction == "short":
+                                ratio_ok = ratio_ok or ofi_zscore <= -ofi_th
+                    return ratio_ok
                 if token == "micro_bos_long":
                     return bool(micro_bos_long and not micro_bos_short)
                 if token == "micro_bos_short":
@@ -4853,13 +4915,6 @@ def analyze(asset: str) -> Dict[str, Any]:
     recent_break_short = broke_structure(k5m_closed, "short", MOMENTUM_BOS_LB)
     if stale_timeframes.get("k5m"):
         recent_break_long = recent_break_short = False
-
-    ofi_zscore = order_flow_metrics.get("imbalance_z") if isinstance(order_flow_metrics, dict) else None
-    try:
-        if ofi_zscore is not None and not np.isfinite(ofi_zscore):
-            ofi_zscore = None
-    except Exception:
-        ofi_zscore = None
 
     structure_notes: List[str] = []
     structure_components: Dict[str, bool] = {"bos": False, "liquidity": False, "ofi": False}
@@ -5049,15 +5104,29 @@ def analyze(asset: str) -> Dict[str, Any]:
         btc_range_drive = bool(
             isinstance(intraday_profile, dict) and intraday_profile.get("range_expansion")
         )
-        high_atr_drive = bool(np.isfinite(atr_ratio) and atr_ratio >= 1.6)
-        btc_momentum_override = bool(
-            strong_momentum and (high_atr_drive or volume_factor >= 1.45 or btc_range_drive)
-        )
+        ofi_th = float(btc_momentum_cfg.get("ofi_z", 0.0) or 0.0)
+        cross_flag = False
+        if candidate_dir == "long":
+            cross_flag = bool(ema_cross_long)
+        elif candidate_dir == "short":
+            cross_flag = bool(ema_cross_short)
+        ofi_condition = False
+        if ofi_th > 0 and ofi_zscore is not None and candidate_dir in {"long", "short"}:
+            if candidate_dir == "long":
+                ofi_condition = ofi_zscore >= ofi_th
+            else:
+                ofi_condition = ofi_zscore <= -ofi_th
+        atr_condition = bool(atr_ok and (btc_atr_floor_ratio is None or btc_atr_floor_passed))
+        if cross_flag and ofi_condition and atr_condition:
+            btc_momentum_override = True
         entry_thresholds_meta["btc_atr_ratio"] = float(atr_ratio if np.isfinite(atr_ratio) else 0.0)
         entry_thresholds_meta["btc_volume_ratio"] = float(volume_factor)
         entry_thresholds_meta["btc_range_expansion"] = btc_range_drive
+        entry_thresholds_meta["btc_momentum_cross"] = cross_flag
+        entry_thresholds_meta["btc_momentum_ofi_ok"] = ofi_condition
+        entry_thresholds_meta["btc_momentum_atr_ok"] = atr_condition
         if btc_momentum_override:
-            override_note = "BTC momentum override — szerkezeti kapuk lazítva erős trendben"
+            override_note = "BTC momentum override — EMA9×21 + OFI megerősítés"
             if override_note not in reasons:
                 reasons.append(override_note)
     xag_overrides: Dict[str, Any] = {}
@@ -5470,6 +5539,31 @@ def analyze(asset: str) -> Dict[str, Any]:
             bos_signal = bos_signal or nvda_cross_short
         structure_components["bos"] = bos_signal and not recent_break_long
 
+    btc_structure_combos: Dict[str, Dict[str, Any]] = {}
+    if asset == "BTCUSD":
+        vwap_distance_base = safe_float(vwap_confluence.get("distance")) if isinstance(vwap_confluence, dict) else None
+        price_above_vwap_base = vwap_distance_base is not None and vwap_distance_base >= 0
+        price_below_vwap_base = vwap_distance_base is not None and vwap_distance_base <= 0
+        vwap_trend_pullback = bool(vwap_confluence.get("trend_pullback"))
+        structure_cfg = _btc_profile_section("structure")
+        ofi_gate = float(structure_cfg.get("ofi_gate", 1.0) or 1.0)
+        btc_structure_combos = {
+            "long": {
+                "micro": bool(micro_bos_long and not recent_break_short),
+                "vwap": bool(price_above_vwap_base or vwap_trend_pullback),
+                "ofi": bool(ofi_gate > 0 and ofi_zscore is not None and ofi_zscore >= ofi_gate),
+                "price_above_vwap": price_above_vwap_base,
+                "price_below_vwap": price_below_vwap_base,
+            },
+            "short": {
+                "micro": bool(micro_bos_short and not recent_break_long),
+                "vwap": bool(price_below_vwap_base or vwap_trend_pullback),
+                "ofi": bool(ofi_gate > 0 and ofi_zscore is not None and ofi_zscore <= -ofi_gate),
+                "price_above_vwap": price_above_vwap_base,
+                "price_below_vwap": price_below_vwap_base,
+            },
+        }
+
     if asset == "EURUSD" and effective_bias in {"long", "short"}:
         if effective_bias == "long":
             higher_timeframe_break = bool(bos1h_long or bos5m_long)
@@ -5600,58 +5694,50 @@ def analyze(asset: str) -> Dict[str, Any]:
             if momentum_note not in structure_notes:
                 structure_notes.append(momentum_note)
 
-    elif asset == "BTCUSD" and effective_bias in {"long", "short"}:
-        vwap_distance = safe_float(vwap_confluence.get("distance")) if isinstance(vwap_confluence, dict) else None
-        price_above_vwap = vwap_distance is not None and vwap_distance >= 0
-        price_below_vwap = vwap_distance is not None and vwap_distance <= 0
-        vwap_trend_pullback = bool(vwap_confluence.get("trend_pullback"))
-        if effective_bias == "long":
-            higher_timeframe_break = bool(
-                (bos1h_long and (bos5m_long or micro_bos_long))
-                or (bos5m_long and micro_bos_long)
-            )
-            vwap_ok = price_above_vwap or vwap_trend_pullback
-            structure_components["bos"] = higher_timeframe_break and vwap_ok and not recent_break_short
-            if structure_components["bos"]:
-                structure_notes.append("BTC H1/5m BOS + VWAP felett — bullish trend megerősítve")
-            elif higher_timeframe_break and not vwap_ok:
-                structure_notes.append("BTC BOS aktív, de VWAP alatt → türelem")
-            if vwap_ok:
-                structure_components["liquidity"] = True
-        elif effective_bias == "short":
-            higher_timeframe_break = bool(
-                (bos1h_short and (bos5m_short or micro_bos_short))
-                or (bos5m_short and micro_bos_short)
-            )
-            vwap_ok = price_below_vwap or vwap_trend_pullback
-            structure_components["bos"] = higher_timeframe_break and vwap_ok and not recent_break_long
-            if structure_components["bos"]:
-                structure_notes.append("BTC H1/5m BOS + VWAP alatt — bearish trend megerősítve")
-            elif higher_timeframe_break and not vwap_ok:
-                structure_notes.append("BTC BOS aktív, de VWAP felett → türelem")
-            if vwap_ok:
-                structure_components["liquidity"] = True
-        if btc_momentum_override and directional_confirmation:
-            if effective_bias == "long" and not price_above_vwap:
-                price_above_vwap = vwap_trend_pullback
-            if effective_bias == "short" and not price_below_vwap:
-                price_below_vwap = vwap_trend_pullback
-            if effective_bias == "long" and price_above_vwap:
-                structure_components["bos"] = True
-                structure_components["liquidity"] = True
-                structure_notes.append("BTC momentum override — mikro BOS elfogadva VWAP fölött")
-            if effective_bias == "short" and price_below_vwap:
-                structure_components["bos"] = True
-                structure_components["liquidity"] = True
-                structure_notes.append("BTC momentum override — mikro BOS elfogadva VWAP alatt")
+    elif asset == "BTCUSD":
+        combo = btc_structure_combos.get(effective_bias) if effective_bias in {"long", "short"} else None
+        micro_ok = bool(combo.get("micro")) if combo else False
+        vwap_ok = bool(combo.get("vwap")) if combo else False
+        ofi_ok = bool(combo.get("ofi")) if combo else False
+        price_above_vwap = bool(combo.get("price_above_vwap")) if combo else False
+        price_below_vwap = bool(combo.get("price_below_vwap")) if combo else False
+        if effective_bias == "long" and combo:
+            if micro_ok:
+                structure_notes.append("BTC mikro BOS long aktív")
+            if vwap_ok and not price_above_vwap:
+                structure_notes.append("BTC VWAP reclaim long — trend pullback engedve")
+        elif effective_bias == "short" and combo:
+            if micro_ok:
+                structure_notes.append("BTC mikro BOS short aktív")
+            if vwap_ok and not price_below_vwap:
+                structure_notes.append("BTC VWAP reclaim short — trend pullback engedve")
+        structure_components["bos"] = micro_ok
+        structure_components["liquidity"] = vwap_ok
+        structure_components["ofi"] = ofi_ok
+        satisfied_combo = sum(1 for flag in (micro_ok, vwap_ok, ofi_ok) if flag)
+        if satisfied_combo >= 2:
+            structure_gate = True
+        entry_thresholds_meta["btc_structure_combo"] = {
+            "active_direction": effective_bias if combo else None,
+            "active": {
+                "micro": micro_ok,
+                "vwap": vwap_ok,
+                "ofi": ofi_ok,
+                "count": satisfied_combo,
+            },
+            "combos": btc_structure_combos,
+        }
 
-    structure_components["liquidity"] = bool(
-        structure_components["liquidity"]
-        or liquidity_ok
-        or liquidity_ok_base
-        or vwap_confluence.get("trend_pullback")
-        or vwap_confluence.get("mean_revert")
-    )
+    if asset == "BTCUSD":
+        structure_components["liquidity"] = bool(structure_components["liquidity"])
+    else:
+        structure_components["liquidity"] = bool(
+            structure_components["liquidity"]
+            or liquidity_ok
+            or liquidity_ok_base
+            or vwap_confluence.get("trend_pullback")
+            or vwap_confluence.get("mean_revert")
+        )
     if asset == "NVDA" and nvda_close_window:
         vwap_distance = safe_float(vwap_confluence.get("distance"))
         if vwap_distance is not None:
@@ -5692,6 +5778,37 @@ def analyze(asset: str) -> Dict[str, Any]:
     entry_thresholds_meta["structure_components"] = structure_components
     if asset == "BTCUSD":
         entry_thresholds_meta["btc_momentum_override"] = btc_momentum_override
+        if effective_bias == "neutral" and btc_structure_combos:
+            combo_th = float(btc_bias_cfg.get("combo_threshold", 0.0) or 0.0)
+            long_combo = btc_structure_combos.get("long") or {}
+            short_combo = btc_structure_combos.get("short") or {}
+            selected_bias: Optional[str] = None
+            if ENTRY_THRESHOLD_PROFILE_NAME == "relaxed":
+                if long_combo.get("vwap") and long_combo.get("ofi"):
+                    selected_bias = "long"
+                elif short_combo.get("vwap") and short_combo.get("ofi"):
+                    selected_bias = "short"
+            elif ENTRY_THRESHOLD_PROFILE_NAME == "suppressed":
+                long_count = sum(1 for key in ("micro", "vwap", "ofi") if long_combo.get(key))
+                short_count = sum(1 for key in ("micro", "vwap", "ofi") if short_combo.get(key))
+                threshold = 2
+                if combo_th >= 3:
+                    threshold = 3
+                if long_count >= threshold and long_count >= short_count:
+                    selected_bias = "long"
+                elif short_count >= threshold:
+                    selected_bias = "short"
+            if selected_bias:
+                effective_bias = selected_bias
+                bias_override_used = True
+                bias_override_reason = f"Bias override: BTC intraday combo {selected_bias}"
+                note = (
+                    "BTC bias override — VWAP + OFI megerősítés"
+                    if ENTRY_THRESHOLD_PROFILE_NAME == "relaxed"
+                    else "BTC bias override — 2/3 momentum kapu"
+                )
+                if note not in reasons:
+                    reasons.append(note)
 
     p_score_min_base = get_p_score_min(asset)
     p_score_min_local = p_score_min_base
@@ -5881,6 +5998,13 @@ def analyze(asset: str) -> Dict[str, Any]:
     if adx_regime == "trend":
         core_rr_min = max(core_rr_min, ADX_TREND_CORE_RR)
         momentum_rr_min = max(momentum_rr_min, ADX_TREND_MOM_RR)
+        if asset == "BTCUSD" and btc_rr_cfg:
+            trend_core = btc_rr_cfg.get("trend_core")
+            trend_mom = btc_rr_cfg.get("trend_momentum")
+            if trend_core is not None:
+                core_rr_min = max(core_rr_min, float(trend_core))
+            if trend_mom is not None:
+                momentum_rr_min = max(momentum_rr_min, float(trend_mom))
     elif adx_regime == "range":
         if ADX_RANGE_CORE_RR:
             core_rr_min = min(core_rr_min, ADX_RANGE_CORE_RR)
@@ -5893,6 +6017,23 @@ def analyze(asset: str) -> Dict[str, Any]:
                 "timeout": ADX_RANGE_TIME_STOP,
                 "breakeven_trigger": ADX_RANGE_BE_TRIGGER,
             }
+        if asset == "BTCUSD" and btc_rr_cfg:
+            range_core = btc_rr_cfg.get("range_core")
+            range_mom = btc_rr_cfg.get("range_momentum")
+            if range_core is not None:
+                core_rr_min = min(core_rr_min, float(range_core))
+            if range_mom is not None:
+                momentum_rr_min = min(momentum_rr_min, float(range_mom))
+            size_scale = btc_rr_cfg.get("range_size_scale")
+            if size_scale:
+                position_size_scale = min(position_size_scale, float(size_scale))
+            time_stop = btc_rr_cfg.get("range_time_stop")
+            breakeven = btc_rr_cfg.get("range_breakeven")
+            if time_stop and breakeven:
+                range_time_stop_plan = {
+                    "timeout": int(time_stop),
+                    "breakeven_trigger": float(breakeven),
+                }
     if asset == "EURUSD" and atr1h is not None and atr1h > 0:
         atr1h_pips = float(atr1h) / EURUSD_PIP
         eurusd_overrides.setdefault("atr1h_pips", atr1h_pips)
@@ -6121,24 +6262,20 @@ def analyze(asset: str) -> Dict[str, Any]:
                 "rr": MOMENTUM_RR_MIN.get(asset, MIN_R_MOMENTUM),
             },
         )
+        base_core_rr = btc_rr_cfg.get("trend_core")
+        if base_core_rr is not None:
+            core_profile["rr"] = float(base_core_rr)
+            core_rr_min = min(core_rr_min, float(base_core_rr))
+        base_mom_rr = btc_rr_cfg.get("trend_momentum")
+        if base_mom_rr is not None:
+            mom_profile["rr"] = float(base_mom_rr)
+            momentum_rr_min = min(momentum_rr_min, float(base_mom_rr))
         if btc_momentum_override:
-            core_profile["rr"] = float(max(1.0, min(core_profile.get("rr", 2.3), 1.5)))
-            core_profile["tp1"] = float(max(1.3, min(core_profile.get("tp1", TP1_R), 1.7)))
-            core_profile["tp2"] = float(
-                max(core_profile["tp1"] + 0.3, min(core_profile.get("tp2", TP2_R), 2.3))
-            )
-            mom_profile["rr"] = float(max(1.0, min(mom_profile.get("rr", 1.6), 1.3)))
-            mom_profile["tp1"] = float(max(1.0, min(mom_profile.get("tp1", TP1_R_MOMENTUM), 1.4)))
-            mom_profile["tp2"] = float(
-                max(mom_profile["tp1"] + 0.2, min(mom_profile.get("tp2", TP2_R_MOMENTUM), 1.9))
-            )
-        else:
-            core_profile["rr"] = float(max(2.3, core_profile.get("rr", 0.0)))
-            core_profile["tp1"] = float(max(1.9, core_profile.get("tp1", TP1_R)))
-            core_profile["tp2"] = float(max(2.8, core_profile.get("tp2", TP2_R)))
-            mom_profile["rr"] = float(max(1.6, mom_profile.get("rr", 0.0)))
-            mom_profile["tp1"] = float(max(1.5, mom_profile.get("tp1", TP1_R_MOMENTUM)))
-            mom_profile["tp2"] = float(max(2.3, mom_profile.get("tp2", TP2_R_MOMENTUM)))
+            rr_override = btc_momentum_cfg.get("rr_min")
+            if rr_override is not None:
+                rr_override_val = float(rr_override)
+                mom_profile["rr"] = rr_override_val
+                momentum_rr_min = min(momentum_rr_min, rr_override_val)
 
     core_tp1_mult = dynamic_tp_profile["core"]["tp1"]
     core_tp2_mult = dynamic_tp_profile["core"]["tp2"]
@@ -6225,51 +6362,28 @@ def analyze(asset: str) -> Dict[str, Any]:
         if not range_guard_ok:
             missing_mom.append(range_guard_label)
 
-        if momentum_vol_ratio is None or momentum_vol_ratio < MOMENTUM_VOLUME_RATIO_TH:
-            momentum_liquidity_ok = False
-            missing_mom.append("liquidity")
-
-        of_imb = order_flow_metrics.get("imbalance")
-        if of_imb is not None and abs(of_imb) < ORDER_FLOW_IMBALANCE_TH:
-            momentum_liquidity_ok = False
-            missing_mom.append("order_flow")
-        of_pressure = order_flow_metrics.get("pressure")
-        if of_pressure is not None and direction is not None:
-            if direction == "long" and of_pressure < ORDER_FLOW_PRESSURE_TH:
-                momentum_liquidity_ok = False
-                missing_mom.append("order_flow_pressure")
-            elif direction == "short" and of_pressure > -ORDER_FLOW_PRESSURE_TH:
-                momentum_liquidity_ok = False
-                missing_mom.append("order_flow_pressure")
-        ofi_confirm = True
-        if ofi_zscore is not None and OFI_Z_TRIGGER > 0 and direction in {"long", "short"}:
-            if direction == "long":
-                ofi_confirm = ofi_zscore >= OFI_Z_TRIGGER
-            else:
-                ofi_confirm = ofi_zscore <= -OFI_Z_TRIGGER
-        if not ofi_confirm:
-            missing_mom.append("ofi")
-
-        if direction is not None:
+        if asset == "BTCUSD":
+            mom_atr_ok = bool(atr_ok and (btc_atr_floor_ratio is None or btc_atr_floor_passed))
+            ofi_th = float(btc_momentum_cfg.get("ofi_z", 0.0) or 0.0)
             cross_flag = False
-            mom_atr_ok = False
-            if asset == "NVDA":
-                mom_atr_ok = not np.isnan(rel_atr) and rel_atr >= NVDA_MOMENTUM_ATR_REL and atr_abs_ok
-                cross_flag = nvda_cross_long if direction == "long" else nvda_cross_short
-            else:
-                mom_atr_ok = bool(atr_ok and not np.isnan(rel_atr))
-                cross_flag = ema_cross_long if direction == "long" else ema_cross_short
+            ofi_confirm = False
+            if direction == "long":
+                cross_flag = bool(ema_cross_long)
+                ofi_confirm = ofi_zscore is not None and ofi_th > 0 and ofi_zscore >= ofi_th
+            elif direction == "short":
+                cross_flag = bool(ema_cross_short)
+                ofi_confirm = ofi_zscore is not None and ofi_th > 0 and ofi_zscore <= -ofi_th
             if (
-                session_ok_flag
+                direction in {"long", "short"}
+                and session_ok_flag
                 and regime_ok
                 and mom_atr_ok
                 and cross_flag
-                and momentum_liquidity_ok
                 and ofi_confirm
             ):
                 mom_dir = "buy" if direction == "long" else "sell"
                 mom_trigger_desc = "EMA9×21 momentum cross"
-                missing_mom = []
+                missing_mom = [item for item in missing_mom if item not in {"liquidity", "ofi"}]
                 if funding_dir_filter and ((funding_dir_filter == "long" and mom_dir != "buy") or (funding_dir_filter == "short" and mom_dir != "sell")):
                     mom_dir = None
                     missing_mom.append("funding_alignment")
@@ -6278,8 +6392,64 @@ def analyze(asset: str) -> Dict[str, Any]:
                     missing_mom.append("atr")
                 if not cross_flag:
                     missing_mom.append("momentum_trigger")
-                if not momentum_liquidity_ok:
-                    missing_mom.append("liquidity")     
+                if not ofi_confirm:
+                    missing_mom.append("ofi")
+        else:
+            if momentum_vol_ratio is None or momentum_vol_ratio < MOMENTUM_VOLUME_RATIO_TH:
+                momentum_liquidity_ok = False
+                missing_mom.append("liquidity")
+
+            of_imb = order_flow_metrics.get("imbalance")
+            if of_imb is not None and abs(of_imb) < ORDER_FLOW_IMBALANCE_TH:
+                momentum_liquidity_ok = False
+                missing_mom.append("order_flow")
+            of_pressure = order_flow_metrics.get("pressure")
+            if of_pressure is not None and direction is not None:
+                if direction == "long" and of_pressure < ORDER_FLOW_PRESSURE_TH:
+                    momentum_liquidity_ok = False
+                    missing_mom.append("order_flow_pressure")
+                elif direction == "short" and of_pressure > -ORDER_FLOW_PRESSURE_TH:
+                    momentum_liquidity_ok = False
+                    missing_mom.append("order_flow_pressure")
+            ofi_confirm = True
+            if ofi_zscore is not None and OFI_Z_TRIGGER > 0 and direction in {"long", "short"}:
+                if direction == "long":
+                    ofi_confirm = ofi_zscore >= OFI_Z_TRIGGER
+                else:
+                    ofi_confirm = ofi_zscore <= -OFI_Z_TRIGGER
+            if not ofi_confirm:
+                missing_mom.append("ofi")
+
+            if direction is not None:
+                cross_flag = False
+                mom_atr_ok = False
+                if asset == "NVDA":
+                    mom_atr_ok = not np.isnan(rel_atr) and rel_atr >= NVDA_MOMENTUM_ATR_REL and atr_abs_ok
+                    cross_flag = nvda_cross_long if direction == "long" else nvda_cross_short
+                else:
+                    mom_atr_ok = bool(atr_ok and not np.isnan(rel_atr))
+                    cross_flag = ema_cross_long if direction == "long" else ema_cross_short
+                if (
+                    session_ok_flag
+                    and regime_ok
+                    and mom_atr_ok
+                    and cross_flag
+                    and momentum_liquidity_ok
+                    and ofi_confirm
+                ):
+                    mom_dir = "buy" if direction == "long" else "sell"
+                    mom_trigger_desc = "EMA9×21 momentum cross"
+                    missing_mom = []
+                    if funding_dir_filter and ((funding_dir_filter == "long" and mom_dir != "buy") or (funding_dir_filter == "short" and mom_dir != "sell")):
+                        mom_dir = None
+                        missing_mom.append("funding_alignment")
+                else:
+                    if not mom_atr_ok:
+                        missing_mom.append("atr")
+                    if not cross_flag:
+                        missing_mom.append("momentum_trigger")
+                    if not momentum_liquidity_ok:
+                        missing_mom.append("liquidity")     
                
     # 8) Döntés + szintek (RR/TP matek) — core vagy momentum
     decision = "no entry"
@@ -6303,13 +6473,31 @@ def analyze(asset: str) -> Dict[str, Any]:
     precision_flow_gate_label = "precision_flow_alignment"
     precision_trigger_gate_label = "precision_trigger_sync"
 
+    if (
+        asset == "BTCUSD"
+        and BTC_PROFILE_CONFIG.get("range_guard_requires_override")
+        and btc_momentum_override
+    ):
+        range_guard_ok = True
+        if range_guard_label in missing_mom:
+            missing_mom = [item for item in missing_mom if item != range_guard_label]
+
     def compute_levels(decision_side: str, rr_required: float, tp1_mult: float = TP1_R, tp2_mult: float = TP2_R):
         nonlocal entry, sl, tp1, tp2, rr, missing, min_stoploss_ok, tp1_net_pct_value, last_computed_risk, current_tp1_mult, current_tp2_mult
         current_tp1_mult = tp1_mult
         current_tp2_mult = tp2_mult
         atr5_val  = float(atr5 or 0.0)
 
-        buf_rule = SL_BUFFER_RULES.get(asset, SL_BUFFER_RULES["default"])
+        buf_rule_raw = SL_BUFFER_RULES.get(asset, SL_BUFFER_RULES["default"])
+        buf_rule = dict(buf_rule_raw) if isinstance(buf_rule_raw, dict) else {}
+        if asset == "BTCUSD":
+            sl_cfg = BTC_PROFILE_CONFIG.get("sl_buffer")
+            if isinstance(sl_cfg, dict):
+                for key, value in sl_cfg.items():
+                    try:
+                        buf_rule[key] = float(value)
+                    except (TypeError, ValueError):
+                        continue
         buf = max(buf_rule.get("atr_mult", 0.2) * atr5_val, buf_rule.get("abs_min", 0.5))
       
         k5_sw = find_swings(k5m_closed, lb=2)
@@ -6529,7 +6717,14 @@ def analyze(asset: str) -> Dict[str, Any]:
                     and price_for_calc is not None
                     and last5_close is not None
                 ):
-                    allowed_slip = 0.2 * last_computed_risk
+                    slip_limit_r = 0.2
+                    if asset == "BTCUSD" and btc_momentum_cfg:
+                        slip_limit_r = float(
+                            btc_momentum_cfg.get("max_slippage_r")
+                            or btc_momentum_cfg.get("no_chase_r")
+                            or slip_limit_r
+                        )
+                    allowed_slip = slip_limit_r * last_computed_risk
                     if decision == "buy":
                         slip = max(0.0, price_for_calc - last5_close)
                     else:
@@ -7804,6 +7999,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
