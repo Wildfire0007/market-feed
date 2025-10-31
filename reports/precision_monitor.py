@@ -42,7 +42,9 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _load_active_assets(settings_path: Path = SETTINGS_PATH) -> Optional[Set[str]]:
+def _load_active_assets(
+    settings_path: Path = SETTINGS_PATH,
+) -> Optional[Tuple[Set[str], List[str]]]:
     try:
         data = json.loads(settings_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError):
@@ -52,8 +54,17 @@ def _load_active_assets(settings_path: Path = SETTINGS_PATH) -> Optional[Set[str
     assets = data.get("assets") if isinstance(data, dict) else None
     if not isinstance(assets, list):
         return None
-    active_assets = {str(asset).strip().upper() for asset in assets if str(asset).strip()}
-    return active_assets or None
+    ordered_assets: List[str] = []
+    for asset in assets:
+        name = str(asset).strip().upper()
+        if not name:
+            continue
+        if name not in ordered_assets:
+            ordered_assets.append(name)
+    active_assets = set(ordered_assets)
+    if not ordered_assets:
+        return None
+    return active_assets, ordered_assets
 
 
 def _safe_pct(numerator: int, denominator: int) -> Optional[float]:
@@ -142,31 +153,84 @@ def _summarise_dataframe(df: pd.DataFrame, flag_columns: Dict[str, str]) -> Dict
     }
 
 
-def _summarise_assets(df: pd.DataFrame, flag_columns: Dict[str, str]) -> List[Dict[str, Any]]:
-    assets: List[Dict[str, Any]] = []
-    for asset, group in df.groupby("asset", dropna=False):
-        asset_name = str(asset) if str(asset).strip() else "UNKNOWN"
-        asset_summary = _summarise_dataframe(group, flag_columns)
-        asset_summary["asset"] = asset_name
-        assets.append(asset_summary)
-    assets.sort(key=lambda item: item["precision_blocked"], reverse=True)
-    return assets
+def _summarise_assets(
+    df: pd.DataFrame,
+    flag_columns: Dict[str, str],
+    active_assets: Optional[Set[str]] = None,
+    ordered_assets: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    grouped: Dict[str, pd.DataFrame] = {}
+    if not df.empty:
+        for asset, group in df.groupby("asset", dropna=False):
+            name = str(asset).strip().upper()
+            grouped[name if name else "UNKNOWN"] = group
+
+    results: List[Dict[str, Any]] = []
+
+    def _summarise(asset_name: str, frame: pd.DataFrame) -> Dict[str, Any]:
+        summary = _summarise_dataframe(frame, flag_columns)
+        summary["asset"] = asset_name
+        return summary
+
+    if ordered_assets:
+        empty_like = df.iloc[0:0]
+        for asset_name in ordered_assets:
+            frame = grouped.get(asset_name, empty_like)
+            results.append(_summarise(asset_name, frame))
+        return results
+
+    for asset_name, group in grouped.items():
+        normalised = asset_name if asset_name else "UNKNOWN"
+        if active_assets and normalised not in active_assets:
+            continue
+        results.append(_summarise(normalised, group))
+
+    results.sort(key=lambda item: item["precision_blocked"], reverse=True)
+    return results
 
 
-def _build_asset_rows(df: pd.DataFrame, flag_columns: Dict[str, str]) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    for asset, group in df.groupby("asset", dropna=False):
-        asset_name = str(asset) if str(asset).strip() else "UNKNOWN"
+def _build_asset_rows(
+    df: pd.DataFrame,
+    flag_columns: Dict[str, str],
+    active_assets: Optional[Set[str]] = None,
+    ordered_assets: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    grouped: Dict[str, pd.DataFrame] = {}
+    if not df.empty:
+        for asset, group in df.groupby("asset", dropna=False):
+            name = str(asset).strip().upper()
+            grouped[name if name else "UNKNOWN"] = group
+
+    def _frame_for(asset_name: str) -> pd.DataFrame:
+        frame = grouped.get(asset_name)
+        if frame is not None:
+            return frame
+        return df.iloc[0:0]
+
+    def _build(asset_name: str, frame: pd.DataFrame) -> Dict[str, Any]:
         row: Dict[str, Any] = {
             "asset": asset_name,
-            "total_signals": int(len(group)),
-            "no_entry_signals": int(group["is_no_entry_flag"].sum()),
-            "precision_blocked": int(group["precision_any_flag"].sum()),
-            "precision_blocked_no_entry": int(group["precision_no_entry_flag"].sum()),
+            "total_signals": int(len(frame)),
+            "no_entry_signals": int(frame["is_no_entry_flag"].sum()),
+            "precision_blocked": int(frame["precision_any_flag"].sum()),
+            "precision_blocked_no_entry": int(frame["precision_no_entry_flag"].sum()),
         }
         for key, column in flag_columns.items():
-            row[key] = int(group[column].sum())
-        rows.append(row)
+            row[key] = int(frame[column].sum())
+        return row
+
+    rows: List[Dict[str, Any]] = []
+    if ordered_assets:
+        for asset_name in ordered_assets:
+            rows.append(_build(asset_name, _frame_for(asset_name)))
+        return rows
+
+    for asset_name, frame in grouped.items():
+        normalised = asset_name if asset_name else "UNKNOWN"
+        if active_assets and normalised not in active_assets:
+            continue
+        rows.append(_build(normalised, frame))
+        
     rows.sort(key=lambda item: item["precision_blocked"], reverse=True)
     return rows
 
@@ -216,10 +280,13 @@ def update_precision_gate_report(
         return None
 
     prepared, flag_columns = _prepare_dataframe(df)
-    active_assets = _load_active_assets()
-    if active_assets:
-        prepared = _filter_to_active_assets(prepared, active_assets)
-
+    active_assets_info = _load_active_assets()
+    active_asset_set: Optional[Set[str]] = None
+    active_asset_order: Optional[List[str]] = None
+    if active_assets_info:
+        active_asset_set, active_asset_order = active_assets_info
+        prepared = _filter_to_active_assets(prepared, active_asset_set)
+        
     reference_time = now or _now()
     lookback = lookback_days if lookback_days is not None else DEFAULT_LOOKBACK_DAYS
     if lookback is not None and lookback > 0:
@@ -229,15 +296,20 @@ def update_precision_gate_report(
     else:
         prepared_recent = prepared
 
-    if active_assets:
-        prepared_recent = _filter_to_active_assets(prepared_recent, active_assets)
+    if active_asset_set:
+        prepared_recent = _filter_to_active_assets(prepared_recent, active_asset_set)
         
     monitor_path = Path(monitor_dir or MONITOR_DIR)
     monitor_path.mkdir(parents=True, exist_ok=True)
 
     total_summary = _summarise_dataframe(prepared, flag_columns)
     recent_summary = _summarise_dataframe(prepared_recent, flag_columns)
-    asset_summaries = _summarise_assets(prepared, flag_columns)
+   asset_summaries = _summarise_assets(
+        prepared,
+        flag_columns,
+        active_assets=active_asset_set,
+        ordered_assets=active_asset_order,
+    )
     daily_records = _build_daily_rows(prepared, flag_columns)
 
     payload = {
@@ -261,7 +333,12 @@ def update_precision_gate_report(
     elif daily_target.exists():
         daily_target.unlink()
 
-    asset_rows = _build_asset_rows(prepared, flag_columns)
+    asset_rows = _build_asset_rows(
+        prepared,
+        flag_columns,
+        active_assets=active_asset_set,
+        ordered_assets=active_asset_order,
+    )
     asset_target = Path(
         ASSET_SUMMARY_PATH if monitor_dir is None else monitor_path / ASSET_SUMMARY_PATH.name
     )
