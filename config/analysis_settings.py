@@ -293,6 +293,18 @@ MOMENTUM_RR_MIN: Dict[str, float] = dict(_get_config_value("momentum_rr_min") or
 FX_TP_TARGETS: Dict[str, float] = dict(_get_config_value("fx_tp_targets") or {})
 NVDA_EXTENDED_ATR_REL: float = float(_get_config_value("nvda_extended_atr_rel") or 0.0)
 NVDA_MOMENTUM_ATR_REL: float = float(_get_config_value("nvda_momentum_atr_rel") or 0.0)
+NVDA_DAILY_ATR_MULTIPLIER: float = float(_get_config_value("nvda_daily_atr_multiplier") or 0.0)
+NVDA_DAILY_ATR_MIN: float = float(_get_config_value("nvda_daily_atr_min") or 0.0)
+NVDA_DAILY_ATR_STRONG: float = float(_get_config_value("nvda_daily_atr_strong") or 0.0)
+NVDA_LOW_ATR_P_SCORE_ADD: float = float(_get_config_value("nvda_low_atr_p_score_add") or 0.0)
+NVDA_RR_BANDS: Dict[str, Any] = dict(_get_config_value("nvda_rr_bands") or {})
+_NVDA_STOP_ATR = dict(_get_config_value("nvda_stop_atr_mult") or {})
+NVDA_STOP_ATR_MIN: float = float(_NVDA_STOP_ATR.get("min") or 0.0)
+NVDA_STOP_ATR_MAX: float = float(_NVDA_STOP_ATR.get("max") or 0.0)
+NVDA_POSITION_SCALE: Dict[str, float] = {
+    key: float(value)
+    for key, value in dict(_get_config_value("nvda_position_scale") or {}).items()
+}
 ENABLE_MOMENTUM_ASSETS: set = load_config()["enable_momentum_assets"]
 INTRADAY_ATR_RELAX: Dict[str, float] = {
     k: float(v) for k, v in dict(_get_config_value("intraday_atr_relax") or {}).items()
