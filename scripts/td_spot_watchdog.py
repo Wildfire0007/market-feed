@@ -215,8 +215,17 @@ def write_state(statuses: Sequence[SpotStatus], state_path: Path, generated_at: 
         "assets": {status.asset: status.as_dict() for status in statuses},
     }
 
+    payload_text = json.dumps(payload, indent=2, sort_keys=True)
+    
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    state_path.write_text(payload_text, encoding="utf-8")
+
+    try:
+        json.loads(state_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive guard
+        LOGGER.error("Spot watchdog wrote invalid JSON to %s: %s", state_path, exc)
+        raise
+        
     return payload
 
 
