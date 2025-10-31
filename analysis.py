@@ -5414,7 +5414,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             bos_signal = bos_signal or nvda_cross_short
         structure_components["bos"] = bos_signal and not recent_break_long
 
-   if asset == "EURUSD" and effective_bias in {"long", "short"}:
+    if asset == "EURUSD" and effective_bias in {"long", "short"}:
         if effective_bias == "long":
             higher_timeframe_break = bool(bos1h_long or bos5m_long)
             structure_components["bos"] = (
@@ -7635,6 +7635,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
