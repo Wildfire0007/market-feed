@@ -5058,6 +5058,10 @@ def analyze(asset: str) -> Dict[str, Any]:
             override_note = "BTC momentum override — szerkezeti kapuk lazítva erős trendben"
             if override_note not in reasons:
                 reasons.append(override_note)
+    usoil_overrides: Dict[str, Any] = {}
+    if asset == "USOIL":
+        usoil_overrides = entry_thresholds_meta.setdefault("usoil_overrides", {})
+
     if asset == "USOIL" and atr1h is not None and atr1h > 0 and strong_momentum:
         momentum_buffer = float(atr1h) * USOIL_MOMENTUM_STOP_MULT
         if invalid_buffer is None or momentum_buffer > invalid_buffer:
@@ -5257,7 +5261,6 @@ def analyze(asset: str) -> Dict[str, Any]:
     entry_thresholds_meta["vwap_confluence"] = vwap_confluence
 
     eurusd_overrides: Dict[str, Any] = {}
-    usoil_overrides: Dict[str, Any] = {}
     eurusd_price_above_vwap = False
     eurusd_price_below_vwap = False
     eurusd_vwap_break_long = False
@@ -7635,6 +7638,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
