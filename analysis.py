@@ -4508,15 +4508,6 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     entry_thresholds_meta["atr_threshold_effective"] = atr_threshold
     entry_thresholds_meta["spread_gate_ok"] = spread_gate_ok
-    if asset == "NVDA":
-        entry_thresholds_meta["nvda_daily_atr"] = nvda_daily_atr
-        entry_thresholds_meta["nvda_daily_atr_rel"] = nvda_daily_atr_rel
-        entry_thresholds_meta.setdefault("nvda_overrides", {})
-        entry_thresholds_meta["nvda_overrides"].setdefault(
-            "session_windows",
-            {"open": nvda_open_window, "close": nvda_close_window},
-        )
-
     momentum_vol_ratio = volume_ratio(k5m_closed, MOMENTUM_VOLUME_RECENT, MOMENTUM_VOLUME_BASE)
     dynamic_tp_profile = compute_dynamic_tp_profile(
         asset,
@@ -5285,6 +5276,14 @@ def analyze(asset: str) -> Dict[str, Any]:
                 session_meta["notes"].append("NVDA nyitási lendület ablak aktív (0-60 perc)")
             if nvda_close_window:
                 session_meta["notes"].append("NVDA zárás előtti 30 perc — VWAP konfluencia kiemelve")
+
+        entry_thresholds_meta["nvda_daily_atr"] = nvda_daily_atr
+        entry_thresholds_meta["nvda_daily_atr_rel"] = nvda_daily_atr_rel
+        entry_thresholds_meta.setdefault("nvda_overrides", {})
+        entry_thresholds_meta["nvda_overrides"].setdefault(
+            "session_windows",
+            {"open": nvda_open_window, "close": nvda_close_window},
+        )
 
     entry_thresholds_meta["ofi_z"] = ofi_zscore
 
@@ -7774,6 +7773,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
