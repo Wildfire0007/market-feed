@@ -43,3 +43,53 @@ def test_xagusd_attempts_cover_physical_metal_exchange() -> None:
 
     assert ("XAG/USD", "PHYSICAL METAL") in attempts
     assert ("XAGUSD", "PHYSICAL METAL") in attempts
+
+
+def test_skip_flag_removes_configured_variants() -> None:
+    cfg = {
+        "symbol": "AAA/BBB",
+        "exchange": "TEST",
+        "alt": [
+            {"symbol": "CCC/DDD", "skip": True, "note": "bad"},
+            {"symbol": "AAA", "exchange": "TEST"},
+        ],
+    }
+
+    attempts = Trading._normalize_symbol_attempts(cfg)
+
+    assert ("CCC/DDD", "TEST") not in attempts
+    assert ("AAA", "TEST") in attempts
+
+
+def test_global_bad_symbol_cache_short_circuits_attempts() -> None:
+    Trading._reset_global_symbol_failure_cache()
+
+    attempts = [("BAD/USD", "FOREX"), ("GOOD/USD", None)]
+    calls = {"bad": 0, "good": 0}
+
+    def fetch(symbol: str, exchange: str | None) -> dict[str, object]:
+        if symbol == "BAD/USD":
+            calls["bad"] += 1
+            raise Trading.TDError("invalid symbol", status_code=400)
+        calls["good"] += 1
+        return {"ok": True, "latency_seconds": 0.1}
+
+    first = Trading.try_symbols(
+        attempts,
+        fetch,
+        freshness_limit=None,
+        attempt_memory=Trading.AttemptMemory(),
+    )
+
+    assert first["ok"]
+    assert calls == {"bad": 1, "good": 1}
+
+    second = Trading.try_symbols(
+        attempts,
+        fetch,
+        freshness_limit=None,
+        attempt_memory=Trading.AttemptMemory(),
+    )
+
+    assert second["ok"]
+    assert calls == {"bad": 1, "good": 2}
