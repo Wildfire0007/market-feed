@@ -117,6 +117,14 @@ from config.analysis_settings import (
     OFI_Z_SETTINGS,
     NVDA_EXTENDED_ATR_REL,
     NVDA_MOMENTUM_ATR_REL,
+    NVDA_DAILY_ATR_MULTIPLIER,
+    NVDA_DAILY_ATR_MIN,
+    NVDA_DAILY_ATR_STRONG,
+    NVDA_LOW_ATR_P_SCORE_ADD,
+    NVDA_RR_BANDS,
+    NVDA_STOP_ATR_MIN,
+    NVDA_STOP_ATR_MAX,
+    NVDA_POSITION_SCALE,
     P_SCORE_TIME_BONUS,
     SESSION_TIME_RULES,
     SESSION_WEEKDAYS,
@@ -3520,6 +3528,28 @@ def compute_dynamic_tp_profile(
         tp2_mom = max(tp2_mom, 3.0)
         rr_mom = max(rr_mom, 1.75)
 
+    if asset == "NVDA":
+        low_rel = float(NVDA_RR_BANDS.get("low_rel_atr") or 0.0)
+        high_rel = float(NVDA_RR_BANDS.get("high_rel_atr") or 0.0)
+        rr_low = float(NVDA_RR_BANDS.get("rr_low") or rr_core)
+        rr_high_core = float(NVDA_RR_BANDS.get("rr_high_core") or rr_core)
+        rr_high_mom = float(NVDA_RR_BANDS.get("rr_high_momentum") or rr_mom)
+        if np.isfinite(rel_atr):
+            if high_rel > 0 and rel_atr >= high_rel:
+                rr_core = max(rr_core, rr_high_core)
+                rr_mom = max(rr_mom, rr_high_mom)
+                tp1_core = max(tp1_core, 1.9)
+                tp2_core = max(tp2_core, rr_core + 0.6)
+                tp1_mom = max(tp1_mom, 1.6)
+                tp2_mom = max(tp2_mom, rr_mom + 0.4)
+            elif low_rel > 0 and rel_atr <= low_rel:
+                rr_core = max(rr_low, min(rr_core, rr_low))
+                rr_mom = max(rr_low, min(rr_mom, rr_low))
+                tp1_core = max(tp1_core * 0.95, 1.2)
+                tp2_core = max(tp2_core * 0.95, tp1_core + 0.3)
+                tp1_mom = max(tp1_mom * 0.95, 1.1)
+                tp2_mom = max(tp2_mom * 0.95, tp1_mom + 0.25)
+
     if current <= perc20:
         regime = "low_vol"
         tp1_core = max(1.2, TP1_R * 0.8)
@@ -4440,6 +4470,14 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     entry_thresholds_meta["atr_threshold_effective"] = atr_threshold
     entry_thresholds_meta["spread_gate_ok"] = spread_gate_ok
+    if asset == "NVDA":
+        entry_thresholds_meta["nvda_daily_atr"] = nvda_daily_atr
+        entry_thresholds_meta["nvda_daily_atr_rel"] = nvda_daily_atr_rel
+        entry_thresholds_meta.setdefault("nvda_overrides", {})
+        entry_thresholds_meta["nvda_overrides"].setdefault(
+            "session_windows",
+            {"open": nvda_open_window, "close": nvda_close_window},
+        )
 
     momentum_vol_ratio = volume_ratio(k5m_closed, MOMENTUM_VOLUME_RECENT, MOMENTUM_VOLUME_BASE)
     dynamic_tp_profile = compute_dynamic_tp_profile(
@@ -4498,6 +4536,21 @@ def analyze(asset: str) -> Dict[str, Any]:
     move_hi, move_lo = last_swing_levels(k1h_sw)
     atr1h_val = float(atr(k1h_closed).iloc[-1]) if not k1h_closed.empty else float("nan")
     atr1h = atr1h_val if np.isfinite(atr1h_val) else None
+    nvda_daily_atr: Optional[float] = None
+    nvda_daily_atr_rel: Optional[float] = None
+    if asset == "NVDA":
+        nvda_daily_candidates: List[float] = []
+        if atr1h is not None and atr1h > 0 and NVDA_DAILY_ATR_MULTIPLIER > 0:
+            nvda_daily_candidates.append(float(atr1h) * NVDA_DAILY_ATR_MULTIPLIER)
+        if atr5 is not None and atr5 > 0 and NVDA_DAILY_ATR_MULTIPLIER > 0:
+            nvda_daily_candidates.append(float(atr5) * NVDA_DAILY_ATR_MULTIPLIER * 12.0)
+        if nvda_daily_candidates:
+            nvda_daily_atr = max(nvda_daily_candidates)
+            if price_for_calc:
+                try:
+                    nvda_daily_atr_rel = nvda_daily_atr / float(price_for_calc)
+                except Exception:
+                    nvda_daily_atr_rel = None
     atr_half = (atr1h * 0.5) if (atr1h is not None) else None
     invalid_buffer_candidates: List[float] = []
     min_buffer = ACTIVE_INVALID_BUFFER_ABS.get(asset)
@@ -5101,12 +5154,16 @@ def analyze(asset: str) -> Dict[str, Any]:
         reasons.append(range_guard_reason)
 
     # --- Kapuk (liquidity = Fib zóna VAGY sweep) + session + regime ---
+    nvda_open_window = False
+    nvda_close_window = False
     if asset == "NVDA":
         h, m = now_utctime_hm()
         minute = h * 60 + m
         cash_start = _min_of_day(13, 30)
         cash_end = _min_of_day(20, 0)
         in_cash_session = cash_start <= minute <= cash_end
+        nvda_open_window = cash_start <= minute <= min(cash_end, cash_start + 60)
+        nvda_close_window = max(cash_start, cash_end - 30) <= minute <= cash_end
         high_atr_for_extended_hours = (
             not np.isnan(rel_atr)
             and rel_atr >= NVDA_EXTENDED_ATR_REL
@@ -5123,6 +5180,12 @@ def analyze(asset: str) -> Dict[str, Any]:
             session_meta.setdefault("notes", []).append(
                 "Cash sessionen kívül — ATR nem elég magas a kereskedéshez"
             )
+        else:
+            session_meta.setdefault("notes", [])
+            if nvda_open_window:
+                session_meta["notes"].append("NVDA nyitási lendület ablak aktív (0-60 perc)")
+            if nvda_close_window:
+                session_meta["notes"].append("NVDA zárás előtti 30 perc — VWAP konfluencia kiemelve")
 
     entry_thresholds_meta["ofi_z"] = ofi_zscore
 
@@ -5205,9 +5268,19 @@ def analyze(asset: str) -> Dict[str, Any]:
             atr_ok and not np.isnan(rel_atr)
             and rel_atr >= max(atr_threshold * 1.3, MOMENTUM_ATR_REL)
         )
-        if high_atr_push and directional_confirmation:
+        nvda_momentum_liquidity = bool(
+            asset == "NVDA"
+            and nvda_daily_atr is not None
+            and NVDA_DAILY_ATR_STRONG > 0
+            and nvda_daily_atr >= NVDA_DAILY_ATR_STRONG
+        )
+        if (high_atr_push or nvda_momentum_liquidity) and directional_confirmation:
             liquidity_ok = True
             liquidity_relaxed = True
+            if nvda_momentum_liquidity:
+                note = "NVDA momentum override — napi ATR támogatja a likviditási lazítást"
+                if note not in structure_notes:
+                    structure_notes.append(note)
 
     if asset == "BTCUSD" and btc_momentum_override and not liquidity_ok:
         liquidity_ok = True
@@ -5331,6 +5404,30 @@ def analyze(asset: str) -> Dict[str, Any]:
         or vwap_confluence.get("trend_pullback")
         or vwap_confluence.get("mean_revert")
     )
+    if asset == "NVDA" and nvda_close_window:
+        vwap_distance = safe_float(vwap_confluence.get("distance"))
+        if vwap_distance is not None:
+            if effective_bias == "long" and vwap_distance >= 0:
+                structure_components["liquidity"] = True
+                note = "NVDA: zárási VWAP felett stabilizáció — long likviditás"
+                if note not in structure_notes:
+                    structure_notes.append(note)
+            elif effective_bias == "short" and vwap_distance <= 0:
+                structure_components["liquidity"] = True
+                note = "NVDA: zárási VWAP alatt stabilizáció — short likviditás"
+                if note not in structure_notes:
+                    structure_notes.append(note)
+    if asset == "NVDA" and nvda_open_window and not structure_components["bos"]:
+        if effective_bias == "long" and (bos5m_long or micro_bos_long or nvda_cross_long):
+            structure_components["bos"] = True
+            note = "NVDA: nyitási BOS/momentum elfogadva — early session bias"
+            if note not in structure_notes:
+                structure_notes.append(note)
+        elif effective_bias == "short" and (bos5m_short or micro_bos_short or nvda_cross_short):
+            structure_components["bos"] = True
+            note = "NVDA: nyitási BOS/momentum elfogadva — early session bias"
+            if note not in structure_notes:
+                structure_notes.append(note)
     if ofi_zscore is not None and OFI_Z_TRIGGER > 0:
         if effective_bias == "long":
             structure_components["ofi"] = ofi_zscore >= OFI_Z_TRIGGER
@@ -5375,6 +5472,33 @@ def analyze(asset: str) -> Dict[str, Any]:
             )
         if eurusd_p_score_meta:
             eurusd_overrides["p_score_adjustments"] = eurusd_p_score_meta
+    if asset == "NVDA":
+        nvda_p_score_meta: Dict[str, Any] = {}
+        if nvda_daily_atr is not None:
+            nvda_p_score_meta["daily_atr"] = nvda_daily_atr
+            if NVDA_DAILY_ATR_MIN > 0 and nvda_daily_atr < NVDA_DAILY_ATR_MIN:
+                p_score_min_local += NVDA_LOW_ATR_P_SCORE_ADD
+                nvda_p_score_meta["low_atr_add"] = NVDA_LOW_ATR_P_SCORE_ADD
+                reasons.append(
+                    "NVDA: napi ATR becslés alacsony — P-score küszöb emelve"
+                )
+            elif (
+                NVDA_DAILY_ATR_STRONG > 0
+                and nvda_daily_atr >= NVDA_DAILY_ATR_STRONG
+                and strong_momentum
+            ):
+                relax = float(NVDA_RR_BANDS.get("momentum_p_score_relax") or 0.0)
+                if relax > 0:
+                    p_score_min_local = max(0.0, p_score_min_local - relax)
+                    nvda_p_score_meta["momentum_relax"] = relax
+                    reasons.append(
+                        "NVDA: magas napi ATR + momentum — P-score küszöb lazítva"
+                    )
+        if nvda_daily_atr_rel is not None:
+            nvda_p_score_meta["daily_atr_rel"] = nvda_daily_atr_rel
+        if nvda_p_score_meta:
+            entry_thresholds_meta.setdefault("nvda_overrides", {})
+            entry_thresholds_meta["nvda_overrides"]["p_score"] = nvda_p_score_meta
     if asset == "BTCUSD" and intervention_band in {"HIGH", "EXTREME"} and effective_bias == "long":
         p_score_min_local += INTERVENTION_P_SCORE_ADD
         note = (
@@ -5397,6 +5521,42 @@ def analyze(asset: str) -> Dict[str, Any]:
     funding_dir_filter: Optional[str] = None
     funding_reason: Optional[str] = None
     range_time_stop_plan: Optional[Dict[str, Any]] = None
+    nvda_small_breakout = False
+    if asset == "NVDA":
+        nvda_rr_meta: Dict[str, Any] = {}
+        low_rel = float(NVDA_RR_BANDS.get("low_rel_atr") or 0.0)
+        high_rel = float(NVDA_RR_BANDS.get("high_rel_atr") or 0.0)
+        rr_low = float(NVDA_RR_BANDS.get("rr_low") or core_rr_min)
+        rr_high_core = float(NVDA_RR_BANDS.get("rr_high_core") or core_rr_min)
+        rr_high_mom = float(NVDA_RR_BANDS.get("rr_high_momentum") or momentum_rr_min)
+        if not np.isnan(rel_atr):
+            if high_rel > 0 and rel_atr >= high_rel:
+                core_rr_min = max(core_rr_min, rr_high_core)
+                momentum_rr_min = max(momentum_rr_min, rr_high_mom)
+                nvda_rr_meta["regime"] = "high_vol"
+            elif low_rel > 0 and rel_atr <= low_rel:
+                core_rr_min = max(rr_low, min(core_rr_min, rr_low))
+                momentum_rr_min = max(rr_low, min(momentum_rr_min, rr_low))
+                nvda_rr_meta["regime"] = "compressed"
+        if effective_bias == "long":
+            nvda_small_breakout = bool(
+                not bos5m_long
+                and (micro_bos_long or nvda_cross_long)
+                and not recent_break_short
+            )
+        elif effective_bias == "short":
+            nvda_small_breakout = bool(
+                not bos5m_short
+                and (micro_bos_short or nvda_cross_short)
+                and not recent_break_long
+            )
+        if nvda_small_breakout:
+            core_rr_min = min(core_rr_min, rr_low)
+            momentum_rr_min = min(momentum_rr_min, rr_low)
+            nvda_rr_meta["breakout_mode"] = True
+        if nvda_rr_meta:
+            entry_thresholds_meta.setdefault("nvda_overrides", {})
+            entry_thresholds_meta["nvda_overrides"]["rr"] = nvda_rr_meta
     if adx_regime == "trend":
         core_rr_min = max(core_rr_min, ADX_TREND_CORE_RR)
         momentum_rr_min = max(momentum_rr_min, ADX_TREND_MOM_RR)
@@ -5529,6 +5689,34 @@ def analyze(asset: str) -> Dict[str, Any]:
                 )
                 if msg not in reasons:
                     reasons.append(msg)
+
+    if asset == "NVDA":
+        nvda_scale_meta: Dict[str, Any] = {}
+        base_scale = float(NVDA_POSITION_SCALE.get("base", 1.0) or 1.0)
+        low_scale = float(NVDA_POSITION_SCALE.get("low_daily_atr", base_scale) or base_scale)
+        high_scale = float(NVDA_POSITION_SCALE.get("high_daily_atr", 1.0) or 1.0)
+        target_scale = position_size_scale
+        if nvda_daily_atr is not None:
+            if NVDA_DAILY_ATR_MIN > 0 and nvda_daily_atr < NVDA_DAILY_ATR_MIN:
+                target_scale = min(target_scale, low_scale)
+                nvda_scale_meta["regime"] = "low_daily_atr"
+            elif NVDA_DAILY_ATR_STRONG > 0 and nvda_daily_atr >= NVDA_DAILY_ATR_STRONG:
+                target_scale = min(target_scale, high_scale)
+                nvda_scale_meta["regime"] = "high_daily_atr"
+            else:
+                target_scale = min(target_scale, base_scale)
+                nvda_scale_meta["regime"] = "neutral"
+        else:
+            target_scale = min(target_scale, base_scale)
+        if target_scale < position_size_scale:
+            position_size_scale = target_scale
+            msg = f"NVDA: ATR-alapú pozícióskálázás ×{position_size_scale:.2f}"
+            if msg not in reasons:
+                reasons.append(msg)
+        if nvda_scale_meta:
+            nvda_scale_meta["applied"] = position_size_scale
+            entry_thresholds_meta.setdefault("nvda_overrides", {})
+            entry_thresholds_meta["nvda_overrides"]["position_scale"] = nvda_scale_meta
 
     for note in structure_notes:
         if note not in reasons:
@@ -5797,6 +5985,40 @@ def analyze(asset: str) -> Dict[str, Any]:
                 if atr5_val > 0:
                     risk_ratio = target_risk / atr5_val
                     adjust_note = f"GOLD stop lazítás: ATR alapú kockázat ×{risk_ratio:.2f}"
+                    if adjust_note not in reasons:
+                    reasons.append(adjust_note)
+
+        if asset == "NVDA":
+            atr_basis = None
+            if atr1h is not None and atr1h > 0:
+                atr_basis = float(atr1h)
+            elif atr5_val > 0:
+                atr_basis = float(atr5_val) * 12.0
+            if atr_basis and NVDA_STOP_ATR_MIN > 0:
+                desired_min = NVDA_STOP_ATR_MIN * atr_basis
+                desired_max = (
+                    NVDA_STOP_ATR_MAX * atr_basis
+                    if NVDA_STOP_ATR_MAX and NVDA_STOP_ATR_MAX >= NVDA_STOP_ATR_MIN
+                    else desired_min * 1.5
+                )
+                target_risk = min(max(risk, desired_min), desired_max)
+                if not np.isclose(target_risk, risk):
+                    if decision_side == "buy":
+                        sl = entry - target_risk
+                        risk = entry - sl
+                        tp1 = entry + tp1_mult * risk
+                        tp2 = entry + tp2_mult * risk
+                        tp1_dist = tp1 - entry
+                        ok_math = (sl < entry < tp1 <= tp2)
+                    else:
+                        sl = entry + target_risk
+                        risk = sl - entry
+                        tp1 = entry - tp1_mult * risk
+                        tp2 = entry - tp2_mult * risk
+                        tp1_dist = entry - tp1
+                        ok_math = (tp2 <= tp1 < entry < sl)
+                    ratio = target_risk / atr_basis if atr_basis else 0.0
+                    adjust_note = f"NVDA stop igazítás: kockázat ×{ratio:.2f} ATR"
                     if adjust_note not in reasons:
                         reasons.append(adjust_note)
 
@@ -7180,6 +7402,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
