@@ -6633,14 +6633,36 @@ def analyze(asset: str) -> Dict[str, Any]:
             required_list.append(precision_gate_label)
         if not precision_ready_for_entry and precision_gate_label not in missing:
             missing.append(precision_gate_label)
-        if precision_flow_gate_label not in required_list:
-            required_list.append(precision_flow_gate_label)
-        if not precision_flow_ready and precision_flow_gate_label not in missing:
-            missing.append(precision_flow_gate_label)
-        if precision_trigger_gate_label not in required_list:
-            required_list.append(precision_trigger_gate_label)
-        if not precision_trigger_ready and precision_trigger_gate_label not in missing:
-            missing.append(precision_trigger_gate_label)
+
+        # Only track downstream precision gates once the score threshold is met –
+        # otherwise suppressed-vol regimes would spam redundant blockers.
+        precision_flow_gate_needed = precision_ready_for_entry
+        precision_trigger_gate_needed = precision_ready_for_entry
+
+        if precision_flow_gate_needed:
+            if precision_flow_gate_label not in required_list:
+                required_list.append(precision_flow_gate_label)
+            if not precision_flow_ready and precision_flow_gate_label not in missing:
+                missing.append(precision_flow_gate_label)
+        else:
+            missing = [item for item in missing if item != precision_flow_gate_label]
+            if precision_flow_gate_label in required_list:
+                required_list = [
+                    item for item in required_list if item != precision_flow_gate_label
+                ]
+
+        if precision_trigger_gate_needed:
+            if precision_trigger_gate_label not in required_list:
+                required_list.append(precision_trigger_gate_label)
+            if not precision_trigger_ready and precision_trigger_gate_label not in missing:
+                missing.append(precision_trigger_gate_label)
+        else:
+            missing = [item for item in missing if item != precision_trigger_gate_label]
+            if precision_trigger_gate_label in required_list:
+                required_list = [
+                    item for item in required_list if item != precision_trigger_gate_label
+                ]
+
         if precision_flow_ready:
             missing = [item for item in missing if item != precision_flow_gate_label]
         if precision_trigger_ready:
@@ -7782,6 +7804,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
