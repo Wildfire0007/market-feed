@@ -20,7 +20,7 @@ vonatkozik. Az aktív profilt két módon lehet megadni:
 Az alap `baseline` profil 60-as P-score küszöböt és 1.0-s ATR szorzót használ.
 Nyugodtabb piaci környezetre a `relaxed` profil 58-as küszöbre vált, míg a
 mostantól alapértelmezetten aktivált `suppressed` profil agresszíven csökkenti
-az elvárt P-score-t (EURUSD: 30, BTCUSD: 25 stb.), és 0.95-ös ATR szorzót
+az elvárt P-score-t (EURUSD: 32, BTCUSD: 25 stb.), és 0.95-ös ATR szorzót
 alkalmaz, hogy a rendkívül alacsony momentum mellett is legyen esély belépőre.
 
 ## Gyors állapotlekérdezés
