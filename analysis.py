@@ -218,6 +218,15 @@ EURUSD_P_SCORE_MOMENTUM_ADD = 2.0
 EURUSD_ATR_POSITION_MULT = 1.25
 EURUSD_POSITION_SCALE_MIN = 0.4
 EURUSD_POSITION_SCALE_MAX = 1.3
+USOIL_ATR1H_BREAKOUT_MIN = 1.0
+USOIL_ATR1H_TARGET = 1.5
+USOIL_ATR1H_PARABOLIC = 2.2
+USOIL_P_SCORE_LOW_ATR_ADD = 6.0
+USOIL_P_SCORE_SIDEWAYS_ADD = 4.0
+USOIL_MOMENTUM_STOP_MULT = 2.5
+USOIL_VWAP_BIAS_LOOKBACK = 240
+USOIL_VWAP_BIAS_RATIO = 0.65
+USOIL_GAP_VWAP_MIN_PCT = 0.6
 TP1_R   = 2.0
 TP2_R   = 3.0
 TP1_R_MOMENTUM = 1.5
@@ -3634,6 +3643,10 @@ def compute_intraday_profile(
         "opening_break": "none",
         "opening_range_minutes": OPENING_RANGE_MINUTES,
         "opening_drive_ratio": None,
+        "previous_close": None,
+        "opening_gap": None,
+        "opening_gap_pct": None,
+        "opening_gap_direction": "flat",
         "price_reference": safe_float(price_now),
         "elapsed_minutes": None,
         "notes": [],
@@ -3667,10 +3680,15 @@ def compute_intraday_profile(
     day_high = safe_float(intraday["high"].max())
     day_low = safe_float(intraday["low"].min())
     last_close = safe_float(intraday["close"].iloc[-1])
+    prev_close = None
+    prev_slice = df.loc[df.index < day_start_utc]
+    if not prev_slice.empty:
+        prev_close = safe_float(prev_slice["close"].iloc[-1])
     price_ref = profile["price_reference"]
     if price_ref is None:
         price_ref = last_close
     profile["price_reference"] = price_ref
+    profile["previous_close"] = prev_close
 
     day_range: Optional[float] = None
     if day_high is not None and day_low is not None:
@@ -3720,6 +3738,23 @@ def compute_intraday_profile(
         opening_break = "up"
     if opening_low is not None and day_low is not None and day_low < opening_low * tol_down:
         opening_break = "down" if opening_break == "none" else "both"
+
+    opening_gap = None
+    opening_gap_pct = None
+    opening_gap_direction = "flat"
+    if day_open is not None and prev_close is not None and prev_close != 0:
+        try:
+            opening_gap = float(day_open) - float(prev_close)
+            if np.isfinite(opening_gap):
+                opening_gap_pct = opening_gap / float(prev_close) * 100.0
+                if opening_gap > 0:
+                    opening_gap_direction = "up"
+                elif opening_gap < 0:
+                    opening_gap_direction = "down"
+        except (TypeError, ValueError, ZeroDivisionError):
+            opening_gap = None
+            opening_gap_pct = None
+            opening_gap_direction = "flat"
 
     opening_drive_ratio = None
     if opening_range and day_range:
@@ -3798,6 +3833,9 @@ def compute_intraday_profile(
             "opening_range_low": opening_low,
             "opening_break": opening_break,
             "opening_drive_ratio": opening_drive_ratio,
+            "opening_gap": opening_gap,
+            "opening_gap_pct": opening_gap_pct,
+            "opening_gap_direction": opening_gap_direction,
             "elapsed_minutes": elapsed_minutes,
             "notes": notes,
         }
@@ -5020,6 +5058,18 @@ def analyze(asset: str) -> Dict[str, Any]:
             override_note = "BTC momentum override — szerkezeti kapuk lazítva erős trendben"
             if override_note not in reasons:
                 reasons.append(override_note)
+    if asset == "USOIL" and atr1h is not None and atr1h > 0 and strong_momentum:
+        momentum_buffer = float(atr1h) * USOIL_MOMENTUM_STOP_MULT
+        if invalid_buffer is None or momentum_buffer > invalid_buffer:
+            invalid_buffer = momentum_buffer
+            usoil_overrides.setdefault("momentum_stop", {})
+            usoil_overrides["momentum_stop"]["atr_multiplier"] = USOIL_MOMENTUM_STOP_MULT
+            usoil_overrides["momentum_stop"]["buffer"] = momentum_buffer
+            note = (
+                f"USOIL: erős momentum — invalid zóna {USOIL_MOMENTUM_STOP_MULT:.1f}×ATR(1h)-re tágítva"
+            )
+            if note not in reasons:
+                reasons.append(note)
 
     if fib_ok:
         fib_points = 18.0
@@ -5207,10 +5257,16 @@ def analyze(asset: str) -> Dict[str, Any]:
     entry_thresholds_meta["vwap_confluence"] = vwap_confluence
 
     eurusd_overrides: Dict[str, Any] = {}
+    usoil_overrides: Dict[str, Any] = {}
     eurusd_price_above_vwap = False
     eurusd_price_below_vwap = False
     eurusd_vwap_break_long = False
     eurusd_vwap_break_short = False
+    usoil_price_above_vwap = False
+    usoil_price_below_vwap = False
+    usoil_vwap_bias: str = "neutral"
+    usoil_gap_break_long = False
+    usoil_gap_break_short = False
     if asset == "EURUSD":
         eurusd_overrides = entry_thresholds_meta.setdefault("eurusd_overrides", {})
         vwap_distance_val = (
@@ -5231,6 +5287,64 @@ def analyze(asset: str) -> Dict[str, Any]:
             "bos_long": bos_alignment_long,
             "bos_short": bos_alignment_short,
         }
+    elif asset == "USOIL":
+        usoil_overrides = entry_thresholds_meta.setdefault("usoil_overrides", {})
+        vwap_distance_val = (
+            safe_float(vwap_confluence.get("distance"))
+            if isinstance(vwap_confluence, dict)
+            else None
+        )
+        usoil_price_above_vwap = vwap_distance_val is not None and vwap_distance_val >= 0
+        usoil_price_below_vwap = vwap_distance_val is not None and vwap_distance_val <= 0
+        usoil_overrides["vwap_distance"] = vwap_distance_val
+        vwap_bias_meta: Dict[str, Any] = {"lookback_minutes": 0}
+        vwap_series = compute_vwap(k1m_closed)
+        if vwap_series is not None and not vwap_series.empty:
+            joined = (
+                pd.DataFrame({"close": k1m_closed["close"], "vwap": vwap_series})
+                .dropna()
+            )
+            if not joined.empty:
+                lookback = min(USOIL_VWAP_BIAS_LOOKBACK, len(joined))
+                recent = joined.tail(lookback)
+                vwap_bias_meta["lookback_minutes"] = lookback
+                if len(recent) >= max(60, lookback // 4):
+                    above_ratio = float((recent["close"] > recent["vwap"]).mean())
+                    below_ratio = float((recent["close"] < recent["vwap"]).mean())
+                    vwap_bias_meta["above_ratio"] = above_ratio
+                    vwap_bias_meta["below_ratio"] = below_ratio
+                    if above_ratio >= USOIL_VWAP_BIAS_RATIO:
+                        usoil_vwap_bias = "long"
+                    elif below_ratio >= USOIL_VWAP_BIAS_RATIO:
+                        usoil_vwap_bias = "short"
+        vwap_bias_meta.setdefault("above_ratio", None)
+        vwap_bias_meta.setdefault("below_ratio", None)
+        vwap_bias_meta["bias"] = usoil_vwap_bias
+        usoil_overrides["vwap_bias"] = vwap_bias_meta
+        opening_gap_pct = safe_float(
+            intraday_profile.get("opening_gap_pct") if isinstance(intraday_profile, dict) else None
+        )
+        opening_gap_direction = (
+            (intraday_profile.get("opening_gap_direction") or "flat")
+            if isinstance(intraday_profile, dict)
+            else "flat"
+        )
+        gap_meta: Dict[str, Any] = {
+            "pct": opening_gap_pct,
+            "direction": opening_gap_direction,
+        }
+        if (
+            opening_gap_pct is not None
+            and abs(opening_gap_pct) >= USOIL_GAP_VWAP_MIN_PCT
+            and vwap_distance_val is not None
+        ):
+            if opening_gap_pct > 0 and vwap_distance_val >= 0 and (bos1h_long or bos5m_long):
+                usoil_gap_break_long = True
+            elif opening_gap_pct < 0 and vwap_distance_val <= 0 and (bos1h_short or bos5m_short):
+                usoil_gap_break_short = True
+        gap_meta["gap_vwap_break_long"] = usoil_gap_break_long
+        gap_meta["gap_vwap_break_short"] = usoil_gap_break_short
+        usoil_overrides["gap_context"] = gap_meta
 
     if asset in {"EURUSD", "BTCUSD"}:
         liquidity_ok_base = bool(fib_ok)
@@ -5300,7 +5414,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             bos_signal = bos_signal or nvda_cross_short
         structure_components["bos"] = bos_signal and not recent_break_long
 
-    if asset == "EURUSD" and effective_bias in {"long", "short"}:
+   if asset == "EURUSD" and effective_bias in {"long", "short"}:
         if effective_bias == "long":
             higher_timeframe_break = bool(bos1h_long or bos5m_long)
             structure_components["bos"] = (
@@ -5328,6 +5442,41 @@ def analyze(asset: str) -> Dict[str, Any]:
                 structure_notes.append("OFI long irányt támogatja — EURUSD konfluencia")
             elif effective_bias == "short" and ofi_zscore <= -OFI_Z_TRIGGER:
                 structure_notes.append("OFI short irányt támogatja — EURUSD konfluencia")
+    if asset == "USOIL" and effective_bias in {"long", "short"}:
+        if usoil_vwap_bias == "long" and effective_bias == "long":
+            structure_components["liquidity"] = True
+            note = "USOIL: ár tartósan VWAP felett — long bias támogatva"
+            if note not in structure_notes:
+                structure_notes.append(note)
+        elif usoil_vwap_bias == "short" and effective_bias == "short":
+            structure_components["liquidity"] = True
+            note = "USOIL: ár tartósan VWAP alatt — short bias támogatva"
+            if note not in structure_notes:
+                structure_notes.append(note)
+        if effective_bias == "long":
+            higher_break = bool(bos1h_long)
+            if usoil_gap_break_long:
+                structure_components["bos"] = True
+                gap_note = "USOIL: Gap + VWAP törés — long setup prioritás"
+                if gap_note not in structure_notes:
+                    structure_notes.append(gap_note)
+            elif not higher_break:
+                structure_components["bos"] = False
+                tighten_note = "USOIL: oldalazó szerkezet — 1h BOS nélkül nincs belépő"
+                if tighten_note not in structure_notes:
+                    structure_notes.append(tighten_note)
+        elif effective_bias == "short":
+            higher_break = bool(bos1h_short)
+            if usoil_gap_break_short:
+                structure_components["bos"] = True
+                gap_note = "USOIL: Gap + VWAP törés — short setup prioritás"
+                if gap_note not in structure_notes:
+                    structure_notes.append(gap_note)
+            elif not higher_break:
+                structure_components["bos"] = False
+                tighten_note = "USOIL: oldalazó szerkezet — 1h BOS nélkül nincs belépő"
+                if tighten_note not in structure_notes:
+                    structure_notes.append(tighten_note)
 
     elif asset == "GOLD_CFD" and effective_bias in {"long", "short"}:
         vwap_distance = safe_float(vwap_confluence.get("distance")) if isinstance(vwap_confluence, dict) else None
@@ -5499,6 +5648,26 @@ def analyze(asset: str) -> Dict[str, Any]:
         if nvda_p_score_meta:
             entry_thresholds_meta.setdefault("nvda_overrides", {})
             entry_thresholds_meta["nvda_overrides"]["p_score"] = nvda_p_score_meta
+    if asset == "USOIL":
+        usoil_p_score_meta: Dict[str, Any] = {}
+        if atr1h is not None and atr1h > 0:
+            usoil_p_score_meta["atr1h"] = float(atr1h)
+            if atr1h < USOIL_ATR1H_BREAKOUT_MIN:
+                p_score_min_local += USOIL_P_SCORE_LOW_ATR_ADD
+                usoil_p_score_meta["low_atr_add"] = USOIL_P_SCORE_LOW_ATR_ADD
+                reasons.append(
+                    "USOIL: 1h ATR <1 USD — P-score küszöb emelve a zajos sáv miatt"
+                )
+        if isinstance(intraday_profile, dict):
+            if intraday_profile.get("range_compression") and not strong_momentum:
+                p_score_min_local += USOIL_P_SCORE_SIDEWAYS_ADD
+                usoil_p_score_meta["sideways_add"] = USOIL_P_SCORE_SIDEWAYS_ADD
+                reasons.append(
+                    "USOIL: oldalazásban szigorított P-score — kevesebb fals jelzés"
+                )
+        if usoil_p_score_meta:
+            usoil_overrides.setdefault("p_score_adjustments", {})
+            usoil_overrides["p_score_adjustments"].update(usoil_p_score_meta)
     if asset == "BTCUSD" and intervention_band in {"HIGH", "EXTREME"} and effective_bias == "long":
         p_score_min_local += INTERVENTION_P_SCORE_ADD
         note = (
@@ -5557,6 +5726,36 @@ def analyze(asset: str) -> Dict[str, Any]:
         if nvda_rr_meta:
             entry_thresholds_meta.setdefault("nvda_overrides", {})
             entry_thresholds_meta["nvda_overrides"]["rr"] = nvda_rr_meta
+    if asset == "USOIL" and atr1h is not None and atr1h > 0:
+        usoil_rr_meta: Dict[str, Any] = {
+            "atr1h": float(atr1h),
+            "core_rr_min": core_rr_min,
+            "momentum_rr_min": momentum_rr_min,
+        }
+        if atr1h >= USOIL_ATR1H_PARABOLIC:
+            core_rr_min = min(core_rr_min, 1.4)
+            momentum_rr_min = min(momentum_rr_min, 1.2)
+            usoil_rr_meta["regime"] = "parabolic"
+            msg = "USOIL: parabolikus lendület — RR cél 1:1.4 környékére szűkítve"
+            if msg not in reasons:
+                reasons.append(msg)
+        elif atr1h >= USOIL_ATR1H_TARGET:
+            core_rr_min = max(core_rr_min, 2.0)
+            momentum_rr_min = max(momentum_rr_min, 1.7)
+            usoil_rr_meta["regime"] = "swing"
+            msg = "USOIL: 1h ATR ≥1.5 USD — RR cél 1:2-re emelve"
+            if msg not in reasons:
+                reasons.append(msg)
+        else:
+            core_rr_min = min(core_rr_min, 1.5)
+            momentum_rr_min = min(momentum_rr_min, 1.3)
+            usoil_rr_meta["regime"] = "muted"
+            msg = "USOIL: csökkenő volatilitás — RR cél 1:1.5-re igazítva"
+            if msg not in reasons:
+                reasons.append(msg)
+        usoil_rr_meta["core_rr_min_effective"] = core_rr_min
+        usoil_rr_meta["momentum_rr_min_effective"] = momentum_rr_min
+        usoil_overrides["rr_adjustments"] = usoil_rr_meta
     if adx_regime == "trend":
         core_rr_min = max(core_rr_min, ADX_TREND_CORE_RR)
         momentum_rr_min = max(momentum_rr_min, ADX_TREND_MOM_RR)
@@ -5657,6 +5856,40 @@ def analyze(asset: str) -> Dict[str, Any]:
             position_size_scale = min(position_size_scale, 0.75)
         entry_thresholds_meta["btc_position_scale"] = position_size_scale
 
+    if asset == "USOIL":
+        minute_now = analysis_now.hour * 60 + analysis_now.minute
+        session_label = "asia"
+        session_scale = 0.7
+        if 12 * 60 <= minute_now < 21 * 60:
+            session_label = "us"
+            session_scale = 1.0
+        elif 6 * 60 <= minute_now < 12 * 60:
+            session_label = "europe"
+            session_scale = 0.85
+        elif minute_now >= 21 * 60:
+            session_label = "overnight"
+            session_scale = 0.75
+        scale_meta: Dict[str, Any] = {
+            "session": session_label,
+            "session_scale": session_scale,
+        }
+        if atr1h is not None and atr1h > 0:
+            scale_meta["atr1h"] = float(atr1h)
+        target_scale = min(position_size_scale, session_scale)
+        if atr1h is not None and atr1h < USOIL_ATR1H_BREAKOUT_MIN:
+            target_scale = min(target_scale, 0.75)
+            scale_meta["low_vol_scale"] = 0.75
+        if target_scale < position_size_scale:
+            position_size_scale = target_scale
+            label_map = {
+                "us": "US nyitás", "europe": "európai délelőtt", "asia": "ázsiai sáv", "overnight": "nyitás előtti sáv"
+            }
+            session_note = label_map.get(session_label, session_label)
+            msg = f"USOIL: {session_note} — pozícióméret ×{target_scale:.2f}"
+            if msg not in reasons:
+                reasons.append(msg)
+        scale_meta["applied"] = position_size_scale
+        usoil_overrides["position_scale"] = scale_meta
     if asset == "EURUSD":
         atr_for_position: Optional[float] = None
         if atr1h is not None and atr1h > 0:
@@ -7402,6 +7635,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
