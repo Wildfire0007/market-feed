@@ -209,6 +209,113 @@ def _normalize_bias_relax(raw_map: Any) -> Dict[str, Dict[str, Any]]:
     return result
 
 
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_btc_profiles(raw_map: Any) -> Dict[str, Dict[str, Any]]:
+    result: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(raw_map, dict):
+        return result
+
+    for profile_name, meta in raw_map.items():
+        if not isinstance(meta, dict):
+            continue
+        profile_cfg: Dict[str, Any] = {}
+
+        floor_val = _safe_float(meta.get("atr_floor_usd"))
+        if floor_val is not None:
+            profile_cfg["atr_floor_usd"] = floor_val
+
+        percentiles_raw = meta.get("atr_percentiles")
+        if isinstance(percentiles_raw, dict):
+            percentiles: Dict[str, float] = {}
+            for bucket, value in percentiles_raw.items():
+                val = _safe_float(value)
+                if val is not None:
+                    percentiles[str(bucket)] = val
+            if percentiles:
+                profile_cfg["atr_percentiles"] = percentiles
+
+        rr_raw = meta.get("rr")
+        if isinstance(rr_raw, dict):
+            rr_cfg: Dict[str, Any] = {}
+            for key in (
+                "trend_core",
+                "trend_momentum",
+                "range_core",
+                "range_momentum",
+                "range_size_scale",
+                "range_breakeven",
+            ):
+                val = _safe_float(rr_raw.get(key))
+                if val is not None:
+                    rr_cfg[key] = val
+            time_stop = rr_raw.get("range_time_stop")
+            try:
+                if time_stop is not None:
+                    rr_cfg["range_time_stop"] = int(time_stop)
+            except (TypeError, ValueError):
+                pass
+            if rr_cfg:
+                profile_cfg["rr"] = rr_cfg
+
+        tp_min_val = _safe_float(meta.get("tp_min_pct"))
+        if tp_min_val is not None:
+            profile_cfg["tp_min_pct"] = tp_min_val
+
+        sl_raw = meta.get("sl_buffer")
+        if isinstance(sl_raw, dict):
+            sl_cfg: Dict[str, float] = {}
+            for key in ("atr_mult", "abs_min"):
+                val = _safe_float(sl_raw.get(key))
+                if val is not None:
+                    sl_cfg[key] = val
+            if sl_cfg:
+                profile_cfg["sl_buffer"] = sl_cfg
+
+        bias_raw = meta.get("bias_relax")
+        if isinstance(bias_raw, dict):
+            bias_cfg: Dict[str, float] = {}
+            for key, value in bias_raw.items():
+                val = _safe_float(value)
+                if val is not None:
+                    bias_cfg[str(key)] = val
+            if bias_cfg:
+                profile_cfg["bias_relax"] = bias_cfg
+
+        structure_raw = meta.get("structure")
+        if isinstance(structure_raw, dict):
+            structure_cfg: Dict[str, float] = {}
+            for key, value in structure_raw.items():
+                val = _safe_float(value)
+                if val is not None:
+                    structure_cfg[str(key)] = val
+            if structure_cfg:
+                profile_cfg["structure"] = structure_cfg
+
+        momentum_raw = meta.get("momentum_override")
+        if isinstance(momentum_raw, dict):
+            momentum_cfg: Dict[str, float] = {}
+            for key, value in momentum_raw.items():
+                val = _safe_float(value)
+                if val is not None:
+                    momentum_cfg[str(key)] = val
+            if momentum_cfg:
+                profile_cfg["momentum_override"] = momentum_cfg
+
+        if bool(meta.get("range_guard_requires_override")):
+            profile_cfg["range_guard_requires_override"] = True
+
+        if profile_cfg:
+            result[str(profile_name)] = profile_cfg
+
+    return result
+
+
 # Module level shortcuts used by ``analysis.py`` and helper scripts.
 ASSETS: List[str] = load_config()["assets"]
 LEVERAGE: Dict[str, float] = load_config()["leverage"]
@@ -262,6 +369,10 @@ ATR_THRESHOLD_MULT_ASSET: Dict[str, float] = {
     for key, value in _ATR_MULT_PROFILE.items()
     if key != "default"
 }
+
+BTC_PROFILE_OVERRIDES: Dict[str, Dict[str, Any]] = _normalize_btc_profiles(
+    _get_config_value("btc_profile_overrides")
+)
 
 ATR_LOW_TH_DEFAULT: float = float(_get_config_value("atr_low_threshold_default"))
 ATR_LOW_TH_ASSET: Dict[str, float] = dict(_get_config_value("atr_low_threshold") or {})
