@@ -453,13 +453,25 @@ def update_live_validation(
         }
     summary["assets"] = asset_breakdown
 
-    reports_dir.mkdir(parents=True, exist_ok=True)
-    summary_path = reports_dir / "live_validation.json"
-    with summary_path.open("w", encoding="utf-8") as fh:
-        json.dump(summary, fh, ensure_ascii=False, indent=2)
+    primary_reports_dir = Path(reports_dir)
+    default_public_reports_dir = Path(public_dir) / "reports"
+    target_dirs: List[Path] = []
+    for candidate in (primary_reports_dir, default_public_reports_dir):
+        candidate = candidate.resolve()
+        if candidate not in target_dirs:
+            target_dirs.append(candidate)
 
-    details_path = reports_dir / "live_validation.csv"
-    results_df.to_csv(details_path, index=False)
+    summary_path: Optional[Path] = None
+    for directory in target_dirs:
+        directory.mkdir(parents=True, exist_ok=True)
+        summary_file = directory / "live_validation.json"
+        with summary_file.open("w", encoding="utf-8") as fh:
+            json.dump(summary, fh, ensure_ascii=False, indent=2)
+        details_file = directory / "live_validation.csv"
+        results_df.to_csv(details_file, index=False)
+        if summary_path is None:
+            summary_path = summary_file
+    
     return summary_path
 
 
