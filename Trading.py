@@ -436,8 +436,8 @@ ASSETS = {
         ],
     },
     "XAGUSD": {
-        # Lásd: https://twelvedata.com/symbols (Metals) – csak az "XAG/USD" és az
-        # exchange nélküli "XAGUSD" tickerek szerepelnek támogatottként.
+        # Lásd: https://twelvedata.com/symbols (Metals) – a dokumentált ticker a
+        # "XAG/USD" formátum, amelyet a Twelve Data REST API ismer.
         "symbol": "XAG/USD",
         "name": "Silver / US Dollar",
         "asset_class": "Commodity",
@@ -447,45 +447,14 @@ ASSETS = {
         "mic": "COMMODITY",
         "currency": "USD",
         "disable_compact_variants": True,
+        "disable_exchange_fallbacks": True,
         "alt": [
-            {
-                "symbol": "XAG/USD",
-                "exchange": "PHYSICAL METAL",
-                "disable_compact_variants": True,
-            },
-            {
-                "symbol": "XAGUSD",
-                "exchange": "PHYSICAL METAL",
-                "disable_compact_variants": True,
-            },
-            {
-                "symbol": "XAGUSD",
-                "exchange": "COMMODITY",
-                "disable_compact_variants": True,
-            },
-            {"symbol": "XAGUSD", "exchange": None, "disable_compact_variants": True},
             {
                 "symbol": "XAG/USD",
                 "exchange": None,
                 "disable_compact_variants": True,
-            },
-            {
-                "symbol": "XAGUSD",
-                "exchange": "FOREX",
-                "disable_compact_variants": True,
-                "skip": True,
-                "note": "Twelve Data rejects the FOREX routed variant with HTTP 400.",
-            },
-            {
-                "symbol": "XAG/USD:FOREX",
-                "skip": True,
-                "note": "Colon-form FOREX suffix is not part of the documented metals universe.",
-            },
-            {
-                "symbol": "XAGUSD/CMX",
-                "skip": True,
-                "note": "Comex-style ticker is not recognised by Twelve Data.",
-            },
+                "disable_exchange_fallbacks": True,
+            }
         ],
     },
 }
@@ -3359,6 +3328,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
