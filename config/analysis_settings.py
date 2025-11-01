@@ -307,6 +307,36 @@ def _normalize_btc_profiles(raw_map: Any) -> Dict[str, Dict[str, Any]]:
             if momentum_cfg:
                 profile_cfg["momentum_override"] = momentum_cfg
 
+        rr_min_raw = meta.get("rr_min")
+        if isinstance(rr_min_raw, dict):
+            rr_min_cfg: Dict[str, float] = {}
+            for key, value in rr_min_raw.items():
+                val = _safe_float(value)
+                if val is not None:
+                    rr_min_cfg[str(key)] = val
+            if rr_min_cfg:
+                profile_cfg["rr_min"] = rr_min_cfg
+
+        precision_raw = meta.get("precision")
+        if isinstance(precision_raw, dict):
+            precision_cfg: Dict[str, Any] = {}
+            score_min = _safe_float(precision_raw.get("score_min"))
+            if score_min is not None:
+                precision_cfg["score_min"] = score_min
+            for key in ("ready_timeout_minutes", "arming_timeout_minutes"):
+                try:
+                    timeout_val = precision_raw.get(key)
+                    if timeout_val is not None:
+                        precision_cfg[key] = int(timeout_val)
+                except (TypeError, ValueError):
+                    continue
+            if precision_cfg:
+                profile_cfg["precision"] = precision_cfg
+
+        no_chase_val = _safe_float(meta.get("no_chase_r"))
+        if no_chase_val is not None:
+            profile_cfg["no_chase_r"] = no_chase_val
+            
         if bool(meta.get("range_guard_requires_override")):
             profile_cfg["range_guard_requires_override"] = True
 
