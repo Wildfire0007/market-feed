@@ -88,9 +88,9 @@ BTC_ADX_TREND_MIN = 20.0
 
 # ATR floor + napszak-percentilis (TOD = time-of-day buckets) – baseline/relaxed/suppressed
 BTC_ATR_FLOOR_USD = {
-    "baseline": 50.0,
-    "relaxed": 45.0,
-    "suppressed": 40.0,
+    "baseline": 150.0,
+    "relaxed": 135.0,
+    "suppressed": 120.0,
 }
 BTC_ATR_PCT_TOD = {  # percentilis minimum a nap adott szakaszára
     "baseline": {"open": 0.50, "mid": 0.45, "close": 0.50},
@@ -113,8 +113,8 @@ BTC_SL_ATR_MULT = {"baseline": 0.30, "relaxed": 0.28, "suppressed": 0.26}
 BTC_SL_ABS_MIN = 120.0  # USD
 
 # Momentum override és no-chase (slippage tiltó R-ben)
-BTC_MOMENTUM_RR_MIN = {"baseline": 1.40, "relaxed": 1.35, "suppressed": 1.30}
-BTC_NO_CHASE_R = {"baseline": 0.25, "relaxed": 0.22, "suppressed": 0.18}
+BTC_MOMENTUM_RR_MIN = {"baseline": 1.60, "relaxed": 1.50, "suppressed": 1.45}
+BTC_NO_CHASE_R = {"baseline": 0.25, "relaxed": 0.22, "suppressed": 0.16}
 
 # Runtime state for BTC momentum overrides and guardrails. Populated lazily
 # during analysis to support helper utilities and optional real-time adapters.
@@ -125,7 +125,7 @@ _BTC_NO_CHASE_LIMITS: Dict[str, float] = {}
 _PRECISION_RUNTIME: Dict[str, Dict[str, Any]] = {}
 
 # Precision pipeline alsó határ (ne blokkoljon túl korán)
-BTC_PRECISION_MIN = {"baseline": 60, "relaxed": 55, "suppressed": 50}
+BTC_PRECISION_MIN = {"baseline": 60, "relaxed": 55, "suppressed": 54}
 
 
 def btc_precision_state(profile: str, asset: str, score: float, trigger_ready: bool) -> str:
@@ -199,11 +199,14 @@ from config.analysis_settings import (
     VWAP_BAND_MULT,
     get_atr_threshold_multiplier,
     get_p_score_min,
+    load_config,
 )
 
 BTC_PROFILE_CONFIG: Dict[str, Any] = dict(
     BTC_PROFILE_OVERRIDES.get(ENTRY_THRESHOLD_PROFILE_NAME) or {}
 )
+
+SETTINGS: Dict[str, Any] = load_config()
 
 
 def btc_rr_min_with_adx(profile: str, asset: str, adx_5m_val: float) -> Tuple[Optional[float], Dict[str, Any]]:
@@ -379,7 +382,28 @@ def btc_momentum_override(profile: str, asset: str, side: str, atr_ok: bool) -> 
                     rr_override = None
 
     if rr_override is None:
-        rr_override = float(BTC_MOMENTUM_RR_MIN.get(profile, BTC_MOMENTUM_RR_MIN.get("baseline", 1.4)))
+        profile_cfg = BTC_PROFILE_OVERRIDES.get(profile)
+        if not profile_cfg and isinstance(BTC_PROFILE_CONFIG, dict):
+            if profile == _btc_active_profile():
+                profile_cfg = BTC_PROFILE_CONFIG
+        rr_min_cfg = None
+        if isinstance(profile_cfg, dict):
+            rr_section = profile_cfg.get("rr_min")
+            if isinstance(rr_section, dict):
+                rr_min_cfg = rr_section.get("momentum")
+        if rr_min_cfg is None and isinstance(BTC_PROFILE_CONFIG, dict):
+            rr_section = BTC_PROFILE_CONFIG.get("rr_min")
+            if isinstance(rr_section, dict):
+                rr_min_cfg = rr_section.get("momentum")
+        if rr_min_cfg is not None:
+            try:
+                rr_override = float(rr_min_cfg)
+            except (TypeError, ValueError):
+                rr_override = None
+    if rr_override is None:
+        rr_override = float(
+            BTC_MOMENTUM_RR_MIN.get(profile, BTC_MOMENTUM_RR_MIN.get("baseline", 1.4))
+        )
 
     if not np.isfinite(ofi_strong_th):
         ofi_strong_th = BTC_OFI_Z.get("strong", 0.0)
@@ -401,7 +425,28 @@ def btc_no_chase_violated(profile: str, entry_price: float, trigger_price: float
     """Return ``True`` when the BTC momentum entry chases beyond the R limit."""
 
     profile_key = profile if profile in BTC_NO_CHASE_R else "baseline"
-    limit_value = BTC_NO_CHASE_R.get(profile_key, BTC_NO_CHASE_R["baseline"])
+    limit_value: Optional[float] = None
+    profile_cfg = BTC_PROFILE_OVERRIDES.get(profile)
+    if not profile_cfg and isinstance(BTC_PROFILE_CONFIG, dict):
+        if profile == _btc_active_profile():
+            profile_cfg = BTC_PROFILE_CONFIG
+    if isinstance(profile_cfg, dict):
+        limit_raw = profile_cfg.get("no_chase_r")
+        if limit_raw is not None:
+            try:
+                limit_value = float(limit_raw)
+            except (TypeError, ValueError):
+                limit_value = None
+    if limit_value is None and isinstance(BTC_PROFILE_CONFIG, dict):
+        if profile == _btc_active_profile():
+            limit_raw = BTC_PROFILE_CONFIG.get("no_chase_r")
+            if limit_raw is not None:
+                try:
+                    limit_value = float(limit_raw)
+                except (TypeError, ValueError):
+                    limit_value = None
+    if limit_value is None:
+        limit_value = BTC_NO_CHASE_R.get(profile_key, BTC_NO_CHASE_R["baseline"])
     limit_map = globals().get("_BTC_NO_CHASE_LIMITS", {})
     if isinstance(limit_map, dict) and profile in limit_map:
         try:
@@ -574,14 +619,27 @@ def _btc_profile_section(name: str) -> Dict[str, Any]:
 
 
 def _precision_profile_config(asset: str) -> Dict[str, Any]:
-    if asset == "BTCUSD":
-        profile = _btc_active_profile()
-        base: Dict[str, Any] = {"score_min": BTC_PRECISION_MIN.get(profile)}
+    if asset != "BTCUSD":
+        return {}
+
+    profile = _btc_active_profile()
+    cfg: Dict[str, Any] = {}
+    if isinstance(BTC_PROFILE_CONFIG, dict):
         section = BTC_PROFILE_CONFIG.get("precision")
         if isinstance(section, dict):
-            base.update(section)
-        return base
-    return {}
+            cfg.update(section)
+
+    precision_min = (cfg or {}).get("score_min")
+    if precision_min is None:
+        precision_min = BTC_PRECISION_MIN.get(profile, BTC_PRECISION_MIN.get("baseline"))
+    try:
+        if precision_min is not None:
+            precision_min = float(precision_min)
+    except (TypeError, ValueError):
+        precision_min = BTC_PRECISION_MIN.get(profile, BTC_PRECISION_MIN.get("baseline"))
+    if precision_min is not None:
+        cfg["score_min"] = precision_min
+    return cfg
 
 
 def get_precision_score_threshold(asset: str) -> float:
@@ -888,14 +946,31 @@ def btc_atr_gate_threshold(profile: str, asset: str, now_utc: Optional[datetime]
     if asset != "BTCUSD":
         return 0.0
 
-    floor = BTC_ATR_FLOOR_USD.get(profile)
+    floor: Optional[float] = None
+    profile_cfg = BTC_PROFILE_OVERRIDES.get(profile)
+    if not profile_cfg and isinstance(BTC_PROFILE_CONFIG, dict):
+        if profile == _btc_active_profile():
+            profile_cfg = BTC_PROFILE_CONFIG
+    if isinstance(profile_cfg, dict):
+        floor_raw = profile_cfg.get("atr_floor_usd")
+        if floor_raw is not None:
+            try:
+                floor = float(floor_raw)
+            except (TypeError, ValueError):
+                floor = None
+    if floor is None:
+        floor = BTC_ATR_FLOOR_USD.get(profile)
     if floor is None:
         floor = BTC_ATR_FLOOR_USD.get("baseline", 0.0)
     tod = time_of_day_bucket(now_utc)
-    pct_cfg = BTC_ATR_PCT_TOD.get(profile) or BTC_ATR_PCT_TOD.get("baseline", {})
-    pct = pct_cfg.get(tod)
+    pct = None
+    if isinstance(profile_cfg, dict):
+        pct_section = profile_cfg.get("atr_percentiles")
+        if isinstance(pct_section, dict):
+            pct = pct_section.get(tod)
     if pct is None:
-        pct = BTC_ATR_PCT_TOD.get("baseline", {}).get(tod, 0.0)
+        pct_cfg = BTC_ATR_PCT_TOD.get(profile) or BTC_ATR_PCT_TOD.get("baseline", {})
+        pct = pct_cfg.get(tod, 0.0)
 
     percentile_fn = globals().get("atr_percentile_value")
     percentile_value: Optional[float] = None
@@ -906,17 +981,19 @@ def btc_atr_gate_threshold(profile: str, asset: str, now_utc: Optional[datetime]
             percentile_value = None
 
     threshold_candidates = []
+    floor_usd = None
     try:
-        threshold_candidates.append(float(floor))
+        floor_usd = float(floor)
+        threshold_candidates.append(floor_usd)
     except (TypeError, ValueError):
-        pass
+        floor_usd = None
     if percentile_value is not None:
         try:
             threshold_candidates.append(float(percentile_value))
         except (TypeError, ValueError):
             pass
-
-    return max(threshold_candidates) if threshold_candidates else 0.0
+    threshold = max(threshold_candidates) if threshold_candidates else 0.0
+    return threshold
 
 
 def btc_atr_gate_ok(
@@ -5470,8 +5547,28 @@ def analyze(asset: str) -> Dict[str, Any]:
             entry_thresholds_meta["btc_rr_adx"] = btc_rr_band_meta.copy()
     atr_profile_multiplier = get_atr_threshold_multiplier(asset)
     atr_threshold = atr_low_threshold(asset)
+    btc_profile_section: Dict[str, Any] = {}
+    if asset == "BTCUSD" and isinstance(BTC_PROFILE_CONFIG, dict):
+        btc_profile_section = dict(BTC_PROFILE_CONFIG)
+
+    atr_ratio_threshold_map = {}
+    if isinstance(SETTINGS, dict):
+        atr_ratio_threshold_map = SETTINGS.get("atr_low_threshold", {}) or {}
+    atr_ratio_threshold_value = None
+    if isinstance(atr_ratio_threshold_map, dict):
+        atr_ratio_threshold_value = atr_ratio_threshold_map.get(asset)
+
     if asset == "BTCUSD":
-        atr_floor_usd = BTC_ATR_FLOOR_USD.get(btc_profile_name or "baseline")
+        atr_floor_usd = None
+        floor_cfg = btc_profile_section.get("atr_floor_usd") if btc_profile_section else None
+        if floor_cfg is not None:
+            try:
+                atr_floor_usd = float(floor_cfg)
+            except (TypeError, ValueError):
+                atr_floor_usd = None
+        if atr_floor_usd is None:
+            profile_key = btc_profile_name or "baseline"
+            atr_floor_usd = BTC_ATR_FLOOR_USD.get(profile_key, BTC_ATR_FLOOR_USD.get("baseline"))
         if atr_floor_usd is not None:
             entry_thresholds_meta["btc_atr_floor_usd"] = float(atr_floor_usd)
         if atr_floor_usd is not None and price_for_calc:
@@ -5484,6 +5581,10 @@ def analyze(asset: str) -> Dict[str, Any]:
             btc_atr_floor_passed = bool(not np.isnan(rel_atr) and rel_atr >= btc_atr_floor_ratio)
             entry_thresholds_meta["btc_atr_floor_ratio"] = btc_atr_floor_ratio
             entry_thresholds_meta["btc_atr_floor_passed"] = btc_atr_floor_passed
+        if atr_ratio_threshold_value is not None:
+            entry_thresholds_meta["btc_atr_ratio_threshold"] = (
+                None if atr_ratio_threshold_value in (None, "null") else atr_ratio_threshold_value
+            )
         btc_profile = btc_profile_name or "baseline"
         try:
             atr5_abs = float(atr5)
@@ -5587,7 +5688,24 @@ def analyze(asset: str) -> Dict[str, Any]:
             atr_abs_ok = float(atr5) >= atr_abs_min
         except Exception:
             atr_abs_ok = False
-    atr_ok = not (np.isnan(rel_atr) or rel_atr < atr_threshold or not atr_abs_ok)
+    base_ratio_ok = not (np.isnan(rel_atr) or rel_atr < atr_threshold)
+    atr_ratio_ok = base_ratio_ok
+    if asset == "BTCUSD":
+        if atr_ratio_threshold_value in (None, "null"):
+            atr_ratio_ok = True
+        elif isinstance(atr_ratio_threshold_value, (int, float)):
+            try:
+                rel_atr_value = float(rel_atr)
+            except (TypeError, ValueError):
+                rel_atr_value = float("nan")
+            atr_ratio_ok = bool(
+                not np.isnan(rel_atr_value) and rel_atr_value >= float(atr_ratio_threshold_value)
+            )
+            atr_ratio_ok = atr_ratio_ok and base_ratio_ok
+        else:
+            atr_ratio_ok = base_ratio_ok
+    atr_ok = bool(atr_ratio_ok and atr_abs_ok)
+    entry_thresholds_meta["atr_ratio_ok"] = bool(atr_ratio_ok)
     if not spread_gate_ok:
         atr_ok = False
     if not atr_overlay_gate:
@@ -8134,12 +8252,37 @@ def analyze(asset: str) -> Dict[str, Any]:
                         if asset == "BTCUSD"
                         else 0.2
                     )
-                    if asset == "BTCUSD" and btc_momentum_cfg:
-                        slip_limit_r = float(
-                            btc_momentum_cfg.get("max_slippage_r")
-                            or btc_momentum_cfg.get("no_chase_r")
-                            or slip_limit_r
-                        )
+                    profile_for_no_chase = btc_profile_name or _btc_active_profile()
+                    no_chase_limit_r = slip_limit_r
+                    if asset == "BTCUSD":
+                        no_chase_cfg = None
+                        if isinstance(BTC_PROFILE_CONFIG, dict):
+                            no_chase_cfg = BTC_PROFILE_CONFIG.get("no_chase_r")
+                        if no_chase_cfg is None:
+                            profile_cfg = BTC_PROFILE_OVERRIDES.get(profile_for_no_chase)
+                            if isinstance(profile_cfg, dict):
+                                no_chase_cfg = profile_cfg.get("no_chase_r")
+                        if no_chase_cfg is not None:
+                            try:
+                                no_chase_limit_r = float(no_chase_cfg)
+                            except (TypeError, ValueError):
+                                no_chase_limit_r = BTC_NO_CHASE_R.get(
+                                    profile_for_no_chase, BTC_NO_CHASE_R.get("baseline", slip_limit_r)
+                                )
+                        else:
+                            no_chase_limit_r = BTC_NO_CHASE_R.get(
+                                profile_for_no_chase, BTC_NO_CHASE_R.get("baseline", slip_limit_r)
+                            )
+                        slip_limit_r = no_chase_limit_r
+                        if btc_momentum_cfg:
+                            max_slip_raw = btc_momentum_cfg.get("max_slippage_r")
+                            if max_slip_raw is not None:
+                                try:
+                                    slip_limit_r = float(max_slip_raw)
+                                except (TypeError, ValueError):
+                                    slip_limit_r = max(slip_limit_r, no_chase_limit_r)
+                    else:
+                        no_chase_limit_r = slip_limit_r
                     allowed_slip = slip_limit_r * last_computed_risk
                     if decision == "buy":
                         slip = max(0.0, price_for_calc - last5_close)
@@ -8151,13 +8294,14 @@ def analyze(asset: str) -> Dict[str, Any]:
                     slip_r = abs(entry_price - trigger_price) / max(1e-9, abs(trigger_price - sl_price))
                     limit_used = slip_limit_r
                     if asset == "BTCUSD":
-                        profile_for_no_chase = btc_profile_name or _btc_active_profile()
                         limit_map = globals().get("_BTC_NO_CHASE_LIMITS", {})
                         if isinstance(limit_map, dict) and profile_for_no_chase in limit_map:
                             try:
                                 limit_used = float(limit_map[profile_for_no_chase])
                             except (TypeError, ValueError):
-                                limit_used = slip_limit_r
+                                limit_used = no_chase_limit_r
+                        else:
+                            limit_used = no_chase_limit_r
                         no_chase_violation = btc_no_chase_violated(
                             profile_for_no_chase,
                             entry_price,
@@ -8169,14 +8313,14 @@ def analyze(asset: str) -> Dict[str, Any]:
                     slip_info = {
                         "slip": float(slip),
                         "allowed": float(allowed_slip),
-                        "limit_r": float(limit_used),
+                        "limit_r": float(limit_used if asset == "BTCUSD" else slip_limit_r),
                         "slip_r": float(slip_r),
                     }
                 if slip_info:
-                    if asset == "BTCUSD" and no_chase_violation:
+                    if asset == "BTCUSD":
                         slip_info["no_chase_r"] = {
                             "slip_r": float(slip_info.get("slip_r", slip_r)),
-                            "limit_r": float(limit_used),
+                            "limit_r": float(limit_used if asset == "BTCUSD" else slip_limit_r),
                         }
                     slip_info["violated"] = no_chase_violation
                     entry_thresholds_meta["momentum_no_chase"] = slip_info
@@ -9526,6 +9670,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
