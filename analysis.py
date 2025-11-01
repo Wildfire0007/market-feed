@@ -258,25 +258,54 @@ except NameError:  # pragma: no cover - stub fallback
 
 
 def btc_core_triggers_ok(asset: str, side: str) -> Tuple[bool, Dict[str, Any]]:
-    """Evaluate BTC core entry triggers using an either-of gateway."""
+    """BTC core: mikró-BOS (1m+retest), VWAP reclaim/reject (5m), OFI z-score (runtime) — EITHER-OF(2)."""
 
-    bos_ok = structure_ok_5m(asset, side) if callable(globals().get("structure_ok_5m")) else False
-    vwap_ok = vwap_retest_ok(asset, side) if callable(globals().get("vwap_retest_ok")) else False
-    z = (
-        ofi_zscore(asset, lookback=BTC_OFI_Z["lookback_bars"])
-        if callable(globals().get("ofi_zscore"))
-        else -999.0
-    )
+    if asset != "BTCUSD" or side not in {"long", "short"}:
+        return False, {"bos_ok": False, "vwap_ok": False, "ofi_ok": False, "ofi_z": None}
+
+    runtime_state = globals().get("_BTC_MOMENTUM_RUNTIME")
+    if not isinstance(runtime_state, dict):
+        runtime_state = {}
+    z_value = runtime_state.get("ofi_z")
     try:
-        z_float = float(z)
+        z_float = float(z_value) if z_value is not None else float("nan")
     except (TypeError, ValueError):
-        z_float = -999.0
-    ofi_ok = z_float >= BTC_OFI_Z["trigger"]
+        z_float = float("nan")
+
+    try:
+        ofi_threshold = float(BTC_OFI_Z.get("trigger", 1.0))
+    except (TypeError, ValueError):
+        ofi_threshold = 1.0
+    if ofi_threshold < 0:
+        ofi_threshold = abs(ofi_threshold)
+
+    if np.isfinite(z_float):
+        if side == "long":
+            ofi_ok = z_float >= ofi_threshold
+        else:
+            ofi_ok = z_float <= -ofi_threshold
+    else:
+        ofi_ok = False
+
+    micro_state = globals().get("_BTC_STRUCT_MICRO")
+    if not isinstance(micro_state, dict):
+        micro_state = {}
+    vwap_state = globals().get("_BTC_STRUCT_VWAP")
+    if not isinstance(vwap_state, dict):
+        vwap_state = {}
+
+    bos_ok = bool(micro_state.get(side))
+    vwap_ok = bool(vwap_state.get(side))
 
     hits = int(bos_ok) + int(vwap_ok) + int(ofi_ok)
     return (
         hits >= 2,
-        {"bos_ok": bool(bos_ok), "vwap_ok": bool(vwap_ok), "ofi_ok": bool(ofi_ok), "ofi_z": z_float},
+        {
+            "bos_ok": bos_ok,
+            "vwap_ok": vwap_ok,
+            "ofi_ok": ofi_ok,
+            "ofi_z": None if not np.isfinite(z_float) else z_float,
+        },
     )
 
 
@@ -9127,6 +9156,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
