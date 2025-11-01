@@ -371,6 +371,49 @@ def btc_no_chase_violated(profile: str, entry_price: float, trigger_price: float
     return r > limit_value
 
 
+def btc_sl_tp_checks(
+    profile: str,
+    asset: str,
+    atr_5m: float,
+    entry: float,
+    sl: float,
+    tp1: float,
+    rr_min: float,
+    info: Dict[str, Any],
+    blockers: List[str],
+) -> None:
+    if asset != "BTCUSD":
+        return
+    profile_key = profile if profile in BTC_SL_ATR_MULT else "baseline"
+    spread_func = globals().get("spread_usd")
+    sp = spread_func(asset) if callable(spread_func) else 0.0
+    if atr_5m > 0:
+        info["spread_limit"] = atr_5m * BTC_SPREAD_MAX_ATR_PCT
+    if sp > atr_5m * BTC_SPREAD_MAX_ATR_PCT:
+        blockers.append("spread_gate")
+
+    sl_buf = max(atr_5m * BTC_SL_ATR_MULT[profile_key], BTC_SL_ABS_MIN)
+    sl_dist = abs(entry - sl)
+    info["sl_buffer"] = sl_dist
+    info["sl_buffer_min"] = sl_buf
+    if sl_dist < sl_buf:
+        blockers.append("sl_too_tight")
+
+    tp_min = BTC_TP_MIN_PCT.get(profile_key, BTC_TP_MIN_PCT["baseline"])
+    tp_pct = abs(tp1 - entry) / entry if entry else 0.0
+    info["tp_pct"] = tp_pct
+    info["tp_min_pct"] = tp_min
+    if tp_pct < tp_min:
+        blockers.append("tp_min_pct")
+
+    rr = abs(tp1 - entry) / max(1e-9, abs(entry - sl))
+    info["rr"] = rr
+    info["rr_min"] = rr_min
+    if rr < rr_min:
+        blockers.append("rr_min")
+    info["spread_usd"] = sp
+
+
 def _btc_active_profile() -> str:
     profile = ENTRY_THRESHOLD_PROFILE_NAME
     if profile not in BTC_P_SCORE_MIN:
@@ -1117,6 +1160,10 @@ def translate_gate_label(label: str) -> str:
         "precision_flow_alignment": "Precision belépő: order flow megerősítés hiányzik.",
         "precision_trigger_sync": "Precision belépő: trigger szinkronra vár.",
         "intraday_range_guard": "Intraday range telített – várj visszahúzódásra.",
+        "spread_gate": "Spread gate: aktuális spread túl széles a setuphoz.",
+        "sl_too_tight": "Stop-loss puffer túl szűk – növeld a kockázati sávot.",
+        "tp_min_pct": "TP1 cél nem éri el a profil szerinti minimum százalékot.",
+        "rr_min": "RR arány nem teljesíti a profil követelményét.",
     }
     if normalized in base_map:
         return base_map[normalized]
@@ -7121,6 +7168,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     last_computed_risk: Optional[float] = None
     current_tp1_mult = core_tp1_mult
     current_tp2_mult = core_tp2_mult
+    btc_level_checks_state: Dict[str, Any] = {}
     precision_plan: Optional[Dict[str, Any]] = None
     precision_ready_for_entry = False
     precision_flow_ready = False
@@ -7333,6 +7381,51 @@ def analyze(asset: str) -> Dict[str, Any]:
             tp1_dist = entry - tp1
             ok_math = ok_math and (tp2 <= tp1 < entry < sl)
             gross_pct = tp1_dist / entry
+
+        btc_level_blockers: List[str] = []
+        if asset == "BTCUSD" and entry is not None and sl is not None and tp1 is not None:
+            profile_used = btc_profile_name or _btc_active_profile()
+            mode_label = mode or "core"
+            entry_val = float(entry)
+            sl_val = float(sl)
+            tp1_val = float(tp1)
+            tp2_val = float(tp2) if tp2 is not None else None
+            risk_val = float(risk)
+            info_payload: Dict[str, Any] = {
+                "profile": profile_used,
+                "mode": mode_label,
+                "side": decision_side,
+                "entry": entry_val,
+                "sl": sl_val,
+                "tp1": tp1_val,
+                "tp2": tp2_val,
+                "risk_abs": risk_val,
+                "tp1_mult": float(tp1_mult),
+                "tp2_mult": float(tp2_mult),
+                "rr_required": float(rr_required),
+            }
+            btc_sl_tp_checks(
+                profile_used,
+                asset,
+                float(atr5_val),
+                entry_val,
+                sl_val,
+                tp1_val,
+                float(rr_required),
+                info_payload,
+                btc_level_blockers,
+            )
+            info_payload["tp1_distance"] = abs(tp1_val - entry_val)
+            info_payload["sl_distance"] = abs(entry_val - sl_val)
+            info_payload["rr_tp2"] = float(rr) if rr is not None else None
+            if btc_level_blockers:
+                for blocker in btc_level_blockers:
+                    if blocker not in missing:
+                        missing.append(blocker)
+            state_key = mode_label
+            state_payload = btc_level_checks_state.setdefault(state_key, {})
+            state_payload.update(info_payload)
+            state_payload["blockers"] = list(btc_level_blockers)
 
         rel_atr_local = float(rel_atr) if not np.isnan(rel_atr) else float("nan")
         high_vol = (not np.isnan(rel_atr_local)) and (rel_atr_local >= ATR_VOL_HIGH_REL)
@@ -8156,6 +8249,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     decision_obj["dynamic_tp_profile"] = dynamic_tp_profile
     decision_obj["order_flow_metrics"] = order_flow_metrics
     decision_obj["intraday_profile"] = intraday_profile
+    if asset == "BTCUSD" and btc_level_checks_state:
+        entry_thresholds_meta["btc_level_checks"] = btc_level_checks_state
     entry_thresholds_meta.setdefault("atr_threshold_effective", atr_threshold)
     entry_thresholds_meta.setdefault("p_score_min_effective", p_score_min_local)
     decision_obj["entry_thresholds"] = entry_thresholds_meta
@@ -8769,6 +8864,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
