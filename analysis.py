@@ -154,6 +154,50 @@ def _btc_profile_section(name: str) -> Dict[str, Any]:
     section = BTC_PROFILE_CONFIG.get(name)
     return dict(section) if isinstance(section, dict) else {}
 
+
+def _precision_profile_config(asset: str) -> Dict[str, Any]:
+    if asset == "BTCUSD":
+        section = BTC_PROFILE_CONFIG.get("precision")
+        if isinstance(section, dict):
+            return dict(section)
+    return {}
+
+
+def get_precision_score_threshold(asset: str) -> float:
+    cfg = _precision_profile_config(asset)
+    value = cfg.get("score_min")
+    if value is not None:
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "Ignoring invalid precision score_min %r for asset %s", value, asset
+            )
+        else:
+            if np.isfinite(val) and val > 0:
+                return val
+    return float(PRECISION_SCORE_THRESHOLD_DEFAULT)
+
+
+def get_precision_timeouts(asset: str) -> Dict[str, int]:
+    cfg = _precision_profile_config(asset)
+
+    def _safe_timeout(value: Any, default: int) -> int:
+        try:
+            parsed = int(float(value))
+        except (TypeError, ValueError):
+            return default
+        return max(1, parsed)
+
+    ready_default = int(PRECISION_READY_TIMEOUT_DEFAULT)
+    arming_default = int(PRECISION_ARMING_TIMEOUT_DEFAULT)
+    ready = _safe_timeout(cfg.get("ready_timeout_minutes"), ready_default)
+    arming_raw = cfg.get("arming_timeout_minutes")
+    arming = _safe_timeout(arming_raw, arming_default)
+    if arming_raw is None:
+        arming = max(arming, ready)
+    return {"ready": ready, "arming": max(arming, ready)}
+
 LOGGER = logging.getLogger(__name__)
 
 # Az asset-specifikus küszöböket a config/analysis_settings.json állomány
@@ -267,6 +311,7 @@ ADX_RANGE_MOM_RR = float(ADX_RANGE_BAND.get("momentum_rr_min") or MIN_R_MOMENTUM
 ADX_RANGE_SIZE_SCALE = float(ADX_RANGE_BAND.get("size_scale") or 1.0)
 ADX_RANGE_TIME_STOP = int(ADX_RANGE_BAND.get("time_stop_minutes") or 0)
 ADX_RANGE_BE_TRIGGER = float(ADX_RANGE_BAND.get("breakeven_trigger_r") or 0.0)
+ADX_RANGE_GIVEBACK = float(ADX_RANGE_BAND.get("giveback_ratio") or 0.0)
 
 OFI_Z_TRIGGER = float(OFI_Z_SETTINGS.get("trigger") or 0.0)
 OFI_Z_WEAKENING = float(OFI_Z_SETTINGS.get("weakening") or 0.0)
@@ -298,7 +343,10 @@ ORDER_FLOW_IMBALANCE_TH = 0.6
 ORDER_FLOW_PRESSURE_TH = 0.7
 PRECISION_FLOW_IMBALANCE_MARGIN = 1.1
 PRECISION_FLOW_PRESSURE_MARGIN = 1.1
-PRECISION_SCORE_THRESHOLD = 55.0
+PRECISION_SCORE_THRESHOLD_DEFAULT = 55.0
+PRECISION_SCORE_THRESHOLD = PRECISION_SCORE_THRESHOLD_DEFAULT
+PRECISION_READY_TIMEOUT_DEFAULT = 15
+PRECISION_ARMING_TIMEOUT_DEFAULT = 20
 PRECISION_TRIGGER_NEAR_MULT = 0.2
 REALTIME_JUMP_MULT = 2.0
 MICRO_BOS_P_BONUS = 8.0
@@ -923,12 +971,21 @@ def build_action_plan(
 
     if precision_plan:
         score = precision_plan.get("score")
-        threshold = precision_plan.get("score_threshold") or PRECISION_SCORE_THRESHOLD
+        threshold_raw = precision_plan.get("score_threshold")
+        try:
+            threshold_val = float(threshold_raw)
+        except (TypeError, ValueError):
+            threshold_val = float(PRECISION_SCORE_THRESHOLD_DEFAULT)
+        threshold_display = (
+            f"{int(round(threshold_val))}"
+            if float(threshold_val).is_integer()
+            else f"{threshold_val:.1f}"
+        )
         confidence = precision_plan.get("confidence")
         trigger_state = precision_plan.get("trigger_state")
         if score is not None:
             add_note(
-                f"Precision score: {float(score):.2f} / küszöb {float(threshold):.0f}."
+                f"Precision score: {float(score):.2f} / küszöb {threshold_display}."
             )
         if confidence:
             add_note(f"Precision confidence: {confidence}.")
@@ -3104,6 +3161,7 @@ def compute_precision_entry(
     price_now: Optional[float],
     atr5: Optional[float],
     order_flow_metrics: Dict[str, Optional[float]],
+    score_threshold: float = PRECISION_SCORE_THRESHOLD_DEFAULT,
 ) -> Dict[str, Any]:
     plan: Dict[str, Any] = {
         "asset": asset,
@@ -3118,7 +3176,7 @@ def compute_precision_entry(
         "risk": None,
         "liquidity_levels": [],
         "factors": [],
-        "score_threshold": PRECISION_SCORE_THRESHOLD,
+        "score_threshold": score_threshold,
         "score_ready": False,
         "trigger_state": "standby",
         "trigger_ready": False,
@@ -3432,7 +3490,7 @@ def compute_precision_entry(
         plan_score = float(plan.get("score") or 0.0)
     except (TypeError, ValueError):
         plan_score = 0.0
-    plan["score_ready"] = plan_score >= PRECISION_SCORE_THRESHOLD
+    plan["score_ready"] = plan_score >= score_threshold
 
     if plan["confidence"] == "low":
         plan["factors"].append("precision confidence low")
@@ -5906,6 +5964,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     funding_dir_filter: Optional[str] = None
     funding_reason: Optional[str] = None
     range_time_stop_plan: Optional[Dict[str, Any]] = None
+    range_giveback_ratio: Optional[float] = None
     nvda_small_breakout = False
     if asset == "NVDA":
         nvda_rr_meta: Dict[str, Any] = {}
@@ -6017,6 +6076,8 @@ def analyze(asset: str) -> Dict[str, Any]:
                 "timeout": ADX_RANGE_TIME_STOP,
                 "breakeven_trigger": ADX_RANGE_BE_TRIGGER,
             }
+        if ADX_RANGE_GIVEBACK > 0:
+            range_giveback_ratio = float(ADX_RANGE_GIVEBACK)
         if asset == "BTCUSD" and btc_rr_cfg:
             range_core = btc_rr_cfg.get("range_core")
             range_mom = btc_rr_cfg.get("range_momentum")
@@ -6034,6 +6095,19 @@ def analyze(asset: str) -> Dict[str, Any]:
                     "timeout": int(time_stop),
                     "breakeven_trigger": float(breakeven),
                 }
+            giveback = btc_rr_cfg.get("range_giveback")
+            if giveback is not None:
+                try:
+                    range_giveback_ratio = float(giveback)
+                except (TypeError, ValueError):
+                    pass
+        if range_giveback_ratio is not None and np.isfinite(range_giveback_ratio):
+            if range_time_stop_plan is None:
+                range_time_stop_plan = {}
+            range_time_stop_plan["giveback_ratio"] = float(range_giveback_ratio)
+    if range_giveback_ratio is not None and np.isfinite(range_giveback_ratio):
+        entry_thresholds_meta["range_giveback_ratio"] = float(range_giveback_ratio)
+
     if asset == "EURUSD" and atr1h is not None and atr1h > 0:
         atr1h_pips = float(atr1h) / EURUSD_PIP
         eurusd_overrides.setdefault("atr1h_pips", atr1h_pips)
@@ -6469,9 +6543,15 @@ def analyze(asset: str) -> Dict[str, Any]:
     precision_flow_ready = False
     precision_trigger_ready = False
     precision_trigger_state: Optional[str] = None
-    precision_gate_label = f"precision_score>={int(PRECISION_SCORE_THRESHOLD)}"
+    precision_threshold_value = get_precision_score_threshold(asset)
+    if float(precision_threshold_value).is_integer():
+        precision_threshold_label = str(int(round(precision_threshold_value)))
+    else:
+        precision_threshold_label = f"{precision_threshold_value:.1f}"
+    precision_gate_label = f"precision_score>={precision_threshold_label}"
     precision_flow_gate_label = "precision_flow_alignment"
     precision_trigger_gate_label = "precision_trigger_sync"
+    precision_timeouts = get_precision_timeouts(asset)
 
     if (
         asset == "BTCUSD"
@@ -6794,10 +6874,13 @@ def analyze(asset: str) -> Dict[str, Any]:
             price_for_calc,
             atr5_value,
             order_flow_metrics,
+            score_threshold=precision_threshold_value,
         )
 
     if precision_plan:
-        precision_plan.setdefault("score_threshold", PRECISION_SCORE_THRESHOLD)
+        precision_plan.setdefault("score_threshold", precision_threshold_value)
+        precision_plan.setdefault("ready_timeout_minutes", precision_timeouts.get("ready"))
+        precision_plan.setdefault("arming_timeout_minutes", precision_timeouts.get("arming"))
         try:
             precision_score_val = float(precision_plan.get("score") or 0.0)
         except (TypeError, ValueError):
@@ -6812,7 +6895,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                     "range_vs_atr": intraday_profile.get("range_vs_atr"),
                 },
             )
-        precision_ready_for_entry = precision_score_val >= PRECISION_SCORE_THRESHOLD
+        precision_ready_for_entry = precision_score_val >= precision_threshold_value
         precision_plan["score_ready"] = bool(precision_plan.get("score_ready") or precision_ready_for_entry)
         precision_trigger_state = str(precision_plan.get("trigger_state") or "standby")
         precision_plan["trigger_state"] = precision_trigger_state
@@ -6867,7 +6950,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         if not precision_ready_for_entry:
             if decision in ("buy", "sell"):
                 score_note = (
-                    f"Precision score {precision_score_val:.2f} < {PRECISION_SCORE_THRESHOLD:.0f}"
+                    f"Precision score {precision_score_val:.2f} < {precision_threshold_label}"
                 )
                 if score_note not in reasons:
                     reasons.append(score_note)
@@ -6994,17 +7077,29 @@ def analyze(asset: str) -> Dict[str, Any]:
                 }
             )
         if range_time_stop_plan:
-            execution_playbook.append(
-                {
-                    "step": "time_stop",
-                    "description": (
-                        f"Time-stop {range_time_stop_plan['timeout']} percig, ha nem érjük el "
-                        f"{range_time_stop_plan['breakeven_trigger']:.2f}R-t"
-                    ),
-                    "timeout_minutes": range_time_stop_plan["timeout"],
-                    "breakeven_trigger_r": range_time_stop_plan["breakeven_trigger"],
-                }
-            )
+            timeout_val = range_time_stop_plan.get("timeout")
+            breakeven_val = range_time_stop_plan.get("breakeven_trigger")
+            giveback_val = range_time_stop_plan.get("giveback_ratio")
+            description = "Time-stop menedzsment aktív"
+            if timeout_val and breakeven_val is not None:
+                description = (
+                    f"Time-stop {int(timeout_val)} percig, ha nem érjük el "
+                    f"{float(breakeven_val):.2f}R-t"
+                )
+            if giveback_val is not None:
+                try:
+                    giveback_pct = float(giveback_val) * 100.0
+                    description += f", profit giveback {giveback_pct:.0f}%"
+                except (TypeError, ValueError):
+                    giveback_val = None
+            step_payload: Dict[str, Any] = {"step": "time_stop", "description": description}
+            if timeout_val:
+                step_payload["timeout_minutes"] = int(timeout_val)
+            if breakeven_val is not None:
+                step_payload["breakeven_trigger_r"] = float(breakeven_val)
+            if giveback_val is not None:
+                step_payload["giveback_ratio"] = float(giveback_val)
+            execution_playbook.append(step_payload)
 
     if precision_plan:
         window_payload: Optional[List[float]] = None
@@ -7014,6 +7109,46 @@ def analyze(asset: str) -> Dict[str, Any]:
                 window_payload = [float(window[0]), float(window[1])]
             except (TypeError, ValueError):
                 window_payload = None
+        if decision in {"precision_ready", "precision_arming"}:
+            timeout_key = (
+                "ready_timeout_minutes"
+                if decision == "precision_ready"
+                else "arming_timeout_minutes"
+            )
+            ttl_val = precision_plan.get(timeout_key)
+            if ttl_val in {None, 0}:
+                fallback_key = "ready" if decision == "precision_ready" else "arming"
+                ttl_val = precision_timeouts.get(fallback_key)
+            ttl_display: Optional[int] = None
+            if ttl_val not in {None, 0}:
+                try:
+                    ttl_display = max(1, int(round(float(ttl_val))))
+                except (TypeError, ValueError):
+                    ttl_display = None
+            limit_desc = "Precision parkolt limit belépő"
+            if window_payload:
+                limit_desc += f" {window_payload[0]:.5f}–{window_payload[1]:.5f}"
+            if ttl_display:
+                limit_desc += f" — {ttl_display} perc timeout"
+            limit_step: Dict[str, Any] = {
+                "step": "precision_limit",
+                "description": limit_desc,
+                "direction": precision_plan.get("direction") or precision_direction,
+                "confidence": precision_plan.get("confidence"),
+                "entry_window": window_payload,
+            }
+            if ttl_display:
+                limit_step["timeout_minutes"] = ttl_display
+            execution_playbook.append(limit_step)
+            limit_note = "Precision limit belépő parkolva"
+            if ttl_display:
+                limit_note += f" {ttl_display} percig"
+            else:
+                default_ttl = precision_timeouts.get("ready")
+                if default_ttl:
+                    limit_note += f" ~{default_ttl} percig"
+            if limit_note not in reasons:
+                reasons.append(limit_note)
         trigger_levels_raw = precision_plan.get("trigger_levels") or {}
         trigger_levels_payload: Dict[str, Any] = {}
         if isinstance(trigger_levels_raw, dict):
@@ -7031,7 +7166,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             "trigger_levels": trigger_levels_payload or None,
             "ready_ts": precision_plan.get("ready_ts"),
             "score": precision_plan.get("score"),
-            "score_threshold": precision_plan.get("score_threshold", PRECISION_SCORE_THRESHOLD),
+            "score_threshold": precision_plan.get(
+                "score_threshold", PRECISION_SCORE_THRESHOLD_DEFAULT
+            ),
             "score_ready": precision_plan.get("score_ready"),
             "trigger_ready": precision_plan.get("trigger_ready"),
             "order_flow_ready": precision_plan.get("order_flow_ready"),
@@ -7041,6 +7178,12 @@ def analyze(asset: str) -> Dict[str, Any]:
             "reasons": precision_plan.get("trigger_reasons") or None,
         }
         execution_playbook.append(trigger_step)
+
+    entry_thresholds_meta["precision_score_threshold"] = float(precision_threshold_value)
+    entry_thresholds_meta["precision_timeouts"] = {
+        "ready": precision_timeouts.get("ready"),
+        "arming": precision_timeouts.get("arming"),
+    }
 
     # 9) Session override + mentés: signal.json
     if latency_flags:
@@ -7586,7 +7729,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             "entry_window": window_payload,
             "trigger_levels": precision_plan.get("trigger_levels"),
             "score": precision_plan.get("score"),
-            "score_threshold": precision_plan.get("score_threshold", PRECISION_SCORE_THRESHOLD),
+            "score_threshold": precision_plan.get(
+                "score_threshold", PRECISION_SCORE_THRESHOLD_DEFAULT
+            ),
             "score_ready": precision_plan.get("score_ready"),
             "trigger_ready": precision_plan.get("trigger_ready"),
             "order_flow_ready": precision_plan.get("order_flow_ready"),
@@ -7636,7 +7781,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             "ready_ts": precision_plan.get("ready_ts"),
             "entry_window": window_payload,
             "trigger_levels": precision_plan.get("trigger_levels"),
-            "score_threshold": precision_plan.get("score_threshold", PRECISION_SCORE_THRESHOLD),
+            "score_threshold": precision_plan.get(
+                "score_threshold", PRECISION_SCORE_THRESHOLD_DEFAULT
+            ),
             "score_ready": precision_plan.get("score_ready"),
             "trigger_ready": precision_plan.get("trigger_ready"),
             "order_flow_ready": precision_plan.get("order_flow_ready"),
@@ -7999,6 +8146,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
