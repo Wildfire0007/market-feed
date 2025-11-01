@@ -507,6 +507,85 @@ def _btc_time_of_day_bucket(minute: int) -> str:
         return "mid"
     return "close"
 
+
+def time_of_day_bucket(now_utc: Optional[datetime]) -> str:
+    """Return the BTC intraday bucket name ("open"/"mid"/"close")."""
+
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    minute = now_utc.hour * 60 + now_utc.minute
+    return _btc_time_of_day_bucket(minute)
+
+
+def atr_percentile_value(
+    asset: str,
+    percentile: float,
+    lookback_days: int = 20,
+    tod: Optional[str] = None,
+) -> Optional[float]:
+    """Return the ATR value at the requested percentile.
+
+    TODO: Replace with a real historical ATR percentile lookup (asset/TOD aware).
+    """
+
+    return None
+
+
+def btc_atr_gate_threshold(profile: str, asset: str, now_utc: Optional[datetime]) -> float:
+    """Return the absolute ATR threshold for BTC given the current profile/bucket."""
+
+    if asset != "BTCUSD":
+        return 0.0
+
+    floor = BTC_ATR_FLOOR_USD.get(profile)
+    if floor is None:
+        floor = BTC_ATR_FLOOR_USD.get("baseline", 0.0)
+    tod = time_of_day_bucket(now_utc)
+    pct_cfg = BTC_ATR_PCT_TOD.get(profile) or BTC_ATR_PCT_TOD.get("baseline", {})
+    pct = pct_cfg.get(tod)
+    if pct is None:
+        pct = BTC_ATR_PCT_TOD.get("baseline", {}).get(tod, 0.0)
+
+    percentile_fn = globals().get("atr_percentile_value")
+    percentile_value: Optional[float] = None
+    if callable(percentile_fn):
+        try:
+            percentile_value = percentile_fn(asset, pct, lookback_days=20, tod=tod)
+        except Exception:
+            percentile_value = None
+
+    threshold_candidates = []
+    try:
+        threshold_candidates.append(float(floor))
+    except (TypeError, ValueError):
+        pass
+    if percentile_value is not None:
+        try:
+            threshold_candidates.append(float(percentile_value))
+        except (TypeError, ValueError):
+            pass
+
+    return max(threshold_candidates) if threshold_candidates else 0.0
+
+
+def btc_atr_gate_ok(
+    profile: str, asset: str, atr_5m_value: float, now_utc: Optional[datetime]
+) -> bool:
+    if asset != "BTCUSD":
+        return True
+
+    threshold = btc_atr_gate_threshold(profile, asset, now_utc)
+    try:
+        atr_value = float(atr_5m_value)
+    except (TypeError, ValueError):
+        return False
+    if not np.isfinite(atr_value):
+        return False
+    return atr_value >= threshold
+
+
 def df_last_timestamp(df: pd.DataFrame) -> Optional[datetime]:
     if df.empty:
         return None
@@ -4660,6 +4739,18 @@ def analyze(asset: str) -> Dict[str, Any]:
             btc_atr_floor_passed = bool(not np.isnan(rel_atr) and rel_atr >= btc_atr_floor_ratio)
             entry_thresholds_meta["btc_atr_floor_ratio"] = btc_atr_floor_ratio
             entry_thresholds_meta["btc_atr_floor_passed"] = btc_atr_floor_passed
+        btc_profile = btc_profile_name or "baseline"
+        try:
+            atr5_abs = float(atr5)
+        except (TypeError, ValueError):
+            atr5_abs = float("nan")
+        btc_gate_threshold_usd = btc_atr_gate_threshold(btc_profile, asset, analysis_now)
+        entry_thresholds_meta["btc_atr_gate_threshold_usd"] = btc_gate_threshold_usd
+        entry_thresholds_meta["btc_atr_value_usd"] = atr5_abs if np.isfinite(atr5_abs) else None
+        btc_atr_gate_passed = btc_atr_gate_ok(btc_profile, asset, atr5_abs, analysis_now)
+        entry_thresholds_meta["btc_atr_gate_ok"] = btc_atr_gate_passed
+    else:
+        btc_atr_gate_passed = True
     entry_thresholds_meta["atr_multiplier"] = atr_profile_multiplier
     if atr_profile_multiplier not in {None, 0.0}:
         try:
@@ -4742,6 +4833,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     if not spread_gate_ok:
         atr_ok = False
     if not atr_overlay_gate:
+        atr_ok = False
+    if not btc_atr_gate_passed:
         atr_ok = False
     if stale_timeframes.get("k5m"):
         atr_ok = False
@@ -8308,6 +8401,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
