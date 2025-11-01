@@ -81,6 +81,45 @@ except Exception:  # pragma: no cover - optional helper
 import pandas as pd
 import numpy as np
 
+# === BTCUSD 5m intraday finomhangolás – profilkonstansok ===
+
+BTC_OFI_Z = {"trigger": 1.0, "strong": 1.2, "weakening": -0.5, "lookback_bars": 60}
+BTC_ADX_TREND_MIN = 22.0
+
+# ATR floor + napszak-percentilis (TOD = time-of-day buckets) – baseline/relaxed/suppressed
+BTC_ATR_FLOOR_USD = {
+    "baseline": 60.0,
+    "relaxed": 50.0,
+    "suppressed": 40.0,
+}
+BTC_ATR_PCT_TOD = {  # percentilis minimum a nap adott szakaszára
+    "baseline": {"open": 0.50, "mid": 0.45, "close": 0.50},
+    "relaxed": {"open": 0.40, "mid": 0.40, "close": 0.45},
+    "suppressed": {"open": 0.30, "mid": 0.30, "close": 0.35},
+}
+
+# P-score / RR / TP / SL / no-chase per profile
+BTC_P_SCORE_MIN = {"baseline": 52, "relaxed": 48, "suppressed": 44}
+
+BTC_RR_MIN_TREND = {"baseline": 1.90, "relaxed": 1.80, "suppressed": 1.70}
+BTC_RR_MIN_RANGE = {"baseline": 1.50, "relaxed": 1.40, "suppressed": 1.35}
+
+BTC_RANGE_SIZE_SCALE = {"baseline": 0.60, "relaxed": 0.55, "suppressed": 0.50}
+BTC_RANGE_TIME_STOP_MIN = {"baseline": 20, "relaxed": 15, "suppressed": 12}
+BTC_RANGE_BE_TRIGGER_R = {"baseline": 0.35, "relaxed": 0.30, "suppressed": 0.25}
+
+BTC_TP_MIN_PCT = {"baseline": 0.008, "relaxed": 0.007, "suppressed": 0.006}  # 0.8/0.7/0.6%
+BTC_SL_ATR_MULT = {"baseline": 0.30, "relaxed": 0.28, "suppressed": 0.26}
+BTC_SL_ABS_MIN = 80.0  # USD
+BTC_SPREAD_MAX_ATR_PCT = 0.40
+
+# Momentum override és no-chase (slippage tiltó R-ben)
+BTC_MOMENTUM_RR_MIN = {"baseline": 1.40, "relaxed": 1.35, "suppressed": 1.30}
+BTC_NO_CHASE_R = {"baseline": 0.20, "relaxed": 0.15, "suppressed": 0.12}
+
+# Precision pipeline alsó határ (ne blokkoljon túl korán)
+BTC_PRECISION_MIN = {"baseline": 60, "relaxed": 55, "suppressed": 50}
+
 # --- Elemzendő eszközök ---
 from config.analysis_settings import (
     ACTIVE_INVALID_BUFFER_ABS,
@@ -150,16 +189,54 @@ BTC_PROFILE_CONFIG: Dict[str, Any] = dict(
 )
 
 
+def _btc_active_profile() -> str:
+    profile = ENTRY_THRESHOLD_PROFILE_NAME
+    if profile not in BTC_P_SCORE_MIN:
+        return "baseline"
+    return profile
+
+
 def _btc_profile_section(name: str) -> Dict[str, Any]:
     section = BTC_PROFILE_CONFIG.get(name)
-    return dict(section) if isinstance(section, dict) else {}
+    defaults: Dict[str, Any] = {}
+    profile = _btc_active_profile()
+    if name == "momentum_override":
+        defaults = {
+            "ofi_z": BTC_OFI_Z["trigger"],
+            "ofi_strong": BTC_OFI_Z["strong"],
+            "ofi_weakening": BTC_OFI_Z["weakening"],
+            "lookback_bars": BTC_OFI_Z["lookback_bars"],
+            "rr_min": BTC_MOMENTUM_RR_MIN.get(profile),
+            "no_chase_r": BTC_NO_CHASE_R.get(profile),
+        }
+    elif name == "rr":
+        defaults = {
+            "trend_core": BTC_RR_MIN_TREND.get(profile),
+            "trend_momentum": BTC_MOMENTUM_RR_MIN.get(profile),
+            "range_core": BTC_RR_MIN_RANGE.get(profile),
+            "range_momentum": BTC_RR_MIN_RANGE.get(profile),
+            "range_size_scale": BTC_RANGE_SIZE_SCALE.get(profile),
+            "range_time_stop": BTC_RANGE_TIME_STOP_MIN.get(profile),
+            "range_breakeven": BTC_RANGE_BE_TRIGGER_R.get(profile),
+        }
+    elif name == "structure":
+        defaults = {
+            "ofi_gate": BTC_OFI_Z["trigger"],
+        }
+    result = dict(defaults)
+    if isinstance(section, dict):
+        result.update(section)
+    return result
 
 
 def _precision_profile_config(asset: str) -> Dict[str, Any]:
     if asset == "BTCUSD":
+        profile = _btc_active_profile()
+        base: Dict[str, Any] = {"score_min": BTC_PRECISION_MIN.get(profile)}
         section = BTC_PROFILE_CONFIG.get("precision")
         if isinstance(section, dict):
-            return dict(section)
+            base.update(section)
+        return base
     return {}
 
 
@@ -421,6 +498,14 @@ def parse_utc_timestamp(value: Any) -> Optional[datetime]:
 def now_utctime_hm() -> Tuple[int,int]:
     t = datetime.now(timezone.utc)
     return t.hour, t.minute
+
+
+def _btc_time_of_day_bucket(minute: int) -> str:
+    if minute < 8 * 60:
+        return "open"
+    if minute < 16 * 60:
+        return "mid"
+    return "close"
 
 def df_last_timestamp(df: pd.DataFrame) -> Optional[datetime]:
     if df.empty:
@@ -1756,12 +1841,10 @@ def atr_low_threshold(asset: str) -> float:
 def tp_min_pct_for(asset: str, rel_atr: float, session_flag: bool) -> float:
     base = TP_MIN_PCT.get(asset, TP_MIN_PCT["default"])
     if asset == "BTCUSD":
-        override_tp = BTC_PROFILE_CONFIG.get("tp_min_pct")
+        profile = _btc_active_profile()
+        override_tp = BTC_TP_MIN_PCT.get(profile)
         if override_tp is not None:
-            try:
-                return float(override_tp)
-            except (TypeError, ValueError):
-                pass
+            return float(override_tp)
     if np.isnan(rel_atr):
         return base
     return base
@@ -2675,29 +2758,29 @@ def compute_rel_atr_percentile(
     details: Dict[str, Any] = {"bucket": None, "samples": 0}
     if df.empty or atr_series.empty:
         return None, details
-    buckets = ATR_PERCENTILE_BUCKETS
     minute_now = _min_of_day(now.hour, now.minute)
-    bucket_name = _bucket_for_minute(minute_now, buckets)
+    buckets = ATR_PERCENTILE_BUCKETS
+    if asset == "BTCUSD":
+        bucket_name = _btc_time_of_day_bucket(minute_now)
+    else:
+        bucket_name = _bucket_for_minute(minute_now, buckets)
     details["bucket"] = bucket_name
-    percentile_target = None
-    for spec in buckets:
-        if str(spec.get("name")) == bucket_name:
-            try:
-                percentile_target = float(spec.get("percentile"))
-            except (TypeError, ValueError):
-                percentile_target = None
-            break
+    percentile_target: Optional[float] = None
+    if asset == "BTCUSD":
+        profile = _btc_active_profile()
+        percentiles = BTC_ATR_PCT_TOD.get(profile) or {}
+        percentile_target = percentiles.get(bucket_name, percentiles.get("mid"))
+        details["profile"] = profile
+    else:
+        for spec in buckets:
+            if str(spec.get("name")) == bucket_name:
+                try:
+                    percentile_target = float(spec.get("percentile"))
+                except (TypeError, ValueError):
+                    percentile_target = None
+                break
     if percentile_target is None:
         percentile_target = 0.5
-    if asset == "BTCUSD":
-        btc_percentiles = _btc_profile_section("atr_percentiles")
-        if btc_percentiles:
-            override = btc_percentiles.get(bucket_name, btc_percentiles.get("default"))
-            if override is not None:
-                try:
-                    percentile_target = float(override)
-                except (TypeError, ValueError):
-                    pass
     overlap_cfg = ATR_PERCENTILE_OVERLAP
     try:
         overlap_assets = set(overlap_cfg.get("assets") or [])
@@ -2728,9 +2811,14 @@ def compute_rel_atr_percentile(
         rel_series = rel_series.loc[rel_series.index >= cutoff]
     if rel_series.empty:
         return None, details
-    bucket_labels = [
-        _bucket_for_minute(_min_of_day(ts.hour, ts.minute), buckets) for ts in rel_series.index
-    ]
+    if asset == "BTCUSD":
+        bucket_labels = [
+            _btc_time_of_day_bucket(_min_of_day(ts.hour, ts.minute)) for ts in rel_series.index
+        ]
+    else:
+        bucket_labels = [
+            _bucket_for_minute(_min_of_day(ts.hour, ts.minute), buckets) for ts in rel_series.index
+        ]
     rel_by_bucket = rel_series.iloc[[i for i, name in enumerate(bucket_labels) if name == bucket_name]]
     if rel_by_bucket.empty:
         rel_by_bucket = rel_series
@@ -3974,6 +4062,9 @@ def analyze(asset: str) -> Dict[str, Any]:
     realtime_confidence: float = 1.0
     realtime_transport = str(spot_realtime.get("transport") or "http").lower() if isinstance(spot_realtime, dict) else "http"
     entry_thresholds_meta: Dict[str, Any] = {"profile": ENTRY_THRESHOLD_PROFILE_NAME}
+    btc_profile_name = _btc_active_profile() if asset == "BTCUSD" else None
+    if btc_profile_name:
+        entry_thresholds_meta["btc_profile"] = btc_profile_name
     btc_atr_floor_ratio: Optional[float] = None
     btc_atr_floor_passed = False
     if spot:
@@ -4081,6 +4172,28 @@ def analyze(asset: str) -> Dict[str, Any]:
                 ofi_zscore = None
         except Exception:
             ofi_zscore = None
+        if asset == "BTCUSD":
+            lookback = int(BTC_OFI_Z.get("lookback_bars") or 0)
+            if lookback > 0:
+                btc_ofi_val = compute_ofi_zscore(k1m_closed, lookback)
+                if btc_ofi_val is not None and np.isfinite(btc_ofi_val):
+                    ofi_zscore = float(btc_ofi_val)
+                    order_flow_metrics["imbalance_z"] = ofi_zscore
+            entry_thresholds_meta["btc_ofi_thresholds"] = {
+                "trigger": BTC_OFI_Z["trigger"],
+                "strong": BTC_OFI_Z["strong"],
+                "weakening": BTC_OFI_Z["weakening"],
+            }
+    if asset == "BTCUSD" and ofi_zscore is not None:
+        state = "neutral"
+        if ofi_zscore >= BTC_OFI_Z["strong"]:
+            state = "strong"
+        elif ofi_zscore <= BTC_OFI_Z["weakening"]:
+            state = "weakening"
+        entry_thresholds_meta["btc_ofi_state"] = {
+            "z": float(ofi_zscore),
+            "state": state,
+        }
 
     anchor_state = current_anchor_state()
     anchor_record = anchor_state.get(asset.upper()) if isinstance(anchor_state, dict) else None
@@ -4516,8 +4629,15 @@ def analyze(asset: str) -> Dict[str, Any]:
         adx_value = None
     entry_thresholds_meta["adx_value"] = adx_value
     adx_regime = "unknown"
+    adx_trend_threshold = ADX_TREND_MIN
+    if asset == "BTCUSD":
+        adx_trend_threshold = max(float(adx_trend_threshold), BTC_ADX_TREND_MIN)
+    try:
+        entry_thresholds_meta["adx_trend_threshold"] = float(adx_trend_threshold)
+    except (TypeError, ValueError):
+        entry_thresholds_meta["adx_trend_threshold"] = None
     if adx_value is not None:
-        if ADX_TREND_MIN and adx_value >= ADX_TREND_MIN:
+        if adx_trend_threshold and adx_value >= adx_trend_threshold:
             adx_regime = "trend"
         elif adx_value < ADX_RANGE_MAX:
             adx_regime = "range"
@@ -4527,7 +4647,9 @@ def analyze(asset: str) -> Dict[str, Any]:
     atr_profile_multiplier = get_atr_threshold_multiplier(asset)
     atr_threshold = atr_low_threshold(asset)
     if asset == "BTCUSD":
-        atr_floor_usd = BTC_PROFILE_CONFIG.get("atr_floor_usd")
+        atr_floor_usd = BTC_ATR_FLOOR_USD.get(btc_profile_name or "baseline")
+        if atr_floor_usd is not None:
+            entry_thresholds_meta["btc_atr_floor_usd"] = float(atr_floor_usd)
         if atr_floor_usd is not None and price_for_calc:
             try:
                 btc_atr_floor_ratio = float(atr_floor_usd) / float(price_for_calc)
@@ -4536,7 +4658,6 @@ def analyze(asset: str) -> Dict[str, Any]:
         if btc_atr_floor_ratio is not None and np.isfinite(btc_atr_floor_ratio):
             atr_threshold = max(float(atr_threshold), btc_atr_floor_ratio)
             btc_atr_floor_passed = bool(not np.isnan(rel_atr) and rel_atr >= btc_atr_floor_ratio)
-            entry_thresholds_meta["btc_atr_floor_usd"] = float(atr_floor_usd)
             entry_thresholds_meta["btc_atr_floor_ratio"] = btc_atr_floor_ratio
             entry_thresholds_meta["btc_atr_floor_passed"] = btc_atr_floor_passed
     entry_thresholds_meta["atr_multiplier"] = atr_profile_multiplier
@@ -4596,6 +4717,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     spread_gate_ok = True
     spread_ratio = None
     spread_limit = SPREAD_MAX_ATR_PCT.get(asset, SPREAD_MAX_ATR_PCT.get("default"))
+    if asset == "BTCUSD":
+        spread_limit = BTC_SPREAD_MAX_ATR_PCT
     if spread_limit and spread_abs is not None and atr5 is not None:
         try:
             spread_ratio = float(spread_abs) / float(atr5) if float(atr5) > 0 else None
@@ -5870,6 +5993,16 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     p_score_min_base = get_p_score_min(asset)
     p_score_min_local = p_score_min_base
+    if asset == "BTCUSD":
+        profile = btc_profile_name or _btc_active_profile()
+        override = BTC_P_SCORE_MIN.get(profile)
+        if override is not None:
+            p_score_min_base = float(override)
+            p_score_min_local = float(override)
+            entry_thresholds_meta["p_score_min_profile_override"] = {
+                "profile": profile,
+                "value": float(override),
+            }
     entry_thresholds_meta["p_score_min_base"] = p_score_min_base
     eurusd_p_score_meta: Dict[str, Any] = {}
     if asset == "EURUSD":
@@ -5960,6 +6093,10 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     core_rr_min = CORE_RR_MIN.get(asset, CORE_RR_MIN["default"])
     momentum_rr_min = MOMENTUM_RR_MIN.get(asset, MOMENTUM_RR_MIN["default"])
+    if asset == "BTCUSD":
+        profile = btc_profile_name or _btc_active_profile()
+        core_rr_min = max(core_rr_min, BTC_RR_MIN_TREND.get(profile, core_rr_min))
+        momentum_rr_min = max(momentum_rr_min, BTC_MOMENTUM_RR_MIN.get(profile, momentum_rr_min))
     position_size_scale = 1.0
     funding_dir_filter: Optional[str] = None
     funding_reason: Optional[str] = None
@@ -6082,9 +6219,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             range_core = btc_rr_cfg.get("range_core")
             range_mom = btc_rr_cfg.get("range_momentum")
             if range_core is not None:
-                core_rr_min = min(core_rr_min, float(range_core))
+                core_rr_min = float(range_core)
             if range_mom is not None:
-                momentum_rr_min = min(momentum_rr_min, float(range_mom))
+                momentum_rr_min = float(range_mom)
             size_scale = btc_rr_cfg.get("range_size_scale")
             if size_scale:
                 position_size_scale = min(position_size_scale, float(size_scale))
@@ -6326,14 +6463,20 @@ def analyze(asset: str) -> Dict[str, Any]:
     if asset == "BTCUSD":
         core_profile = dynamic_tp_profile.setdefault(
             "core",
-            {"tp1": TP1_R, "tp2": TP2_R, "rr": CORE_RR_MIN.get(asset, MIN_R_CORE)},
+            {
+                "tp1": TP1_R,
+                "tp2": TP2_R,
+                "rr": BTC_RR_MIN_TREND.get(btc_profile_name or _btc_active_profile(), MIN_R_CORE),
+            },
         )
         mom_profile = dynamic_tp_profile.setdefault(
             "momentum",
             {
                 "tp1": TP1_R_MOMENTUM,
                 "tp2": TP2_R_MOMENTUM,
-                "rr": MOMENTUM_RR_MIN.get(asset, MIN_R_MOMENTUM),
+                "rr": BTC_MOMENTUM_RR_MIN.get(
+                    btc_profile_name or _btc_active_profile(), MIN_R_MOMENTUM
+                ),
             },
         )
         base_core_rr = btc_rr_cfg.get("trend_core")
@@ -6578,7 +6721,25 @@ def analyze(asset: str) -> Dict[str, Any]:
                         buf_rule[key] = float(value)
                     except (TypeError, ValueError):
                         continue
-        buf = max(buf_rule.get("atr_mult", 0.2) * atr5_val, buf_rule.get("abs_min", 0.5))
+            profile = btc_profile_name or _btc_active_profile()
+
+            def _safe_float(value: Any, default: float) -> float:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return default
+
+            atr_mult_default = BTC_SL_ATR_MULT.get(profile, buf_rule.get("atr_mult", 0.2))
+            abs_min_default = BTC_SL_ABS_MIN
+            buf_rule["atr_mult"] = _safe_float(buf_rule.get("atr_mult"), float(atr_mult_default))
+            buf_rule["abs_min"] = max(
+                abs_min_default,
+                _safe_float(buf_rule.get("abs_min"), float(abs_min_default)),
+            )
+        buf = max(
+            float(buf_rule.get("atr_mult", 0.2)) * atr5_val,
+            float(buf_rule.get("abs_min", 0.5)),
+        )
       
         k5_sw = find_swings(k5m_closed, lb=2)
         hi5, lo5 = last_swing_levels(k5_sw)
@@ -6812,6 +6973,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                     slip_info = {
                         "slip": float(slip),
                         "allowed": float(allowed_slip),
+                        "limit_r": float(slip_limit_r),
                     }
                     if slip > allowed_slip + 1e-9:
                         no_chase_violation = True
@@ -6820,7 +6982,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                     entry_thresholds_meta["momentum_no_chase"] = slip_info
                 if no_chase_violation:
                     reasons.append(
-                        "Momentum no-chase szabály: aktuális ár kedvezőtlenebb mint 0.2R"
+                        f"Momentum no-chase szabály: aktuális ár kedvezőtlenebb mint {slip_limit_r:.2f}R"
                     )
                     decision = "no entry"
                     momentum_used = False
@@ -8146,6 +8308,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
