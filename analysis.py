@@ -189,6 +189,32 @@ BTC_PROFILE_CONFIG: Dict[str, Any] = dict(
 )
 
 
+def btc_rr_min_with_adx(profile: str, asset: str, adx_5m_val: float) -> Tuple[Optional[float], Dict[str, Any]]:
+    """Return BTC RR-min override + metadata based on 5m ADX regime."""
+
+    if asset != "BTCUSD":
+        return (None, {})
+
+    profile_key = profile if profile in BTC_RR_MIN_TREND else "baseline"
+    if adx_5m_val is None or not np.isfinite(adx_5m_val):
+        return (None, {})
+
+    if adx_5m_val >= BTC_ADX_TREND_MIN:
+        rr_val = BTC_RR_MIN_TREND[profile_key]
+        return (rr_val, {"mode": "trend"})
+
+    rr_val = BTC_RR_MIN_RANGE[profile_key]
+    return (
+        rr_val,
+        {
+            "mode": "range",
+            "size_scale": BTC_RANGE_SIZE_SCALE[profile_key],
+            "time_stop": BTC_RANGE_TIME_STOP_MIN[profile_key],
+            "be_trigger_r": BTC_RANGE_BE_TRIGGER_R[profile_key],
+        },
+    )
+
+
 try:  # pragma: no cover - optional micro structure utility
     structure_ok_5m  # type: ignore[name-defined]
 except NameError:  # pragma: no cover - stub fallback
@@ -4773,6 +4799,18 @@ def analyze(asset: str) -> Dict[str, Any]:
         else:
             adx_regime = "balanced"
     entry_thresholds_meta["adx_regime_initial"] = adx_regime
+    if asset == "BTCUSD":
+        btc_profile_active = btc_profile_name or _btc_active_profile()
+        if adx_value is not None:
+            rr_override, rr_meta = btc_rr_min_with_adx(btc_profile_active, asset, float(adx_value))
+        else:
+            rr_override, rr_meta = (None, {})
+        if rr_override is not None:
+            btc_rr_band_meta = {"profile": btc_profile_active, "rr_min": float(rr_override), **rr_meta}
+            meta_mode = rr_meta.get("mode")
+            if meta_mode in {"trend", "range"}:
+                adx_regime = meta_mode
+            entry_thresholds_meta["btc_rr_adx"] = btc_rr_band_meta.copy()
     atr_profile_multiplier = get_atr_threshold_multiplier(asset)
     atr_threshold = atr_low_threshold(asset)
     if asset == "BTCUSD":
@@ -6252,6 +6290,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     funding_reason: Optional[str] = None
     range_time_stop_plan: Optional[Dict[str, Any]] = None
     range_giveback_ratio: Optional[float] = None
+    btc_rr_band_meta: Dict[str, Any] = {}
     nvda_small_breakout = False
     if asset == "NVDA":
         nvda_rr_meta: Dict[str, Any] = {}
@@ -6341,6 +6380,56 @@ def analyze(asset: str) -> Dict[str, Any]:
         usoil_rr_meta["core_rr_min_effective"] = core_rr_min
         usoil_rr_meta["momentum_rr_min_effective"] = momentum_rr_min
         usoil_overrides["rr_adjustments"] = usoil_rr_meta
+    if asset == "BTCUSD" and btc_rr_band_meta:
+        rr_override = btc_rr_band_meta.get("rr_min")
+        mode = btc_rr_band_meta.get("mode")
+        if rr_override is not None:
+            rr_override_val = float(rr_override)
+            if mode == "trend":
+                core_rr_min = max(core_rr_min, rr_override_val)
+            elif mode == "range":
+                core_rr_min = min(core_rr_min, rr_override_val)
+        if mode == "range":
+            size_scale = btc_rr_band_meta.get("size_scale")
+            if size_scale:
+                try:
+                    position_size_scale = min(position_size_scale, float(size_scale))
+                except (TypeError, ValueError):
+                    pass
+            time_stop = btc_rr_band_meta.get("time_stop")
+            be_trigger = btc_rr_band_meta.get("be_trigger_r")
+            if time_stop:
+                try:
+                    time_stop_val = int(time_stop)
+                except (TypeError, ValueError):
+                    time_stop_val = None
+                if time_stop_val and time_stop_val > 0:
+                    if range_time_stop_plan is None:
+                        range_time_stop_plan = {"timeout": time_stop_val}
+                    else:
+                        existing_timeout = range_time_stop_plan.get("timeout")
+                        if existing_timeout is None or time_stop_val < int(existing_timeout):
+                            range_time_stop_plan["timeout"] = time_stop_val
+            if be_trigger:
+                try:
+                    be_trigger_val = float(be_trigger)
+                except (TypeError, ValueError):
+                    be_trigger_val = None
+                if be_trigger_val and be_trigger_val > 0:
+                    if range_time_stop_plan is None:
+                        range_time_stop_plan = {"breakeven_trigger": be_trigger_val}
+                    else:
+                        existing_be = range_time_stop_plan.get("breakeven_trigger")
+                        if existing_be is None or be_trigger_val < float(existing_be):
+                            range_time_stop_plan["breakeven_trigger"] = be_trigger_val
+        if btc_rr_band_meta:
+            applied_meta: Dict[str, Any] = {"applied_rr_min": core_rr_min}
+            if mode == "range":
+                applied_meta["applied_position_scale"] = position_size_scale
+                if range_time_stop_plan:
+                    applied_meta["applied_timeout"] = range_time_stop_plan.get("timeout")
+                    applied_meta["applied_be_trigger"] = range_time_stop_plan.get("breakeven_trigger")
+            entry_thresholds_meta.setdefault("btc_rr_adx", {}).update(applied_meta)
     if adx_regime == "trend":
         core_rr_min = max(core_rr_min, ADX_TREND_CORE_RR)
         momentum_rr_min = max(momentum_rr_min, ADX_TREND_MOM_RR)
@@ -8458,6 +8547,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
