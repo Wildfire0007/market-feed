@@ -1174,6 +1174,9 @@ def translate_gate_label(label: str) -> str:
         "sl_too_tight": "Stop-loss puffer túl szűk – növeld a kockázati sávot.",
         "tp_min_pct": "TP1 cél nem éri el a profil szerinti minimum százalékot.",
         "rr_min": "RR arány nem teljesíti a profil követelményét.",
+        "atr_gate": "BTC ATR kapu blokkolja a setupot.",
+        "triggers": "BTC trigger feltételek hiányosak.",
+        "no_chase": "No-chase szabály sérül – ne üldözd az árat.",
     }
     if normalized in base_map:
         return base_map[normalized]
@@ -1242,6 +1245,7 @@ def build_action_plan(
     momentum_trailing_plan: Optional[Dict[str, Any]],
     intraday_profile: Optional[Dict[str, Any]],
     btc_profile: Optional[str] = None,
+    entry_thresholds: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     session_meta = session_meta or {}
     execution_playbook = execution_playbook or []
@@ -1283,6 +1287,16 @@ def build_action_plan(
         },
     }
 
+    def append_blocker(label: str) -> None:
+        raw_label = (label or "").strip().lower()
+        if not raw_label:
+            return
+        if raw_label not in blockers_raw:
+            blockers_raw.append(raw_label)
+        translated = translate_gate_label(raw_label)
+        if translated not in blockers:
+            blockers.append(translated)
+
     if intraday_profile:
         plan["context"]["intraday_profile"] = {
             "range_state": intraday_profile.get("range_state"),
@@ -1305,6 +1319,196 @@ def build_action_plan(
         note_clean = text.strip()
         if note_clean and note_clean not in notes:
             notes.append(note_clean)
+
+    btc_entry_summary: Optional[Dict[str, Any]] = None
+    if asset == "BTCUSD":
+        summary_blockers: List[str] = []
+        try:
+            profile_name = btc_profile or (
+                entry_thresholds.get("btc_profile")
+                if isinstance(entry_thresholds, dict)
+                else None
+            )
+            if not profile_name:
+                profile_name = _btc_active_profile()
+
+            atr_value_raw = (
+                entry_thresholds.get("btc_atr_value_usd")
+                if isinstance(entry_thresholds, dict)
+                else None
+            )
+            try:
+                atr_value = float(atr_value_raw) if atr_value_raw is not None else float("nan")
+            except (TypeError, ValueError):
+                atr_value = float("nan")
+            atr_threshold = (
+                entry_thresholds.get("btc_atr_gate_threshold_usd")
+                if isinstance(entry_thresholds, dict)
+                else None
+            )
+            atr_ok_meta = (
+                entry_thresholds.get("btc_atr_gate_ok")
+                if isinstance(entry_thresholds, dict)
+                else None
+            )
+            atr_ok = bool(atr_ok_meta) if atr_ok_meta is not None else btc_atr_gate_ok(
+                profile_name,
+                asset,
+                atr_value,
+                datetime.utcnow(),
+            )
+
+            adx_raw = (
+                entry_thresholds.get("adx_value")
+                if isinstance(entry_thresholds, dict)
+                else None
+            )
+            try:
+                adx_val = float(adx_raw) if adx_raw is not None else 25.0
+            except (TypeError, ValueError):
+                adx_val = 25.0
+
+            default_rr = rr if isinstance(rr, (int, float)) else None
+            if default_rr is None:
+                default_rr = 1.5
+            rr_min, rr_info = btc_rr_min_with_adx(profile_name, asset, float(adx_val))
+            rr_effective = rr_min if rr_min is not None else default_rr
+
+            side = None
+            if decision == "buy":
+                side = "long"
+            elif decision == "sell":
+                side = "short"
+
+            core_ok = False
+            trig_info: Dict[str, Any] = {}
+            if side:
+                try:
+                    core_ok, trig_info = btc_core_triggers_ok(asset, side)
+                except Exception as exc:  # pragma: no cover - defensive
+                    LOGGER.warning("BTC core trigger summary failed: %s", exc)
+                    core_ok = False
+                    trig_info = {}
+
+            mom_ok = False
+            mom_rr: Optional[float] = None
+            mom_note = ""
+            if side:
+                try:
+                    mom_ok, mom_rr, mom_note = btc_momentum_override(
+                        profile_name,
+                        asset,
+                        side,
+                        atr_ok,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    LOGGER.warning("BTC momentum override summary failed: %s", exc)
+                    mom_ok = False
+                    mom_rr = None
+                    mom_note = ""
+
+            enter_mode: Optional[str] = None
+            if mom_ok:
+                enter_mode = "momentum"
+                if mom_rr is not None:
+                    rr_effective = float(mom_rr)
+            elif core_ok:
+                enter_mode = "core"
+
+            if not atr_ok:
+                summary_blockers.append("atr_gate")
+                append_blocker("atr_gate")
+            if not (core_ok or mom_ok):
+                summary_blockers.append("triggers")
+                append_blocker("triggers")
+
+            momentum_no_chase = (
+                entry_thresholds.get("momentum_no_chase")
+                if isinstance(entry_thresholds, dict)
+                else None
+            )
+            if isinstance(momentum_no_chase, dict) and momentum_no_chase.get("violated"):
+                summary_blockers.append("no_chase")
+                append_blocker("no_chase")
+
+            extra_checks: Dict[str, Any] = {}
+            if decision in {"buy", "sell"} and enter_mode and entry is not None and sl is not None and tp1 is not None:
+                blockers_local: List[str] = []
+                info_payload: Dict[str, Any] = {
+                    "profile": profile_name,
+                    "mode": enter_mode,
+                    "side": side,
+                    "entry": float(entry),
+                    "sl": float(sl),
+                    "tp1": float(tp1),
+                    "rr_required": float(rr_effective) if rr_effective is not None else None,
+                }
+                atr_for_checks = atr_value if np.isfinite(atr_value) else 0.0
+                btc_sl_tp_checks(
+                    profile_name,
+                    asset,
+                    float(atr_for_checks),
+                    float(entry),
+                    float(sl),
+                    float(tp1),
+                    float(rr_effective) if rr_effective is not None else default_rr,
+                    info_payload,
+                    blockers_local,
+                )
+                extra_checks = info_payload
+                for blocker in blockers_local:
+                    summary_blockers.append(blocker)
+                    append_blocker(blocker)
+
+            if mom_rr is not None:
+                rr_effective = float(mom_rr)
+
+            summary_note_parts = [
+                f"mód: {enter_mode or 'nincs'}",
+                f"ATR kapu: {'OK' if atr_ok else 'blokkol'}",
+                f"core trigger: {'OK' if core_ok else 'hiányzik'}",
+                f"momentum override: {'OK' if mom_ok else 'inaktív'}",
+            ]
+            if rr_effective is not None:
+                summary_note_parts.append(f"RR min: {float(rr_effective):.2f}")
+            if mom_note:
+                summary_note_parts.append(mom_note)
+            add_note("Belépési döntés – összefogás: " + "; ".join(summary_note_parts))
+
+            btc_entry_summary = {
+                "profile": profile_name,
+                "enter_mode": enter_mode,
+                "atr_gate": {
+                    "ok": bool(atr_ok),
+                    "value": float(atr_value) if np.isfinite(atr_value) else None,
+                    "threshold": float(atr_threshold) if atr_threshold is not None else None,
+                },
+                "core_triggers": {"ok": bool(core_ok), **trig_info},
+                "momentum_override": {
+                    "ok": bool(mom_ok),
+                    "rr_min": float(mom_rr) if mom_rr is not None else None,
+                    "note": mom_note or None,
+                },
+                "rr_min_effective": float(rr_effective) if rr_effective is not None else None,
+                "rr_from_adx": float(rr_min) if rr_min is not None else None,
+                "rr_info": rr_info,
+            }
+            if isinstance(momentum_no_chase, dict):
+                btc_entry_summary["momentum_no_chase"] = momentum_no_chase
+            if extra_checks:
+                btc_entry_summary["sl_tp_checks"] = extra_checks
+            if isinstance(rr_info, dict) and rr_info.get("mode") == "range":
+                btc_entry_summary["range_constraints"] = {
+                    "size_scale": rr_info.get("size_scale"),
+                    "time_stop": rr_info.get("time_stop"),
+                    "be_trigger_r": rr_info.get("be_trigger_r"),
+                }
+            if summary_blockers:
+                btc_entry_summary["blockers"] = summary_blockers
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.warning("Failed to compile BTC entry summary: %s", exc)
+            btc_entry_summary = None
+          
 
     for note in intraday_profile.get("notes", []):
         add_note(note)
@@ -1596,6 +1800,9 @@ def build_action_plan(
         plan["context"]["precision_trigger_state"] = precision_trigger_state
     if precision_direction:
         plan["context"]["precision_direction"] = precision_direction
+
+    if btc_entry_summary:
+        plan["context"]["btc_entry_summary"] = btc_entry_summary
 
     if not summary_parts:
         if decision == "no entry":
@@ -8414,6 +8621,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             if asset == "BTCUSD" and btc_profile_name
             else (_btc_active_profile() if asset == "BTCUSD" else None)
         ),
+        entry_thresholds=decision_obj.get("entry_thresholds"),
     )
     if action_plan:
         decision_obj["action_plan"] = action_plan
@@ -8919,6 +9127,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
