@@ -431,10 +431,33 @@ def btc_sl_tp_checks(
     if sp > atr_5m * BTC_SPREAD_MAX_ATR_PCT:
         blockers.append("spread_gate")
 
-    sl_buf = max(atr_5m * BTC_SL_ATR_MULT[profile_key], BTC_SL_ABS_MIN)
+    abs_min_default = BTC_SL_ABS_MIN
+    sl_cfg = None
+    try:
+        overrides = globals().get("BTC_PROFILE_OVERRIDES")
+    except NameError:
+        overrides = None
+    if isinstance(overrides, dict):
+        profile_section = overrides.get(profile)
+        if isinstance(profile_section, dict):
+            sl_cfg = profile_section.get("sl_buffer")
+    if not sl_cfg:
+        try:
+            sl_cfg = (BTC_PROFILE_CONFIG or {}).get("sl_buffer")
+        except NameError:
+            sl_cfg = None
+    if isinstance(sl_cfg, dict):
+        try:
+            abs_min_default = max(abs_min_default, float(sl_cfg.get("abs_min", abs_min_default)))
+        except Exception:
+            pass
+
+    sl_buf = max(atr_5m * BTC_SL_ATR_MULT[profile_key], abs_min_default)
     sl_dist = abs(entry - sl)
     info["sl_buffer"] = sl_dist
     info["sl_buffer_min"] = sl_buf
+    info["sl_buffer_abs_min"] = abs_min_default
+    info["btc_profile"] = profile_key
     if sl_dist < sl_buf:
         blockers.append("sl_too_tight")
 
@@ -1214,6 +1237,7 @@ def translate_gate_label(label: str) -> str:
         "atr_gate": "BTC ATR kapu blokkolja a setupot.",
         "triggers": "BTC trigger feltételek hiányosak.",
         "no_chase": "No-chase szabály sérül – ne üldözd az árat.",
+        "no_chase_core": "Core no-chase szabály sérül – ne üldözd az árat.",
     }
     if normalized in base_map:
         return base_map[normalized]
@@ -1492,6 +1516,46 @@ def build_action_plan(
                     info_payload,
                     blockers_local,
                 )
+                if asset == "BTCUSD" and enter_mode == "core":
+                    profile_for_no_chase = profile_name or _btc_active_profile()
+                    slip_limit = BTC_NO_CHASE_R.get(
+                        profile_for_no_chase, BTC_NO_CHASE_R["baseline"]
+                    )
+                    limit_map = globals().get("_BTC_NO_CHASE_LIMITS", {})
+                    if (
+                        isinstance(limit_map, dict)
+                        and profile_for_no_chase in limit_map
+                    ):
+                        try:
+                            slip_limit = float(limit_map[profile_for_no_chase])
+                        except (TypeError, ValueError):
+                            slip_limit = BTC_NO_CHASE_R.get(
+                                profile_for_no_chase, BTC_NO_CHASE_R["baseline"]
+                            )
+                    trigger_reference = last5_close if last5_close is not None else entry
+                    if (
+                        trigger_reference is not None
+                        and entry is not None
+                        and sl is not None
+                    ):
+                        try:
+                            entry_price = float(entry)
+                            trigger_price = float(trigger_reference)
+                            sl_price = float(sl)
+                        except (TypeError, ValueError):
+                            entry_price = trigger_price = sl_price = None
+                        if (
+                            entry_price is not None
+                            and trigger_price is not None
+                            and sl_price is not None
+                        ):
+                            slip_r = abs(entry_price - trigger_price) / max(
+                                1e-9, abs(trigger_price - sl_price)
+                            )
+                            info_payload["no_chase_core_r"] = float(slip_r)
+                            info_payload["no_chase_core_limit_r"] = float(slip_limit)
+                            if slip_r > slip_limit and "no_chase_core" not in blockers_local:
+                                blockers_local.append("no_chase_core")
                 extra_checks = info_payload
                 for blocker in blockers_local:
                     summary_blockers.append(blocker)
@@ -6657,6 +6721,67 @@ def analyze(asset: str) -> Dict[str, Any]:
             structure_gate = True
         elif structure_components.get("liquidity") and structure_components.get("ofi"):
             structure_gate = True
+    if asset == "BTCUSD" and not btc_momentum_override_active and not structure_gate:
+        profile_lookup = btc_profile_name or _btc_active_profile()
+        try:
+            p_min = p_score_min_local  # type: ignore[name-defined]
+        except NameError:
+            p_min = BTC_P_SCORE_MIN.get(profile_lookup, BTC_P_SCORE_MIN["baseline"])
+        p_min_val = None
+        try:
+            if p_min is not None:
+                p_min_val = float(p_min)
+        except (TypeError, ValueError):
+            p_min_val = None
+        P_val = None
+        try:
+            if P is not None:
+                P_val = float(P)
+        except (TypeError, ValueError):
+            P_val = None
+        atr_gate_th = None
+        try:
+            atr_gate_th = float(atr_threshold)  # type: ignore[name-defined]
+        except (TypeError, ValueError, NameError):
+            atr_gate_th = None
+        rel_atr_val = None
+        try:
+            if rel_atr is not None:
+                rel_atr_val = float(rel_atr)
+        except (TypeError, ValueError):
+            rel_atr_val = None
+        good_pscore = (
+            p_min_val is not None
+            and P_val is not None
+            and np.isfinite(p_min_val)
+            and np.isfinite(P_val)
+            and P_val >= (p_min_val + 6.0)
+        )
+        good_vola = (
+            rel_atr_val is not None
+            and atr_gate_th is not None
+            and np.isfinite(rel_atr_val)
+            and np.isfinite(atr_gate_th)
+            and rel_atr_val >= (atr_gate_th * 1.15)
+        )
+        one_of_three = bool(micro_ok or vwap_ok or ofi_ok)
+        if good_pscore and good_vola and one_of_three:
+            structure_gate = True
+            entry_thresholds_meta["core_relax_applied"] = True
+            entry_thresholds_meta.setdefault("core_relax_context", {})
+            entry_thresholds_meta["core_relax_context"].update(
+                {
+                    "p_score": P_val,
+                    "p_score_min": p_min_val,
+                    "rel_atr": rel_atr_val,
+                    "atr_threshold": atr_gate_th,
+                    "signals": {
+                        "micro": micro_ok,
+                        "vwap": vwap_ok,
+                        "ofi": ofi_ok,
+                    },
+                }
+            )
     entry_thresholds_meta["structure_components"] = structure_components
     if asset == "BTCUSD":
         entry_thresholds_meta["btc_momentum_override"] = btc_momentum_override_active
@@ -7779,10 +7904,75 @@ def analyze(asset: str) -> Dict[str, Any]:
         if decision in ("buy", "sell"):
             if not compute_levels(decision, core_rr_min, core_tp1_mult, core_tp2_mult):
                 decision = "no entry"
-            elif tp1_net_pct_value is not None:
-                msg_net = f"TP1 nettó profit ≈ {tp1_net_pct_value*100:.2f}%"
-                if msg_net not in reasons:
-                    reasons.append(msg_net)
+            else:
+                if asset == "BTCUSD":
+                    profile_for_no_chase = btc_profile_name or _btc_active_profile()
+                    core_slip_info: Dict[str, Any] = {}
+                    if (
+                        entry is not None
+                        and sl is not None
+                        and last5_close is not None
+                    ):
+                        try:
+                            entry_price = float(entry)
+                            trigger_price = float(last5_close)
+                            sl_price = float(sl)
+                        except (TypeError, ValueError):
+                            entry_price = trigger_price = sl_price = None
+                        if (
+                            entry_price is not None
+                            and trigger_price is not None
+                            and sl_price is not None
+                        ):
+                            slip_limit = BTC_NO_CHASE_R.get(
+                                profile_for_no_chase, BTC_NO_CHASE_R["baseline"]
+                            )
+                            limit_map = globals().get("_BTC_NO_CHASE_LIMITS", {})
+                            if (
+                                isinstance(limit_map, dict)
+                                and profile_for_no_chase in limit_map
+                            ):
+                                try:
+                                    slip_limit = float(limit_map[profile_for_no_chase])
+                                except (TypeError, ValueError):
+                                    slip_limit = BTC_NO_CHASE_R.get(
+                                        profile_for_no_chase, BTC_NO_CHASE_R["baseline"]
+                                    )
+                            slip_abs = abs(entry_price - trigger_price)
+                            denom = max(1e-9, abs(trigger_price - sl_price))
+                            slip_r = slip_abs / denom
+                            core_slip_info = {
+                                "slip": float(slip_abs),
+                                "slip_r": float(slip_r),
+                                "limit_r": float(slip_limit),
+                                "entry": float(entry_price),
+                                "trigger": float(trigger_price),
+                                "sl": float(sl_price),
+                                "evaluated": True,
+                            }
+                            violation = slip_r > slip_limit
+                            core_slip_info["violated"] = violation
+                            entry_thresholds_meta["core_no_chase"] = core_slip_info
+                            if violation:
+                                msg = (
+                                    "Core no-chase szabály: aktuális ár kedvezőtlenebb "
+                                    f"mint {slip_limit:.2f}R"
+                                )
+                                if msg not in reasons:
+                                    reasons.append(msg)
+                                if "no_chase_core" not in missing:
+                                    missing.append("no_chase_core")
+                                append_blocker("no_chase_core")
+                                decision = "no entry"
+                                entry = sl = tp1 = tp2 = rr = None
+                    else:
+                        entry_thresholds_meta.setdefault("core_no_chase", {}).setdefault(
+                            "evaluated", False
+                        )
+                if decision in ("buy", "sell") and tp1_net_pct_value is not None:
+                    msg_net = f"TP1 nettó profit ≈ {tp1_net_pct_value*100:.2f}%"
+                    if msg_net not in reasons:
+                        reasons.append(msg_net)
     else:
         if mom_dir is not None:
             mode = "momentum"
@@ -9190,6 +9380,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
