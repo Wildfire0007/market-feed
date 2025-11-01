@@ -95,7 +95,7 @@ BTC_ATR_FLOOR_USD = {
 BTC_ATR_PCT_TOD = {  # percentilis minimum a nap adott szakaszára
     "baseline": {"open": 0.50, "mid": 0.45, "close": 0.50},
     "relaxed": {"open": 0.40, "mid": 0.40, "close": 0.45},
-    "suppressed": {"open": 0.30, "mid": 0.30, "close": 0.35},
+    "suppressed": {"open": 0.30, "mid": 0.28, "close": 0.35},
 }
 
 # P-score / RR / TP / SL / no-chase per profile
@@ -111,7 +111,6 @@ BTC_RANGE_BE_TRIGGER_R = {"baseline": 0.35, "relaxed": 0.30, "suppressed": 0.25}
 BTC_TP_MIN_PCT = {"baseline": 0.008, "relaxed": 0.007, "suppressed": 0.006}  # 0.8/0.7/0.6%
 BTC_SL_ATR_MULT = {"baseline": 0.30, "relaxed": 0.28, "suppressed": 0.26}
 BTC_SL_ABS_MIN = 120.0  # USD
-BTC_SPREAD_MAX_ATR_PCT = 0.40
 
 # Momentum override és no-chase (slippage tiltó R-ben)
 BTC_MOMENTUM_RR_MIN = {"baseline": 1.40, "relaxed": 1.35, "suppressed": 1.30}
@@ -121,6 +120,9 @@ BTC_NO_CHASE_R = {"baseline": 0.25, "relaxed": 0.22, "suppressed": 0.18}
 # during analysis to support helper utilities and optional real-time adapters.
 _BTC_MOMENTUM_RUNTIME: Dict[str, Any] = {}
 _BTC_NO_CHASE_LIMITS: Dict[str, float] = {}
+
+# Precision állapot figyelése a timeout diagnosztikához.
+_PRECISION_RUNTIME: Dict[str, Dict[str, Any]] = {}
 
 # Precision pipeline alsó határ (ne blokkoljon túl korán)
 BTC_PRECISION_MIN = {"baseline": 60, "relaxed": 55, "suppressed": 50}
@@ -410,6 +412,52 @@ def btc_no_chase_violated(profile: str, entry_price: float, trigger_price: float
     return r > limit_value
 
 
+def btc_gate_margins(asset: str, ctx) -> dict:
+    """
+    Számolja, mennyivel maradtunk el a belépési küszöböktől:
+    - ATR_gate: rel_atr vs atr_gate_th (érték + arány)
+    - P-score:  P vs p_min
+    - OFI:      |z| vs trigger
+    - ADX:      adx vs trend_min
+    - RR:       rr vs rr_min
+    - TP1:      tp_pct vs tp_min_pct
+    ctx: tartalmazza az épp számolt értékeket (rel_atr, atr_gate_th, P, p_min, z, adx, rr, rr_min, tp_pct, tp_min_pct)
+    """
+
+    m: Dict[str, float] = {}
+    try:
+        rel_atr_val = float(ctx["rel_atr"])
+        atr_gate_th = float(ctx["atr_gate_th"])
+        m["atr_gap"] = rel_atr_val - atr_gate_th
+        if atr_gate_th != 0:
+            m["atr_ratio"] = rel_atr_val / max(atr_gate_th, 1e-9)
+    except Exception:
+        pass
+    try:
+        m["p_gap"] = float(ctx["P"]) - float(ctx["p_min"])
+    except Exception:
+        pass
+    try:
+        z = float(ctx.get("ofi_z", float("nan")))
+        trig = float(ctx.get("ofi_trig", 1.0))
+        m["ofi_gap"] = abs(z) - trig
+    except Exception:
+        pass
+    try:
+        m["adx_gap"] = float(ctx["adx"]) - float(ctx["adx_trend_min"])
+    except Exception:
+        pass
+    try:
+        m["rr_gap"] = float(ctx["rr"]) - float(ctx["rr_min"])
+    except Exception:
+        pass
+    try:
+        m["tp_gap"] = float(ctx["tp_pct"]) - float(ctx["tp_min_pct"])
+    except Exception:
+        pass
+    return m
+
+
 def btc_sl_tp_checks(
     profile: str,
     asset: str,
@@ -424,11 +472,17 @@ def btc_sl_tp_checks(
     if asset != "BTCUSD":
         return
     profile_key = profile if profile in BTC_SL_ATR_MULT else "baseline"
+
+    sp_limit = 0.40
+    try:
+        sp_limit = float(SPREAD_MAX_ATR_PCT.get("BTCUSD", sp_limit))
+    except Exception:
+        pass
+    if profile_key == "baseline":
+        sp_limit = 0.35
     spread_func = globals().get("spread_usd")
     sp = spread_func(asset) if callable(spread_func) else 0.0
-    if atr_5m > 0:
-        info["spread_limit"] = atr_5m * BTC_SPREAD_MAX_ATR_PCT
-    if sp > atr_5m * BTC_SPREAD_MAX_ATR_PCT:
+    if sp > atr_5m * sp_limit:
         blockers.append("spread_gate")
 
     abs_min_default = BTC_SL_ABS_MIN
@@ -438,14 +492,15 @@ def btc_sl_tp_checks(
     except NameError:
         overrides = None
     if isinstance(overrides, dict):
-        profile_section = overrides.get(profile)
+        profile_section = overrides.get(profile_key) or overrides.get(profile)
         if isinstance(profile_section, dict):
             sl_cfg = profile_section.get("sl_buffer")
     if not sl_cfg:
         try:
             sl_cfg = (BTC_PROFILE_CONFIG or {}).get("sl_buffer")
-        except NameError:
+        except Exception:
             sl_cfg = None
+
     if isinstance(sl_cfg, dict):
         try:
             abs_min_default = max(abs_min_default, float(sl_cfg.get("abs_min", abs_min_default)))
@@ -454,13 +509,15 @@ def btc_sl_tp_checks(
 
     sl_buf = max(atr_5m * BTC_SL_ATR_MULT[profile_key], abs_min_default)
     sl_dist = abs(entry - sl)
-    info["sl_buffer"] = sl_dist
-    info["sl_buffer_min"] = sl_buf
-    info["sl_buffer_abs_min"] = abs_min_default
+    info["sl_buffer"] = float(sl_dist)
+    info["sl_buffer_min"] = float(sl_buf)
+    info["sl_buffer_abs_min"] = float(abs_min_default)
     info["btc_profile"] = profile_key
+    info["spread_usd"] = float(sp)
+    info["spread_limit_atr_mult"] = float(sp_limit)
     if sl_dist < sl_buf:
         blockers.append("sl_too_tight")
-
+      
     tp_min = BTC_TP_MIN_PCT.get(profile_key, BTC_TP_MIN_PCT["baseline"])
     tp_pct = abs(tp1 - entry) / entry if entry else 0.0
     info["tp_pct"] = tp_pct
@@ -1552,10 +1609,49 @@ def build_action_plan(
                             slip_r = abs(entry_price - trigger_price) / max(
                                 1e-9, abs(trigger_price - sl_price)
                             )
+                            violated_no_chase = slip_r > slip_limit
                             info_payload["no_chase_core_r"] = float(slip_r)
                             info_payload["no_chase_core_limit_r"] = float(slip_limit)
-                            if slip_r > slip_limit and "no_chase_core" not in blockers_local:
+                            if asset == "BTCUSD" and violated_no_chase:
+                                info_payload["no_chase_r"] = {
+                                    "slip_r": float(slip_r),
+                                    "limit_r": float(slip_limit),
+                                }
+                            if violated_no_chase and "no_chase_core" not in blockers_local:
                                 blockers_local.append("no_chase_core")
+                atr_gate_ratio = float("nan")
+                if atr_threshold and price_for_calc:
+                    try:
+                        atr_gate_ratio = float(atr_threshold) / float(price_for_calc)
+                    except Exception:
+                        atr_gate_ratio = float("nan")
+                rel_atr_val = float("nan")
+                if rel_atr is not None:
+                    try:
+                        rel_atr_val = float(rel_atr)
+                    except Exception:
+                        rel_atr_val = float("nan")
+                rr_actual = info_payload.get("rr")
+                rr_min_val = info_payload.get("rr_min")
+                tp_pct_val = info_payload.get("tp_pct")
+                tp_min_val = info_payload.get("tp_min_pct")
+                ctx = {
+                    "rel_atr": rel_atr_val,
+                    "atr_gate_th": atr_gate_ratio,
+                    "P": float(P) if P is not None else float("nan"),
+                    "p_min": float(p_score_min_local)
+                    if p_score_min_local is not None
+                    else float("nan"),
+                    "ofi_z": ofi_zscore if ofi_zscore is not None else float("nan"),
+                    "ofi_trig": BTC_OFI_Z.get("trigger", 1.0),
+                    "adx": float(adx_val) if adx_val is not None else float("nan"),
+                    "adx_trend_min": float(BTC_ADX_TREND_MIN),
+                    "rr": float(rr_actual) if rr_actual is not None else float("nan"),
+                    "rr_min": float(rr_min_val) if rr_min_val is not None else float("nan"),
+                    "tp_pct": float(tp_pct_val) if tp_pct_val is not None else float("nan"),
+                    "tp_min_pct": float(tp_min_val) if tp_min_val is not None else float("nan"),
+                }
+                info_payload["gate_margins"] = btc_gate_margins(asset, ctx)
                 extra_checks = info_payload
                 for blocker in blockers_local:
                     summary_blockers.append(blocker)
@@ -1862,6 +1958,34 @@ def build_action_plan(
         )
     if precision_state == "none" and decision in {"precision_ready", "precision_arming"}:
         precision_state = decision
+    now_runtime = datetime.now(timezone.utc)
+    runtime_bucket = _PRECISION_RUNTIME.setdefault(asset, {})
+    ready_since = runtime_bucket.get("ready_since")
+    if not isinstance(ready_since, datetime):
+        ready_since = None
+    precision_timeout_triggered = False
+    timeout_minutes = 10
+    if (
+        runtime_bucket.get("last_state") == "precision_ready"
+        and ready_since is not None
+    ):
+        try:
+            elapsed = (now_runtime - ready_since).total_seconds()
+        except Exception:
+            elapsed = None
+        if elapsed is not None and elapsed > timeout_minutes * 60:
+            precision_timeout_triggered = True
+            if precision_state == "precision_ready":
+                precision_state = "none"
+    if precision_state == "precision_ready":
+        if runtime_bucket.get("last_state") != "precision_ready":
+            runtime_bucket["ready_since"] = now_runtime
+        runtime_bucket["last_state"] = "precision_ready"
+    else:
+        runtime_bucket["last_state"] = precision_state
+        runtime_bucket.pop("ready_since", None)
+    if precision_timeout_triggered and isinstance(entry_thresholds, dict):
+        entry_thresholds["precision_timeout"] = {"minutes": timeout_minutes}
     if precision_state in {"precision_ready", "precision_arming"} and precision_plan:
         label = "Precision trigger előkészítés"
         if precision_state == "precision_arming":
@@ -5428,9 +5552,22 @@ def analyze(asset: str) -> Dict[str, Any]:
         atr_threshold *= 0.95
     spread_gate_ok = True
     spread_ratio = None
-    spread_limit = SPREAD_MAX_ATR_PCT.get(asset, SPREAD_MAX_ATR_PCT.get("default"))
+    spread_limit: Optional[float] = None
+    try:
+        raw_limit = SPREAD_MAX_ATR_PCT.get(asset, SPREAD_MAX_ATR_PCT.get("default"))
+        spread_limit = float(raw_limit) if raw_limit is not None else None
+    except Exception:
+        spread_limit = None
     if asset == "BTCUSD":
-        spread_limit = BTC_SPREAD_MAX_ATR_PCT
+        sp_limit = 0.40
+        try:
+            sp_limit = float(SPREAD_MAX_ATR_PCT.get("BTCUSD", sp_limit))
+        except Exception:
+            pass
+        profile_for_spread = btc_profile_name or ENTRY_THRESHOLD_PROFILE_NAME
+        if profile_for_spread == "baseline":
+            sp_limit = 0.35
+        spread_limit = sp_limit
     if spread_limit and spread_abs is not None and atr5 is not None:
         try:
             spread_ratio = float(spread_abs) / float(atr5) if float(atr5) > 0 else None
@@ -5660,11 +5797,11 @@ def analyze(asset: str) -> Dict[str, Any]:
                     limit_map[btc_profile_name] = float(raw_limit)
                 except (TypeError, ValueError):
                     limit_map[btc_profile_name] = BTC_NO_CHASE_R.get(
-                        btc_profile_name, BTC_NO_CHASE_R.get("baseline", 0.2)
+                        btc_profile_name, BTC_NO_CHASE_R.get("baseline", 0.25)
                     )
             elif btc_profile_name not in limit_map:
                 limit_map[btc_profile_name] = BTC_NO_CHASE_R.get(
-                    btc_profile_name, BTC_NO_CHASE_R.get("baseline", 0.2)
+                    btc_profile_name, BTC_NO_CHASE_R.get("baseline", 0.25)
                 )
 
     if effective_bias == "neutral":
@@ -7992,7 +8129,11 @@ def analyze(asset: str) -> Dict[str, Any]:
                     and last5_close is not None
                     and sl is not None
                 ):
-                    slip_limit_r = 0.2
+                    slip_limit_r = (
+                        BTC_NO_CHASE_R.get("baseline", 0.25)
+                        if asset == "BTCUSD"
+                        else 0.2
+                    )
                     if asset == "BTCUSD" and btc_momentum_cfg:
                         slip_limit_r = float(
                             btc_momentum_cfg.get("max_slippage_r")
@@ -8032,6 +8173,11 @@ def analyze(asset: str) -> Dict[str, Any]:
                         "slip_r": float(slip_r),
                     }
                 if slip_info:
+                    if asset == "BTCUSD" and no_chase_violation:
+                        slip_info["no_chase_r"] = {
+                            "slip_r": float(slip_info.get("slip_r", slip_r)),
+                            "limit_r": float(limit_used),
+                        }
                     slip_info["violated"] = no_chase_violation
                     entry_thresholds_meta["momentum_no_chase"] = slip_info
                 if no_chase_violation:
@@ -9380,6 +9526,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
