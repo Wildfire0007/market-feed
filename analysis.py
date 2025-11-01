@@ -125,6 +125,16 @@ _BTC_NO_CHASE_LIMITS: Dict[str, float] = {}
 # Precision pipeline alsó határ (ne blokkoljon túl korán)
 BTC_PRECISION_MIN = {"baseline": 60, "relaxed": 55, "suppressed": 50}
 
+
+def btc_precision_state(profile: str, asset: str, score: float, trigger_ready: bool) -> str:
+    if asset != "BTCUSD":
+        return "none"
+    profile_key = profile if profile in BTC_PRECISION_MIN else "baseline"
+    threshold = BTC_PRECISION_MIN.get(profile_key, BTC_PRECISION_MIN["baseline"])
+    if score >= threshold:
+        return "precision_arming" if trigger_ready else "precision_ready"
+    return "none"  # ne blokkoljon önmagában
+
 # --- Elemzendő eszközök ---
 from config.analysis_settings import (
     ACTIVE_INVALID_BUFFER_ABS,
@@ -1231,10 +1241,12 @@ def build_action_plan(
     last_computed_risk: Optional[float],
     momentum_trailing_plan: Optional[Dict[str, Any]],
     intraday_profile: Optional[Dict[str, Any]],
+    btc_profile: Optional[str] = None,
 ) -> Dict[str, Any]:
     session_meta = session_meta or {}
     execution_playbook = execution_playbook or []
     intraday_profile = intraday_profile or {}
+    btc_profile_name = btc_profile if isinstance(btc_profile, str) else None
     blockers_raw = [str(item) for item in (missing or []) if item]
     blockers: List[str] = []
     for raw in blockers_raw:
@@ -1520,11 +1532,34 @@ def build_action_plan(
                 extra={"tp2": float(tp2)},
             )
 
-    precision_state = str((precision_plan or {}).get("trigger_state") or "")
     precision_direction = (precision_plan or {}).get("direction")
-    if decision in {"precision_ready", "precision_arming"} and precision_plan:
+    precision_trigger_state = str((precision_plan or {}).get("trigger_state") or "")
+    precision_state = "none"
+    if precision_plan:
+        score_value = safe_float(precision_plan.get("score")) or 0.0
+        trigger_ready_flag = bool(precision_plan.get("trigger_ready")) or precision_trigger_state in {
+            "arming",
+            "fire",
+        }
+        profile_for_precision: Optional[str] = None
+        if asset == "BTCUSD":
+            if btc_profile_name and btc_profile_name in BTC_PRECISION_MIN:
+                profile_for_precision = btc_profile_name
+            else:
+                profile_for_precision = _btc_active_profile()
+        elif btc_profile_name:
+            profile_for_precision = btc_profile_name
+        precision_state = btc_precision_state(
+            profile_for_precision or "baseline",
+            asset,
+            score_value,
+            trigger_ready_flag,
+        )
+    if precision_state == "none" and decision in {"precision_ready", "precision_arming"}:
+        precision_state = decision
+    if precision_state in {"precision_ready", "precision_arming"} and precision_plan:
         label = "Precision trigger előkészítés"
-        if decision == "precision_arming":
+        if precision_state == "precision_arming":
             label = "Precision trigger aktív"
         summary_parts.append(short_text(label))
         window = precision_plan.get("entry_window")
@@ -1553,10 +1588,12 @@ def build_action_plan(
                 source="precision",
                 extra={"trigger_levels": trigger_levels},
             )
-        update_state("monitor_trigger", "high" if decision == "precision_arming" else "medium")
+        update_state("monitor_trigger", "high" if precision_state == "precision_arming" else "medium")
 
-    if precision_state:
+    if precision_state and precision_state != "none":
         plan["context"]["precision_state"] = precision_state
+    if precision_trigger_state:
+        plan["context"]["precision_trigger_state"] = precision_trigger_state
     if precision_direction:
         plan["context"]["precision_direction"] = precision_direction
 
@@ -1571,7 +1608,10 @@ def build_action_plan(
         else:
             summary_parts.append(f"Állapot: {decision}")
 
-    if (decision in {"buy", "sell", "precision_ready", "precision_arming"}) and not entry_open:
+    if (
+        (decision in {"buy", "sell"})
+        or (precision_state in {"precision_ready", "precision_arming"})
+    ) and not entry_open:
         session_msg = "Belépési ablak zárva – várj a megnyitásig."
         if next_open:
             session_msg += f" Következő nyitás: {next_open}."
@@ -7825,16 +7865,26 @@ def analyze(asset: str) -> Dict[str, Any]:
                 window_payload = [float(window[0]), float(window[1])]
             except (TypeError, ValueError):
                 window_payload = None
-        if decision in {"precision_ready", "precision_arming"}:
+        if precision_state in {"precision_ready", "precision_arming"}:
             timeout_key = (
                 "ready_timeout_minutes"
-                if decision == "precision_ready"
+                if precision_state == "precision_ready"
                 else "arming_timeout_minutes"
             )
             ttl_val = precision_plan.get(timeout_key)
+            fallback_key = "ready" if precision_state == "precision_ready" else "arming"
             if ttl_val in {None, 0}:
-                fallback_key = "ready" if decision == "precision_ready" else "arming"
                 ttl_val = precision_timeouts.get(fallback_key)
+            if precision_state == "precision_ready":
+                ttl_numeric: Optional[float] = None
+                try:
+                    ttl_numeric = float(ttl_val) if ttl_val not in {None, 0} else None
+                except (TypeError, ValueError):
+                    ttl_numeric = None
+                if ttl_numeric is None or ttl_numeric <= 0:
+                    ttl_val = 15.0
+                else:
+                    ttl_val = min(20.0, max(10.0, ttl_numeric))
             ttl_display: Optional[int] = None
             if ttl_val not in {None, 0}:
                 try:
@@ -8359,6 +8409,11 @@ def analyze(asset: str) -> Dict[str, Any]:
         last_computed_risk=last_computed_risk,
         momentum_trailing_plan=momentum_trailing_plan,
         intraday_profile=intraday_profile,
+        btc_profile=(
+            btc_profile_name
+            if asset == "BTCUSD" and btc_profile_name
+            else (_btc_active_profile() if asset == "BTCUSD" else None)
+        ),
     )
     if action_plan:
         decision_obj["action_plan"] = action_plan
@@ -8864,6 +8919,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
