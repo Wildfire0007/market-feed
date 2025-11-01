@@ -9,7 +9,7 @@ import json
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import logging
 
@@ -416,7 +416,26 @@ NVDA_POSITION_SCALE: Dict[str, float] = {
     key: float(value)
     for key, value in dict(_get_config_value("nvda_position_scale") or {}).items()
 }
-ENABLE_MOMENTUM_ASSETS: set = load_config()["enable_momentum_assets"]
+def _resolve_momentum_assets() -> Set[str]:
+    """Return the configured momentum-capable assets with fallbacks."""
+
+    try:
+        raw_assets = load_config().get("enable_momentum_assets", [])
+    except AnalysisConfigError:
+        raw_assets = []
+    except Exception:
+        raw_assets = []
+
+    enabled: Set[str] = {
+        str(asset)
+        for asset in raw_assets
+        if isinstance(asset, str)
+    }
+    enabled.add("BTCUSD")
+    return enabled
+
+
+ENABLE_MOMENTUM_ASSETS: Set[str] = _resolve_momentum_assets()
 INTRADAY_ATR_RELAX: Dict[str, float] = {
     k: float(v) for k, v in dict(_get_config_value("intraday_atr_relax") or {}).items()
 }
@@ -468,6 +487,12 @@ def get_p_score_min(asset: str) -> float:
     """Return the configured minimum P-score for the active profile."""
 
     return P_SCORE_MIN_ASSET.get(asset, P_SCORE_MIN_DEFAULT)
+
+
+def is_momentum_asset(asset: str) -> bool:
+    """Return ``True`` when ``asset`` participates in the momentum strategy."""
+
+    return asset in _resolve_momentum_assets()
 
 
 def get_atr_threshold_multiplier(asset: str) -> float:
