@@ -122,7 +122,7 @@ def test_btc_profile_overrides(monkeypatch):
     assert overrides["baseline"]["atr_floor_usd"] == pytest.approx(50.0)
     assert overrides["baseline"]["tp_min_pct"] == pytest.approx(0.008)
     assert overrides["baseline"]["sl_buffer"]["atr_mult"] == pytest.approx(0.3)
-    assert overrides["baseline"]["sl_buffer"]["abs_min"] == pytest.approx(120.0)
+    assert overrides["baseline"]["sl_buffer"]["abs_min"] == pytest.approx(150.0)
     assert overrides["baseline"]["rr"]["trend_core"] == pytest.approx(1.9)
     assert overrides["baseline"]["rr"]["range_core"] == pytest.approx(1.5)
     assert overrides["baseline"]["rr"]["range_momentum"] == pytest.approx(1.5)
@@ -143,7 +143,7 @@ def test_btc_profile_overrides(monkeypatch):
     assert relaxed["atr_percentiles"]["mid"] == pytest.approx(0.4)
     assert relaxed["tp_min_pct"] == pytest.approx(0.007)
     assert relaxed["sl_buffer"]["atr_mult"] == pytest.approx(0.28)
-    assert relaxed["sl_buffer"]["abs_min"] == pytest.approx(120.0)
+    assert relaxed["sl_buffer"]["abs_min"] == pytest.approx(135.0)
     assert relaxed["bias_relax"]["vwap_ofi_threshold"] == pytest.approx(1.0)
 
     suppressed = overrides["suppressed"]
