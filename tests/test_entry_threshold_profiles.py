@@ -132,12 +132,12 @@ def test_btc_profile_overrides(monkeypatch):
     assert overrides["baseline"]["bias_relax"]["ofi_sub_threshold"] == pytest.approx(1.2)
     assert overrides["baseline"]["structure"]["ofi_gate"] == pytest.approx(0.8)
     assert overrides["baseline"]["momentum_override"]["rr_min"] == pytest.approx(1.4)
-    assert overrides["baseline"]["momentum_override"]["max_slippage_r"] == pytest.approx(0.2)
+    assert overrides["baseline"]["momentum_override"]["max_slippage_r"] == pytest.approx(0.25)
     assert overrides["baseline"]["momentum_override"]["no_chase_r"] == pytest.approx(0.25)
 
     relaxed = overrides["relaxed"]
     assert relaxed["rr"]["range_time_stop"] == 15
-    assert relaxed["momentum_override"]["max_slippage_r"] == pytest.approx(0.15)
+    assert relaxed["momentum_override"]["max_slippage_r"] == pytest.approx(0.22)
     assert relaxed["atr_floor_usd"] == pytest.approx(45.0)
     assert relaxed["atr_percentiles"]["open"] == pytest.approx(0.4)
     assert relaxed["atr_percentiles"]["mid"] == pytest.approx(0.4)
@@ -151,7 +151,7 @@ def test_btc_profile_overrides(monkeypatch):
     assert suppressed["momentum_override"]["no_chase_r"] == pytest.approx(0.18)
     assert suppressed["atr_floor_usd"] == pytest.approx(40.0)
     assert suppressed["atr_percentiles"]["open"] == pytest.approx(0.3)
-    assert suppressed["atr_percentiles"]["mid"] == pytest.approx(0.3)
+    assert suppressed["atr_percentiles"]["mid"] == pytest.approx(0.28)
     assert suppressed["tp_min_pct"] == pytest.approx(0.006)
     assert suppressed["sl_buffer"]["atr_mult"] == pytest.approx(0.26)
     assert suppressed["sl_buffer"]["abs_min"] == pytest.approx(120.0)
