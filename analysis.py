@@ -117,6 +117,11 @@ BTC_SPREAD_MAX_ATR_PCT = 0.40
 BTC_MOMENTUM_RR_MIN = {"baseline": 1.40, "relaxed": 1.35, "suppressed": 1.30}
 BTC_NO_CHASE_R = {"baseline": 0.20, "relaxed": 0.15, "suppressed": 0.12}
 
+# Runtime state for BTC momentum overrides and guardrails. Populated lazily
+# during analysis to support helper utilities and optional real-time adapters.
+_BTC_MOMENTUM_RUNTIME: Dict[str, Any] = {}
+_BTC_NO_CHASE_LIMITS: Dict[str, float] = {}
+
 # Precision pipeline alsó határ (ne blokkoljon túl korán)
 BTC_PRECISION_MIN = {"baseline": 60, "relaxed": 55, "suppressed": 50}
 
@@ -263,6 +268,107 @@ def btc_core_triggers_ok(asset: str, side: str) -> Tuple[bool, Dict[str, Any]]:
         hits >= 2,
         {"bos_ok": bool(bos_ok), "vwap_ok": bool(vwap_ok), "ofi_ok": bool(ofi_ok), "ofi_z": z_float},
     )
+
+
+def btc_momentum_override(profile: str, asset: str, side: str, atr_ok: bool) -> Tuple[bool, Optional[float], str]:
+    """Return the BTC momentum override status, RR override and descriptor."""
+
+    if asset != "BTCUSD" or not is_momentum_asset(asset) or side not in {"long", "short"}:
+        return (False, None, "")
+
+    ema_ok = False
+    ema_cross_fn = globals().get("ema_cross_5m")
+    if callable(ema_cross_fn):
+        try:
+            ema_ok = bool(ema_cross_fn(asset, fast=9, slow=21, side=side))
+        except Exception:
+            ema_ok = False
+    if not ema_ok:
+        state = globals().get("_BTC_MOMENTUM_RUNTIME", {})
+        if isinstance(state, dict):
+            ema_state = state.get("ema_cross")
+            if isinstance(ema_state, dict):
+                ema_ok = bool(ema_state.get(side))
+
+    z_value: Optional[float] = None
+    ofi_fn = globals().get("ofi_zscore")
+    if callable(ofi_fn):
+        try:
+            lookback = int(BTC_OFI_Z.get("lookback_bars", 60))
+        except (TypeError, ValueError):
+            lookback = 60
+        try:
+            z_val = ofi_fn(asset, lookback=lookback)
+        except Exception:
+            z_val = None
+        else:
+            try:
+                z_value = float(z_val)
+            except (TypeError, ValueError):
+                z_value = None
+    if z_value is None:
+        state = globals().get("_BTC_MOMENTUM_RUNTIME", {})
+        if isinstance(state, dict):
+            cached = state.get("ofi_z")
+            try:
+                z_value = float(cached) if cached is not None else None
+            except (TypeError, ValueError):
+                z_value = None
+
+    if z_value is None or not np.isfinite(z_value):
+        z_value = float("nan")
+
+    cfg_state = globals().get("_BTC_MOMENTUM_RUNTIME", {})
+    ofi_strong_th = BTC_OFI_Z.get("strong", 0.0)
+    rr_override: Optional[float] = None
+    if isinstance(cfg_state, dict):
+        cfg = cfg_state.get("cfg")
+        if isinstance(cfg, dict):
+            strong_raw = cfg.get("ofi_strong")
+            if strong_raw is not None:
+                try:
+                    ofi_strong_th = float(strong_raw)
+                except (TypeError, ValueError):
+                    pass
+            rr_raw = cfg.get("rr_min")
+            if rr_raw is not None:
+                try:
+                    rr_override = float(rr_raw)
+                except (TypeError, ValueError):
+                    rr_override = None
+
+    if rr_override is None:
+        rr_override = float(BTC_MOMENTUM_RR_MIN.get(profile, BTC_MOMENTUM_RR_MIN.get("baseline", 1.4)))
+
+    if not np.isfinite(ofi_strong_th):
+        ofi_strong_th = BTC_OFI_Z.get("strong", 0.0)
+
+    if np.isnan(z_value):
+        ofi_strong = False
+    elif side == "long":
+        ofi_strong = z_value >= ofi_strong_th
+    else:
+        ofi_strong = z_value <= -ofi_strong_th
+
+    if ema_ok and ofi_strong and atr_ok:
+        desc = f"ema9x21+ofi_z={z_value:.2f}" if np.isfinite(z_value) else "ema9x21+ofi"
+        return (True, rr_override, desc)
+    return (False, None, "")
+
+
+def btc_no_chase_violated(profile: str, entry_price: float, trigger_price: float, sl_price: float) -> bool:
+    """Return ``True`` when the BTC momentum entry chases beyond the R limit."""
+
+    limit_map = globals().get("_BTC_NO_CHASE_LIMITS", {})
+    limit_default = BTC_NO_CHASE_R.get(profile, BTC_NO_CHASE_R.get("baseline", 0.2))
+    limit_value = limit_default
+    if isinstance(limit_map, dict) and profile in limit_map:
+        try:
+            limit_value = float(limit_map[profile])
+        except (TypeError, ValueError):
+            limit_value = limit_default
+    r = abs(entry_price - trigger_price) / max(1e-9, abs(trigger_price - sl_price))
+    return r > limit_value
 
 
 def _btc_active_profile() -> str:
@@ -4339,6 +4445,12 @@ def analyze(asset: str) -> Dict[str, Any]:
                 "strong": BTC_OFI_Z["strong"],
                 "weakening": BTC_OFI_Z["weakening"],
             }
+    if asset == "BTCUSD":
+        momentum_state = globals().setdefault("_BTC_MOMENTUM_RUNTIME", {})
+        if ofi_zscore is not None and np.isfinite(ofi_zscore):
+            momentum_state["ofi_z"] = float(ofi_zscore)
+        elif isinstance(momentum_state, dict):
+            momentum_state.pop("ofi_z", None)
     if asset == "BTCUSD" and ofi_zscore is not None:
         state = "neutral"
         if ofi_zscore >= BTC_OFI_Z["strong"]:
@@ -5073,6 +5185,9 @@ def analyze(asset: str) -> Dict[str, Any]:
         cross_bars = 7 if asset == "NVDA" else MOMENTUM_BARS
         ema_cross_long = ema_cross_recent(ema9_5m, ema21_5m, bars=cross_bars, direction="long")
         ema_cross_short = ema_cross_recent(ema9_5m, ema21_5m, bars=cross_bars, direction="short")
+    if asset == "BTCUSD":
+        momentum_state = globals().setdefault("_BTC_MOMENTUM_RUNTIME", {})
+        momentum_state["ema_cross"] = {"long": bool(ema_cross_long), "short": bool(ema_cross_short)}
 
     nvda_cross_long = nvda_cross_short = False
     if asset == "NVDA":
@@ -5112,6 +5227,24 @@ def analyze(asset: str) -> Dict[str, Any]:
     btc_bias_cfg = _btc_profile_section("bias_relax") if asset == "BTCUSD" else {}
     btc_momentum_cfg = _btc_profile_section("momentum_override") if asset == "BTCUSD" else {}
     btc_rr_cfg = _btc_profile_section("rr") if asset == "BTCUSD" else {}
+    if asset == "BTCUSD":
+        momentum_state = globals().setdefault("_BTC_MOMENTUM_RUNTIME", {})
+        momentum_state["cfg"] = dict(btc_momentum_cfg)
+        if btc_profile_name:
+            momentum_state["profile"] = btc_profile_name
+            limit_map = globals().setdefault("_BTC_NO_CHASE_LIMITS", {})
+            raw_limit = btc_momentum_cfg.get("no_chase_r")
+            if raw_limit is not None:
+                try:
+                    limit_map[btc_profile_name] = float(raw_limit)
+                except (TypeError, ValueError):
+                    limit_map[btc_profile_name] = BTC_NO_CHASE_R.get(
+                        btc_profile_name, BTC_NO_CHASE_R.get("baseline", 0.2)
+                    )
+            elif btc_profile_name not in limit_map:
+                limit_map[btc_profile_name] = BTC_NO_CHASE_R.get(
+                    btc_profile_name, BTC_NO_CHASE_R.get("baseline", 0.2)
+                )
 
     if effective_bias == "neutral":
         relax_cfg = INTRADAY_BIAS_RELAX.get(asset)
@@ -5412,7 +5545,9 @@ def analyze(asset: str) -> Dict[str, Any]:
         if effective_bias in ("long", "short")
         else (bias1h if bias1h in ("long", "short") else None)
     )
-    btc_momentum_override = False
+    btc_momentum_override_active = False
+    btc_momentum_override_rr: Optional[float] = None
+    btc_momentum_override_desc: Optional[str] = None
     xag_momentum_override = False
     xag_atr_ratio: Optional[float] = None
     strong_momentum = False
@@ -5479,16 +5614,37 @@ def analyze(asset: str) -> Dict[str, Any]:
             else:
                 ofi_condition = ofi_zscore <= -ofi_th
         atr_condition = bool(atr_ok and (btc_atr_floor_ratio is None or btc_atr_floor_passed))
-        if cross_flag and ofi_condition and atr_condition:
-            btc_momentum_override = True
+        override_active = False
+        override_rr = None
+        override_desc = ""
+        if candidate_dir in {"long", "short"} and btc_profile_name:
+            override_active, override_rr, override_desc = btc_momentum_override(
+                btc_profile_name, asset, candidate_dir, atr_condition
+            )
+        if override_active:
+            btc_momentum_override_active = True
+            btc_momentum_override_rr = override_rr
+            btc_momentum_override_desc = override_desc or "BTC momentum override"
         entry_thresholds_meta["btc_atr_ratio"] = float(atr_ratio if np.isfinite(atr_ratio) else 0.0)
         entry_thresholds_meta["btc_volume_ratio"] = float(volume_factor)
         entry_thresholds_meta["btc_range_expansion"] = btc_range_drive
         entry_thresholds_meta["btc_momentum_cross"] = cross_flag
         entry_thresholds_meta["btc_momentum_ofi_ok"] = ofi_condition
         entry_thresholds_meta["btc_momentum_atr_ok"] = atr_condition
-        if btc_momentum_override:
-            override_note = "BTC momentum override — EMA9×21 + OFI megerősítés"
+        momentum_state = globals().setdefault("_BTC_MOMENTUM_RUNTIME", {})
+        if isinstance(momentum_state, dict):
+            momentum_state["override"] = {
+                "active": btc_momentum_override_active,
+                "rr_min": btc_momentum_override_rr,
+                "desc": btc_momentum_override_desc,
+                "side": candidate_dir if btc_momentum_override_active else None,
+            }
+        if btc_momentum_override_active:
+            override_note = (
+                btc_momentum_override_desc
+                if btc_momentum_override_desc
+                else "BTC momentum override — EMA9×21 + OFI megerősítés"
+            )
             if override_note not in reasons:
                 reasons.append(override_note)
     xag_overrides: Dict[str, Any] = {}
@@ -5883,7 +6039,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 if note not in structure_notes:
                     structure_notes.append(note)
 
-    if asset == "BTCUSD" and btc_momentum_override and not liquidity_ok:
+    if asset == "BTCUSD" and btc_momentum_override_active and not liquidity_ok:
         liquidity_ok = True
         liquidity_relaxed = True
         if "BTC momentum override — likviditási kapu lazítva" not in structure_notes:
@@ -6139,14 +6295,14 @@ def analyze(asset: str) -> Dict[str, Any]:
     if structure_components.get("ofi") and ofi_zscore is not None:
         structure_notes.append(f"OFI z-score {ofi_zscore:.2f} támogatja az irányt")
     structure_gate = sum(1 for flag in structure_components.values() if flag) >= 2
-    if asset == "BTCUSD" and btc_momentum_override and not structure_gate:
+    if asset == "BTCUSD" and btc_momentum_override_active and not structure_gate:
         if structure_components.get("bos") and structure_components.get("ofi"):
             structure_gate = True
         elif structure_components.get("liquidity") and structure_components.get("ofi"):
             structure_gate = True
     entry_thresholds_meta["structure_components"] = structure_components
     if asset == "BTCUSD":
-        entry_thresholds_meta["btc_momentum_override"] = btc_momentum_override
+        entry_thresholds_meta["btc_momentum_override"] = btc_momentum_override_active
         if effective_bias == "neutral" and btc_structure_combos:
             combo_th = float(btc_bias_cfg.get("combo_threshold", 0.0) or 0.0)
             long_combo = btc_structure_combos.get("long") or {}
@@ -6586,7 +6742,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         xag_overrides.setdefault("position_scale", {}).update(xag_scale_meta)
 
     if asset == "BTCUSD":
-        if btc_momentum_override:
+        if btc_momentum_override_active:
             position_size_scale = min(position_size_scale, 0.55)
             if "BTC momentum override — pozícióméret csökkentve" not in reasons:
                 reasons.append("BTC momentum override — pozícióméret csökkentve")
@@ -6726,7 +6882,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         if base_mom_rr is not None:
             mom_profile["rr"] = float(base_mom_rr)
             momentum_rr_min = min(momentum_rr_min, float(base_mom_rr))
-        if btc_momentum_override:
+        if btc_momentum_override_active:
             rr_override = btc_momentum_cfg.get("rr_min")
             if rr_override is not None:
                 rr_override_val = float(rr_override)
@@ -6829,7 +6985,48 @@ def analyze(asset: str) -> Dict[str, Any]:
             elif direction == "short":
                 cross_flag = bool(ema_cross_short)
                 ofi_confirm = ofi_zscore is not None and ofi_th > 0 and ofi_zscore <= -ofi_th
+            momentum_state = globals().get("_BTC_MOMENTUM_RUNTIME", {})
+            override_state: Dict[str, Any] = {}
+            if isinstance(momentum_state, dict):
+                raw_override = momentum_state.get("override")
+                if isinstance(raw_override, dict):
+                    override_state = raw_override
+            override_side = override_state.get("side")
+            override_active = (
+                bool(override_state.get("active"))
+                and direction in {"long", "short"}
+                and override_side == direction
+            )
             if (
+                override_active
+                and session_ok_flag
+                and regime_ok
+                and mom_atr_ok
+            ):
+                mom_dir = "buy" if direction == "long" else "sell"
+                override_desc = override_state.get("desc")
+                mom_trigger_desc = (
+                    override_desc if isinstance(override_desc, str) and override_desc else "EMA9×21 momentum cross"
+                )
+                rr_override_val = override_state.get("rr_min")
+                if rr_override_val is not None:
+                    try:
+                        momentum_rr_min = min(momentum_rr_min, float(rr_override_val))
+                    except (TypeError, ValueError):
+                        pass
+                missing_mom = [
+                    item
+                    for item in missing_mom
+                    if item not in {"liquidity", "ofi", "momentum_trigger"}
+                ]
+                if funding_dir_filter and (
+                    (funding_dir_filter == "long" and mom_dir != "buy")
+                    or (funding_dir_filter == "short" and mom_dir != "sell")
+                ):
+                    mom_dir = None
+                    if "funding_alignment" not in missing_mom:
+                        missing_mom.append("funding_alignment")
+            elif (
                 direction in {"long", "short"}
                 and session_ok_flag
                 and regime_ok
@@ -6840,15 +7037,19 @@ def analyze(asset: str) -> Dict[str, Any]:
                 mom_dir = "buy" if direction == "long" else "sell"
                 mom_trigger_desc = "EMA9×21 momentum cross"
                 missing_mom = [item for item in missing_mom if item not in {"liquidity", "ofi"}]
-                if funding_dir_filter and ((funding_dir_filter == "long" and mom_dir != "buy") or (funding_dir_filter == "short" and mom_dir != "sell")):
+                if funding_dir_filter and (
+                    (funding_dir_filter == "long" and mom_dir != "buy")
+                    or (funding_dir_filter == "short" and mom_dir != "sell")
+                ):
                     mom_dir = None
-                    missing_mom.append("funding_alignment")
+                    if "funding_alignment" not in missing_mom:
+                        missing_mom.append("funding_alignment")
             else:
-                if not mom_atr_ok:
+                if not mom_atr_ok and "atr" not in missing_mom:
                     missing_mom.append("atr")
-                if not cross_flag:
+                if not cross_flag and "momentum_trigger" not in missing_mom:
                     missing_mom.append("momentum_trigger")
-                if not ofi_confirm:
+                if not ofi_confirm and "ofi" not in missing_mom:
                     missing_mom.append("ofi")
         else:
             if momentum_vol_ratio is None or momentum_vol_ratio < MOMENTUM_VOLUME_RATIO_TH:
@@ -6938,7 +7139,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     if (
         asset == "BTCUSD"
         and BTC_PROFILE_CONFIG.get("range_guard_requires_override")
-        and btc_momentum_override
+        and btc_momentum_override_active
     ):
         range_guard_ok = True
         if range_guard_label in missing_mom:
@@ -7071,8 +7272,8 @@ def analyze(asset: str) -> Dict[str, Any]:
                         reasons.append(adjust_note)
 
         if asset == "BTCUSD" and atr5_val > 0:
-            lower_mult = 0.9 if btc_momentum_override else 1.0
-            upper_mult = 1.6 if btc_momentum_override else 2.2
+            lower_mult = 0.9 if btc_momentum_override_active else 1.0
+            upper_mult = 1.6 if btc_momentum_override_active else 2.2
             desired_min = lower_mult * atr5_val
             desired_max = upper_mult * atr5_val
             target_risk = risk
@@ -7196,6 +7397,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                     and last_computed_risk is not None
                     and price_for_calc is not None
                     and last5_close is not None
+                    and sl is not None
                 ):
                     slip_limit_r = 0.2
                     if asset == "BTCUSD" and btc_momentum_cfg:
@@ -7209,19 +7411,39 @@ def analyze(asset: str) -> Dict[str, Any]:
                         slip = max(0.0, price_for_calc - last5_close)
                     else:
                         slip = max(0.0, last5_close - price_for_calc)
+                    entry_price = float(price_for_calc)
+                    trigger_price = float(last5_close)
+                    sl_price = float(sl)
+                    slip_r = abs(entry_price - trigger_price) / max(1e-9, abs(trigger_price - sl_price))
+                    limit_used = slip_limit_r
+                    if asset == "BTCUSD":
+                        profile_for_no_chase = btc_profile_name or _btc_active_profile()
+                        limit_map = globals().get("_BTC_NO_CHASE_LIMITS", {})
+                        if isinstance(limit_map, dict) and profile_for_no_chase in limit_map:
+                            try:
+                                limit_used = float(limit_map[profile_for_no_chase])
+                            except (TypeError, ValueError):
+                                limit_used = slip_limit_r
+                        no_chase_violation = btc_no_chase_violated(
+                            profile_for_no_chase,
+                            entry_price,
+                            trigger_price,
+                            sl_price,
+                        )
+                    else:
+                        no_chase_violation = slip > allowed_slip + 1e-9
                     slip_info = {
                         "slip": float(slip),
                         "allowed": float(allowed_slip),
-                        "limit_r": float(slip_limit_r),
+                        "limit_r": float(limit_used),
+                        "slip_r": float(slip_r),
                     }
-                    if slip > allowed_slip + 1e-9:
-                        no_chase_violation = True
                 if slip_info:
                     slip_info["violated"] = no_chase_violation
                     entry_thresholds_meta["momentum_no_chase"] = slip_info
                 if no_chase_violation:
                     reasons.append(
-                        f"Momentum no-chase szabály: aktuális ár kedvezőtlenebb mint {slip_limit_r:.2f}R"
+                        f"Momentum no-chase szabály: aktuális ár kedvezőtlenebb mint {slip_info['limit_r']:.2f}R"
                     )
                     decision = "no entry"
                     momentum_used = False
@@ -8547,6 +8769,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
