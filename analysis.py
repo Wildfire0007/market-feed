@@ -83,13 +83,13 @@ import numpy as np
 
 # === BTCUSD 5m intraday finomhangolás – profilkonstansok ===
 
-BTC_OFI_Z = {"trigger": 1.0, "strong": 1.2, "weakening": -0.5, "lookback_bars": 60}
-BTC_ADX_TREND_MIN = 22.0
+BTC_OFI_Z = {"trigger": 0.8, "strong": 1.1, "weakening": -0.4, "lookback_bars": 60}
+BTC_ADX_TREND_MIN = 20.0
 
 # ATR floor + napszak-percentilis (TOD = time-of-day buckets) – baseline/relaxed/suppressed
 BTC_ATR_FLOOR_USD = {
-    "baseline": 60.0,
-    "relaxed": 50.0,
+    "baseline": 50.0,
+    "relaxed": 45.0,
     "suppressed": 40.0,
 }
 BTC_ATR_PCT_TOD = {  # percentilis minimum a nap adott szakaszára
@@ -110,12 +110,12 @@ BTC_RANGE_BE_TRIGGER_R = {"baseline": 0.35, "relaxed": 0.30, "suppressed": 0.25}
 
 BTC_TP_MIN_PCT = {"baseline": 0.008, "relaxed": 0.007, "suppressed": 0.006}  # 0.8/0.7/0.6%
 BTC_SL_ATR_MULT = {"baseline": 0.30, "relaxed": 0.28, "suppressed": 0.26}
-BTC_SL_ABS_MIN = 80.0  # USD
+BTC_SL_ABS_MIN = 120.0  # USD
 BTC_SPREAD_MAX_ATR_PCT = 0.40
 
 # Momentum override és no-chase (slippage tiltó R-ben)
 BTC_MOMENTUM_RR_MIN = {"baseline": 1.40, "relaxed": 1.35, "suppressed": 1.30}
-BTC_NO_CHASE_R = {"baseline": 0.20, "relaxed": 0.15, "suppressed": 0.12}
+BTC_NO_CHASE_R = {"baseline": 0.25, "relaxed": 0.22, "suppressed": 0.18}
 
 # Runtime state for BTC momentum overrides and guardrails. Populated lazily
 # during analysis to support helper utilities and optional real-time adapters.
@@ -398,14 +398,14 @@ def btc_momentum_override(profile: str, asset: str, side: str, atr_ok: bool) -> 
 def btc_no_chase_violated(profile: str, entry_price: float, trigger_price: float, sl_price: float) -> bool:
     """Return ``True`` when the BTC momentum entry chases beyond the R limit."""
 
+    profile_key = profile if profile in BTC_NO_CHASE_R else "baseline"
+    limit_value = BTC_NO_CHASE_R.get(profile_key, BTC_NO_CHASE_R["baseline"])
     limit_map = globals().get("_BTC_NO_CHASE_LIMITS", {})
-    limit_default = BTC_NO_CHASE_R.get(profile, BTC_NO_CHASE_R.get("baseline", 0.2))
-    limit_value = limit_default
     if isinstance(limit_map, dict) and profile in limit_map:
         try:
             limit_value = float(limit_map[profile])
         except (TypeError, ValueError):
-            limit_value = limit_default
+            limit_value = BTC_NO_CHASE_R.get(profile_key, BTC_NO_CHASE_R["baseline"])
     r = abs(entry_price - trigger_price) / max(1e-9, abs(trigger_price - sl_price))
     return r > limit_value
 
@@ -661,10 +661,15 @@ OFI_Z_LOOKBACK = int(OFI_Z_SETTINGS.get("lookback_bars") or 0)
 VWAP_TREND_BAND = float(VWAP_BAND_MULT.get("trend") or 0.8)
 VWAP_MEAN_REVERT_BAND = float(VWAP_BAND_MULT.get("mean_revert") or 2.0)
 
-NEWS_LOCKOUT_MINUTES = int(NEWS_MODE_SETTINGS.get("lockout_minutes") or 0)
-NEWS_STABILISATION_MINUTES = int(NEWS_MODE_SETTINGS.get("stabilisation_minutes") or 0)
-NEWS_SEVERITY_THRESHOLD = float(NEWS_MODE_SETTINGS.get("severity_threshold") or 1.0)
+NEWS_LOCKOUT_MINUTES_DEFAULT = int(NEWS_MODE_SETTINGS.get("lockout_minutes") or 0)
+NEWS_STABILISATION_MINUTES_DEFAULT = int(NEWS_MODE_SETTINGS.get("stabilisation_minutes") or 0)
+NEWS_SEVERITY_THRESHOLD_DEFAULT = float(NEWS_MODE_SETTINGS.get("severity_threshold") or 1.0)
 NEWS_CALENDAR_FILES: List[str] = list(NEWS_MODE_SETTINGS.get("calendar_files") or [])
+NEWS_ASSET_SETTINGS: Dict[str, Dict[str, Any]] = {
+    str(asset): dict(settings)
+    for asset, settings in NEWS_MODE_SETTINGS.items()
+    if isinstance(settings, dict)
+}
 # Period used for EMA slope calculations
 EMA_SLOPE_PERIOD = 21
 # Historical window (number of bars) considered for EMA slope thresholds
@@ -3497,6 +3502,27 @@ def evaluate_vwap_confluence(
     return result
 
 
+def _news_settings_for_asset(asset: str) -> Tuple[int, int, float]:
+    settings = NEWS_ASSET_SETTINGS.get(asset, {})
+    lockout = NEWS_LOCKOUT_MINUTES_DEFAULT
+    stabilisation = NEWS_STABILISATION_MINUTES_DEFAULT
+    severity = NEWS_SEVERITY_THRESHOLD_DEFAULT
+    if isinstance(settings, dict):
+        try:
+            lockout = int(settings.get("lockout_minutes", lockout) or 0)
+        except (TypeError, ValueError):
+            lockout = NEWS_LOCKOUT_MINUTES_DEFAULT
+        try:
+            stabilisation = int(settings.get("stabilisation_minutes", stabilisation) or 0)
+        except (TypeError, ValueError):
+            stabilisation = NEWS_STABILISATION_MINUTES_DEFAULT
+        try:
+            severity = float(settings.get("severity_threshold", severity) or severity)
+        except (TypeError, ValueError):
+            severity = NEWS_SEVERITY_THRESHOLD_DEFAULT
+    return lockout, stabilisation, severity
+
+
 def load_calendar_events(asset: str) -> List[Dict[str, Any]]:
     events: List[Dict[str, Any]] = []
     for name in NEWS_CALENDAR_FILES:
@@ -3522,7 +3548,8 @@ def load_calendar_events(asset: str) -> List[Dict[str, Any]]:
 
 
 def evaluate_news_lockout(asset: str, now: datetime) -> Tuple[bool, Optional[str]]:
-    if NEWS_LOCKOUT_MINUTES <= 0 and NEWS_STABILISATION_MINUTES <= 0:
+    lockout_minutes, stabilisation_minutes, severity_threshold = _news_settings_for_asset(asset)
+    if lockout_minutes <= 0 and stabilisation_minutes <= 0:
         return False, None
     events = load_calendar_events(asset)
     if not events:
@@ -3542,14 +3569,14 @@ def evaluate_news_lockout(asset: str, now: datetime) -> Tuple[bool, Optional[str
             severity_val = float(severity)
         except (TypeError, ValueError):
             severity_val = 1.0
-        if severity_val < NEWS_SEVERITY_THRESHOLD:
+        if severity_val < severity_threshold:
             continue
         delta_minutes = (now - event_time).total_seconds() / 60.0
-        if abs(delta_minutes) <= NEWS_LOCKOUT_MINUTES:
+        if abs(delta_minutes) <= lockout_minutes:
             lockout = True
             reason = event.get("title") or event.get("name") or "High impact news"
             break
-        if 0 < delta_minutes < NEWS_STABILISATION_MINUTES:
+        if 0 < delta_minutes < stabilisation_minutes:
             lockout = True
             reason = (event.get("title") or event.get("name") or "High impact news") + " — stabilizáció"
             break
@@ -4678,7 +4705,11 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     now = datetime.now(timezone.utc)
     session_ok_flag, session_meta = session_state(asset)
-    news_lockout_active, news_reason = evaluate_news_lockout(asset, now)
+    if asset == "BTCUSD":
+        news_lockout_active = False
+        news_reason = None
+    else:
+        news_lockout_active, news_reason = evaluate_news_lockout(asset, now)
     entry_thresholds_meta["news_lockout"] = bool(news_lockout_active)
     if news_lockout_active:
         session_ok_flag = False
@@ -9159,6 +9190,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
