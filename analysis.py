@@ -189,6 +189,56 @@ BTC_PROFILE_CONFIG: Dict[str, Any] = dict(
 )
 
 
+try:  # pragma: no cover - optional micro structure utility
+    structure_ok_5m  # type: ignore[name-defined]
+except NameError:  # pragma: no cover - stub fallback
+    def structure_ok_5m(asset: str, side: str) -> bool:
+        """TODO: Replace with micro structure confirmation implementation."""
+
+        return False
+
+
+try:  # pragma: no cover - optional VWAP retest utility
+    vwap_retest_ok  # type: ignore[name-defined]
+except NameError:  # pragma: no cover - stub fallback
+    def vwap_retest_ok(asset: str, side: str) -> bool:
+        """TODO: Replace with VWAP reclaim/reject confirmation implementation."""
+
+        return False
+
+
+try:  # pragma: no cover - optional OFI utility
+    ofi_zscore  # type: ignore[name-defined]
+except NameError:  # pragma: no cover - stub fallback
+    def ofi_zscore(asset: str, lookback: int) -> float:
+        """TODO: Replace with order flow imbalance z-score implementation."""
+
+        return -999.0
+
+
+def btc_core_triggers_ok(asset: str, side: str) -> Tuple[bool, Dict[str, Any]]:
+    """Evaluate BTC core entry triggers using an either-of gateway."""
+
+    bos_ok = structure_ok_5m(asset, side) if callable(globals().get("structure_ok_5m")) else False
+    vwap_ok = vwap_retest_ok(asset, side) if callable(globals().get("vwap_retest_ok")) else False
+    z = (
+        ofi_zscore(asset, lookback=BTC_OFI_Z["lookback_bars"])
+        if callable(globals().get("ofi_zscore"))
+        else -999.0
+    )
+    try:
+        z_float = float(z)
+    except (TypeError, ValueError):
+        z_float = -999.0
+    ofi_ok = z_float >= BTC_OFI_Z["trigger"]
+
+    hits = int(bos_ok) + int(vwap_ok) + int(ofi_ok)
+    return (
+        hits >= 2,
+        {"bos_ok": bool(bos_ok), "vwap_ok": bool(vwap_ok), "ofi_ok": bool(ofi_ok), "ofi_z": z_float},
+    )
+
+
 def _btc_active_profile() -> str:
     profile = ENTRY_THRESHOLD_PROFILE_NAME
     if profile not in BTC_P_SCORE_MIN:
@@ -5970,17 +6020,25 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     elif asset == "BTCUSD":
         combo = btc_structure_combos.get(effective_bias) if effective_bias in {"long", "short"} else None
-        micro_ok = bool(combo.get("micro")) if combo else False
-        vwap_ok = bool(combo.get("vwap")) if combo else False
-        ofi_ok = bool(combo.get("ofi")) if combo else False
         price_above_vwap = bool(combo.get("price_above_vwap")) if combo else False
         price_below_vwap = bool(combo.get("price_below_vwap")) if combo else False
-        if effective_bias == "long" and combo:
+        side = effective_bias if effective_bias in {"long", "short"} else ""
+        btc_trigger_meta: Dict[str, Any] = {"bos_ok": False, "vwap_ok": False, "ofi_ok": False, "ofi_z": None}
+        try:
+            btc_triggers_ok, btc_trigger_meta = btc_core_triggers_ok(asset, side)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            LOGGER.warning("BTC core trigger evaluation failed: %s", exc)
+            btc_triggers_ok = False
+        micro_ok = bool(btc_trigger_meta.get("bos_ok"))
+        vwap_ok = bool(btc_trigger_meta.get("vwap_ok"))
+        ofi_ok = bool(btc_trigger_meta.get("ofi_ok"))
+        satisfied_combo = int(micro_ok) + int(vwap_ok) + int(ofi_ok)
+        if effective_bias == "long":
             if micro_ok:
                 structure_notes.append("BTC mikro BOS long aktív")
             if vwap_ok and not price_above_vwap:
                 structure_notes.append("BTC VWAP reclaim long — trend pullback engedve")
-        elif effective_bias == "short" and combo:
+        elif effective_bias == "short":
             if micro_ok:
                 structure_notes.append("BTC mikro BOS short aktív")
             if vwap_ok and not price_below_vwap:
@@ -5988,9 +6046,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         structure_components["bos"] = micro_ok
         structure_components["liquidity"] = vwap_ok
         structure_components["ofi"] = ofi_ok
-        satisfied_combo = sum(1 for flag in (micro_ok, vwap_ok, ofi_ok) if flag)
-        if satisfied_combo >= 2:
-            structure_gate = True
+        entry_thresholds_meta["btc_core_triggers"] = dict(btc_trigger_meta, hits=satisfied_combo)
         entry_thresholds_meta["btc_structure_combo"] = {
             "active_direction": effective_bias if combo else None,
             "active": {
@@ -6000,6 +6056,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 "count": satisfied_combo,
             },
             "combos": btc_structure_combos,
+            "either_of_ok": bool(btc_triggers_ok),
         }
 
     if asset == "BTCUSD":
@@ -8401,6 +8458,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
