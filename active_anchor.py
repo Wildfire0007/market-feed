@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from statistics import mean
 from typing import Any, Dict, Optional
 
@@ -230,6 +230,64 @@ def update_anchor_metrics(
     save_anchor_state(state, path)
     return state
 
+def reset_anchor_state(
+    max_age_hours: Optional[int] = None,
+    path: str = ANCHOR_STATE_PATH,
+    *,
+    now: Optional[datetime] = None,
+    dry_run: bool = False,
+) -> Dict[str, Dict[str, Any]]:
+    """Clear or prune the anchor state file.
+
+    Parameters
+    ----------
+    max_age_hours:
+        If ``None`` or ``<= 0`` every entry is removed.  Otherwise records with a
+        ``last_update`` (or ``timestamp``) older than ``now - max_age_hours`` are
+        dropped.
+    path:
+        Location of the anchor state JSON file.
+    now:
+        Reference timestamp used for age comparisons.  Defaults to ``utcnow`` and
+        is primarily exposed for deterministic unit tests.
+
+    dry_run:
+        When ``True`` the function performs calculations without touching the
+        underlying JSON file.
+
+    Returns
+    -------
+    dict
+        The updated anchor state.
+    """
+
+    state = load_anchor_state(path)
+    if not state:
+        if not dry_run:
+            save_anchor_state({}, path)
+        return {}
+
+    if max_age_hours is None or max_age_hours <= 0:
+        if not dry_run:
+            save_anchor_state({}, path)
+        return {}
+
+    reference = now or datetime.now(timezone.utc)
+    cutoff = reference - timedelta(hours=float(max_age_hours))
+
+    pruned: Dict[str, Dict[str, Any]] = {}
+    for asset, payload in state.items():
+        timestamp_raw = payload.get("last_update") or payload.get("timestamp")
+        timestamp = _parse_iso(timestamp_raw)
+        if timestamp is None or timestamp >= cutoff:
+            pruned[asset] = payload
+
+    if pruned != state and not dry_run:
+        save_anchor_state(pruned, path)
+
+    return pruned
+
+
 __all__ = [
     "ANCHOR_STATE_PATH",
     "load_anchor_state",
@@ -237,4 +295,5 @@ __all__ = [
     "record_anchor",
     "touch_anchor",
     "update_anchor_metrics",
+    "reset_anchor_state",
 ]
