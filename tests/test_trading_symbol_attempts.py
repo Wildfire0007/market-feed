@@ -4,7 +4,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import Trading
-
+import pytest
 
 def test_normalize_symbol_attempts_generates_crypto_variants() -> None:
     cfg = {"symbol": "BTC/USD", "exchange": "CRYPTO"}
@@ -94,3 +94,64 @@ def test_global_bad_symbol_cache_short_circuits_attempts() -> None:
 
     assert second["ok"]
     assert calls == {"bad": 1, "good": 2}
+
+
+
+@pytest.fixture(autouse=True)
+def _reset_symbol_meta(monkeypatch: pytest.MonkeyPatch) -> None:
+    Trading._reset_symbol_catalog_cache()
+    monkeypatch.setattr(Trading, "_SYMBOL_META_DISABLED", False)
+    monkeypatch.setattr(Trading, "API_KEY", "dummy-key")
+
+
+def test_symbol_catalog_rewrites_invalid_exchange(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = dict(Trading.ASSETS["XAGUSD"])
+    attempts = Trading._normalize_symbol_attempts(cfg)
+
+    def fake_catalog(symbol: str) -> list[dict[str, object]]:
+        assert symbol == "XAG/USD"
+        return [
+            {
+                "symbol": "XAG/USD",
+                "exchange": "FOREXCOM",
+                "mic_code": "FOREXCOM",
+            }
+        ]
+
+    monkeypatch.setattr(Trading, "_symbol_catalog_for", fake_catalog)
+
+    filtered = Trading._apply_symbol_catalog_filter("XAGUSD", cfg, attempts)
+
+    assert filtered == [("XAG/USD", "FOREXCOM")]
+
+
+def test_symbol_catalog_converts_colon_variants(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = {"symbol": "NVDA", "exchange": "NASDAQ"}
+    attempts = [("NVDA:XNAS", None)]
+
+    def fake_catalog(symbol: str) -> list[dict[str, object]]:
+        assert symbol == "NVDA"
+        return [
+            {
+                "symbol": "NVDA",
+                "exchange": "NASDAQ",
+                "mic_code": "XNAS",
+            }
+        ]
+
+    monkeypatch.setattr(Trading, "_symbol_catalog_for", fake_catalog)
+
+    filtered = Trading._apply_symbol_catalog_filter("NVDA", cfg, attempts)
+
+    assert filtered == [("NVDA", "XNAS")]
+
+
+def test_symbol_catalog_falls_back_when_meta_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = {"symbol": "EUR/USD", "exchange": "PHYSICAL CURRENCY"}
+    attempts = [("EUR/USD", "PHYSICAL CURRENCY"), ("EUR/USD", None)]
+
+    monkeypatch.setattr(Trading, "_symbol_catalog_for", lambda _symbol: None)
+
+    filtered = Trading._apply_symbol_catalog_filter("EURUSD", cfg, attempts)
+
+    assert filtered == attempts
