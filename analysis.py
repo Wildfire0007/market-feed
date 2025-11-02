@@ -187,6 +187,7 @@ from config.analysis_settings import (
     SESSION_TIME_RULES,
     SESSION_WEEKDAYS,
     SESSION_WINDOWS_UTC,
+    is_momentum_asset,
     SPREAD_MAX_ATR_PCT,
     SL_BUFFER_RULES,
     SMT_AUTO_CONFIG,
@@ -9813,5 +9814,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
