@@ -611,6 +611,27 @@ def _ensure_state_structure(state: Any, *, persist_archive: bool = False) -> Dic
 
     return cleaned
   
+
+def build_default_state(
+    *,
+    now: Optional[datetime] = None,
+    reason: str = "scheduled_reset",
+) -> Dict[str, Any]:
+    """Return a baseline notification state with reset metadata."""
+
+    base = _ensure_state_structure({}, persist_archive=False)
+    meta = base.setdefault("_meta", {})
+    reset_ts = to_utc_iso((now or datetime.now(timezone.utc)))
+    meta["last_reset_utc"] = reset_ts
+    meta["last_reset_reason"] = reason
+
+    for asset in list(base.keys()):
+        if asset == "_meta":
+            continue
+        base[asset] = _default_asset_state()
+
+    return base
+  
 def load_state():
     try:
         with open(STATE_PATH, "r", encoding="utf-8") as f:
