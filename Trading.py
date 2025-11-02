@@ -138,6 +138,13 @@ REALTIME_HTTP_MAX_SAMPLES = int(os.getenv("TD_REALTIME_HTTP_MAX_SAMPLES", "6"))
 REALTIME_HTTP_DURATION = max(1.0, _env_float("TD_REALTIME_HTTP_DURATION", 8.0))
 _REALTIME_HTTP_BACKGROUND_FLAG = _env_flag("TD_REALTIME_HTTP_BACKGROUND")
 
+_SYMBOL_META_DISABLED = os.getenv("TD_DISABLE_SYMBOL_META", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
 FINNHUB_BASE_URL = os.getenv("FINNHUB_BASE_URL", "https://finnhub.io/api/v1").rstrip("/")
 FINNHUB_TIMEOUT = max(1.0, _env_float("FINNHUB_TIMEOUT", 4.0))
@@ -2819,6 +2826,176 @@ def _normalize_symbol_attempts(cfg: Dict[str, Any]) -> List[Tuple[str, Optional[
     return unique
 
 
+_SYMBOL_META_LOCK = threading.Lock()
+_SYMBOL_META_CACHE: Dict[str, Optional[List[Dict[str, Any]]]] = {}
+
+
+def _reset_symbol_catalog_cache() -> None:
+    with _SYMBOL_META_LOCK:
+        _SYMBOL_META_CACHE.clear()
+
+
+def _split_symbol_variant(symbol: str) -> Tuple[str, Optional[str]]:
+    if not symbol:
+        return "", None
+    if ":" not in symbol:
+        return symbol.strip(), None
+    base, suffix = symbol.split(":", 1)
+    suffix = suffix.strip()
+    return base.strip(), suffix or None
+
+
+def _symbol_catalog_for(symbol: str) -> Optional[List[Dict[str, Any]]]:
+    key = symbol.strip().upper()
+    if not key:
+        return None
+    with _SYMBOL_META_LOCK:
+        if key in _SYMBOL_META_CACHE:
+            return _SYMBOL_META_CACHE[key]
+    try:
+        response = td_get("symbols", symbol=symbol)
+    except Exception as exc:
+        LOGGER.warning(
+            "Failed to fetch Twelve Data symbol catalog for %s: %s",
+            symbol,
+            exc,
+        )
+        with _SYMBOL_META_LOCK:
+            _SYMBOL_META_CACHE[key] = None
+        return None
+
+    entries: List[Dict[str, Any]] = []
+    data_block = response.get("data") if isinstance(response, dict) else None
+    if isinstance(data_block, list):
+        for item in data_block:
+            if isinstance(item, dict):
+                entries.append(item)
+
+    with _SYMBOL_META_LOCK:
+        _SYMBOL_META_CACHE[key] = entries
+    return entries
+
+
+def _catalog_exchange_map(entries: List[Dict[str, Any]], symbol: str) -> Dict[str, str]:
+    allowed: Dict[str, str] = {}
+    if not entries:
+        return allowed
+    symbol_norm = symbol.strip().upper()
+    compact_norm = symbol_norm.replace("/", "")
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_symbol = str(entry.get("symbol") or "").strip().upper()
+        if entry_symbol not in {symbol_norm, compact_norm}:
+            continue
+        for key in ("exchange", "mic_code", "mic"):
+            value = entry.get(key)
+            if not value:
+                continue
+            value_str = str(value).strip()
+            if not value_str:
+                continue
+            allowed.setdefault(value_str.upper(), value_str)
+    return allowed
+
+
+def _select_preferred_exchange(options: Dict[str, str], *candidates: Optional[str]) -> Optional[str]:
+    if not options:
+        return None
+    for candidate in candidates:
+        if not candidate:
+            continue
+        key = str(candidate).strip().upper()
+        if not key:
+            continue
+        if key in options:
+            return options[key]
+    first_key = sorted(options.keys())[0]
+    return options[first_key]
+
+
+def _apply_symbol_catalog_filter(
+    asset: str,
+    cfg: Dict[str, Any],
+    attempts: List[Tuple[str, Optional[str]]],
+) -> List[Tuple[str, Optional[str]]]:
+    if not attempts:
+        return attempts
+    if _SYMBOL_META_DISABLED or not API_KEY:
+        return attempts
+
+    preferred_exchange = str(cfg.get("exchange") or "").strip()
+    filtered: List[Tuple[str, Optional[str]]] = []
+    seen: Set[Tuple[str, Optional[str]]] = set()
+    skipped: List[Tuple[str, Optional[str]]] = []
+    adjustments: Set[Tuple[str, Optional[str], str]] = set()
+
+    for symbol, exchange in attempts:
+        base_symbol, colon_exchange = _split_symbol_variant(symbol)
+        query_symbol = base_symbol or symbol
+        catalog = _symbol_catalog_for(query_symbol)
+        if catalog is None:
+            pair = (symbol, exchange)
+            if pair not in seen:
+                filtered.append(pair)
+                seen.add(pair)
+            continue
+
+        exchange_map = _catalog_exchange_map(catalog, base_symbol or symbol)
+        if not exchange_map:
+            pair = (symbol, exchange)
+            if pair not in seen:
+                filtered.append(pair)
+                seen.add(pair)
+            continue
+
+        selected_exchange = _select_preferred_exchange(
+            exchange_map,
+            colon_exchange,
+            exchange,
+            preferred_exchange,
+        )
+
+        if selected_exchange:
+            normalized_symbol = base_symbol or symbol
+            pair = (normalized_symbol, selected_exchange)
+            if pair not in seen:
+                filtered.append(pair)
+                seen.add(pair)
+            orig_exchange = colon_exchange or exchange
+            orig_key = str(orig_exchange).strip().upper() if orig_exchange else None
+            if not exchange or colon_exchange or (
+                orig_key and selected_exchange.strip().upper() != orig_key
+            ):
+                adjustments.add((symbol, exchange, selected_exchange))
+        else:
+            skipped.append((symbol, exchange))
+
+    if skipped:
+        skipped_label = ", ".join(
+            f"{sym}@{exch or 'default'}" for sym, exch in skipped
+        )
+        LOGGER.warning(
+            "Skipping unsupported Twelve Data symbol variants for %s: %s",
+            asset,
+            skipped_label,
+        )
+
+    if adjustments:
+        adjustment_label = ", ".join(
+            f"{sym}@{exch or 'default'}→{new}" for sym, exch, new in sorted(
+                adjustments, key=lambda item: (item[0], item[1] or "", item[2])
+            )
+        )
+        LOGGER.info(
+            "Adjusted Twelve Data symbol mappings for %s: %s",
+            asset,
+            adjustment_label,
+        )
+
+    return filtered or attempts
+
+
 def try_symbols(
     attempts: List[Tuple[str, Optional[str]]],
     fetch_fn,
@@ -3088,6 +3265,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     ensure_dir(adir)
 
     attempts = _normalize_symbol_attempts(cfg)
+    attempts = _apply_symbol_catalog_filter(asset, cfg, attempts)
     attempt_memory = AttemptMemory()
 
     spot_limit = _spot_freshness_limit(asset)
@@ -3328,6 +3506,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
