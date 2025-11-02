@@ -424,6 +424,13 @@ DEFAULT_COST_MODEL: Dict[str, Any] = dict(_get_config_value("default_cost_model"
 COST_MULT_DEFAULT: float = float(_get_config_value("cost_mult_default") or 0.0)
 COST_MULT_HIGH_VOL: float = float(_get_config_value("cost_mult_high_vol") or 0.0)
 ATR5_MIN_MULT: float = float(_get_config_value("atr5_min_mult") or 0.0)
+_ATR5_MIN_MULT_ASSET_RAW = dict(_get_config_value("atr5_min_mult_asset") or {})
+ATR5_MIN_MULT_ASSET: Dict[str, float] = {}
+for key, value in _ATR5_MIN_MULT_ASSET_RAW.items():
+    try:
+        ATR5_MIN_MULT_ASSET[str(key)] = float(value)
+    except (TypeError, ValueError):
+        continue
 ATR_VOL_HIGH_REL: float = float(_get_config_value("atr_vol_high_rel") or 0.0)
 EMA_SLOPE_TH_DEFAULT: float = float(_get_config_value("ema_slope_th_default") or 0.0)
 EMA_SLOPE_TH_ASSET: Dict[str, float] = dict(_get_config_value("ema_slope_th_asset") or {})
