@@ -9784,9 +9784,6 @@ def main():
     except Exception:
         pass
 
-if __name__ == "__main__":
-    main()
-
 # --- Override bucket helpers --------------------------------------------------
 
 def _ensure_override_bucket(entry_thresholds_meta: Dict[str, Any], key: str) -> Dict[str, Any]:
@@ -9806,9 +9803,12 @@ def _initialize_asset_overrides(
     eurusd_overrides: Dict[str, Any] = {}
     if asset == "XAGUSD":
         xag_overrides = _ensure_override_bucket(entry_thresholds_meta, "xag_overrides")
-    if asset == "USOIL":
+     if asset == "USOIL":
         usoil_overrides = _ensure_override_bucket(entry_thresholds_meta, "usoil_overrides")
     if asset == "EURUSD":
         eurusd_overrides = _ensure_override_bucket(entry_thresholds_meta, "eurusd_overrides")
     return xag_overrides, usoil_overrides, eurusd_overrides
 
+
+if __name__ == "__main__":
+    main()
