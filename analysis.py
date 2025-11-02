@@ -83,7 +83,7 @@ import numpy as np
 
 # === BTCUSD 5m intraday finomhangolás – profilkonstansok ===
 
-BTC_OFI_Z = {"trigger": 0.8, "strong": 1.1, "weakening": -0.4, "lookback_bars": 60}
+BTC_OFI_Z = {"trigger": 0.8, "strong": 1.0, "weakening": -0.4, "lookback_bars": 60}
 BTC_ADX_TREND_MIN = 20.0
 
 # ATR floor + napszak-percentilis (TOD = time-of-day buckets) – baseline/relaxed/suppressed
@@ -125,7 +125,7 @@ _BTC_NO_CHASE_LIMITS: Dict[str, float] = {}
 _PRECISION_RUNTIME: Dict[str, Dict[str, Any]] = {}
 
 # Precision pipeline alsó határ (ne blokkoljon túl korán)
-BTC_PRECISION_MIN = {"baseline": 60, "relaxed": 55, "suppressed": 54}
+BTC_PRECISION_MIN = {"baseline": 60, "relaxed": 55, "suppressed": 52}
 
 
 def btc_precision_state(profile: str, asset: str, score: float, trigger_ready: bool) -> str:
@@ -142,6 +142,7 @@ from config.analysis_settings import (
     ACTIVE_INVALID_BUFFER_ABS,
     ASSET_COST_MODEL,
     ATR5_MIN_MULT,
+    ATR5_MIN_MULT_ASSET,
     ATR_ABS_MIN,
     ATR_LOW_TH_ASSET,
     ATR_LOW_TH_DEFAULT,
@@ -523,8 +524,6 @@ def btc_sl_tp_checks(
         sp_limit = float(SPREAD_MAX_ATR_PCT.get("BTCUSD", sp_limit))
     except Exception:
         pass
-    if profile_key == "baseline":
-        sp_limit = 0.35
     spread_func = globals().get("spread_usd")
     sp = spread_func(asset) if callable(spread_func) else 0.0
     if sp > atr_5m * sp_limit:
@@ -5665,9 +5664,6 @@ def analyze(asset: str) -> Dict[str, Any]:
             sp_limit = float(SPREAD_MAX_ATR_PCT.get("BTCUSD", sp_limit))
         except Exception:
             pass
-        profile_for_spread = btc_profile_name or ENTRY_THRESHOLD_PROFILE_NAME
-        if profile_for_spread == "baseline":
-            sp_limit = 0.35
         spread_limit = sp_limit
     if spread_limit and spread_abs is not None and atr5 is not None:
         try:
@@ -8127,11 +8123,13 @@ def analyze(asset: str) -> Dict[str, Any]:
         net_pct = gross_pct - total_cost_pct
         tp1_net_pct_value = net_pct
 
+        atr5_min_mult = ATR5_MIN_MULT_ASSET.get(asset, ATR5_MIN_MULT)
+
         min_profit_abs = max(
             TP_MIN_ABS.get(asset, TP_MIN_ABS["default"]),
             tp_min_pct * entry,
             (cost_mult * cost_round_pct + overnight_pct) * entry,
-            ATR5_MIN_MULT * atr5_val,
+            atr5_min_mult * atr5_val,
         )
 
         if (not ok_math) or (rr is None) or (rr < rr_required) or (tp1_dist < min_profit_abs) or (net_pct < tp_net_threshold):
@@ -9670,6 +9668,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
