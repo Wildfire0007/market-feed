@@ -910,6 +910,17 @@ ORDER_FLOW_IMBALANCE_TH = 0.6
 ORDER_FLOW_PRESSURE_TH = 0.7
 PRECISION_FLOW_IMBALANCE_MARGIN = 1.1
 PRECISION_FLOW_PRESSURE_MARGIN = 1.1
+PRECISION_FLOW_STATS_FILE = Path(
+    os.getenv(
+        "PRECISION_FLOW_STATS_FILE",
+        os.path.join(PUBLIC_DIR, "monitoring", "precision_gates_by_asset.csv"),
+    )
+)
+PRECISION_FLOW_TARGET_RATIO = float(os.getenv("PRECISION_FLOW_TARGET_RATIO", "0.14"))
+PRECISION_FLOW_SCALE_MIN = float(os.getenv("PRECISION_FLOW_SCALE_MIN", "0.75"))
+PRECISION_FLOW_MARGIN_MIN = float(os.getenv("PRECISION_FLOW_MARGIN_MIN", "0.9"))
+PRECISION_FLOW_STRENGTH_BASE = float(os.getenv("PRECISION_FLOW_STRENGTH_BASE", "0.85"))
+PRECISION_FLOW_STRENGTH_MIN = float(os.getenv("PRECISION_FLOW_STRENGTH_MIN", "0.65"))
 PRECISION_SCORE_THRESHOLD_DEFAULT = 55.0
 PRECISION_SCORE_THRESHOLD = PRECISION_SCORE_THRESHOLD_DEFAULT
 PRECISION_READY_TIMEOUT_DEFAULT = 15
@@ -2835,6 +2846,111 @@ def safe_float(value: Any) -> Optional[float]:
     return result
 
 
+_PRECISION_FLOW_CACHE: Dict[str, Any] = {"mtime": None, "data": {}}
+
+
+def _clamp01(value: float) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not np.isfinite(numeric):
+        return 0.0
+    return max(0.0, min(1.0, numeric))
+
+
+def _load_precision_flow_stats(
+    path: Path = PRECISION_FLOW_STATS_FILE,
+) -> Dict[str, Dict[str, float]]:
+    """Return cached precision flow blocking ratios by asset."""
+
+    global _PRECISION_FLOW_CACHE
+    try:
+        mtime = path.stat().st_mtime
+    except (FileNotFoundError, OSError):
+        _PRECISION_FLOW_CACHE = {"mtime": None, "data": {}}
+        return {}
+
+    if _PRECISION_FLOW_CACHE.get("mtime") == mtime:
+        cached = _PRECISION_FLOW_CACHE.get("data")
+        return cached if isinstance(cached, dict) else {}
+
+    try:
+        frame = pd.read_csv(path)
+    except Exception:
+        _PRECISION_FLOW_CACHE = {"mtime": mtime, "data": {}}
+        return {}
+
+    stats: Dict[str, Dict[str, float]] = {}
+    total_signals_sum = 0.0
+    flow_sum = 0.0
+    for row in frame.to_dict(orient="records"):
+        asset = str(row.get("asset", "")).strip().upper()
+        if not asset:
+            continue
+        total = safe_float(row.get("total_signals")) or 0.0
+        if total <= 0:
+            total = safe_float(row.get("no_entry_signals")) or 0.0
+        flow_hits = safe_float(row.get("precision_flow_alignment")) or 0.0
+        ratio = _clamp01(flow_hits / total) if total > 0 else 0.0
+        stats[asset] = {
+            "ratio": ratio,
+            "total": float(total),
+            "flow_hits": float(flow_hits),
+        }
+        total_signals_sum += max(total, 0.0)
+        flow_sum += max(flow_hits, 0.0)
+
+    if total_signals_sum > 0:
+        stats["__GLOBAL__"] = {
+            "ratio": _clamp01(flow_sum / total_signals_sum),
+            "total": float(total_signals_sum),
+            "flow_hits": float(flow_sum),
+        }
+
+    _PRECISION_FLOW_CACHE = {"mtime": mtime, "data": stats}
+    return stats
+
+
+def get_precision_flow_rules(asset: str) -> Dict[str, float]:
+    """Return adaptive thresholds for precision flow alignment."""
+
+    stats = _load_precision_flow_stats()
+    asset_key = str(asset or "").strip().upper()
+    meta = stats.get(asset_key) or stats.get("__GLOBAL__") or {}
+    ratio = float(meta.get("ratio") or 0.0)
+    target = max(PRECISION_FLOW_TARGET_RATIO, 0.01)
+    overshoot = max(0.0, ratio - target)
+    overshoot_ratio = min(overshoot / target, 2.0)
+    scale = 1.0 - 0.45 * overshoot_ratio
+    scale = max(PRECISION_FLOW_SCALE_MIN, min(1.0, scale))
+
+    imbalance_th = ORDER_FLOW_IMBALANCE_TH * scale
+    pressure_th = ORDER_FLOW_PRESSURE_TH * scale
+
+    imbalance_margin = 1.0 + (PRECISION_FLOW_IMBALANCE_MARGIN - 1.0) * scale
+    imbalance_margin = max(PRECISION_FLOW_MARGIN_MIN, imbalance_margin)
+    pressure_margin = 1.0 + (PRECISION_FLOW_PRESSURE_MARGIN - 1.0) * scale
+    pressure_margin = max(PRECISION_FLOW_MARGIN_MIN, pressure_margin)
+
+    strength_floor = PRECISION_FLOW_STRENGTH_BASE * (1.0 - 0.25 * overshoot_ratio)
+    strength_floor = max(PRECISION_FLOW_STRENGTH_MIN, min(1.0, strength_floor))
+
+    min_signals = 1
+    if overshoot_ratio >= 0.8:
+        min_signals = 0
+
+    return {
+        "imbalance_threshold": float(imbalance_th),
+        "pressure_threshold": float(pressure_th),
+        "imbalance_margin": float(imbalance_margin),
+        "pressure_margin": float(pressure_margin),
+        "min_signals": int(min_signals),
+        "strength_floor": float(strength_floor),
+        "block_ratio": float(ratio),
+    }
+
+
 def deep_update(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(base.get(key), dict):
@@ -4281,6 +4397,35 @@ def compute_precision_entry(
         "trigger_reasons": [],
     }
 
+    flow_rules = get_precision_flow_rules(asset)
+    imbalance_threshold = float(
+        flow_rules.get("imbalance_threshold", ORDER_FLOW_IMBALANCE_TH)
+    )
+    pressure_threshold = float(
+        flow_rules.get("pressure_threshold", ORDER_FLOW_PRESSURE_TH)
+    )
+    imbalance_margin = float(
+        flow_rules.get("imbalance_margin", PRECISION_FLOW_IMBALANCE_MARGIN)
+    )
+    pressure_margin = float(
+        flow_rules.get("pressure_margin", PRECISION_FLOW_PRESSURE_MARGIN)
+    )
+    min_flow_signals = max(0, int(flow_rules.get("min_signals", 1)))
+    strength_floor = max(
+        0.0, float(flow_rules.get("strength_floor", PRECISION_FLOW_STRENGTH_BASE))
+    )
+    block_ratio = float(flow_rules.get("block_ratio", 0.0))
+
+    plan["order_flow_settings"] = {
+        "imbalance_threshold": round(imbalance_threshold, 4),
+        "pressure_threshold": round(pressure_threshold, 4),
+        "imbalance_margin": round(imbalance_margin, 3),
+        "pressure_margin": round(pressure_margin, 3),
+        "min_signals": min_flow_signals,
+        "strength_floor": round(strength_floor, 2),
+        "block_ratio": round(block_ratio, 4),
+    }
+
     if direction not in {"buy", "sell"}:
         plan["factors"].append("direction unsupported")
         return plan
@@ -4308,46 +4453,52 @@ def compute_precision_entry(
     flow_reasons: List[str] = []
     flow_blockers: List[str] = []    
     if imb is not None:
-        if direction == "buy" and imb > ORDER_FLOW_IMBALANCE_TH:
+        strong_threshold = imbalance_threshold * imbalance_margin
+        base_threshold = max(imbalance_threshold, 1e-9)
+        strong_threshold = max(strong_threshold, base_threshold)
+        if direction == "buy" and imb > imbalance_threshold:
             score += 12.0
-            flow_strength += min(1.0, float(imb) / ORDER_FLOW_IMBALANCE_TH)
+            flow_strength += min(1.0, float(imb) / base_threshold)
             factors.append(f"order flow imbalance +{imb:.2f}")
             flow_reasons.append(f"imbalance {imb:.2f}")
-            if imb >= ORDER_FLOW_IMBALANCE_TH * PRECISION_FLOW_IMBALANCE_MARGIN:
+            if imb >= strong_threshold:
                 flow_signal_count += 1
-        elif direction == "sell" and imb < -ORDER_FLOW_IMBALANCE_TH:
+        elif direction == "sell" and imb < -imbalance_threshold:
             score += 12.0
-            flow_strength += min(1.0, abs(float(imb)) / ORDER_FLOW_IMBALANCE_TH)
+            flow_strength += min(1.0, abs(float(imb)) / base_threshold)
             factors.append(f"order flow imbalance {imb:.2f}")
             flow_reasons.append(f"imbalance {imb:.2f}")
-            if imb <= -ORDER_FLOW_IMBALANCE_TH * PRECISION_FLOW_IMBALANCE_MARGIN:
+            if imb <= -strong_threshold:
                 flow_signal_count += 1
         else:
-            if direction == "buy" and imb <= -ORDER_FLOW_IMBALANCE_TH * PRECISION_FLOW_IMBALANCE_MARGIN:
+            if direction == "buy" and imb <= -strong_threshold:
                 flow_blockers.append(f"imbalance {imb:.2f}")
-            elif direction == "sell" and imb >= ORDER_FLOW_IMBALANCE_TH * PRECISION_FLOW_IMBALANCE_MARGIN:
+            elif direction == "sell" and imb >= strong_threshold:
                 flow_blockers.append(f"imbalance {imb:.2f}")
 
     pressure = order_flow_metrics.get("pressure")
     if pressure is not None:
-        if direction == "buy" and pressure > ORDER_FLOW_PRESSURE_TH:
+        pressure_strong = pressure_threshold * pressure_margin
+        pressure_base = max(pressure_threshold, 1e-9)
+        pressure_strong = max(pressure_strong, pressure_base)
+        if direction == "buy" and pressure > pressure_threshold:
             score += 10.0
-            flow_strength += min(1.0, float(pressure) / ORDER_FLOW_PRESSURE_TH)
+            flow_strength += min(1.0, float(pressure) / pressure_base)
             factors.append(f"order flow pressure +{pressure:.2f}")
             flow_reasons.append(f"pressure {pressure:.2f}")
-            if pressure >= ORDER_FLOW_PRESSURE_TH * PRECISION_FLOW_PRESSURE_MARGIN:
+            if pressure >= pressure_strong:
                 flow_signal_count += 1
-        elif direction == "sell" and pressure < -ORDER_FLOW_PRESSURE_TH:
+        elif direction == "sell" and pressure < -pressure_threshold:
             score += 10.0
-            flow_strength += min(1.0, abs(float(pressure)) / ORDER_FLOW_PRESSURE_TH)
+            flow_strength += min(1.0, abs(float(pressure)) / pressure_base)
             factors.append(f"order flow pressure {pressure:.2f}")
             flow_reasons.append(f"pressure {pressure:.2f}")
-            if pressure <= -ORDER_FLOW_PRESSURE_TH * PRECISION_FLOW_PRESSURE_MARGIN:
+            if pressure <= -pressure_strong:
                 flow_signal_count += 1
         else:
-            if direction == "buy" and pressure <= -ORDER_FLOW_PRESSURE_TH * PRECISION_FLOW_PRESSURE_MARGIN:
+            if direction == "buy" and pressure <= -pressure_strong:
                 flow_blockers.append(f"pressure {pressure:.2f}")
-            elif direction == "sell" and pressure >= ORDER_FLOW_PRESSURE_TH * PRECISION_FLOW_PRESSURE_MARGIN:
+            elif direction == "sell" and pressure >= pressure_strong:
                 flow_blockers.append(f"pressure {pressure:.2f}")
 
     delta_volume = order_flow_metrics.get("delta_volume")
@@ -4369,11 +4520,25 @@ def compute_precision_entry(
         except (TypeError, ValueError):
             pass
 
-    flow_ready = flow_signal_count > 0 and not flow_blockers
-    if flow_signal_count:
-        plan["order_flow_strength"] = round(
-            min(2.0, flow_strength / max(flow_signal_count, 1)), 2
+    if flow_signal_count > 0:
+        signal_metric = flow_strength / float(flow_signal_count)
+    else:
+        signal_metric = flow_strength
+
+    if flow_strength > 0 or flow_signal_count > 0:
+        plan["order_flow_strength"] = round(min(2.0, signal_metric), 2)
+    plan["order_flow_signals"] = flow_signal_count
+
+    meets_count = flow_signal_count >= max(1, min_flow_signals)
+    if min_flow_signals <= 0:
+        meets_count = flow_signal_count > 0
+    meets_strength = flow_strength > 0 and signal_metric >= strength_floor
+    if meets_strength and not meets_count:
+        flow_reasons.append(
+            f"flow strength override ≥ {strength_floor:.2f}"
         )
+
+    flow_ready = (meets_count or meets_strength) and not flow_blockers
     plan["order_flow_ready"] = flow_ready
     if flow_blockers:
         plan["order_flow_blockers"] = flow_blockers
@@ -9838,6 +10003,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
