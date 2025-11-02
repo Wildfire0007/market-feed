@@ -18,6 +18,8 @@ LOGGER = logging.getLogger(__name__)
 _DEFAULT_CONFIG_PATH = Path(__file__).with_name("analysis_settings.json")
 _ENV_OVERRIDE = "ANALYSIS_CONFIG_FILE"
 
+SequenceTuple = Tuple[Any, ...]
+
 
 class AnalysisConfigError(RuntimeError):
     """Raised when the analysis configuration is missing or invalid."""
@@ -55,7 +57,11 @@ def reload_config(path: Optional[str] = None) -> None:
     _load_raw_config(path)
 
 
-def _convert_sequence(sequence: Optional[Iterable[Sequence[Any]]]) -> Optional[List[Tuple[Any, ...]]]:
+def _convert_sequence(
+    sequence: Optional[Iterable[Sequence[Any]]]
+) -> Optional[List[SequenceTuple]]:
+    """Convert nested sequences to tuples while preserving ``None``."""
+    
     if sequence is None:
         return None
     return [tuple(item) for item in sequence]
