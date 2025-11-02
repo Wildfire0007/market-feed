@@ -5064,6 +5064,9 @@ def analyze(asset: str) -> Dict[str, Any]:
     realtime_confidence: float = 1.0
     realtime_transport = str(spot_realtime.get("transport") or "http").lower() if isinstance(spot_realtime, dict) else "http"
     entry_thresholds_meta: Dict[str, Any] = {"profile": ENTRY_THRESHOLD_PROFILE_NAME}
+    xag_overrides, usoil_overrides, eurusd_overrides = _initialize_asset_overrides(
+        entry_thresholds_meta, asset
+    )
     btc_profile_name = _btc_active_profile() if asset == "BTCUSD" else None
     if btc_profile_name:
         entry_thresholds_meta["btc_profile"] = btc_profile_name
@@ -6443,9 +6446,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             )
             if override_note not in reasons:
                 reasons.append(override_note)
-    xag_overrides: Dict[str, Any] = {}
     if asset == "XAGUSD":
-        xag_overrides = entry_thresholds_meta.setdefault("xag_overrides", {})
         xag_atr_ratio = float(atr_ratio) if atr_ratio > 0 else None
         if xag_atr_ratio is not None:
             xag_overrides["atr_ratio"] = xag_atr_ratio
@@ -6468,10 +6469,6 @@ def analyze(asset: str) -> Dict[str, Any]:
             xag_overrides.setdefault("momentum_override", {})
             xag_overrides["momentum_override"]["atr_ratio"] = xag_atr_ratio
             xag_overrides["momentum_override"]["range_expansion"] = expansion_drive
-    usoil_overrides: Dict[str, Any] = {}
-    if asset == "USOIL":
-        usoil_overrides = entry_thresholds_meta.setdefault("usoil_overrides", {})
-
     if asset == "USOIL" and atr1h is not None and atr1h > 0 and strong_momentum:
         momentum_buffer = float(atr1h) * USOIL_MOMENTUM_STOP_MULT
         if invalid_buffer is None or momentum_buffer > invalid_buffer:
@@ -6696,7 +6693,6 @@ def analyze(asset: str) -> Dict[str, Any]:
     )
     entry_thresholds_meta["vwap_confluence"] = vwap_confluence
 
-    eurusd_overrides: Dict[str, Any] = {}
     eurusd_price_above_vwap = False
     eurusd_price_below_vwap = False
     eurusd_vwap_break_long = False
@@ -6707,7 +6703,6 @@ def analyze(asset: str) -> Dict[str, Any]:
     usoil_gap_break_long = False
     usoil_gap_break_short = False
     if asset == "EURUSD":
-        eurusd_overrides = entry_thresholds_meta.setdefault("eurusd_overrides", {})
         vwap_distance_val = (
             safe_float(vwap_confluence.get("distance"))
             if isinstance(vwap_confluence, dict)
@@ -6727,7 +6722,6 @@ def analyze(asset: str) -> Dict[str, Any]:
             "bos_short": bos_alignment_short,
         }
     elif asset == "USOIL":
-        usoil_overrides = entry_thresholds_meta.setdefault("usoil_overrides", {})
         vwap_distance_val = (
             safe_float(vwap_confluence.get("distance"))
             if isinstance(vwap_confluence, dict)
@@ -9793,78 +9787,28 @@ def main():
 if __name__ == "__main__":
     main()
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+# --- Override bucket helpers --------------------------------------------------
+
+def _ensure_override_bucket(entry_thresholds_meta: Dict[str, Any], key: str) -> Dict[str, Any]:
+    bucket = entry_thresholds_meta.get(key)
+    if isinstance(bucket, dict):
+        return bucket
+    new_bucket: Dict[str, Any] = {}
+    entry_thresholds_meta[key] = new_bucket
+    return new_bucket
+
+
+def _initialize_asset_overrides(
+    entry_thresholds_meta: Dict[str, Any], asset: str
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    xag_overrides: Dict[str, Any] = {}
+    usoil_overrides: Dict[str, Any] = {}
+    eurusd_overrides: Dict[str, Any] = {}
+    if asset == "XAGUSD":
+        xag_overrides = _ensure_override_bucket(entry_thresholds_meta, "xag_overrides")
+    if asset == "USOIL":
+        usoil_overrides = _ensure_override_bucket(entry_thresholds_meta, "usoil_overrides")
+    if asset == "EURUSD":
+        eurusd_overrides = _ensure_override_bucket(entry_thresholds_meta, "eurusd_overrides")
+    return xag_overrides, usoil_overrides, eurusd_overrides
 
