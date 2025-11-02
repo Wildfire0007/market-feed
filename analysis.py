@@ -684,6 +684,89 @@ LOGGER = logging.getLogger(__name__)
 MARKET_TIMEZONE = ZoneInfo("Europe/Berlin")
 
 PUBLIC_DIR = "public"
+MACRO_DATA_DIR = Path("data") / "macro"
+MACRO_LOCKOUT_FILE = MACRO_DATA_DIR / "lockout_by_asset.json"
+
+
+def _parse_utc_timestamp(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        ts = value.strip()
+        if ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        dt = datetime.fromisoformat(ts)
+    except Exception:
+        try:
+            dt = pd.to_datetime(value).to_pydatetime()
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+_MACRO_LOCKOUT_CACHE: Optional[Tuple[float, Dict[str, List[Dict[str, Any]]]]] = None
+
+
+def _load_macro_lockout_windows() -> Dict[str, List[Dict[str, Any]]]:
+    global _MACRO_LOCKOUT_CACHE
+    path = MACRO_LOCKOUT_FILE
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return {}
+    mtime = stat.st_mtime
+    if _MACRO_LOCKOUT_CACHE and _MACRO_LOCKOUT_CACHE[0] == mtime:
+        return _MACRO_LOCKOUT_CACHE[1]
+    raw = load_json(str(path))
+    normalized: Dict[str, List[Dict[str, Any]]] = {}
+    if isinstance(raw, dict):
+        for asset, events in raw.items():
+            if not isinstance(events, list):
+                continue
+            asset_key = str(asset).upper()
+            normalized_events: List[Dict[str, Any]] = []
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                ts_value = event.get("ts_release_utc") or event.get("ts")
+                ts_release = _parse_utc_timestamp(str(ts_value)) if ts_value else None
+                if ts_release is None:
+                    continue
+                try:
+                    pre = max(0, int(event.get("pre") or event.get("pre_seconds") or 0))
+                except (TypeError, ValueError):
+                    pre = 0
+                try:
+                    post = max(0, int(event.get("post") or event.get("post_seconds") or 0))
+                except (TypeError, ValueError):
+                    post = 0
+                start = ts_release - timedelta(seconds=pre)
+                end = ts_release + timedelta(seconds=post)
+                label = (
+                    event.get("label")
+                    or event.get("event")
+                    or event.get("id")
+                    or "Macro event"
+                )
+                normalized_events.append(
+                    {
+                        "id": event.get("id"),
+                        "provider": event.get("provider"),
+                        "label": str(label),
+                        "start": start,
+                        "end": end,
+                        "release": ts_release,
+                        "pre": pre,
+                        "post": post,
+                    }
+                )
+            if normalized_events:
+                normalized_events.sort(key=lambda item: item.get("release") or datetime.min.replace(tzinfo=timezone.utc))
+                normalized[asset_key] = normalized_events
+    _MACRO_LOCKOUT_CACHE = (mtime, normalized)
+    return normalized
 
 MAX_RISK_PCT = 1.8
 
@@ -3811,7 +3894,48 @@ def load_calendar_events(asset: str) -> List[Dict[str, Any]]:
     return events
 
 
+def _evaluate_macro_lockout(asset: str, now: datetime) -> Tuple[bool, Optional[str]]:
+    if not asset:
+        return False, None
+    windows = _load_macro_lockout_windows()
+    if not windows:
+        return False, None
+    asset_windows = windows.get(asset.upper())
+    if not asset_windows:
+        return False, None
+    now_utc = now.astimezone(timezone.utc)
+    for window in asset_windows:
+        start = window.get("start")
+        end = window.get("end")
+        if start is None or end is None:
+            continue
+        if start <= now_utc <= end:
+            label = window.get("label") or "Macro event"
+            provider = window.get("provider")
+            release = window.get("release")
+            timing: Optional[str] = None
+            if isinstance(release, datetime):
+                if now_utc < release:
+                    timing = "pre-release"
+                elif now_utc > release:
+                    timing = "post-release"
+                else:
+                    timing = "at release"
+            reason_parts = ["Macro lockout"]
+            if provider:
+                reason_parts.append(f"{provider}")
+            reason_parts.append(str(label))
+            if timing:
+                reason_parts.append(f"({timing})")
+            reason = ": ".join([reason_parts[0], " ".join(reason_parts[1:])]) if len(reason_parts) > 1 else reason_parts[0]
+            return True, reason
+    return False, None
+
+
 def evaluate_news_lockout(asset: str, now: datetime) -> Tuple[bool, Optional[str]]:
+    macro_lockout, macro_reason = _evaluate_macro_lockout(asset, now)
+    if macro_lockout:
+        return True, macro_reason
     lockout_minutes, stabilisation_minutes, severity_threshold = _news_settings_for_asset(asset)
     if lockout_minutes <= 0 and stabilisation_minutes <= 0:
         return False, None
@@ -9668,6 +9792,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
