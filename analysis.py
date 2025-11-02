@@ -8752,6 +8752,30 @@ def analyze(asset: str) -> Dict[str, Any]:
             execution_playbook.append(step_payload)
 
     if precision_plan:
+        precision_state = "none"
+        score_value = safe_float(precision_plan.get("score")) or 0.0
+        trigger_state_value = str(precision_plan.get("trigger_state") or "")
+        trigger_ready_flag = bool(precision_plan.get("trigger_ready")) or trigger_state_value in {
+            "arming",
+            "fire",
+        }
+        profile_for_precision: Optional[str] = None
+        if asset == "BTCUSD":
+            if btc_profile_name and btc_profile_name in BTC_PRECISION_MIN:
+                profile_for_precision = btc_profile_name
+            else:
+                profile_for_precision = _btc_active_profile()
+        elif btc_profile_name:
+            profile_for_precision = btc_profile_name
+        precision_state = btc_precision_state(
+            profile_for_precision or "baseline",
+            asset,
+            score_value,
+            trigger_ready_flag,
+        )
+        if precision_state == "none" and decision in {"precision_ready", "precision_arming"}:
+            precision_state = decision
+
         window_payload: Optional[List[float]] = None
         window = precision_plan.get("entry_window")
         if isinstance(window, (list, tuple)) and len(window) == 2:
@@ -9814,6 +9838,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
