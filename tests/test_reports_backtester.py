@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import pandas as pd
+import pytest
 
 from reports.backtester import update_live_validation
 from scripts import label_trades as lt
@@ -226,3 +227,64 @@ def test_update_live_validation_applies_manual_overrides(tmp_path):
     assert not live_df.empty
     assert set(live_df["validation_outcome"]) == {"manual_tp"}
     assert set(live_df["validation_source"]) == {"audited"}
+
+
+def test_update_live_validation_simulates_exit_rules(tmp_path):
+    public_dir = tmp_path / "public"
+    reports_dir = tmp_path / "reports"
+    journal_dir = public_dir / "journal"
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    asset_dir = public_dir / "TEST"
+    asset_dir.mkdir(parents=True, exist_ok=True)
+
+    journal_df = pd.DataFrame(
+        [
+            {
+                "journal_id": "t-sim",
+                "asset": "TEST",
+                "analysis_timestamp": "2024-01-01T10:00:00Z",
+                "signal": "buy",
+                "entry_price": 1.100,
+                "stop_loss": 1.095,
+                "take_profit_1": 1.120,
+                "spot_price": 1.100,
+            }
+        ]
+    )
+    journal_path = journal_dir / "trade_journal.csv"
+    journal_df.to_csv(journal_path, index=False)
+
+    _write_price_file(
+        asset_dir / "klines_1m.json",
+        [
+            {"datetime": "2024-01-01T10:00:00Z", "open": 1.10, "high": 1.102, "low": 1.098, "close": 1.101},
+            {"datetime": "2024-01-01T10:30:00Z", "open": 1.101, "high": 1.106, "low": 1.099, "close": 1.104},
+            {"datetime": "2024-01-01T11:00:00Z", "open": 1.104, "high": 1.106, "low": 1.100, "close": 1.105},
+        ],
+    )
+
+    summary_path = update_live_validation(
+        public_dir=public_dir,
+        reports_dir=reports_dir,
+        lookahead_hours=1.0,
+    )
+
+    assert summary_path is not None
+
+    updated_journal = pd.read_csv(journal_path)
+    row = updated_journal.iloc[0]
+    assert row["validation_outcome"] == "simulated_tp"
+    assert row["validation_source"] == "simulated"
+    assert row["exit_timestamp"].startswith("2024-01-01T11:00:00")
+    assert pytest.approx(float(row["validation_rr"]), rel=1e-6) == 1.0
+    assert pytest.approx(float(row["time_to_outcome_minutes"]), rel=1e-6) == 60.0
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["resolved_trades"] == 1
+    assert summary["wins"] == 1
+    assert pytest.approx(float(summary["avg_validation_rr"]), rel=1e-6) == 1.0
+
+    live_validation_path = reports_dir / "live_validation.csv"
+    live_df = pd.read_csv(live_validation_path)
+    assert set(live_df["validation_outcome"]) == {"simulated_tp"}
+    assert set(live_df["validation_source"]) == {"simulated"}
