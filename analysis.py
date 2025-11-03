@@ -187,6 +187,7 @@ from config.analysis_settings import (
     SESSION_TIME_RULES,
     SESSION_WEEKDAYS,
     SESSION_WINDOWS_UTC,
+    resolve_session_status_for_asset,
     is_momentum_asset,
     SPREAD_MAX_ATR_PCT,
     SL_BUFFER_RULES,
@@ -1293,6 +1294,13 @@ def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
     monitor_ok = in_any_window_utc(monitor_windows, h, m)
     entry_window_ok = in_any_window_utc(entry_windows, h, m)
     weekday_ok = session_weekday_ok(asset, now)
+    status_profile_name, status_profile = resolve_session_status_for_asset(asset)
+    if not isinstance(status_profile, dict):
+        status_profile = {}
+    next_open_override: Optional[str] = None
+    profile_notes: List[str] = []
+    profile_tags: List[str] = []
+    profile_context: Dict[str, Any] = {}
 
     special_status: Optional[str] = None
     special_note: Optional[str] = None
@@ -1333,12 +1341,51 @@ def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
         special_note = f"Piac zárva (pénteki zárás {format_utc_minute(friday_close)} UTC)"
 
     open_now = monitor_ok and weekday_ok
-    if asset == "BTCUSD":
+     if asset == "BTCUSD":
         entry_open = entry_window_ok and weekday_ok
     else:
         entry_open = entry_window_ok and weekday_ok and (
             monitor_ok or not monitor_windows
         )
+
+    if status_profile:
+        if status_profile.get("force_session_closed"):
+            monitor_ok = False
+            entry_window_ok = False
+            open_now = False
+            entry_open = False
+        if "open" in status_profile:
+            open_now = bool(status_profile.get("open"))
+        if "entry_open" in status_profile:
+            entry_open = bool(status_profile.get("entry_open"))
+        if "within_monitor_window" in status_profile:
+            monitor_ok = bool(status_profile.get("within_monitor_window"))
+        if "within_entry_window" in status_profile:
+            entry_window_ok = bool(status_profile.get("within_entry_window"))
+        elif "within_window" in status_profile:
+            entry_window_ok = bool(status_profile.get("within_window"))
+        if "weekday_ok" in status_profile:
+            weekday_ok = bool(status_profile.get("weekday_ok"))
+        next_open_raw = status_profile.get("next_open_utc")
+        if isinstance(next_open_raw, str) and next_open_raw.strip():
+            next_open_override = next_open_raw.strip()
+        notes_raw = status_profile.get("notes")
+        if isinstance(notes_raw, list):
+            profile_notes = [
+                note.strip()
+                for note in notes_raw
+                if isinstance(note, str) and note.strip()
+            ]
+        tags_raw = status_profile.get("tags")
+        if isinstance(tags_raw, list):
+            profile_tags = [
+                tag.strip()
+                for tag in tags_raw
+                if isinstance(tag, str) and tag.strip()
+            ]
+        context_raw = status_profile.get("context")
+        if isinstance(context_raw, dict):
+            profile_context = {str(key): value for key, value in context_raw.items()}
 
     info: Dict[str, Any] = {
         "open": open_now,
@@ -1362,6 +1409,19 @@ def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
     allowed = SESSION_WEEKDAYS.get(asset)
     if allowed:
         info["allowed_weekdays"] = list(allowed)
+    info["open"] = open_now
+    info["entry_open"] = entry_open
+    info["within_window"] = entry_window_ok
+    info["within_entry_window"] = entry_window_ok
+    info["within_monitor_window"] = monitor_ok
+    info["weekday_ok"] = weekday_ok
+    info["status_profile"] = status_profile_name
+    if status_profile.get("force_session_closed"):
+        info["status_profile_forced"] = True
+    if profile_tags:
+        info["status_profile_tags"] = profile_tags
+    if profile_context:
+        info["status_profile_context"] = profile_context
     if not weekday_ok:
         status = "closed_weekend"
         status_note = "Piac zárva (hétvége)"
@@ -1378,6 +1438,21 @@ def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
         status = special_status
     if special_note:
         status_note = special_note
+    if status_profile:
+        override_status = status_profile.get("status")
+        override_note = status_profile.get("status_note")
+        if override_status:
+            status = str(override_status)
+        if override_note:
+            status_note = str(override_note)
+        if "market_closed_reason" in status_profile:
+            info["market_closed_reason"] = str(
+                status_profile.get("market_closed_reason")
+            )
+        if "market_closed_assumed" in status_profile:
+            info["market_closed_assumed"] = bool(
+                status_profile.get("market_closed_assumed")
+            )
     if break_active:
         info["daily_break_active"] = True
     if break_window:
@@ -1387,7 +1462,14 @@ def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
         info["special_closure_reason"] = special_reason
     info["status"] = status
     info["status_note"] = status_note
-    if not entry_open:
+    if profile_notes:
+        notes_bucket = info.setdefault("notes", [])
+        for note in profile_notes:
+            if note not in notes_bucket:
+                notes_bucket.append(note)
+    if next_open_override:
+        info["next_open_utc"] = next_open_override
+    elif not entry_open:
         nxt = next_session_open(asset, now)
         if nxt:
             info["next_open_utc"] = nxt.isoformat()
@@ -10003,6 +10085,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
