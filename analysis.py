@@ -9860,6 +9860,15 @@ def main():
         "sentiment_alerts": [],
         "troubleshooting": list(REFRESH_TIPS),
     }
+    run_context = summary.setdefault("run_context", {})
+    current_weekday = datetime.now(timezone.utc).weekday()
+    run_context["weekday"] = current_weekday
+    if current_weekday >= 5:
+        run_context["weekend_run"] = True
+        weekend_notes = summary.setdefault("notes", [])
+        note_text = "Hétvégi snapshot — piaczárás miatt jelzések csak tájékoztató jellegűek"
+        if note_text not in weekend_notes:
+            weekend_notes.append(note_text)
     revision_info = detect_analysis_revision()
     if revision_info:
         summary["analysis_revision"] = revision_info
@@ -10085,6 +10094,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
