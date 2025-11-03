@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -19,6 +20,12 @@ _DEFAULT_CONFIG_PATH = Path(__file__).with_name("analysis_settings.json")
 _ENV_OVERRIDE = "ANALYSIS_CONFIG_FILE"
 
 SequenceTuple = Tuple[Any, ...]
+
+
+def _now_utc() -> datetime:
+    """Return the current UTC time (split out for test overrides)."""
+
+    return datetime.now(timezone.utc)
 
 
 class AnalysisConfigError(RuntimeError):
@@ -156,6 +163,83 @@ def _normalize_threshold_map(raw_map: Any, default_value: float) -> Dict[str, fl
                     key,
                 )
     return mapping
+
+
+def _normalize_session_status_profiles(raw_map: Any) -> Dict[str, Dict[str, Any]]:
+    profiles: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(raw_map, dict):
+        return profiles
+
+    bool_fields = (
+        "force_session_closed",
+        "open",
+        "entry_open",
+        "within_window",
+        "within_entry_window",
+        "within_monitor_window",
+        "weekday_ok",
+        "market_closed_assumed",
+        "auto_activate_weekend",
+    )
+    str_fields = (
+        "status",
+        "status_note",
+        "market_closed_reason",
+        "next_open_utc",
+    )
+
+    for name, meta in raw_map.items():
+        if not isinstance(meta, dict):
+            profiles[str(name)] = {}
+            continue
+        profile_cfg: Dict[str, Any] = {}
+        for field in bool_fields:
+            if field in meta:
+                profile_cfg[field] = bool(meta.get(field))
+        for field in str_fields:
+            if field in meta and meta.get(field) is not None:
+                profile_cfg[field] = str(meta.get(field))
+
+        notes_raw = meta.get("notes")
+        if isinstance(notes_raw, list):
+            notes: List[str] = []
+            for item in notes_raw:
+                if isinstance(item, str):
+                    text = item.strip()
+                    if text:
+                        notes.append(text)
+            if notes:
+                profile_cfg["notes"] = notes
+
+        tags_raw = meta.get("tags")
+        if isinstance(tags_raw, list):
+            tags: List[str] = []
+            for item in tags_raw:
+                if isinstance(item, str):
+                    text = item.strip()
+                    if text:
+                        tags.append(text)
+            if tags:
+                profile_cfg["tags"] = tags
+
+        context_raw = meta.get("context")
+        if isinstance(context_raw, dict):
+            profile_cfg["context"] = {str(key): value for key, value in context_raw.items()}
+
+        assets_raw = meta.get("assets")
+        if isinstance(assets_raw, list):
+            assets: List[str] = []
+            for item in assets_raw:
+                if isinstance(item, str):
+                    text = item.strip().upper()
+                    if text and text not in assets:
+                        assets.append(text)
+            if assets:
+                profile_cfg["assets"] = assets
+
+        profiles[str(name)] = profile_cfg
+
+    return profiles
 
 
 def _normalize_entry_profile(name: str, raw_profile: Any) -> Dict[str, Dict[str, float]]:
@@ -410,6 +494,98 @@ BTC_PROFILE_OVERRIDES: Dict[str, Dict[str, Any]] = _normalize_btc_profiles(
     _get_config_value("btc_profile_overrides")
 )
 
+_SESSION_STATUS_PROFILES_RAW: Dict[str, Any] = dict(
+    _get_config_value("session_status_profiles") or {}
+)
+SESSION_STATUS_PROFILES: Dict[str, Dict[str, Any]] = _normalize_session_status_profiles(
+    _SESSION_STATUS_PROFILES_RAW
+)
+if "default" not in SESSION_STATUS_PROFILES:
+    SESSION_STATUS_PROFILES["default"] = {}
+
+_SESSION_STATUS_PROFILE_ASSETS: Dict[str, Set[str]] = {
+    name: set(meta.get("assets", [])) for name, meta in SESSION_STATUS_PROFILES.items()
+}
+
+
+def _auto_session_status_profile(
+    profiles: Dict[str, Dict[str, Any]]
+) -> Optional[str]:
+    now = _now_utc()
+    if now.weekday() >= 5:
+        for name, meta in profiles.items():
+            if meta.get("auto_activate_weekend"):
+                return name
+    return None
+
+
+def _resolve_active_session_status_profile() -> str:
+    env_value_raw = os.getenv("SESSION_STATUS_PROFILE")
+    env_value = env_value_raw.strip() if isinstance(env_value_raw, str) else None
+    cfg_value_raw = _get_config_value("active_session_status_profile")
+    cfg_value = cfg_value_raw.strip() if isinstance(cfg_value_raw, str) else None
+    auto_value = _auto_session_status_profile(SESSION_STATUS_PROFILES)
+
+    candidates = [
+        (env_value, "env"),
+        (auto_value, "auto"),
+        (cfg_value, "config"),
+        ("default", "default"),
+    ]
+    for candidate, source in candidates:
+        if not candidate:
+            continue
+        if candidate in SESSION_STATUS_PROFILES:
+            return candidate
+        if source == "env":
+            LOGGER.warning(
+                "Unknown session status profile '%s'; falling back to auto/config/default",
+                candidate,
+            )
+    return "default"
+
+
+SESSION_STATUS_PROFILE_NAME: str = "default"
+SESSION_STATUS_PROFILE: Dict[str, Any] = {}
+
+
+def refresh_session_status_profile() -> None:
+    """Re-evaluate the active session status profile."""
+
+    global SESSION_STATUS_PROFILE_NAME, SESSION_STATUS_PROFILE
+
+    active = _resolve_active_session_status_profile()
+    SESSION_STATUS_PROFILE_NAME = active
+    SESSION_STATUS_PROFILE = dict(SESSION_STATUS_PROFILES.get(active, {}))
+
+
+refresh_session_status_profile()
+
+
+def session_status_profile_targets_asset(
+    profile_name: Optional[str], asset: Optional[str]
+) -> bool:
+    asset_key = str(asset or "").strip().upper()
+    if not asset_key:
+        return True
+    if not profile_name:
+        return True
+    assets = _SESSION_STATUS_PROFILE_ASSETS.get(profile_name)
+    if not assets:
+        return True
+    return asset_key in assets
+
+
+def resolve_session_status_for_asset(asset: Optional[str]) -> Tuple[str, Dict[str, Any]]:
+    """Return the active session status profile metadata for ``asset``."""
+
+    asset_key = str(asset or "").strip().upper()
+    profile_name = SESSION_STATUS_PROFILE_NAME
+    if not session_status_profile_targets_asset(profile_name, asset_key):
+        default_profile = dict(SESSION_STATUS_PROFILES.get("default", {}))
+        return "default", default_profile
+    return profile_name, dict(SESSION_STATUS_PROFILE)
+    
 ATR_LOW_TH_DEFAULT: float = float(_get_config_value("atr_low_threshold_default"))
 ATR_LOW_TH_ASSET: Dict[str, float] = dict(_get_config_value("atr_low_threshold") or {})
 GOLD_HIGH_VOL_WINDOWS = _get_config_value("gold_high_vol_windows") or []
@@ -599,3 +775,4 @@ def describe_entry_threshold_profile(profile_name: Optional[str] = None) -> Dict
         "p_score_min": _resolve("p_score_min", 60.0),
         "atr_threshold_multiplier": _resolve("atr_threshold_multiplier", 1.0),
     }
+    
