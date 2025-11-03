@@ -172,9 +172,15 @@ SERIES_FRESHNESS_LIMITS = {
     "4h": 4 * 3600.0 + 21600.0,  # 4h candle + 6h tolerance
 }
 try:
-    from config.analysis_settings import SPOT_MAX_AGE_SECONDS as _ANALYSIS_SPOT_MAX_AGE_SECONDS
+    from config.analysis_settings import (
+        SPOT_MAX_AGE_SECONDS as _ANALYSIS_SPOT_MAX_AGE_SECONDS,
+        resolve_session_status_for_asset as _resolve_session_status_for_asset,
+    )
 except Exception:  # pragma: no cover - optional dependency during tests
     _ANALYSIS_SPOT_MAX_AGE_SECONDS = {}
+
+    def _resolve_session_status_for_asset(asset: str):
+        return "default", {}
 
 _SPOT_FRESHNESS_ENV = os.getenv("TD_SPOT_FRESHNESS_LIMIT")
 _SPOT_FRESHNESS_DEFAULT = float(_SPOT_FRESHNESS_ENV) if _SPOT_FRESHNESS_ENV else 900.0
@@ -557,6 +563,70 @@ def _market_closed_skip_reason(asset_key: str, cfg: Dict[str, Any]) -> Optional[
         return None
     now_dt = datetime.now(timezone.utc)
     return _asset_market_closed_reason(asset_key, cfg, now_dt, now_dt)
+
+
+def _status_profile_for_asset(asset: str) -> Tuple[str, Dict[str, Any]]:
+    name, profile = _resolve_session_status_for_asset(asset)
+    if not isinstance(profile, dict):
+        profile = {}
+    return name, dict(profile)
+
+
+def _status_profile_skip_reason(profile: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(profile, dict) or not profile.get("force_session_closed"):
+        return None
+    reason = profile.get("market_closed_reason") or profile.get("status")
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    return "status_profile_forced"
+
+
+def _apply_status_profile_metadata(
+    payload: Dict[str, Any], profile_name: str, profile: Dict[str, Any]
+) -> None:
+    if not isinstance(payload, dict) or not isinstance(profile, dict):
+        return
+
+    payload["status_profile"] = profile_name or "default"
+    if profile.get("force_session_closed"):
+        payload["status_profile_forced"] = True
+
+    tags = profile.get("tags")
+    if isinstance(tags, list) and tags:
+        clean_tags: List[str] = []
+        for tag in tags:
+            if isinstance(tag, str):
+                cleaned = tag.strip()
+                if cleaned and cleaned not in clean_tags:
+                    clean_tags.append(cleaned)
+        if clean_tags:
+            payload["status_profile_tags"] = clean_tags
+
+    context = profile.get("context")
+    if isinstance(context, dict) and context:
+        payload["status_profile_context"] = {str(key): value for key, value in context.items()}
+
+    notes = profile.get("notes")
+    if isinstance(notes, list) and notes:
+        bucket = payload.setdefault("notes", [])
+        for note in notes:
+            if isinstance(note, str):
+                cleaned = note.strip()
+                if cleaned and cleaned not in bucket:
+                    bucket.append(cleaned)
+
+    if "market_closed_reason" in profile:
+        payload["market_closed_reason"] = str(profile.get("market_closed_reason"))
+    if "market_closed_assumed" in profile:
+        payload["market_closed_assumed"] = bool(profile.get("market_closed_assumed"))
+
+    next_open = profile.get("next_open_utc")
+    if isinstance(next_open, str) and next_open.strip():
+        payload["next_open_utc"] = next_open.strip()
+
+    status_note = profile.get("status_note")
+    if isinstance(status_note, str) and status_note.strip():
+        payload["status_note"] = status_note.strip()
 
 _BASE_REQUESTS_PER_ASSET = 1 + len(SERIES_FETCH_PLAN)
 _BASE_REQUESTS_TOTAL = len(ASSETS) * _BASE_REQUESTS_PER_ASSET
@@ -3269,16 +3339,24 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     attempt_memory = AttemptMemory()
 
     spot_limit = _spot_freshness_limit(asset)
-    skip_reason = _market_closed_skip_reason(asset, cfg)
+    status_profile_name, status_profile = _status_profile_for_asset(asset)
+    skip_reason = _status_profile_skip_reason(status_profile) or _market_closed_skip_reason(
+        asset, cfg
+    )
     series_payloads: Dict[str, Dict[str, Any]]
 
     if skip_reason:
         LOGGER.info(
-            "Skipping Twelve Data fetches for %s: market closed (%s)",
+            "Skipping Twelve Data fetches for %s: market closed (%s%s)",
             asset,
             skip_reason,
+            f", profile={status_profile_name}" if status_profile else "",
         )
-        note = "market_closed_weekend" if skip_reason == "weekend" else "market_closed_outside_hours"
+        note = (
+            "market_closed_weekend"
+            if skip_reason == "weekend"
+            else "market_closed_outside_hours"
+        )
         base_symbol: Optional[str] = attempts[0][0] if attempts else cfg.get("symbol")
         base_exchange: Optional[str] = attempts[0][1] if attempts else cfg.get("exchange")
         placeholder_spot: Dict[str, Any] = {
@@ -3292,6 +3370,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
             "freshness_note": note,
             "error": f"market closed ({skip_reason})",
         }
+        _apply_status_profile_metadata(placeholder_spot, status_profile_name, status_profile)
         if base_symbol:
             placeholder_spot["used_symbol"] = base_symbol
         if base_exchange:
@@ -3304,6 +3383,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
             spot.setdefault("market_closed_reason", skip_reason)
             spot.setdefault("freshness_note", note)
             spot.setdefault("freshness_limit_seconds", spot_limit)
+            _apply_status_profile_metadata(spot, status_profile_name, status_profile)
         series_payloads = {}
         for name, interval in SERIES_FETCH_PLAN:
             freshness_limit = SERIES_FRESHNESS_LIMITS.get(interval)
@@ -3318,6 +3398,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
                 "error": f"market closed ({skip_reason})",
                 "raw": {"values": []},
             }
+            _apply_status_profile_metadata(placeholder_series, status_profile_name, status_profile)
             payload = _finalize_series_payload(
                 attempts,
                 adir,
@@ -3332,6 +3413,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
                 payload.setdefault("market_closed_assumed", True)
                 payload.setdefault("market_closed_reason", skip_reason)
                 payload.setdefault("freshness_note", note)
+                _apply_status_profile_metadata(payload, status_profile_name, status_profile)
             series_payloads[name] = payload
         spot_violation = False
         force_reason: Optional[str] = None
@@ -3506,6 +3588,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
