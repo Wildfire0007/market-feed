@@ -16,17 +16,17 @@ jobs:
   reset:
     name: Reset monitoring state
     runs-on: ubuntu-latest
+    env:
+      TARGET_BRANCH: ${{ github.event.repository.default_branch || github.ref_name }}
     steps:
-      - name: Checkout main
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: main
           fetch-depth: 0
+          ref: ${{ env.TARGET_BRANCH }}
 
-      - name: Sync with origin/main
-        run: |
-          git fetch origin main
-          git reset --hard origin/main
+      - name: Ensure branch is up to date
+        run: git pull --ff-only origin "$TARGET_BRANCH"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -52,8 +52,8 @@ jobs:
           git add public/_active_anchor.json public/_notify_state.json public/status.json public/monitoring || true
           if ! git diff --cached --quiet; then
             git commit -m "reset: refresh monitoring state [skip ci]"
-            git pull --rebase origin main
-            git push
+            git pull --rebase origin "$TARGET_BRANCH"
+            git push origin "HEAD:$TARGET_BRANCH"
           else
             echo "No monitoring state changes to commit."
           fi
