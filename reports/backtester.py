@@ -68,9 +68,13 @@ NUMERIC_RESULT_COLUMNS = {
     "time_to_outcome_minutes",
 }
 
-WIN_OUTCOMES = {lt.OUTCOME_PROFIT, "tp_hit", "tp1"}
-LOSS_OUTCOMES = {lt.OUTCOME_STOP, "stopped"}
-AMBIGUOUS_OUTCOMES = {lt.OUTCOME_AMBIGUOUS, "ambiguous"}
+SIMULATED_TP = "simulated_tp"
+SIMULATED_SL = "simulated_sl"
+SIMULATED_EXIT = "simulated_exit"
+
+WIN_OUTCOMES = {lt.OUTCOME_PROFIT, "tp_hit", "tp1", SIMULATED_TP}
+LOSS_OUTCOMES = {lt.OUTCOME_STOP, "stopped", SIMULATED_SL}
+AMBIGUOUS_OUTCOMES = {lt.OUTCOME_AMBIGUOUS, "ambiguous", SIMULATED_EXIT}
 RESOLVED_OUTCOMES = WIN_OUTCOMES | LOSS_OUTCOMES | AMBIGUOUS_OUTCOMES | {"tp2"}
 
 WIN_OUTCOMES_LOWER = {status.lower() for status in WIN_OUTCOMES}
@@ -220,6 +224,120 @@ def _apply_manual_overrides(results_df: pd.DataFrame, manual_df: pd.DataFrame) -
     return merged
 
 
+def _parse_timestamp(value: object) -> Optional[pd.Timestamp]:
+    if value is None:
+        return None
+    try:
+        timestamp = pd.to_datetime(value, utc=True)
+    except Exception:
+        return None
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize("UTC")
+    return timestamp
+
+
+def _coerce_price(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return float(numeric)
+
+
+def _maybe_simulate_exit(
+    trade_row: pd.Series,
+    price_frame: pd.DataFrame,
+    evaluation: Dict[str, Any],
+    horizon_minutes: int,
+) -> None:
+    outcome = str(evaluation.get("validation_outcome", "")).lower()
+    if outcome in RESOLVED_OUTCOMES_LOWER:
+        return
+
+    analysis_timestamp = _parse_timestamp(trade_row.get("analysis_timestamp"))
+    if analysis_timestamp is None:
+        return
+
+    direction_raw = str(trade_row.get("signal", "")).lower()
+    if direction_raw not in {"buy", "sell"}:
+        return
+    direction = 1 if direction_raw == "buy" else -1
+
+    entry_price = _coerce_price(trade_row.get("entry_price"))
+    if entry_price is None:
+        entry_price = _coerce_price(trade_row.get("spot_price"))
+    stop_loss = _coerce_price(trade_row.get("stop_loss"))
+    take_profit = _coerce_price(trade_row.get("take_profit_1"))
+    if take_profit is None:
+        take_profit = _coerce_price(trade_row.get("take_profit_2"))
+
+    if entry_price is None or stop_loss is None or take_profit is None:
+        return
+
+    risk = entry_price - stop_loss if direction == 1 else stop_loss - entry_price
+    if not math.isfinite(risk) or risk <= 0:
+        return
+
+    evaluation_end = analysis_timestamp + pd.Timedelta(minutes=int(max(horizon_minutes, 1)))
+    window_start = analysis_timestamp.floor("min")
+    price_slice = price_frame[
+        (price_frame["timestamp"] >= window_start)
+        & (price_frame["timestamp"] <= evaluation_end)
+    ]
+    if price_slice.empty:
+        return
+
+    exit_row = price_slice.iloc[-1]
+    exit_timestamp = exit_row["timestamp"]
+    exit_close = _coerce_price(exit_row.get("close"))
+    if exit_close is None:
+        return
+
+    fill_timestamp = _parse_timestamp(evaluation.get("fill_timestamp")) or analysis_timestamp
+    time_to_outcome: Optional[float] = None
+    if exit_timestamp is not None:
+        time_to_outcome = (exit_timestamp - fill_timestamp).total_seconds() / 60.0
+
+    if direction == 1:
+        rr = (exit_close - entry_price) / risk
+        max_favorable = (price_slice["high"].max() - entry_price) / risk
+        max_adverse = (entry_price - price_slice["low"].min()) / risk
+    else:
+        rr = (entry_price - exit_close) / risk
+        max_favorable = (entry_price - price_slice["low"].min()) / risk
+        max_adverse = (price_slice["high"].max() - entry_price) / risk
+
+    if not all(map(math.isfinite, [rr, max_favorable, max_adverse])):
+        return
+
+    epsilon = 1e-6
+    if rr > epsilon:
+        simulated_outcome = SIMULATED_TP
+    elif rr < -epsilon:
+        simulated_outcome = SIMULATED_SL
+    else:
+        simulated_outcome = SIMULATED_EXIT
+
+    evaluation.update(
+        {
+            "validation_outcome": simulated_outcome,
+            "validation_rr": float(rr),
+            "max_favorable_excursion": float(max_favorable),
+            "max_adverse_excursion": float(max_adverse),
+            "time_to_outcome_minutes": float(time_to_outcome) if time_to_outcome is not None else None,
+            "exit_timestamp": _serialise_timestamp(exit_timestamp),
+            "validation_source": "simulated",
+        }
+    )
+    if evaluation.get("fill_timestamp") is None:
+        evaluation["fill_timestamp"] = _serialise_timestamp(fill_timestamp)
+        
 def _evaluate_trade_row(
     trade_row: pd.Series,
     price_frame: pd.DataFrame,
@@ -326,6 +444,7 @@ def update_live_validation(
             )
             if not evaluation:
                 continue
+            _maybe_simulate_exit(row, price_history, evaluation, horizon_minutes)
             evaluation["asset"] = asset
             results.append(evaluation)
     if not results:
