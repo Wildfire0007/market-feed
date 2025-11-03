@@ -9,11 +9,12 @@ import importlib.util
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, List, Optional
 
 LOGGER = logging.getLogger("pipeline_env")
 
@@ -183,6 +184,224 @@ def _write_build_metadata(
     return path
 
 
+def _parse_iso_timestamp(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return None
+        if candidate.endswith("Z"):
+            candidate = candidate[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
+
+
+def _prune_archive_snapshots(root: Path, retention: int) -> None:
+    if retention <= 0 or not root.exists():
+        return
+    snapshots: List[Path] = [candidate for candidate in root.iterdir() if candidate.is_dir()]
+    snapshots.sort(key=lambda candidate: candidate.name, reverse=True)
+    for obsolete in snapshots[retention:]:
+        shutil.rmtree(obsolete, ignore_errors=True)
+
+
+def _archive_analysis_summaries(
+    public_dir: Path,
+    *,
+    now: Optional[datetime] = None,
+    retention: int = 7,
+) -> int:
+    now = now or datetime.now(timezone.utc)
+    timestamp = now.strftime("%Y%m%dT%H%M%SZ")
+    archive_root = public_dir / "archive" / "analysis_summary"
+
+    summary_paths: List[Path] = []
+    root_summary = public_dir / "analysis_summary.json"
+    if root_summary.exists():
+        summary_paths.append(root_summary)
+    for path in public_dir.glob("*/analysis_summary.json"):
+        if path.is_file():
+            summary_paths.append(path)
+
+    archived = 0
+    for path in summary_paths:
+        relative = path.relative_to(public_dir)
+        target_dir = archive_root / timestamp / relative.parent
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / relative.name
+        try:
+            if target_path.exists():
+                target_path.unlink()
+            shutil.move(str(path), str(target_path))
+            archived += 1
+        except Exception:
+            LOGGER.warning("Failed to archive %s", path)
+
+    _prune_archive_snapshots(archive_root, retention)
+    return archived
+
+
+def _archive_stale_feature_monitors(
+    public_dir: Path,
+    *,
+    now: Optional[datetime] = None,
+    max_age_hours: float = 36.0,
+    retention: int = 5,
+) -> int:
+    monitor_dir = public_dir / "ml_features" / "monitoring"
+    if not monitor_dir.exists():
+        return 0
+
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=max(0.0, float(max_age_hours)))
+    archive_root = public_dir / "archive" / "feature_monitor"
+    timestamp = now.strftime("%Y%m%dT%H%M%SZ")
+
+    archived = 0
+    for json_path in monitor_dir.glob("*_monitor.json"):
+        if not json_path.is_file():
+            continue
+        try:
+            with json_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception:
+            payload = None
+        generated = None
+        if isinstance(payload, dict):
+            generated = _parse_iso_timestamp(payload.get("generated_utc"))
+        if generated is not None and generated >= cutoff:
+            continue
+
+        relative = json_path.relative_to(public_dir)
+        target_dir = archive_root / timestamp / relative.parent
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_json = target_dir / relative.name
+        try:
+            if target_json.exists():
+                target_json.unlink()
+            shutil.move(str(json_path), str(target_json))
+            archived += 1
+        except Exception:
+            LOGGER.warning("Failed to archive %s", json_path)
+            continue
+
+        csv_path = json_path.with_suffix(".csv")
+        if csv_path.exists():
+            rel_csv = csv_path.relative_to(public_dir)
+            csv_dir = archive_root / timestamp / rel_csv.parent
+            csv_dir.mkdir(parents=True, exist_ok=True)
+            csv_target = csv_dir / rel_csv.name
+            try:
+                if csv_target.exists():
+                    csv_target.unlink()
+                shutil.move(str(csv_path), str(csv_target))
+            except Exception:
+                LOGGER.warning("Failed to archive %s", csv_path)
+
+    _prune_archive_snapshots(archive_root, retention)
+    return archived
+
+
+def _load_json(path: Path) -> Any:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception:
+        return None
+
+
+def _maybe_reset_notify_state(
+    public_dir: Path,
+    *,
+    now: Optional[datetime] = None,
+    stale_hours: float = 72.0,
+):
+    from scripts.reset_dashboard_state import reset_notify_state_file
+
+    now = now or datetime.now(timezone.utc)
+    state_path = public_dir / "_notify_state.json"
+    payload = _load_json(state_path)
+    latest = None
+    if isinstance(payload, dict):
+        meta = payload.get("_meta")
+        if isinstance(meta, dict):
+            latest = _parse_iso_timestamp(meta.get("last_heartbeat_utc")) or latest
+        for value in payload.values():
+            if not isinstance(value, dict):
+                continue
+            for key in ("last_sent", "last_sent_utc", "last_notification_utc", "timestamp"):
+                candidate = _parse_iso_timestamp(value.get(key))
+                if candidate and (latest is None or candidate > latest):
+                    latest = candidate
+
+    if latest is not None and latest >= now - timedelta(hours=float(stale_hours)):
+        return None
+
+    return reset_notify_state_file(
+        path=state_path,
+        now=now,
+        backup_dir=public_dir / "monitoring" / "reset_backups",
+        reason="pipeline_cleanup",
+    )
+
+
+def _maybe_reset_status(
+    public_dir: Path,
+    *,
+    now: Optional[datetime] = None,
+    stale_hours: float = 36.0,
+):
+    from scripts.reset_dashboard_state import reset_status_file
+
+    now = now or datetime.now(timezone.utc)
+    status_path = public_dir / "status.json"
+    payload = _load_json(status_path)
+    generated = None
+    if isinstance(payload, dict):
+        generated = _parse_iso_timestamp(payload.get("generated_utc"))
+    if generated is not None and generated >= now - timedelta(hours=float(stale_hours)):
+        return None
+
+    return reset_status_file(
+        path=status_path,
+        now=now,
+        backup_dir=public_dir / "monitoring" / "reset_backups",
+        reason="pipeline_cleanup",
+    )
+
+
+def _prune_anchor_state(
+    public_dir: Path,
+    *,
+    now: Optional[datetime] = None,
+    max_age_hours: float = 72.0,
+):
+    from scripts.reset_dashboard_state import reset_anchor_state_file
+
+    now = now or datetime.now(timezone.utc)
+    anchor_path = public_dir / "_active_anchor.json"
+    if not anchor_path.exists():
+        anchor_path.parent.mkdir(parents=True, exist_ok=True)
+        anchor_path.write_text("{}", encoding="utf-8")
+    return reset_anchor_state_file(
+        max_age_hours=max_age_hours,
+        path=str(anchor_path),
+        now=now,
+        backup_dir=public_dir / "monitoring" / "reset_backups",
+    )
+
+
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Synchronise pipeline runtime state")
     parser.add_argument("--public-dir", default=os.getenv("PUBLIC_DIR", "public"))
@@ -238,6 +457,27 @@ def main(argv: Iterable[str] | None = None) -> int:
     except SystemExit as exc:
         LOGGER.error("%s", exc)
         return 2
+
+    now = datetime.now(timezone.utc)
+    archived = _archive_analysis_summaries(public_dir, now=now)
+    if archived:
+        LOGGER.info("Archived %d analysis summary snapshot(s)", archived)
+
+    monitor_archived = _archive_stale_feature_monitors(public_dir, now=now)
+    if monitor_archived:
+        LOGGER.info("Archived %d stale feature monitor snapshot(s)", monitor_archived)
+
+    notify_reset = _maybe_reset_notify_state(public_dir, now=now)
+    if notify_reset and getattr(notify_reset, "changed", False):
+        LOGGER.info("%s", getattr(notify_reset, "message", "reset notify state"))
+
+    status_reset = _maybe_reset_status(public_dir, now=now)
+    if status_reset and getattr(status_reset, "changed", False):
+        LOGGER.info("%s", getattr(status_reset, "message", "reset status"))
+
+    anchor_reset = _prune_anchor_state(public_dir, now=now)
+    if anchor_reset and (getattr(anchor_reset, "removed", 0) or getattr(anchor_reset, "changed", False)):
+        LOGGER.info("%s", getattr(anchor_reset, "message", "refreshed anchor state"))
 
     build_info_path = _write_build_metadata(public_dir, git_meta, module_path, repo_root, args.module)
     LOGGER.info("Wrote build metadata to %s", build_info_path)
