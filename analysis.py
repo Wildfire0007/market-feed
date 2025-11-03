@@ -1341,7 +1341,7 @@ def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
         special_note = f"Piac zárva (pénteki zárás {format_utc_minute(friday_close)} UTC)"
 
     open_now = monitor_ok and weekday_ok
-     if asset == "BTCUSD":
+    if asset == "BTCUSD":
         entry_open = entry_window_ok and weekday_ok
     else:
         entry_open = entry_window_ok and weekday_ok and (
@@ -10085,6 +10085,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
