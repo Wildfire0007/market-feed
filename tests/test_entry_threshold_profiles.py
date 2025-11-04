@@ -23,7 +23,7 @@ def _reload_settings(monkeypatch, profile=None):
 def test_default_profile_configuration(monkeypatch):
     settings = _reload_settings(monkeypatch)
 
-    assert settings.ENTRY_THRESHOLD_PROFILE_NAME == "suppressed"
+    assert settings.ENTRY_THRESHOLD_PROFILE_NAME == "relaxed"
     profile = settings.describe_entry_threshold_profile()
     assert profile["name"] == "suppressed"
     assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(32.0)
