@@ -29,7 +29,7 @@ def test_default_profile_configuration(monkeypatch):
     assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(58.0)
     assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(48.0)
     assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.95)
-    assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.85)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.9)
 
     baseline = settings.describe_entry_threshold_profile("baseline")
     assert baseline["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(60.0)
