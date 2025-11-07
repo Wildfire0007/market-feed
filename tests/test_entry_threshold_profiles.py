@@ -23,17 +23,17 @@ def _reload_settings(monkeypatch, profile=None):
 def test_default_profile_configuration(monkeypatch):
     settings = _reload_settings(monkeypatch)
 
-    # Alapértelmezett aktív profil továbbra is 'relaxed'
+    # Alapértelmezett aktív profil most már 'suppressed'
     assert settings.ENTRY_THRESHOLD_PROFILE_NAME == "suppressed"
     profile = settings.describe_entry_threshold_profile()
     assert profile["name"] == "suppressed"
 
-    # RELAXED p_score_min: default 50.0, BTCUSD 40.0 (EURUSD nincs override -> default)
-    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(50.0)
-    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(40.0)
+    # SUPPRESSED p_score_min: default 40.0, EURUSD 32.0, BTCUSD 44.0
+    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(32.0)
+    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(44.0)
 
-    # RELAXED atr_threshold_multiplier: default 0.90, USOIL 0.85
-    assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.90)
+    # SUPPRESSED atr_threshold_multiplier: default 0.95, USOIL 0.85
+    assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.95)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.85)
 
     # Baseline továbbra is a régi értékekkel (változatlan)
@@ -65,7 +65,7 @@ def test_relaxed_profile_override(monkeypatch):
     profile = settings.describe_entry_threshold_profile()
     assert profile["name"] == "relaxed"
 
-    # Új RELAXED értékek
+    # RELAXED értékek
     assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(52.0)
     assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(40.0)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.85)
