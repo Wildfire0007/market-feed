@@ -81,7 +81,11 @@ def test_weekend_profile_skips_non_target_assets(monkeypatch):
 
 
 def test_invalid_session_status_profile_fallback(monkeypatch):
-    settings, _ = _reload_for_status_profile(monkeypatch, "does-not-exist")
+    # Időfüggetlenítés: fagyasszuk hétfőre az "aktuális" időt, hogy a weekend auto-profil ne befolyásolja a fallbacket.
+    fake_weekday = datetime(2025, 1, 6, 12, 0, tzinfo=timezone.utc)  # hétfő
+    settings, _ = _reload_for_status_profile(
+        monkeypatch, "does-not-exist", forced_now=fake_weekday
+    )
     try:
         assert settings.SESSION_STATUS_PROFILE_NAME == "default"
     finally:
