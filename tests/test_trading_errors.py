@@ -1,5 +1,8 @@
 import os
 import sys
+import tempfile
+import threading
+import types
 import unittest
 from typing import Any, Dict
 from unittest import mock
@@ -154,6 +157,80 @@ class CollectRealtimeSpotTests(unittest.TestCase):
         self.assertLessEqual(calls["max_samples"], 2)
         self.assertLessEqual(calls["interval"], 2.0)
         self.assertTrue(calls["force"])
+
+    def test_websocket_failure_falls_back_to_http(self):
+        frames = [
+            {
+                "price": 1.1111,
+                "utc": "2024-01-01T00:00:00Z",
+                "retrieved_at_utc": "2024-01-01T00:00:01Z",
+            }
+        ]
+        saved: Dict[str, Any] = {}
+
+        fake_ws = types.SimpleNamespace(
+            create_connection=mock.Mock(side_effect=RuntimeError("ws unavailable")),
+            WebSocketTimeoutException=Exception,
+        )
+
+        def capture_json(path, payload):
+            saved["path"] = path
+            saved["payload"] = payload
+
+        with tempfile.TemporaryDirectory() as out_dir, \
+             mock.patch("Trading.REALTIME_WS_ENABLED", True), \
+             mock.patch("Trading.REALTIME_FLAG", True), \
+             mock.patch("Trading.REALTIME_DURATION", 5.0), \
+             mock.patch("Trading.REALTIME_INTERVAL", 1.0), \
+             mock.patch("Trading.websocket", fake_ws), \
+             mock.patch("Trading.ensure_dir"), \
+             mock.patch("Trading._collect_http_frames", return_value=(frames, None)) as http_mock, \
+             mock.patch("Trading.save_json", side_effect=capture_json), \
+             mock.patch("Trading.time.time", side_effect=[1000.0, 1000.0, 1000.0]):
+            Trading._collect_realtime_spot_impl(
+                "EURUSD",
+                [("EUR/USD", "FX")],
+                out_dir,
+                force=False,
+            )
+
+        self.assertIn("payload", saved)
+        payload = saved["payload"]
+        self.assertEqual(payload.get("transport"), "http")
+        self.assertEqual(payload.get("source"), "rest")
+        self.assertEqual(payload.get("frames"), frames)
+        http_mock.assert_called_once()
+
+    def test_wait_for_realtime_background_joins_threads(self):
+        events: Dict[str, Any] = {}
+        done = threading.Event()
+
+        def fake_impl(asset, symbol_cycle, out_dir, force=False, reason=None):
+            events["asset"] = asset
+            events["cycle"] = list(symbol_cycle)
+            events["out_dir"] = out_dir
+            done.set()
+
+        with tempfile.TemporaryDirectory() as out_dir, \
+             mock.patch("Trading.REALTIME_FLAG", True), \
+             mock.patch("Trading.REALTIME_WS_ENABLED", False), \
+             mock.patch("Trading.ensure_dir"), \
+             mock.patch("Trading._collect_realtime_spot_impl", side_effect=fake_impl):
+            Trading.REALTIME_BACKGROUND_THREADS.clear()
+            Trading.collect_realtime_spot(
+                "EURUSD",
+                [("EUR/USD", "FX")],
+                out_dir,
+                force=False,
+            )
+            self.assertTrue(Trading.REALTIME_BACKGROUND_THREADS)
+            self.assertTrue(done.wait(timeout=2.0))
+            Trading.wait_for_realtime_background()
+
+        self.assertEqual(events.get("asset"), "EURUSD")
+        self.assertEqual(events.get("cycle"), [("EUR/USD", "FX")])
+        self.assertTrue(events.get("out_dir"))
+        self.assertFalse(Trading.REALTIME_BACKGROUND_THREADS)
 
 
 class TDQuotePriceExtractionTests(unittest.TestCase):
