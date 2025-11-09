@@ -3798,11 +3798,25 @@ def detect_analysis_revision() -> Optional[Dict[str, Any]]:
                 stderr=subprocess.DEVNULL,
                 text=True,
             )
-            .strip()
+            .splitlines()
         )
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        status = ""
-    if status:
+        status = []
+
+    relevant_changes = []
+    for line in status:
+        entry = line.strip()
+        if not entry:
+            continue
+        try:
+            _, path = entry.split(None, 1)
+        except ValueError:
+            path = entry
+        if path.startswith("public/"):
+            continue
+        relevant_changes.append(entry)
+
+    if relevant_changes:
         metadata["dirty"] = True
 
     return metadata
@@ -10213,6 +10227,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
