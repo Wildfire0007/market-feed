@@ -10,7 +10,7 @@ import os
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, TypeVar
 
 import logging
 
@@ -20,6 +20,7 @@ _DEFAULT_CONFIG_PATH = Path(__file__).with_name("analysis_settings.json")
 _ENV_OVERRIDE = "ANALYSIS_CONFIG_FILE"
 
 SequenceTuple = Tuple[Any, ...]
+T = TypeVar("T")
 
 
 def _now_utc() -> datetime:
@@ -255,6 +256,42 @@ def _normalize_entry_profile(name: str, raw_profile: Any) -> Dict[str, Dict[str,
             raw_profile.get("atr_threshold_multiplier"), 1.0
         ),
     }
+
+
+def _normalize_profiled_numeric_map(
+    raw_map: Any, cast: Callable[[Any], T], default_value: T
+) -> Dict[str, Dict[str, T]]:
+    profiles: Dict[str, Dict[str, T]] = {}
+    if not isinstance(raw_map, dict):
+        return profiles
+
+    for profile_name, mapping in raw_map.items():
+        if not isinstance(mapping, dict):
+            continue
+        profile_default = default_value
+        if "default" in mapping:
+            try:
+                value = mapping.get("default")
+                if value is not None:
+                    profile_default = cast(value)
+            except (TypeError, ValueError):
+                LOGGER.warning(
+                    "Ignoring invalid default %r for profile %s", mapping.get("default"), profile_name
+                )
+        overrides: Dict[str, T] = {}
+        for asset, value in mapping.items():
+            if asset == "default":
+                continue
+            try:
+                if value is None:
+                    continue
+                overrides[str(asset)] = cast(value)
+            except (TypeError, ValueError):
+                LOGGER.warning(
+                    "Ignoring invalid override %r for %s in profile %s", value, asset, profile_name
+                )
+        profiles[str(profile_name)] = {"default": profile_default, "by_asset": overrides}
+    return profiles
 
 
 def _normalize_bias_relax(raw_map: Any) -> Dict[str, Dict[str, Any]]:
@@ -682,6 +719,26 @@ for key, value in _RAW_SPREAD_MAX.items():
     except (TypeError, ValueError):
         continue
 
+_ATR_PERIOD_PROFILES = _normalize_profiled_numeric_map(
+    _get_config_value("atr_period_profiles"), lambda value: int(float(value)), 14
+)
+_ATR_ABS_MIN_PROFILES = _normalize_profiled_numeric_map(
+    _get_config_value("atr_abs_min_profiles"), float, 0.0
+)
+_SPREAD_PROFILE_DEFAULT = float(SPREAD_MAX_ATR_PCT.get("default", 0.0) or 0.0)
+_SPREAD_MAX_ATR_PCT_PROFILES = _normalize_profiled_numeric_map(
+    _get_config_value("spread_max_atr_pct_profiles"), float, _SPREAD_PROFILE_DEFAULT
+)
+_FIB_TOLERANCE_PROFILES = _normalize_profiled_numeric_map(
+    _get_config_value("fib_tolerance_profiles"), float, 0.02
+)
+_MAX_RISK_PCT_PROFILES = _normalize_profiled_numeric_map(
+    _get_config_value("max_risk_pct_profiles"), float, 1.5
+)
+_BOS_LOOKBACK_PROFILES = _normalize_profiled_numeric_map(
+    _get_config_value("bos_lookback_profiles"), lambda value: int(float(value)), 30
+)
+
 _RAW_VWAP_BAND_MULT = dict(_get_config_value("vwap_band_mult") or {})
 VWAP_BAND_MULT: Dict[str, float] = {}
 for key, value in _RAW_VWAP_BAND_MULT.items():
@@ -718,6 +775,110 @@ def get_atr_threshold_multiplier(asset: str) -> float:
     """Return the ATR threshold multiplier for the active profile."""
 
     return ATR_THRESHOLD_MULT_ASSET.get(asset, ATR_THRESHOLD_MULT_DEFAULT)
+
+
+def get_atr_period(asset: str, profile: Optional[str] = None) -> int:
+    """Return the ATR calculation window (bars) for the requested profile."""
+
+    profile_name = profile or ENTRY_THRESHOLD_PROFILE_NAME
+    profile_cfg = _ATR_PERIOD_PROFILES.get(profile_name) or {}
+    overrides = profile_cfg.get("by_asset", {})
+    if asset in overrides:
+        return int(overrides[asset])
+    default_val = profile_cfg.get("default")
+    if default_val not in (None, 0):
+        return int(default_val)
+    baseline_default = _ATR_PERIOD_PROFILES.get("baseline", {}).get("default")
+    if baseline_default not in (None, 0):
+        return int(baseline_default)
+    return 14
+
+
+def get_atr_abs_min(asset: str, profile: Optional[str] = None) -> Optional[float]:
+    """Return the minimum absolute ATR threshold for the profile if configured."""
+
+    profile_name = profile or ENTRY_THRESHOLD_PROFILE_NAME
+    profile_cfg = _ATR_ABS_MIN_PROFILES.get(profile_name) or {}
+    overrides = profile_cfg.get("by_asset", {})
+    value = overrides.get(asset)
+    if value not in (None, 0):
+        return float(value)
+    default_val = profile_cfg.get("default")
+    if default_val not in (None, 0):
+        return float(default_val)
+    base = ATR_ABS_MIN.get(asset)
+    if base is not None:
+        return float(base)
+    return None
+
+
+def get_spread_max_atr_pct(asset: str, profile: Optional[str] = None) -> float:
+    """Return the maximum spread/ATR ratio for the given profile."""
+
+    profile_name = profile or ENTRY_THRESHOLD_PROFILE_NAME
+    profile_cfg = _SPREAD_MAX_ATR_PCT_PROFILES.get(profile_name) or {}
+    overrides = profile_cfg.get("by_asset", {})
+    value = overrides.get(asset)
+    if value is not None:
+        return float(value)
+    default_val = profile_cfg.get("default")
+    if default_val is not None and default_val > 0:
+        return float(default_val)
+    base = SPREAD_MAX_ATR_PCT.get(asset, SPREAD_MAX_ATR_PCT.get("default", 0.0))
+    return float(base or 0.0)
+
+
+def get_fib_tolerance(asset: str, profile: Optional[str] = None) -> float:
+    """Return the Fib tolerance fraction for the profile/asset combination."""
+
+    profile_name = profile or ENTRY_THRESHOLD_PROFILE_NAME
+    profile_cfg = _FIB_TOLERANCE_PROFILES.get(profile_name) or {}
+    overrides = profile_cfg.get("by_asset", {})
+    value = overrides.get(asset)
+    if value is not None and value > 0:
+        return float(value)
+    default_val = profile_cfg.get("default")
+    if default_val is not None and default_val > 0:
+        return float(default_val)
+    baseline_default = _FIB_TOLERANCE_PROFILES.get("baseline", {}).get("default")
+    if baseline_default is not None and baseline_default > 0:
+        return float(baseline_default)
+    return 0.02
+
+
+def get_max_risk_pct(asset: str, profile: Optional[str] = None) -> float:
+    """Return the maximum per-trade risk percentage for the active profile."""
+
+    profile_name = profile or ENTRY_THRESHOLD_PROFILE_NAME
+    profile_cfg = _MAX_RISK_PCT_PROFILES.get(profile_name) or {}
+    overrides = profile_cfg.get("by_asset", {})
+    value = overrides.get(asset)
+    if value is not None and value > 0:
+        return float(value)
+    default_val = profile_cfg.get("default")
+    if default_val is not None and default_val > 0:
+        return float(default_val)
+    baseline_default = _MAX_RISK_PCT_PROFILES.get("baseline", {}).get("default")
+    if baseline_default is not None and baseline_default > 0:
+        return float(baseline_default)
+    return 1.5
+
+
+def get_bos_lookback(asset: Optional[str] = None, profile: Optional[str] = None) -> int:
+    """Return the BOS/CHoCH lookback window in bars for the selected profile."""
+
+    profile_name = profile or ENTRY_THRESHOLD_PROFILE_NAME
+    profile_cfg = _BOS_LOOKBACK_PROFILES.get(profile_name) or {}
+    overrides = profile_cfg.get("by_asset", {})
+    if asset and asset in overrides:
+        return int(overrides[asset])
+    default_val = profile_cfg.get("default")
+    if default_val not in (None, 0):
+        return int(default_val)
+    baseline_default = _BOS_LOOKBACK_PROFILES.get("baseline", {}).get("default")
+    if baseline_default not in (None, 0):
+        return int(baseline_default)
+    return 30
 
 
 def list_entry_threshold_profiles() -> List[str]:
