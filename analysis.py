@@ -88,9 +88,9 @@ BTC_ADX_TREND_MIN = 20.0
 
 # ATR floor + napszak-percentilis (TOD = time-of-day buckets) – baseline/relaxed/suppressed
 BTC_ATR_FLOOR_USD = {
-    "baseline": 85.0,
-    "relaxed": 78.0,
-    "suppressed": 70.0,
+    "baseline": 90.0,
+    "relaxed": 80.0,
+    "suppressed": 75.0,
 }
 BTC_ATR_PCT_TOD = {  # percentilis minimum a nap adott szakaszára
     "baseline": {"open": 0.45, "mid": 0.40, "close": 0.45},
@@ -99,17 +99,17 @@ BTC_ATR_PCT_TOD = {  # percentilis minimum a nap adott szakaszára
 }
 
 # P-score / RR / TP / SL / no-chase per profile
-BTC_P_SCORE_MIN = {"baseline": 50, "relaxed": 48, "suppressed": 44}
-
-BTC_RR_MIN_TREND = {"baseline": 1.80, "relaxed": 1.70, "suppressed": 1.60}
-BTC_RR_MIN_RANGE = {"baseline": 1.50, "relaxed": 1.40, "suppressed": 1.35}
+BTC_P_SCORE_MIN = {"baseline": 50, "relaxed": 48, "suppressed": 48}
+␊
+BTC_RR_MIN_TREND = {"baseline": 1.60, "relaxed": 1.55, "suppressed": 1.45}
+BTC_RR_MIN_RANGE = {"baseline": 1.60, "relaxed": 1.50, "suppressed": 1.40}
 
 BTC_RANGE_SIZE_SCALE = {"baseline": 0.55, "relaxed": 0.52, "suppressed": 0.48}
 BTC_RANGE_TIME_STOP_MIN = {"baseline": 24, "relaxed": 18, "suppressed": 15}
 BTC_RANGE_BE_TRIGGER_R = {"baseline": 0.32, "relaxed": 0.28, "suppressed": 0.24}
 
-BTC_TP_MIN_PCT = {"baseline": 0.007, "relaxed": 0.0065, "suppressed": 0.006}
-BTC_SL_ATR_MULT = {"baseline": 0.28, "relaxed": 0.26, "suppressed": 0.24}
+BTC_TP_MIN_PCT = {"baseline": 0.0068, "relaxed": 0.0064, "suppressed": 0.006}
+BTC_SL_ATR_MULT = {"baseline": 0.26, "relaxed": 0.25, "suppressed": 0.24}
 BTC_SL_ABS_MIN = 90.0  # USD
 
 # Momentum override és no-chase (slippage tiltó R-ben)
@@ -125,7 +125,7 @@ _BTC_NO_CHASE_LIMITS: Dict[str, float] = {}
 _PRECISION_RUNTIME: Dict[str, Dict[str, Any]] = {}
 
 # Precision pipeline alsó határ (ne blokkoljon túl korán)
-BTC_PRECISION_MIN = {"baseline": 55, "relaxed": 52, "suppressed": 48}
+BTC_PRECISION_MIN = {"baseline": 52, "relaxed": 50, "suppressed": 48}
 
 
 def btc_precision_state(profile: str, asset: str, score: float, trigger_ready: bool) -> str:
@@ -1038,6 +1038,50 @@ def _should_use_realtime_spot(
     if spot_ts is not None and rt_ts <= spot_ts:
         return False, {"reason": "not_newer"}
     return True, {"reason": "ok", "age_seconds": age_seconds}
+
+
+def _extract_bid_ask_spread(snapshot: Any) -> Optional[float]:
+    """Return the bid/ask spread from a realtime snapshot when available."""
+
+    if not isinstance(snapshot, dict):
+        return None
+    bid_val = safe_float(snapshot.get("bid") or snapshot.get("best_bid"))
+    ask_val = safe_float(snapshot.get("ask") or snapshot.get("best_ask"))
+    if bid_val is None or ask_val is None:
+        return None
+    try:
+        spread = float(ask_val) - float(bid_val)
+    except (TypeError, ValueError):
+        return None
+    if spread < 0:
+        return None
+    return spread
+
+
+def _resolve_spread_for_entry(
+    spot_realtime: Any,
+    spot_price_reference: Optional[float],
+    rt_price: Optional[float],
+    use_realtime: bool,
+) -> Optional[float]:
+    """Determine the spread guard input used during entry evaluation.
+
+    The spread gate should only consider realtime samples when they are
+    actively used for pricing.  Otherwise stale forced snapshots can inject
+    arbitrarily large spreads and block entries despite fresh OHLC data.
+    """
+
+    if not use_realtime:
+        return None
+    spread = _extract_bid_ask_spread(spot_realtime)
+    if spread is not None:
+        return spread
+    if rt_price is None or spot_price_reference is None:
+        return None
+    try:
+        return abs(float(rt_price) - float(spot_price_reference))
+    except (TypeError, ValueError):
+        return None
   
 def now_utctime_hm() -> Tuple[int,int]:
     t = datetime.now(timezone.utc)
@@ -4231,13 +4275,14 @@ def compute_order_flow_metrics(
     k1m: pd.DataFrame,
     k5m: pd.DataFrame,
     tick_metrics: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Optional[float]]:
-    metrics: Dict[str, Optional[float]] = {
+) -> Dict[str, Any]:
+    metrics: Dict[str, Any] = {
         "imbalance": None,
         "pressure": None,
         "delta_volume": None,
         "aggressor_ratio": None,
         "imbalance_z": None,
+        "status": "unavailable",
     }
     if tick_metrics:
         for key in ("imbalance", "pressure", "delta", "delta_volume", "aggressor_ratio"):
@@ -4248,9 +4293,11 @@ def compute_order_flow_metrics(
                 except (TypeError, ValueError):
                     continue
     if tick_metrics and metrics.get("imbalance") is not None and metrics.get("pressure") is not None:
+        metrics["status"] = "tick_only"
         return metrics
 
     if k1m.empty or "volume" not in k1m.columns or len(k1m) < ORDER_FLOW_LOOKBACK_MIN:
+        metrics["status"] = "volume_unavailable"
         return metrics
 
     recent = k1m.tail(ORDER_FLOW_LOOKBACK_MIN).copy()
@@ -4281,6 +4328,7 @@ def compute_order_flow_metrics(
         if z_score is not None and np.isfinite(z_score):
             metrics["imbalance_z"] = float(z_score)
 
+    metrics["status"] = "ok"
     return metrics
 
 
@@ -4491,7 +4539,7 @@ def compute_precision_entry(
     k5m: pd.DataFrame,
     price_now: Optional[float],
     atr5: Optional[float],
-    order_flow_metrics: Dict[str, Optional[float]],
+    order_flow_metrics: Dict[str, Any],
     score_threshold: float = PRECISION_SCORE_THRESHOLD_DEFAULT,
 ) -> Dict[str, Any]:
     plan: Dict[str, Any] = {
@@ -4520,6 +4568,11 @@ def compute_precision_entry(
         "trigger_confidence": 0.0,
         "trigger_reasons": [],
     }
+
+    metrics_status = str(order_flow_metrics.get("status") or "unavailable")
+    flow_optional = metrics_status in {"volume_unavailable", "unavailable", "stale"}
+    plan["order_flow_status"] = metrics_status
+    plan["order_flow_optional"] = flow_optional
 
     flow_rules = get_precision_flow_rules(asset)
     imbalance_threshold = float(
@@ -4663,12 +4716,18 @@ def compute_precision_entry(
         )
 
     flow_ready = (meets_count or meets_strength) and not flow_blockers
+    if flow_optional:
+        flow_ready = True
+        flow_blockers = []
+        flow_reasons.append("order flow optional (volume unavailable)")
     plan["order_flow_ready"] = flow_ready
     if flow_blockers:
         plan["order_flow_blockers"] = flow_blockers
+    else:
+        plan["order_flow_blockers"] = []
     if flow_reasons:
         plan["trigger_reasons"].extend(flow_reasons)
-
+      
     if micro_bos_with_retest(k1m, k5m, direction):
         score += 12.0
         factors.append("micro BOS + retest confirmed")
@@ -5373,6 +5432,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     k1m, k5m, k1h, k4h = as_df_klines(k1m_raw), as_df_klines(k5m_raw), as_df_klines(k1h_raw), as_df_klines(k4h_raw)
 
     spot_price = None
+    spot_price_reference: Optional[float] = None
     spot_utc = "-"
     spot_retrieved = "-"
     display_spot: Optional[float] = None
@@ -5395,6 +5455,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         spot_price = spot.get("price") if spot.get("price") is not None else spot.get("price_usd")
         spot_utc = spot.get("utc") or spot.get("timestamp") or "-"
         spot_retrieved = spot.get("retrieved_at_utc") or spot.get("retrieved") or "-"
+        try:
+            spot_price_reference = float(spot_price) if spot_price is not None else None
+        except (TypeError, ValueError):
+            spot_price_reference = None
 
     rt_price = None
     rt_utc = None
@@ -5623,17 +5687,12 @@ def analyze(asset: str) -> Dict[str, Any]:
             force_note += f" ({spot_realtime.get('force_reason')})"
         spot_latency_notes.append(force_note)
 
-    spread_abs: Optional[float] = None
-    if isinstance(spot_realtime, dict):
-        bid_val = safe_float(spot_realtime.get("bid") or spot_realtime.get("best_bid"))
-        ask_val = safe_float(spot_realtime.get("ask") or spot_realtime.get("best_ask"))
-        if bid_val is not None and ask_val is not None and ask_val >= bid_val:
-            spread_abs = float(ask_val - bid_val)
-    if spread_abs is None and rt_price is not None and spot_price is not None:
-        try:
-            spread_abs = abs(float(rt_price) - float(spot_price))
-        except (TypeError, ValueError):
-            spread_abs = None
+    spread_abs = _resolve_spread_for_entry(
+        spot_realtime,
+        spot_price_reference,
+        safe_float(rt_price) if rt_price is not None else None,
+        use_realtime,
+    )
 
     analysis_now = now
 
@@ -8856,6 +8915,9 @@ def analyze(asset: str) -> Dict[str, Any]:
         precision_trigger_state = str(precision_plan.get("trigger_state") or "standby")
         precision_plan["trigger_state"] = precision_trigger_state
         precision_flow_ready = bool(precision_plan.get("order_flow_ready"))
+        if not precision_flow_ready and precision_plan.get("order_flow_optional"):
+            precision_flow_ready = True
+            precision_plan["order_flow_ready"] = True
         precision_trigger_ready = bool(
             precision_plan.get("trigger_ready")
             or precision_trigger_state in {"arming", "fire"}
@@ -9318,9 +9380,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         "bias_long": 1.0 if effective_bias == "long" else 0.0,
         "bias_short": 1.0 if effective_bias == "short" else 0.0,
         "momentum_vol_ratio": momentum_vol_ratio or 0.0,
-        "order_flow_imbalance": order_flow_metrics.get("imbalance") or 0.0,
-        "order_flow_pressure": order_flow_metrics.get("pressure") or 0.0,
-        "order_flow_aggressor": order_flow_metrics.get("aggressor_ratio") or 0.0,
+        "order_flow_status": order_flow_metrics.get("status"),
+        "order_flow_imbalance": order_flow_metrics.get("imbalance"),
+        "order_flow_pressure": order_flow_metrics.get("pressure"),
+        "order_flow_aggressor": order_flow_metrics.get("aggressor_ratio"),
         "news_sentiment": news_sentiment_value,
         "news_event_severity": news_severity_value,
         "realtime_confidence": realtime_confidence,
@@ -10153,6 +10216,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
