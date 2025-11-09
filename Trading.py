@@ -3045,6 +3045,17 @@ def _symbol_catalog_for(symbol: str) -> Optional[List[Dict[str, Any]]]:
             return _SYMBOL_META_CACHE[key]
     try:
         response = td_get("symbols", symbol=symbol)
+    except TDError as exc:
+        log_level = logging.INFO if exc.status_code == 404 else logging.WARNING
+        LOGGER.log(
+            log_level,
+            "Failed to fetch Twelve Data symbol catalog for %s: %s",
+            symbol,
+            exc,
+        )
+        with _SYMBOL_META_LOCK:
+            _SYMBOL_META_CACHE[key] = None
+        return None
     except Exception as exc:
         LOGGER.warning(
             "Failed to fetch Twelve Data symbol catalog for %s: %s",
@@ -3746,6 +3757,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
