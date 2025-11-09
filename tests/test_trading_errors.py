@@ -81,6 +81,36 @@ class TDGetErrorTests(unittest.TestCase):
         record_success.assert_not_called()
 
 
+class SymbolCatalogLoggingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        Trading._reset_symbol_catalog_cache()
+
+    def test_symbol_catalog_404_logs_info(self) -> None:
+        error = Trading.TDError("not found", status_code=404)
+
+        with mock.patch("Trading.td_get", side_effect=error):
+            with self.assertLogs("market_feed.trading", level="INFO") as logs:
+                result = Trading._symbol_catalog_for("EUR/USD")
+
+        self.assertIsNone(result)
+        self.assertTrue(
+            any("INFO:market_feed.trading:Failed to fetch Twelve Data symbol catalog" in entry for entry in logs.output)
+        )
+        self.assertTrue(all("WARNING:" not in entry for entry in logs.output))
+
+    def test_symbol_catalog_non_404_logs_warning(self) -> None:
+        error = Trading.TDError("server down", status_code=500)
+
+        with mock.patch("Trading.td_get", side_effect=error):
+            with self.assertLogs("market_feed.trading", level="INFO") as logs:
+                result = Trading._symbol_catalog_for("EUR/USD")
+
+        self.assertIsNone(result)
+        self.assertTrue(
+            any("WARNING:market_feed.trading:Failed to fetch Twelve Data symbol catalog" in entry for entry in logs.output)
+        )
+
+
 class CollectHttpFramesTests(unittest.TestCase):
     def test_collect_http_frames_breaks_after_repeated_failures(self):
         symbol_cycle = [("EUR/USD", "FX")]
@@ -153,6 +183,8 @@ class CollectRealtimeSpotTests(unittest.TestCase):
                 reason="spot_fallback",
             )
 
+        Trading.wait_for_realtime_background()
+        
         http_mock.assert_called_once()
         self.assertLessEqual(calls["max_samples"], 2)
         self.assertLessEqual(calls["interval"], 2.0)
