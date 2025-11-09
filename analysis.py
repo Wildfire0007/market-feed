@@ -99,7 +99,7 @@ BTC_ATR_PCT_TOD = {  # percentilis minimum a nap adott szakaszára
 }
 
 # P-score / RR / TP / SL / no-chase per profile
-BTC_P_SCORE_MIN = {"baseline": 50, "relaxed": 48, "suppressed": 48}
+BTC_P_SCORE_MIN = {"baseline": 48, "relaxed": 46, "suppressed": 46}
 BTC_RR_MIN_TREND = {"baseline": 1.60, "relaxed": 1.55, "suppressed": 1.45}
 BTC_RR_MIN_RANGE = {"baseline": 1.60, "relaxed": 1.50, "suppressed": 1.40}
 
@@ -948,7 +948,7 @@ MICRO_BOS_P_BONUS = 8.0
 MOMENTUM_ATR_REL = 0.0005
 MOMENTUM_VOLUME_RECENT = 6
 MOMENTUM_VOLUME_BASE = 30
-MOMENTUM_VOLUME_RATIO_TH = 1.15
+MOMENTUM_VOLUME_RATIO_TH = 1.05
 MOMENTUM_TRAIL_TRIGGER_R = 1.2
 MOMENTUM_TRAIL_LOCK = 0.5
 ANCHOR_P_SCORE_DELTA_WARN = 10.0
@@ -10215,6 +10215,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
