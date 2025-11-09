@@ -14,7 +14,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 LOGGER = logging.getLogger("pipeline_env")
 
@@ -205,6 +205,123 @@ def _parse_iso_timestamp(value: Any) -> Optional[datetime]:
             return parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
     return None
+
+
+def _extract_bid_ask(frame: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+    bid_keys = ("bid", "best_bid", "bid_price", "b")
+    ask_keys = ("ask", "best_ask", "ask_price", "a")
+    bid_val: Optional[float] = None
+    ask_val: Optional[float] = None
+    for key in bid_keys:
+        if key in frame and frame.get(key) is not None:
+            try:
+                bid_val = float(frame[key])
+            except (TypeError, ValueError):
+                bid_val = None
+            if bid_val is not None:
+                break
+    for key in ask_keys:
+        if key in frame and frame.get(key) is not None:
+            try:
+                ask_val = float(frame[key])
+            except (TypeError, ValueError):
+                ask_val = None
+            if ask_val is not None:
+                break
+    return bid_val, ask_val
+
+
+def _mark_snapshot_stale(payload: Dict[str, Any], reason: str, *, now: datetime) -> bool:
+    changed = False
+    if payload.get("ok") is not False:
+        payload["ok"] = False
+        changed = True
+    if payload.get("stale_reason") != reason:
+        payload["stale_reason"] = reason
+        changed = True
+    payload["stale_marked_at_utc"] = now.isoformat()
+    payload["suggested_refresh"] = "now"
+    for field in ("price", "frames", "statistics", "forced", "force_reason"):
+        if field in payload:
+            payload.pop(field, None)
+            changed = True
+    return changed
+
+
+def _sanitize_spot_snapshots(public_dir: Path, *, now: Optional[datetime] = None) -> int:
+    now = now or datetime.now(timezone.utc)
+    updated = 0
+    for snapshot_path in public_dir.glob("*/spot_realtime.json"):
+        if not snapshot_path.is_file():
+            continue
+        payload = _load_json(snapshot_path)
+        if not isinstance(payload, dict) or not payload:
+            continue
+        forced = bool(payload.get("forced")) or payload.get("stale_reason") in {"missing_bid_ask", "older_than_300s"}
+        if not forced:
+            continue
+        reason: Optional[str] = None
+        frames = payload.get("frames") if isinstance(payload.get("frames"), list) else []
+        last_frame: Dict[str, Any] = frames[-1] if frames else {}
+        bid_val, ask_val = _extract_bid_ask(last_frame)
+        if bid_val is None or ask_val is None:
+            reason = "missing_bid_ask"
+        snapshot_ts = _parse_iso_timestamp(payload.get("utc") or payload.get("retrieved_at_utc"))
+        if snapshot_ts is None:
+            reason = reason or "missing_timestamp"
+        elif (now - snapshot_ts).total_seconds() > 300:
+            reason = "older_than_300s"
+        if not reason:
+            continue
+        if _mark_snapshot_stale(payload, reason, now=now):
+            with snapshot_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+            updated += 1
+    return updated
+
+
+def _sanitize_order_flow_summary_files(public_dir: Path) -> int:
+    updated = 0
+    summary_paths: List[Path] = []
+    root_summary = public_dir / "analysis_summary.json"
+    if root_summary.exists():
+        summary_paths.append(root_summary)
+    for path in public_dir.glob("*/analysis_summary.json"):
+        if path.is_file():
+            summary_paths.append(path)
+
+    for path in summary_paths:
+        payload = _load_json(path)
+        if not isinstance(payload, dict):
+            continue
+        assets = payload.get("assets")
+        if not isinstance(assets, dict):
+            continue
+        changed = False
+        for meta in assets.values():
+            if not isinstance(meta, dict):
+                continue
+            metrics = meta.get("order_flow_metrics")
+            if not isinstance(metrics, dict):
+                continue
+            status = str(metrics.get("status") or "").strip()
+            if not status:
+                values = [metrics.get("imbalance"), metrics.get("pressure"), metrics.get("delta_volume")]
+                if all(value in (None, 0, 0.0) for value in values):
+                    metrics["status"] = "volume_unavailable"
+                    metrics["pressure"] = None
+                    metrics["delta_volume"] = None
+                    changed = True
+            elif status in {"volume_unavailable", "unavailable"}:
+                for key in ("pressure", "delta_volume", "aggressor_ratio"):
+                    if metrics.get(key) not in (None, 0, 0.0):
+                        metrics[key] = None
+                        changed = True
+        if changed:
+            with path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+            updated += 1
+    return updated
 
 
 def _prune_archive_snapshots(root: Path, retention: int) -> None:
@@ -459,6 +576,14 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 2
 
     now = datetime.now(timezone.utc)
+    stale_snapshots = _sanitize_spot_snapshots(public_dir, now=now)
+    if stale_snapshots:
+        LOGGER.info("Marked %d realtime snapshot(s) as stale", stale_snapshots)
+
+    sanitized_summaries = _sanitize_order_flow_summary_files(public_dir)
+    if sanitized_summaries:
+        LOGGER.info("Normalised order-flow metrics in %d summary file(s)", sanitized_summaries)
+        
     archived = _archive_analysis_summaries(public_dir, now=now)
     if archived:
         LOGGER.info("Archived %d analysis summary snapshot(s)", archived)
