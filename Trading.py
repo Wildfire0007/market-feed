@@ -895,8 +895,13 @@ def load_json(path: str) -> Optional[Any]:
 
 
 def _format_attempts(attempts: List[Tuple[str, Optional[str]]]) -> List[Dict[str, Optional[str]]]:
+    seen: Set[Tuple[str, Optional[str]]] = set()
     formatted: List[Dict[str, Optional[str]]] = []
     for symbol, exchange in attempts:
+        key = (symbol, exchange)
+        if key in seen:
+            continue
+        seen.add(key)
         formatted.append({"symbol": symbol, "exchange": exchange})
     return formatted
 
@@ -3652,6 +3657,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
