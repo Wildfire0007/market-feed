@@ -27,16 +27,19 @@ def test_default_profile_configuration(monkeypatch):
     assert settings.ENTRY_THRESHOLD_PROFILE_NAME == "baseline"
     profile = settings.describe_entry_threshold_profile()
     assert profile["name"] == "baseline"
-    assert profile["p_score_min"]["default"] == pytest.approx(52.0)
-    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(50.0)
-    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(52.0)
+    assert profile["p_score_min"]["default"] == pytest.approx(50.0)
+    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(48.0)
+    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(50.0)
+    assert profile["p_score_min"]["by_asset"]["XAGUSD"] == pytest.approx(53.0)
+    assert profile["p_score_min"]["by_asset"]["NVDA"] == pytest.approx(48.0)
+    assert profile["p_score_min"]["by_asset"]["USOIL"] == pytest.approx(48.0)
     assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.95)
     assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.9)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.92)
 
     suppressed = settings.describe_entry_threshold_profile("suppressed")
-    assert suppressed["p_score_min"]["default"] == pytest.approx(48.0)
-    assert suppressed["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(48.0)
+    assert suppressed["p_score_min"]["default"] == pytest.approx(46.0)
+    assert suppressed["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(46.0)
     assert suppressed["atr_threshold_multiplier"]["default"] == pytest.approx(0.88)
     assert suppressed["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.82)
 
@@ -49,9 +52,9 @@ def test_suppressed_profile_configuration(monkeypatch):
     assert settings.ENTRY_THRESHOLD_PROFILE_NAME == "suppressed"
     profile = settings.describe_entry_threshold_profile()
     assert profile["name"] == "suppressed"
-    assert profile["p_score_min"]["default"] == pytest.approx(48.0)
-    assert profile["p_score_min"]["by_asset"]["USOIL"] == pytest.approx(45.0)
-    assert profile["p_score_min"]["by_asset"]["XAGUSD"] == pytest.approx(48.0)
+    assert profile["p_score_min"]["default"] == pytest.approx(46.0)
+    assert profile["p_score_min"]["by_asset"]["USOIL"] == pytest.approx(43.0)
+    assert profile["p_score_min"]["by_asset"]["XAGUSD"] == pytest.approx(46.0)
     assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.88)
     assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.85)
 
@@ -64,17 +67,17 @@ def test_relaxed_profile_override(monkeypatch):
     assert profile["name"] == "relaxed"
 
     # RELAXED értékek
-    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(50.0)
-    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(45.0)
+    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(48.0)
+    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(46.0)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.88)
     assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.88)
 
     # Nem felülírt eszköz fallback a profil defaultjára (EURUSD -> 50.0)
-    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(50.0)
+    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(48.0)
 
     # Baseline ellenőrzés (aktív)
     baseline = settings.describe_entry_threshold_profile("baseline")
-    assert baseline["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(52.0)
+    assert baseline["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(50.0)
 
     # Profilok listája
     assert set(settings.list_entry_threshold_profiles()) >= {
@@ -114,6 +117,10 @@ def test_intraday_bias_and_atr_overrides(monkeypatch):
     btc_bias = settings.INTRADAY_BIAS_RELAX["BTCUSD"]
     assert any(
         scenario["direction"] == "long" and "momentum_volume" in scenario["requires"]
+        for scenario in btc_bias["scenarios"]
+    )
+    assert any(
+        scenario["direction"] == "long" and "bos5m_long" in scenario["requires"]
         for scenario in btc_bias["scenarios"]
     )
 
