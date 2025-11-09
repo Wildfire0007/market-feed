@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -107,3 +108,43 @@ def test_summarize_pipeline_warnings_detects_exceptions(tmp_path):
     latest_bucket = trend_series[-1]
     assert latest_bucket["client_errors"] == 1
     assert latest_bucket["throttling"] == 1
+
+
+def test_summarize_pipeline_warnings_handles_json_logs(tmp_path):
+    log_path = tmp_path / "pipeline.log"
+    entries = [
+        json.dumps(
+            {
+                "timestamp": "2024-06-02T10:00:00Z",
+                "level": "WARNING",
+                "message": "Client error 404 while fetching feed for EURUSD",
+                "event": "fetch_completed",
+                "asset": "EURUSD",
+            }
+        ),
+        json.dumps(
+            {
+                "timestamp": "2024-06-02T10:01:00Z",
+                "level": "ERROR",
+                "message": "Failed to publish update",
+                "exc_info": "Traceback (most recent call last):\n  File \"notify.py\", line 10, in <module>\nRuntimeError: publish failed",
+            }
+        ),
+    ]
+    log_path.write_text("\n".join(entries))
+
+    summary = pipeline_monitor.summarize_pipeline_warnings(log_path)
+
+    assert summary["warning_lines"] == 1
+    assert summary["client_error_lines"] == 1
+    assert summary["error_lines"] == 1
+    assert summary["exception_types"].get("RuntimeError") == 1
+    assert summary["last_exception"]["type"] == "RuntimeError"
+    assert summary["last_error"]["message"] == "Failed to publish update"
+    recent_symbols = summary["recent_warning_symbols"]
+    assert recent_symbols["total_events"] == 1
+    assert recent_symbols["symbols"]
+    assert recent_symbols["symbols"][0]["symbol"] == "EURUSD"
+    trend_series = summary["warning_trend"]["series"]
+    assert trend_series
+    assert trend_series[-1]["client_errors"] == 1
