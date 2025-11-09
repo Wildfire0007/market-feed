@@ -100,7 +100,6 @@ BTC_ATR_PCT_TOD = {  # percentilis minimum a nap adott szakaszára
 
 # P-score / RR / TP / SL / no-chase per profile
 BTC_P_SCORE_MIN = {"baseline": 50, "relaxed": 48, "suppressed": 48}
-␊
 BTC_RR_MIN_TREND = {"baseline": 1.60, "relaxed": 1.55, "suppressed": 1.45}
 BTC_RR_MIN_RANGE = {"baseline": 1.60, "relaxed": 1.50, "suppressed": 1.40}
 
@@ -10216,6 +10215,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
