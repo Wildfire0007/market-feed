@@ -18,6 +18,22 @@ def test_normalize_symbol_attempts_generates_crypto_variants() -> None:
     assert ("BTC/USD:CRYPTO", None) in attempts
 
 
+def test_format_attempts_deduplicates_symbol_exchange_pairs() -> None:
+    attempts = [
+        ("BTC/USD", "CRYPTO"),
+        ("BTC/USD", "CRYPTO"),
+        ("BTC/USD", None),
+        ("BTC/USD", None),
+    ]
+
+    formatted = Trading._format_attempts(attempts)
+
+    assert formatted == [
+        {"symbol": "BTC/USD", "exchange": "CRYPTO"},
+        {"symbol": "BTC/USD", "exchange": None},
+    ]
+
+
 def test_normalize_symbol_attempts_respects_alt_symbols() -> None:
     cfg = {
         "symbol": "ABC/DEF",
