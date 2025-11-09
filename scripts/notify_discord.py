@@ -25,7 +25,7 @@ ENV:
 - DISCORD_FORCE_HEARTBEAT=1 ➜ csak az összefoglalót kényszerítjük (cooldown marad)
 """
 
-import os, json, sys, requests
+import os, json, sys, logging, requests
 from copy import deepcopy
 from pathlib import Path
 import numpy as np
@@ -41,6 +41,10 @@ if str(_REPO_ROOT) not in sys.path:
 
 from active_anchor import load_anchor_state, touch_anchor
 from config.analysis_settings import ASSETS as CONFIG_ASSETS
+from logging_utils import ensure_json_stream_handler
+
+LOGGER = logging.getLogger("market_feed.notify")
+ensure_json_stream_handler(LOGGER, static_fields={"component": "notify"})
 
 PUBLIC_DIR = "public"
 ASSETS: List[str] = list(CONFIG_ASSETS)
@@ -1426,8 +1430,29 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
 # ---------------- főlogika ----------------
 
 def main():
+    run_meta = {
+        "run_id": os.getenv("GITHUB_RUN_ID"),
+        "run_attempt": os.getenv("GITHUB_RUN_ATTEMPT"),
+        "workflow": os.getenv("GITHUB_WORKFLOW"),
+    }
+
+    def log_event(event: str, **fields: Any) -> None:
+        payload = {
+            key: value
+            for key, value in run_meta.items()
+            if value is not None and str(value).strip()
+        }
+        for key, value in fields.items():
+            if isinstance(value, set):
+                payload[key] = sorted(value)
+            elif value is not None:
+                payload[key] = value
+        payload["event"] = event
+        LOGGER.info(event, extra=payload)
+
     hook = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
     if not hook:
+        log_event("notify_skipped", reason="missing_webhook")
         print("No DISCORD_WEBHOOK_URL, skipping notify.")
         return
 
@@ -1452,6 +1477,21 @@ def main():
 
     force_send = manual_context or skip_cooldown_flag
     force_heartbeat = manual_context or heartbeat_flag or force_heartbeat_env
+
+    log_event(
+        "notify_run_start",
+        manual_flag=bool(manual_flag),
+        force_flag=bool(force_flag),
+        heartbeat_flag=bool(heartbeat_flag),
+        manual_context=bool(manual_context),
+        force_send=bool(force_send),
+        force_heartbeat=bool(force_heartbeat),
+        skip_cooldown=bool(skip_cooldown_flag),
+        force_env=bool(force_env),
+        force_heartbeat_env=bool(force_heartbeat_env),
+        asset_count=len(ASSETS),
+        flag_args=sorted(flags),
+    )
 
     tdstatus = load_tdstatus()
     state = load_state()
