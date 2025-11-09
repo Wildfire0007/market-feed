@@ -144,7 +144,6 @@ from config.analysis_settings import (
     ASSET_COST_MODEL,
     ATR5_MIN_MULT,
     ATR5_MIN_MULT_ASSET,
-    ATR_ABS_MIN,
     ATR_LOW_TH_ASSET,
     ATR_LOW_TH_DEFAULT,
     ATR_VOL_HIGH_REL,
@@ -190,7 +189,6 @@ from config.analysis_settings import (
     SESSION_WINDOWS_UTC,
     resolve_session_status_for_asset,
     is_momentum_asset,
-    SPREAD_MAX_ATR_PCT,
     SL_BUFFER_RULES,
     SMT_AUTO_CONFIG,
     SMT_PENALTY_VALUE,
@@ -201,8 +199,14 @@ from config.analysis_settings import (
     TP_NET_MIN_ASSET,
     TP_NET_MIN_DEFAULT,
     VWAP_BAND_MULT,
+    get_atr_abs_min,
+    get_atr_period,
     get_atr_threshold_multiplier,
+    get_bos_lookback,
+    get_fib_tolerance,
+    get_max_risk_pct,
     get_p_score_min,
+    get_spread_max_atr_pct,
     load_config,
 )
 
@@ -539,11 +543,7 @@ def btc_sl_tp_checks(
         return
     profile_key = profile if profile in BTC_SL_ATR_MULT else "baseline"
 
-    sp_limit = 0.40
-    try:
-        sp_limit = float(SPREAD_MAX_ATR_PCT.get("BTCUSD", sp_limit))
-    except Exception:
-        pass
+    sp_limit = get_spread_max_atr_pct(asset, profile)
     spread_func = globals().get("spread_usd")
     sp = spread_func(asset) if callable(spread_func) else 0.0
     if sp > atr_5m * sp_limit:
@@ -788,9 +788,6 @@ def _load_macro_lockout_windows() -> Dict[str, List[Dict[str, Any]]]:
     _MACRO_LOCKOUT_CACHE = (mtime, normalized)
     return normalized
 
-MAX_RISK_PCT = 1.8
-
-
 def _env_flag(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -868,7 +865,7 @@ TP1_R_MOMENTUM = 1.5
 TP2_R_MOMENTUM = 2.4
 MIN_STOPLOSS_PCT = 0.01
 # Momentum structure check window (5m candles × lookback bars)
-MOMENTUM_BOS_LB = 36
+DEFAULT_BOS_LOOKBACK = get_bos_lookback()
 # Number of recent bars to inspect for EMA cross momentum confirmation
 MOMENTUM_BARS = 12
 
@@ -2105,7 +2102,8 @@ def build_action_plan(
         add_note(
             f"Belépő–stop távolság ≈ {risk_pct:.2f}% ({abs(float(last_computed_risk)):.5f} ár)."
         )
-        add_note(f"Maximális számla kockázat: {MAX_RISK_PCT:.1f}%.")
+        risk_cap = get_max_risk_pct(asset)
+        add_note(f"Maximális számla kockázat: {risk_cap:.1f}%.")
 
     if momentum_trailing_plan:
         activation = momentum_trailing_plan.get("activation_rr")
@@ -3260,7 +3258,8 @@ def compute_btcusd_intraday_watch(
             speed_score += 6
     speed_score = min(32.0, speed_score)
 
-    atr5_series = atr(df_5m, 14)
+    atr_period = get_atr_period("BTCUSD")
+    atr5_series = atr(df_5m, atr_period)
     atr5_val = safe_float(atr5_series.iloc[-1]) if not atr5_series.empty else None
     atr5_med = None
     if not atr5_series.empty:
@@ -4469,11 +4468,12 @@ def detect_bos(df: pd.DataFrame, direction: str) -> bool:
         return sw["low"].iloc[-1] < lo
     return False
 
-def broke_structure(df: pd.DataFrame, direction: str, lookback: int = MOMENTUM_BOS_LB) -> bool:
+def broke_structure(df: pd.DataFrame, direction: str, lookback: Optional[int] = None) -> bool:
     """Egyszerű szerkezeti törés: utolsó high/low áttöri az előző N bar csúcsát/alját."""
-    if df.empty or len(df) < lookback + 2:
+    lb = lookback or DEFAULT_BOS_LOOKBACK
+    if df.empty or len(df) < lb + 2:
         return False
-    ref = df.iloc[-(lookback+1):-1]
+    ref = df.iloc[-(lb + 1) : -1]
     last = df.iloc[-1]
     if direction == "long":
         return last["high"] > ref["high"].max()
@@ -4481,13 +4481,15 @@ def broke_structure(df: pd.DataFrame, direction: str, lookback: int = MOMENTUM_B
         return last["low"] < ref["low"].min()
     return False
 
-def retest_level(df: pd.DataFrame, direction: str, lookback: int = MOMENTUM_BOS_LB) -> bool:
+
+def retest_level(df: pd.DataFrame, direction: str, lookback: Optional[int] = None) -> bool:
     if df.empty or len(df) < 2:
         return False
-    if len(df) < lookback + 1:
+    lb = lookback or DEFAULT_BOS_LOOKBACK
+    if len(df) < lb + 1:
         ref = df.iloc[:-1]
     else:
-        ref = df.iloc[-(lookback+1):-1]
+        ref = df.iloc[-(lb + 1) : -1]
     if ref.empty:
         return False
     last = df.iloc[-1]
@@ -4503,21 +4505,28 @@ def retest_level(df: pd.DataFrame, direction: str, lookback: int = MOMENTUM_BOS_
         return last["low"] <= level <= last["high"]
     return False
 
-def structure_break_with_retest(df: pd.DataFrame, direction: str, lookback: int = MOMENTUM_BOS_LB) -> bool:
+
+def structure_break_with_retest(
+    df: pd.DataFrame, direction: str, lookback: Optional[int] = None
+) -> bool:
     if direction not in ("long", "short"):
         return False
-    if not broke_structure(df, direction, lookback):
+    lb = lookback or DEFAULT_BOS_LOOKBACK
+    if not broke_structure(df, direction, lb):
         return False
-    return retest_level(df, direction, lookback)
+    return retest_level(df, direction, lb)
 
-def micro_bos_with_retest(k1m: pd.DataFrame, k5m: pd.DataFrame, direction: str) -> bool:
+
+def micro_bos_with_retest(
+    k1m: pd.DataFrame, k5m: pd.DataFrame, direction: str, lookback: Optional[int] = None
+) -> bool:
     if direction not in ("long", "short"):
         return False
     if k1m.empty or len(k1m) < 10:
         return False
     if not detect_bos(k1m, direction):
         return False
-    return retest_level(k5m, direction, MOMENTUM_BOS_LB)
+    return retest_level(k5m, direction, lookback or DEFAULT_BOS_LOOKBACK)
 
 
 def _recent_liquidity_levels(
@@ -6036,7 +6045,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     bos1h_short = detect_bos(k1h_closed, "short")
 
     # 5) ATR szűrő (relatív) — a stabil árhoz viszonyítjuk (zárt 5m)
-    atr_series_5 = atr(k5m_closed)
+    atr_period = get_atr_period(asset)
+    atr_series_5 = atr(k5m_closed, period=atr_period)
     atr5 = atr_series_5.iloc[-1]
     rel_atr = float(atr5 / price_for_calc) if (atr5 and price_for_calc) else float("nan")
     adx_value = latest_adx(k5m_closed)
@@ -6181,17 +6191,9 @@ def analyze(asset: str) -> Dict[str, Any]:
     spread_ratio = None
     spread_limit: Optional[float] = None
     try:
-        raw_limit = SPREAD_MAX_ATR_PCT.get(asset, SPREAD_MAX_ATR_PCT.get("default"))
-        spread_limit = float(raw_limit) if raw_limit is not None else None
+        spread_limit = float(get_spread_max_atr_pct(asset))
     except Exception:
-        spread_limit = None
-    if asset == "BTCUSD":
-        sp_limit = 0.40
-        try:
-            sp_limit = float(SPREAD_MAX_ATR_PCT.get("BTCUSD", sp_limit))
-        except Exception:
-            pass
-        spread_limit = sp_limit
+        spread_limit = Non  
     if spread_limit and spread_abs is not None and atr5 is not None:
         try:
             spread_ratio = float(spread_abs) / float(atr5) if float(atr5) > 0 else None
@@ -6204,7 +6206,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 spread_gate_ok = False
     else:
         entry_thresholds_meta["spread_ratio"] = spread_ratio
-    atr_abs_min = ATR_ABS_MIN.get(asset)
+    atr_abs_min = get_atr_abs_min(asset)
     atr_abs_ok = True
     if atr_abs_min is not None:
         try:
@@ -6331,11 +6333,12 @@ def analyze(asset: str) -> Dict[str, Any]:
         else None
     )
     atr1h_tol = atr1h_val if np.isfinite(atr1h_val) else 0.0
+    fib_tol = get_fib_tolerance(asset)
     fib_ok = fib_zone_ok(
         move_hi, move_lo, price_for_calc,
         low=0.618, high=0.886,
         tol_abs=atr1h_tol * 0.75,   # SZÉLESÍTVE: ±0.75×ATR(1h)
-        tol_frac=0.02
+        tol_frac=fib_tol
     )
 
     # 6/b) Kiegészítő likviditás kontextus (1h EMA21 közelség + szerkezeti retest)
@@ -6365,13 +6368,14 @@ def analyze(asset: str) -> Dict[str, Any]:
         ema21_dist_ok = False
         ema21_relation = "stale"
 
-    struct_retest_long  = structure_break_with_retest(k5m_closed, "long", MOMENTUM_BOS_LB)
-    struct_retest_short = structure_break_with_retest(k5m_closed, "short", MOMENTUM_BOS_LB)
+    bos_lookback = get_bos_lookback(asset)
+    struct_retest_long = structure_break_with_retest(k5m_closed, "long", bos_lookback)
+    struct_retest_short = structure_break_with_retest(k5m_closed, "short", bos_lookback)
     if stale_timeframes.get("k5m"):
         struct_retest_long = struct_retest_short = False
 
-    micro_bos_long = micro_bos_with_retest(k1m_closed, k5m_closed, "long")
-    micro_bos_short = micro_bos_with_retest(k1m_closed, k5m_closed, "short")
+    micro_bos_long = micro_bos_with_retest(k1m_closed, k5m_closed, "long", bos_lookback)
+    micro_bos_short = micro_bos_with_retest(k1m_closed, k5m_closed, "short", bos_lookback)
     if stale_timeframes.get("k1m") or stale_timeframes.get("k5m"):
         micro_bos_long = micro_bos_short = False
 
@@ -6605,8 +6609,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         else False
     )
 
-    recent_break_long = broke_structure(k5m_closed, "long", MOMENTUM_BOS_LB)
-    recent_break_short = broke_structure(k5m_closed, "short", MOMENTUM_BOS_LB)
+    recent_break_long = broke_structure(k5m_closed, "long", bos_lookback)
+    recent_break_short = broke_structure(k5m_closed, "short", bos_lookback)
     if stale_timeframes.get("k5m"):
         recent_break_long = recent_break_short = False
 
@@ -10227,6 +10231,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
