@@ -265,8 +265,25 @@ def record_ml_model_status(
     return payload, reminder_due
 
 
-def _parse_log_line(line: str) -> Tuple[Optional[datetime], Optional[str], str]:
-    parts = line.split(" ", 3)
+def _parse_log_line(line: str) -> Tuple[Optional[datetime], Optional[str], str, Dict[str, Any]]:
+    stripped = line.strip()
+    if not stripped:
+        return None, None, "", {}
+
+    if stripped.startswith("{"):
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            return None, None, stripped, {}
+        timestamp_value = data.get("timestamp") or data.get("@timestamp") or data.get("time")
+        timestamp = _parse_iso(str(timestamp_value)) if timestamp_value is not None else None
+        level_value = data.get("level")
+        level = str(level_value) if level_value is not None else None
+        message_value = data.get("message")
+        message = str(message_value) if message_value is not None else ""
+        return timestamp, level, message, data if isinstance(data, dict) else {}
+
+    parts = stripped.split(" ", 3)
     if len(parts) >= 4:
         timestamp_str = f"{parts[0]} {parts[1]}"
         level = parts[2]
@@ -276,8 +293,8 @@ def _parse_log_line(line: str) -> Tuple[Optional[datetime], Optional[str], str]:
             timestamp = timestamp.replace(tzinfo=timezone.utc)
         except ValueError:
             timestamp = None
-        return timestamp, level, message
-    return None, None, line
+        return timestamp, level, message, {}
+    return None, None, stripped, {}
 
 
 def summarize_pipeline_warnings(path: Optional[Path] = None) -> Dict[str, Any]:
@@ -332,14 +349,24 @@ def summarize_pipeline_warnings(path: Optional[Path] = None) -> Dict[str, Any]:
                     continue
                 summary["total_lines"] += 1
 
-                timestamp, level, message = _parse_log_line(line.strip())
+                timestamp, level, message, payload = _parse_log_line(line.strip())
+                message_text = message or line
+                message_lower = message_text.lower()
+                line_lower = line.lower()
+                level_upper = level.upper() if isinstance(level, str) else ""
+                combined_lower = f"{level_upper} {message_lower}".strip().lower()
+
                 if timestamp and (latest_timestamp is None or timestamp > latest_timestamp):
                     latest_timestamp = timestamp
                     
-                lower = line.lower()
-                if "warning" in lower:
+                is_warning = (
+                    level_upper == "WARNING"
+                    or "warning" in message_lower
+                    or "warning" in line_lower
+                )
+                if is_warning:
                     summary["warning_lines"] += 1
-                    classification = _classify_warning(line)
+                    classification = _classify_warning(message_text)
                     if classification == "client_error":
                         summary["client_error_lines"] += 1
                     if timestamp:
@@ -348,22 +375,23 @@ def summarize_pipeline_warnings(path: Optional[Path] = None) -> Dict[str, Any]:
                     if SYMBOL_HISTORY_WINDOW:
                         relevant_symbols: List[str] = []
                         if classification in {"client_error", "throttling"}:
-                            relevant_symbols = _extract_symbols(message or line)
-                        elif "symbol" in lower or "asset" in lower:
-                            relevant_symbols = _extract_symbols(message or line)
+                            relevant_symbols = _extract_symbols(message_text)
+                        elif "symbol" in combined_lower or "asset" in combined_lower:
+                            relevant_symbols = _extract_symbols(message_text)
                         for sym in relevant_symbols:
                             symbol_window.append((timestamp, classification, sym))
 
-                if level and level.upper() == "ERROR":
+                if level_upper == "ERROR":
                     summary["error_lines"] += 1
                     summary["last_error"] = {
                         "timestamp_utc": _to_iso(timestamp) if timestamp else None,
                         "level": level,
-                        "message": message,
+                        "message": message_text,
                     }
 
-                if sentiment_marker in line:
-                    detail = line.split(sentiment_marker, 1)[1].strip()
+                source_for_marker = message_text or line
+                if sentiment_marker in source_for_marker:
+                    detail = source_for_marker.split(sentiment_marker, 1)[1].strip()
                     summary["sentiment_exit_events"].append(
                         {
                             "timestamp_utc": _to_iso(timestamp) if timestamp else None,
@@ -372,7 +400,31 @@ def summarize_pipeline_warnings(path: Optional[Path] = None) -> Dict[str, Any]:
                         }
                     )
 
-                if "traceback (most recent call last" in lower:
+                exc_info_text = payload.get("exc_info") if isinstance(payload, dict) else None
+                if isinstance(exc_info_text, str) and exc_info_text.strip():
+                    exc_lines = [segment.strip() for segment in exc_info_text.splitlines() if segment.strip()]
+                    count = max(len(exc_lines), 1)
+                    summary["exception_lines"] += count
+                    for exc_line in reversed(exc_lines):
+                        exception_match = re.match(
+                            r"(?P<name>[A-Za-z_][A-Za-z0-9_]*(Error|Exception))",
+                            exc_line,
+                        )
+                        if exception_match:
+                            exc_name = exception_match.group("name")
+                            summary["exception_types"][exc_name] = (
+                                summary["exception_types"].get(exc_name, 0) + 1
+                            )
+                            summary["last_exception"] = {
+                                "timestamp_utc": _to_iso(timestamp) if timestamp else None,
+                                "type": exc_name,
+                                "message": exc_line,
+                            }
+                            break
+                    in_traceback = False
+                    traceback_timestamp = timestamp
+
+                if not payload and "traceback (most recent call last" in line_lower:
                     in_traceback = True
                     traceback_timestamp = timestamp
                     summary["exception_lines"] += 1
@@ -405,9 +457,13 @@ def summarize_pipeline_warnings(path: Optional[Path] = None) -> Dict[str, Any]:
                         traceback_timestamp = None
                     continue
 
-                if "error" in lower and "warning" not in lower and "traceback" not in lower:
+                if (
+                    "error" in combined_lower
+                    and "warning" not in combined_lower
+                    and "traceback" not in combined_lower
+                ):
                     exception_match = re.search(
-                        r"([A-Za-z_][A-Za-z0-9_]*(Error|Exception))", line
+                        r"([A-Za-z_][A-Za-z0-9_]*(Error|Exception))", message_text
                     )
                     if exception_match:
                         exc_name = exception_match.group(1)
@@ -417,7 +473,7 @@ def summarize_pipeline_warnings(path: Optional[Path] = None) -> Dict[str, Any]:
                         summary["last_exception"] = {
                             "timestamp_utc": _to_iso(timestamp) if timestamp else None,
                             "type": exc_name,
-                            "message": message if message else line,
+                            "message": message_text,
                         }
     except Exception:
         return summary
