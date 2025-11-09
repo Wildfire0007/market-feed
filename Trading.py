@@ -137,6 +137,7 @@ REALTIME_WS_ENABLED = bool(REALTIME_WS_URL and websocket is not None)
 REALTIME_HTTP_MAX_SAMPLES = int(os.getenv("TD_REALTIME_HTTP_MAX_SAMPLES", "6"))
 REALTIME_HTTP_DURATION = max(1.0, _env_float("TD_REALTIME_HTTP_DURATION", 8.0))
 _REALTIME_HTTP_BACKGROUND_FLAG = _env_flag("TD_REALTIME_HTTP_BACKGROUND")
+FORCED_SNAPSHOT_MAX_AGE = 300.0
 
 _SYMBOL_META_DISABLED = os.getenv("TD_DISABLE_SYMBOL_META", "").strip().lower() in {
     "1",
@@ -774,6 +775,34 @@ CLIENT_ERROR_STATUS_CODES: Set[Optional[int]] = {
 
 def now_utc() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _parse_iso_utc(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), timezone.utc)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return None
+        if candidate.endswith("Z"):
+            candidate = candidate[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
 
 def ensure_dir(p: str) -> None:
     os.makedirs(p, exist_ok=True)
@@ -2118,16 +2147,6 @@ def _maybe_use_secondary_series(
     )
 
     return fallback
-
-
-def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except Exception:
-        return None
-
 def td_time_series(symbol: str, interval: str, outputsize: int = 500,
                    exchange: Optional[str] = None, order: str = "desc") -> Dict[str, Any]:
     """Hibatűrő time_series (hiba esetén ok:false + üres values)."""
@@ -2529,6 +2548,30 @@ def _collect_ws_frames(
     return frames
 
 
+def _extract_bid_ask(frame: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+    bid_candidates = ("bid", "best_bid", "bid_price", "b")
+    ask_candidates = ("ask", "best_ask", "ask_price", "a")
+    bid_val: Optional[float] = None
+    ask_val: Optional[float] = None
+    for key in bid_candidates:
+        if key in frame and frame.get(key) is not None:
+            try:
+                bid_val = float(frame[key])
+            except (TypeError, ValueError):
+                bid_val = None
+            if bid_val is not None:
+                break
+    for key in ask_candidates:
+        if key in frame and frame.get(key) is not None:
+            try:
+                ask_val = float(frame[key])
+            except (TypeError, ValueError):
+                ask_val = None
+            if ask_val is not None:
+                break
+    return bid_val, ask_val
+
+
 def _collect_realtime_spot_impl(
     asset: str,
     symbol_cycle: List[Tuple[str, Optional[str]]],
@@ -2661,6 +2704,27 @@ def _collect_realtime_spot_impl(
         payload["http_abort_reason"] = abort_reason
     if transport == "websocket" and isinstance(last_frame.get("raw"), dict):
         payload["raw_last_frame"] = last_frame["raw"]
+
+    stale_reason: Optional[str] = None
+    if force:
+        last_bid, last_ask = _extract_bid_ask(last_frame)
+        if last_bid is None or last_ask is None:
+            stale_reason = "missing_bid_ask"
+        snapshot_ts = _parse_iso_utc(payload.get("utc") or payload.get("retrieved_at_utc"))
+        if snapshot_ts is None:
+            stale_reason = stale_reason or "missing_timestamp"
+        else:
+            age = (datetime.now(timezone.utc) - snapshot_ts).total_seconds()
+            if age > FORCED_SNAPSHOT_MAX_AGE:
+                stale_reason = "older_than_300s"
+        if stale_reason:
+            payload["ok"] = False
+            payload["stale_reason"] = stale_reason
+            payload["stale_marked_at_utc"] = now_utc()
+            payload["suggested_refresh"] = "now"
+            for field in ("price", "frames", "statistics", "forced", "force_reason"):
+                if field in payload:
+                    payload.pop(field, None)
 
     transport_label = payload.get("transport") or (
         "websocket" if ws_attempted and not http_attempted else "http" if http_attempted else "unknown"
@@ -3588,6 +3652,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
