@@ -4918,7 +4918,7 @@ def compute_precision_entry(
             else:
                 candidate = candidate.tz_convert(timezone.utc)
             ready_ts = (
-                candidate.floor("S").isoformat().replace("+00:00", "Z")
+                candidate.floor("s").isoformat().replace("+00:00", "Z")
             )
     except Exception:
         ready_ts = None
@@ -10215,6 +10215,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
