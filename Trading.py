@@ -44,6 +44,8 @@ from typing import Any, Dict, Optional, List, Tuple, Callable, Set
 import requests
 from requests.adapters import HTTPAdapter
 
+from logging_utils import ensure_json_file_handler
+
 try:
     from active_anchor import update_anchor_metrics
 except Exception:  # pragma: no cover - optional dependency path
@@ -2779,7 +2781,42 @@ def collect_realtime_spot(
     reason: Optional[str] = None,
 ) -> None:
     realtime_enabled = REALTIME_FLAG or force
+
+    attempt_cycle_for_log = list(attempts or [])
+
+    def _log_plan(
+        transport: str,
+        *,
+        note: Optional[str] = None,
+        cycle=None,
+        http_background: Optional[bool] = None,
+    ) -> None:
+        cycle_items = [
+            {"symbol": sym, "exchange": exch} for sym, exch in (cycle or [])
+        ]
+        payload: Dict[str, Any] = {
+            "event": "realtime_plan",
+            "asset": asset,
+            "transport": transport,
+            "force": bool(force),
+            "reason": reason,
+            "realtime_enabled": bool(realtime_enabled),
+            "attempt_cycle": cycle_items,
+        }
+        if note:
+            payload["note"] = note
+        if cycle is not None:
+            payload["cycle_size"] = len(cycle_items)
+        if attempt_cycle_for_log:
+            payload["configured_cycle_size"] = len(attempt_cycle_for_log)
+        if REALTIME_WS_ENABLED:
+            payload["websocket_preferred"] = True
+        if http_background is not None:
+            payload["http_background_enabled"] = bool(http_background)
+        LOGGER.debug("realtime_plan", extra=payload)
+
     if not realtime_enabled:
+        _log_plan("disabled", note="realtime_flag_off", cycle=attempt_cycle_for_log)
         return
 
     allowed_assets = {
@@ -2788,6 +2825,11 @@ def collect_realtime_spot(
         if a.strip()
     }
     if allowed_assets and asset.upper() not in allowed_assets and not force:
+        _log_plan(
+            "skipped",
+            note="asset_not_allowlisted",
+            cycle=attempt_cycle_for_log,
+        )
         return
 
     base_cycle = list(attempts) if attempts else []
@@ -2801,6 +2843,7 @@ def collect_realtime_spot(
         filtered_cycle = base_cycle
     symbol_cycle = filtered_cycle or base_cycle
     if not symbol_cycle:
+        _log_plan("skipped", note="empty_symbol_cycle", cycle=attempt_cycle_for_log)
         return
 
     use_ws = REALTIME_WS_ENABLED and REALTIME_FLAG and not force
@@ -2810,6 +2853,15 @@ def collect_realtime_spot(
         else True
     )
     run_async = http_background_enabled and not use_ws
+
+    planned_transport = "websocket" if use_ws else "http_background" if run_async else "http_sync"
+
+    _log_plan(
+        planned_transport,
+        note="forced_realtime" if force else None,
+        cycle=symbol_cycle,
+        http_background=http_background_enabled,
+    )
 
     if run_async:
         thread = threading.Thread(
@@ -3547,6 +3599,46 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
         reason=force_reason,
     )
 
+    spot_payload = spot if isinstance(spot, dict) else {}
+    series_ok = {
+        name: bool(payload.get("ok")) if isinstance(payload, dict) else False
+        for name, payload in series_payloads.items()
+    }
+    series_fallback = {
+        name: bool(
+            isinstance(payload, dict)
+            and (
+                payload.get("fallback_used")
+                or payload.get("fallback_previous_payload")
+            )
+        )
+        for name, payload in series_payloads.items()
+    }
+    LOGGER.info(
+        "fetch_completed",
+        extra={
+            "event": "fetch_completed",
+            "asset": asset,
+            "used_symbol": spot_payload.get("used_symbol"),
+            "used_exchange": spot_payload.get("used_exchange"),
+            "spot_ok": bool(spot_payload.get("ok")),
+            "spot_price": spot_payload.get("price"),
+            "spot_freshness_violation": bool(spot_payload.get("freshness_violation")),
+            "spot_fallback": bool(
+                spot_payload.get("fallback_used")
+                or spot_payload.get("fallback_previous_payload")
+            ),
+            "market_closed": bool(spot_payload.get("market_closed_assumed")),
+            "force_reason": force_reason,
+            "series_ok": series_ok,
+            "series_fallback": series_fallback,
+            "attempt_cycle": [
+                {"symbol": sym, "exchange": exch}
+                for sym, exch in (attempts or [])
+            ],
+        },
+    )
+
 # ─────────────────────────────── main ─────────────────────────────────────
 
 def _write_error_payload(asset: str, error: Exception) -> None:
@@ -3599,14 +3691,11 @@ def main():
     except Exception:
         pipeline_log_path = None
     if pipeline_log_path:
-        ensure_dir(str(pipeline_log_path.parent))
-        if not any(getattr(handler, "_pipeline_log", False) for handler in logger.handlers):
-            handler = logging.FileHandler(pipeline_log_path, encoding="utf-8")
-            handler.setFormatter(logging.Formatter("%(asctime)sZ %(levelname)s %(message)s"))
-            handler._pipeline_log = True  # type: ignore[attr-defined]
-            logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
-        logger.propagate = False
+        ensure_json_file_handler(
+            logger,
+            pipeline_log_path,
+            static_fields={"component": "trading"},
+        )
     started_at_dt = datetime.now(timezone.utc)
     logger.info("Trading run started for %d assets", len(ASSETS))
     workers = max(1, min(len(ASSETS), TD_MAX_WORKERS))
@@ -3657,6 +3746,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
