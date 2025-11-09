@@ -27,16 +27,16 @@ def test_default_profile_configuration(monkeypatch):
     assert settings.ENTRY_THRESHOLD_PROFILE_NAME == "baseline"
     profile = settings.describe_entry_threshold_profile()
     assert profile["name"] == "baseline"
-    assert profile["p_score_min"]["default"] == pytest.approx(55.0)
+    assert profile["p_score_min"]["default"] == pytest.approx(52.0)
     assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(50.0)
-    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(55.0)
+    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(52.0)
     assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.95)
     assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.9)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.92)
 
     suppressed = settings.describe_entry_threshold_profile("suppressed")
-    assert suppressed["p_score_min"]["default"] == pytest.approx(45.0)
-    assert suppressed["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(44.0)
+    assert suppressed["p_score_min"]["default"] == pytest.approx(48.0)
+    assert suppressed["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(48.0)
     assert suppressed["atr_threshold_multiplier"]["default"] == pytest.approx(0.88)
     assert suppressed["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.82)
 
@@ -49,8 +49,8 @@ def test_suppressed_profile_configuration(monkeypatch):
     assert settings.ENTRY_THRESHOLD_PROFILE_NAME == "suppressed"
     profile = settings.describe_entry_threshold_profile()
     assert profile["name"] == "suppressed"
-    assert profile["p_score_min"]["default"] == pytest.approx(45.0)
-    assert profile["p_score_min"]["by_asset"]["USOIL"] == pytest.approx(40.0)
+    assert profile["p_score_min"]["default"] == pytest.approx(48.0)
+    assert profile["p_score_min"]["by_asset"]["USOIL"] == pytest.approx(45.0)
     assert profile["p_score_min"]["by_asset"]["XAGUSD"] == pytest.approx(48.0)
     assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.88)
     assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.85)
@@ -74,7 +74,7 @@ def test_relaxed_profile_override(monkeypatch):
 
     # Baseline ellenőrzés (aktív)
     baseline = settings.describe_entry_threshold_profile("baseline")
-    assert baseline["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(55.0)
+    assert baseline["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(52.0)
 
     # Profilok listája
     assert set(settings.list_entry_threshold_profiles()) >= {
