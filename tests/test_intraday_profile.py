@@ -63,6 +63,17 @@ class IntradayProfileTests(unittest.TestCase):
         notes = " ".join(profile.get("notes", []))
         self.assertIn("Napi range", notes)
 
+    def test_trading_day_bounds_handles_dst_transitions(self) -> None:
+        spring_now = datetime(2024, 3, 31, 12, 0, tzinfo=timezone.utc)
+        start_utc_spring, end_utc_spring = analysis.trading_day_bounds(spring_now)
+        self.assertEqual(start_utc_spring, datetime(2024, 3, 30, 23, 0, tzinfo=timezone.utc))
+        self.assertEqual(end_utc_spring, datetime(2024, 3, 31, 22, 0, tzinfo=timezone.utc))
+
+        autumn_now = datetime(2024, 10, 27, 12, 0, tzinfo=timezone.utc)
+        start_utc_autumn, end_utc_autumn = analysis.trading_day_bounds(autumn_now)
+        self.assertEqual(start_utc_autumn, datetime(2024, 10, 26, 22, 0, tzinfo=timezone.utc))
+        self.assertEqual(end_utc_autumn, datetime(2024, 10, 27, 23, 0, tzinfo=timezone.utc))
+
 
 if __name__ == "__main__":
     unittest.main()
