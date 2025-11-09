@@ -85,7 +85,7 @@ import numpy as np
 
 BTC_OFI_Z = {"trigger": 0.8, "strong": 1.0, "weakening": -0.4, "lookback_bars": 60}
 BTC_ADX_TREND_MIN = 20.0
-␊
+
 # ATR floor + napszak-percentilis (TOD = time-of-day buckets) – baseline/relaxed/suppressed
 BTC_ATR_FLOOR_USD = {
     "baseline": 85.0,
@@ -5449,7 +5449,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             spot_latency_sec = 0
         else:
             spot_latency_sec = int(delta.total_seconds())
-         spot_latency_sec is not None and spot_latency_sec > spot_max_age_limit:
+        if spot_latency_sec is not None and spot_latency_sec > spot_max_age_limit:
             age_min = spot_latency_sec // 60
             limit_min = spot_max_age_limit // 60 if spot_max_age_limit else 0
             spot_stale_reason = f"Spot data stale: {age_min} min behind (limit {limit_min} min)"
@@ -10153,6 +10153,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
