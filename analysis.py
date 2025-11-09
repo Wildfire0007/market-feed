@@ -85,36 +85,36 @@ import numpy as np
 
 BTC_OFI_Z = {"trigger": 0.8, "strong": 1.0, "weakening": -0.4, "lookback_bars": 60}
 BTC_ADX_TREND_MIN = 20.0
-
+␊
 # ATR floor + napszak-percentilis (TOD = time-of-day buckets) – baseline/relaxed/suppressed
 BTC_ATR_FLOOR_USD = {
-    "baseline": 150.0,
-    "relaxed": 135.0,
-    "suppressed": 120.0,
+    "baseline": 85.0,
+    "relaxed": 78.0,
+    "suppressed": 70.0,
 }
 BTC_ATR_PCT_TOD = {  # percentilis minimum a nap adott szakaszára
-    "baseline": {"open": 0.50, "mid": 0.45, "close": 0.50},
-    "relaxed": {"open": 0.40, "mid": 0.40, "close": 0.45},
-    "suppressed": {"open": 0.30, "mid": 0.28, "close": 0.35},
+    "baseline": {"open": 0.45, "mid": 0.40, "close": 0.45},
+    "relaxed": {"open": 0.38, "mid": 0.36, "close": 0.38},
+    "suppressed": {"open": 0.32, "mid": 0.30, "close": 0.34},
 }
 
 # P-score / RR / TP / SL / no-chase per profile
-BTC_P_SCORE_MIN = {"baseline": 52, "relaxed": 48, "suppressed": 44}
+BTC_P_SCORE_MIN = {"baseline": 50, "relaxed": 48, "suppressed": 44}
 
-BTC_RR_MIN_TREND = {"baseline": 1.90, "relaxed": 1.80, "suppressed": 1.70}
+BTC_RR_MIN_TREND = {"baseline": 1.80, "relaxed": 1.70, "suppressed": 1.60}
 BTC_RR_MIN_RANGE = {"baseline": 1.50, "relaxed": 1.40, "suppressed": 1.35}
 
-BTC_RANGE_SIZE_SCALE = {"baseline": 0.60, "relaxed": 0.55, "suppressed": 0.50}
-BTC_RANGE_TIME_STOP_MIN = {"baseline": 20, "relaxed": 15, "suppressed": 12}
-BTC_RANGE_BE_TRIGGER_R = {"baseline": 0.35, "relaxed": 0.30, "suppressed": 0.25}
+BTC_RANGE_SIZE_SCALE = {"baseline": 0.55, "relaxed": 0.52, "suppressed": 0.48}
+BTC_RANGE_TIME_STOP_MIN = {"baseline": 24, "relaxed": 18, "suppressed": 15}
+BTC_RANGE_BE_TRIGGER_R = {"baseline": 0.32, "relaxed": 0.28, "suppressed": 0.24}
 
-BTC_TP_MIN_PCT = {"baseline": 0.008, "relaxed": 0.007, "suppressed": 0.006}  # 0.8/0.7/0.6%
-BTC_SL_ATR_MULT = {"baseline": 0.30, "relaxed": 0.28, "suppressed": 0.26}
-BTC_SL_ABS_MIN = 120.0  # USD
+BTC_TP_MIN_PCT = {"baseline": 0.007, "relaxed": 0.0065, "suppressed": 0.006}
+BTC_SL_ATR_MULT = {"baseline": 0.28, "relaxed": 0.26, "suppressed": 0.24}
+BTC_SL_ABS_MIN = 90.0  # USD
 
 # Momentum override és no-chase (slippage tiltó R-ben)
-BTC_MOMENTUM_RR_MIN = {"baseline": 1.60, "relaxed": 1.50, "suppressed": 1.45}
-BTC_NO_CHASE_R = {"baseline": 0.25, "relaxed": 0.22, "suppressed": 0.16}
+BTC_MOMENTUM_RR_MIN = {"baseline": 1.50, "relaxed": 1.45, "suppressed": 1.35}
+BTC_NO_CHASE_R = {"baseline": 0.25, "relaxed": 0.22, "suppressed": 0.18}
 
 # Runtime state for BTC momentum overrides and guardrails. Populated lazily
 # during analysis to support helper utilities and optional real-time adapters.
@@ -125,7 +125,7 @@ _BTC_NO_CHASE_LIMITS: Dict[str, float] = {}
 _PRECISION_RUNTIME: Dict[str, Dict[str, Any]] = {}
 
 # Precision pipeline alsó határ (ne blokkoljon túl korán)
-BTC_PRECISION_MIN = {"baseline": 60, "relaxed": 55, "suppressed": 52}
+BTC_PRECISION_MIN = {"baseline": 55, "relaxed": 52, "suppressed": 48}
 
 
 def btc_precision_state(profile: str, asset: str, score: float, trigger_ready: bool) -> str:
@@ -289,11 +289,11 @@ def btc_core_triggers_ok(asset: str, side: str) -> Tuple[bool, Dict[str, Any]]:
 
     if np.isfinite(z_float):
         if side == "long":
-            ofi_ok = z_float >= ofi_threshold
+            ofi_ok: Optional[bool] = z_float >= ofi_threshold
         else:
             ofi_ok = z_float <= -ofi_threshold
     else:
-        ofi_ok = False
+        ofi_ok = None
 
     micro_state = globals().get("_BTC_STRUCT_MICRO")
     if not isinstance(micro_state, dict):
@@ -302,17 +302,34 @@ def btc_core_triggers_ok(asset: str, side: str) -> Tuple[bool, Dict[str, Any]]:
     if not isinstance(vwap_state, dict):
         vwap_state = {}
 
-    bos_ok = bool(micro_state.get(side))
-    vwap_ok = bool(vwap_state.get(side))
+    def _normalise(flag: Any) -> Optional[bool]:
+        if flag is None:
+            return None
+        try:
+            return bool(flag)
+        except Exception:
+            return None
 
-    hits = int(bos_ok) + int(vwap_ok) + int(ofi_ok)
+    bos_ok = _normalise(micro_state.get(side))
+    vwap_ok = _normalise(vwap_state.get(side))
+
+    components = {"bos": bos_ok, "vwap": vwap_ok, "ofi": ofi_ok}
+    available = [name for name, value in components.items() if value is not None]
+    positives = [name for name, value in components.items() if value is True]
+    required_hits = 2 if len(available) >= 2 else 1
+    gate_ok = bool(positives) and len(positives) >= required_hits
+
     return (
-        hits >= 2,
+        gate_ok,
         {
-            "bos_ok": bos_ok,
-            "vwap_ok": vwap_ok,
-            "ofi_ok": ofi_ok,
+            "bos_ok": bool(bos_ok) if bos_ok is not None else False,
+            "vwap_ok": bool(vwap_ok) if vwap_ok is not None else False,
+            "ofi_ok": bool(ofi_ok) if ofi_ok is not None else False,
             "ofi_z": None if not np.isfinite(z_float) else z_float,
+            "available": available,
+            "missing": [name for name, value in components.items() if value is None],
+            "required_hits": required_hits,
+            "hits": len(positives),
         },
     )
 
@@ -997,6 +1014,31 @@ def parse_utc_timestamp(value: Any) -> Optional[datetime]:
         return ts.astimezone(timezone.utc)
     return None
 
+
+def _should_use_realtime_spot(
+    rt_price: Optional[Any],
+    rt_ts: Optional[datetime],
+    spot_ts: Optional[datetime],
+    now_utc: datetime,
+    max_age_seconds: int,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Decide whether the realtime spot snapshot should override the last spot close."""
+
+    if rt_price is None:
+        return False, {"reason": "missing_price"}
+    if rt_ts is None:
+        return False, {"reason": "missing_timestamp"}
+    if rt_ts.tzinfo is None:
+        rt_ts = rt_ts.replace(tzinfo=timezone.utc)
+    age_seconds = (now_utc - rt_ts).total_seconds()
+    if age_seconds < 0:
+        age_seconds = 0.0
+    if age_seconds > float(max_age_seconds):
+        return False, {"reason": "stale", "age_seconds": age_seconds}
+    if spot_ts is not None and rt_ts <= spot_ts:
+        return False, {"reason": "not_newer"}
+    return True, {"reason": "ok", "age_seconds": age_seconds}
+  
 def now_utctime_hm() -> Tuple[int,int]:
     t = datetime.now(timezone.utc)
     return t.hour, t.minute
@@ -5347,6 +5389,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         entry_thresholds_meta["btc_profile"] = btc_profile_name
     btc_atr_floor_ratio: Optional[float] = None
     btc_atr_floor_passed = False
+    now = datetime.now(timezone.utc)
+    spot_max_age = int(SPOT_MAX_AGE_SECONDS.get(asset, SPOT_MAX_AGE_SECONDS["default"]))
     if spot:
         spot_price = spot.get("price") if spot.get("price") is not None else spot.get("price_usd")
         spot_utc = spot.get("utc") or spot.get("timestamp") or "-"
@@ -5358,8 +5402,15 @@ def analyze(asset: str) -> Dict[str, Any]:
         rt_price = spot_realtime.get("price") if spot_realtime.get("price") is not None else spot_realtime.get("price_usd")
         rt_utc = spot_realtime.get("utc") or spot_realtime.get("timestamp") or spot_realtime.get("retrieved_at_utc")
 
+    spot_ts_existing = parse_utc_timestamp(spot_utc)
     rt_ts = parse_utc_timestamp(rt_utc)
-    if rt_price is not None and (not spot_price or (rt_ts and parse_utc_timestamp(spot_utc) and rt_ts > parse_utc_timestamp(spot_utc)) or (rt_ts and not parse_utc_timestamp(spot_utc))):
+    use_realtime = False
+    rt_decision_meta: Dict[str, Any] = {}
+    if rt_price is not None or rt_ts is not None:
+        use_realtime, rt_decision_meta = _should_use_realtime_spot(
+            rt_price, rt_ts, spot_ts_existing, now, spot_max_age
+        )
+    if use_realtime:
         spot_price = rt_price
         display_spot = safe_float(rt_price)
         if rt_ts:
@@ -5368,8 +5419,8 @@ def analyze(asset: str) -> Dict[str, Any]:
             spot_retrieved = spot_realtime.get("retrieved_at_utc")
         realtime_used = True
         realtime_reason = "Realtime spot feed override"
-
-    now = datetime.now(timezone.utc)
+    elif rt_decision_meta:
+        entry_thresholds_meta["spot_realtime_ignored"] = dict(rt_decision_meta, used=False)
     session_ok_flag, session_meta = session_state(asset)
     if asset == "BTCUSD":
         news_lockout_active = False
@@ -5390,7 +5441,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     spot_ts = spot_ts_primary or spot_ts_fallback
     spot_latency_sec: Optional[int] = None
     spot_stale_reason: Optional[str] = None
-    spot_max_age = SPOT_MAX_AGE_SECONDS.get(asset, SPOT_MAX_AGE_SECONDS["default"])
+    spot_max_age_limit = spot_max_age
     relaxed_spot_reason: Optional[str] = None
     if spot_ts:
         delta = now - spot_ts
@@ -5398,9 +5449,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             spot_latency_sec = 0
         else:
             spot_latency_sec = int(delta.total_seconds())
-        if spot_latency_sec is not None and spot_latency_sec > spot_max_age:
+         spot_latency_sec is not None and spot_latency_sec > spot_max_age_limit:
             age_min = spot_latency_sec // 60
-            limit_min = spot_max_age // 60
+            limit_min = spot_max_age_limit // 60 if spot_max_age_limit else 0
             spot_stale_reason = f"Spot data stale: {age_min} min behind (limit {limit_min} min)"
     elif spot_price is not None:
         spot_stale_reason = "Spot timestamp missing"
@@ -7146,6 +7197,14 @@ def analyze(asset: str) -> Dict[str, Any]:
                 "price_below_vwap": price_below_vwap_base,
             },
         }
+        micro_runtime = globals().setdefault("_BTC_STRUCT_MICRO", {})
+        vwap_runtime = globals().setdefault("_BTC_STRUCT_VWAP", {})
+        if isinstance(micro_runtime, dict):
+            micro_runtime["long"] = btc_structure_combos["long"].get("micro")
+            micro_runtime["short"] = btc_structure_combos["short"].get("micro")
+        if isinstance(vwap_runtime, dict):
+            vwap_runtime["long"] = btc_structure_combos["long"].get("vwap")
+            vwap_runtime["short"] = btc_structure_combos["short"].get("vwap")
 
     if asset == "EURUSD" and effective_bias in {"long", "short"}:
         if effective_bias == "long":
@@ -10094,6 +10153,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
