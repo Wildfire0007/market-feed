@@ -23,42 +23,37 @@ def _reload_settings(monkeypatch, profile=None):
 def test_default_profile_configuration(monkeypatch):
     settings = _reload_settings(monkeypatch)
 
-    # Alapértelmezett aktív profil most már 'suppressed'
-    assert settings.ENTRY_THRESHOLD_PROFILE_NAME == "suppressed"
+    # Alapértelmezett aktív profil most már 'baseline'
+    assert settings.ENTRY_THRESHOLD_PROFILE_NAME == "baseline"
     profile = settings.describe_entry_threshold_profile()
-    assert profile["name"] == "suppressed"
-
-    # SUPPRESSED p_score_min: default 40.0, EURUSD 32.0, BTCUSD 44.0
-    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(32.0)
-    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(25.0)
-
-
-    # SUPPRESSED atr_threshold_multiplier: default 0.95, USOIL 0.85
+    assert profile["name"] == "baseline"
+    assert profile["p_score_min"]["default"] == pytest.approx(55.0)
+    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(50.0)
+    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(55.0)
     assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.95)
-    assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.85)
-    assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.95)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.9)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.92)
 
-
-    # Baseline továbbra is a régi értékekkel (változatlan)
-    baseline = settings.describe_entry_threshold_profile("baseline")
-    assert baseline["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(60.0)
-    assert baseline["atr_threshold_multiplier"]["default"] == pytest.approx(1.0)
+    suppressed = settings.describe_entry_threshold_profile("suppressed")
+    assert suppressed["p_score_min"]["default"] == pytest.approx(45.0)
+    assert suppressed["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(44.0)
+    assert suppressed["atr_threshold_multiplier"]["default"] == pytest.approx(0.88)
+    assert suppressed["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.82)
 
     _reload_settings(monkeypatch)
 
 
-def test_baseline_profile_configuration(monkeypatch):
-    settings = _reload_settings(monkeypatch, profile="baseline")
+def test_suppressed_profile_configuration(monkeypatch):
+    settings = _reload_settings(monkeypatch, profile="suppressed")
 
-    assert settings.ENTRY_THRESHOLD_PROFILE_NAME == "baseline"
+    assert settings.ENTRY_THRESHOLD_PROFILE_NAME == "suppressed"
     profile = settings.describe_entry_threshold_profile()
-    assert profile["name"] == "baseline"
-    assert profile["p_score_min"]["default"] == pytest.approx(60.0)
-    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(60.0)
-    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(52.0)
-    assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(1.0)
-    assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(1.0)
-    assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(1.0)
+    assert profile["name"] == "suppressed"
+    assert profile["p_score_min"]["default"] == pytest.approx(45.0)
+    assert profile["p_score_min"]["by_asset"]["USOIL"] == pytest.approx(40.0)
+    assert profile["p_score_min"]["by_asset"]["XAGUSD"] == pytest.approx(48.0)
+    assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.88)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.85)
 
 
 def test_relaxed_profile_override(monkeypatch):
@@ -69,17 +64,17 @@ def test_relaxed_profile_override(monkeypatch):
     assert profile["name"] == "relaxed"
 
     # RELAXED értékek
-    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(52.0)
-    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(40.0)
-    assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.85)
-    assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.95)
+    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(50.0)
+    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(45.0)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.88)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.88)
 
     # Nem felülírt eszköz fallback a profil defaultjára (EURUSD -> 50.0)
     assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(50.0)
 
-    # Baseline ellenőrzés (változatlan)
+    # Baseline ellenőrzés (aktív)
     baseline = settings.describe_entry_threshold_profile("baseline")
-    assert baseline["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(60.0)
+    assert baseline["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(55.0)
 
     # Profilok listája
     assert set(settings.list_entry_threshold_profiles()) >= {
@@ -133,47 +128,47 @@ def test_btc_profile_overrides(monkeypatch):
 
     overrides = baseline_settings.BTC_PROFILE_OVERRIDES
 
-    # BASELINE BTC override-ok (változatlanok)
-    assert overrides["baseline"]["atr_floor_usd"] == pytest.approx(150.0)
-    assert overrides["baseline"]["tp_min_pct"] == pytest.approx(0.008)
-    assert overrides["baseline"]["sl_buffer"]["atr_mult"] == pytest.approx(0.3)
-    assert overrides["baseline"]["sl_buffer"]["abs_min"] == pytest.approx(150.0)
-    assert overrides["baseline"]["rr"]["trend_core"] == pytest.approx(1.9)
+    # BASELINE BTC override-ok (új értékek)
+    assert overrides["baseline"]["atr_floor_usd"] == pytest.approx(85.0)
+    assert overrides["baseline"]["tp_min_pct"] == pytest.approx(0.007)
+    assert overrides["baseline"]["sl_buffer"]["atr_mult"] == pytest.approx(0.28)
+    assert overrides["baseline"]["sl_buffer"]["abs_min"] == pytest.approx(90.0)
+    assert overrides["baseline"]["rr"]["trend_core"] == pytest.approx(1.8)
     assert overrides["baseline"]["rr"]["range_core"] == pytest.approx(1.5)
-    assert overrides["baseline"]["rr"]["range_momentum"] == pytest.approx(1.5)
-    assert overrides["baseline"]["rr"]["range_size_scale"] == pytest.approx(0.6)
-    assert overrides["baseline"]["rr"]["range_time_stop"] == 20
-    assert overrides["baseline"]["rr"]["range_breakeven"] == pytest.approx(0.35)
-    assert overrides["baseline"]["bias_relax"]["ofi_sub_threshold"] == pytest.approx(1.2)
+    assert overrides["baseline"]["rr"]["range_momentum"] == pytest.approx(1.4)
+    assert overrides["baseline"]["rr"]["range_size_scale"] == pytest.approx(0.55)
+    assert overrides["baseline"]["rr"]["range_time_stop"] == 24
+    assert overrides["baseline"]["rr"]["range_breakeven"] == pytest.approx(0.32)
+    assert overrides["baseline"]["bias_relax"]["ofi_sub_threshold"] == pytest.approx(1.1)
     assert overrides["baseline"]["structure"]["ofi_gate"] == pytest.approx(0.8)
-    assert overrides["baseline"]["momentum_override"]["rr_min"] == pytest.approx(1.6)
-    assert overrides["baseline"]["momentum_override"]["max_slippage_r"] == pytest.approx(0.25)
+    assert overrides["baseline"]["momentum_override"]["rr_min"] == pytest.approx(1.5)
+    assert overrides["baseline"]["momentum_override"]["max_slippage_r"] == pytest.approx(0.22)
     assert overrides["baseline"]["momentum_override"]["no_chase_r"] == pytest.approx(0.25)
 
     # RELAXED BTC override-ok – új értékek
     relaxed = overrides["relaxed"]
-    assert relaxed["rr"]["range_time_stop"] == 15
-    assert relaxed["momentum_override"]["max_slippage_r"] == pytest.approx(0.28)
-    assert relaxed["momentum_override"]["no_chase_r"] == pytest.approx(0.45)
-    assert relaxed["atr_floor_usd"] == pytest.approx(110.0)
-    assert relaxed["atr_percentiles"]["open"] == pytest.approx(0.35)
-    assert relaxed["atr_percentiles"]["mid"] == pytest.approx(0.35)
-    assert relaxed["tp_min_pct"] == pytest.approx(0.006)
-    assert relaxed["sl_buffer"]["atr_mult"] == pytest.approx(0.25)
-    assert relaxed["sl_buffer"]["abs_min"] == pytest.approx(90.0)
-    assert relaxed["bias_relax"]["vwap_ofi_threshold"] == pytest.approx(1.0)
+    assert relaxed["rr"]["range_time_stop"] == 18
+    assert relaxed["momentum_override"]["max_slippage_r"] == pytest.approx(0.24)
+    assert relaxed["momentum_override"]["no_chase_r"] == pytest.approx(0.22)
+    assert relaxed["atr_floor_usd"] == pytest.approx(78.0)
+    assert relaxed["atr_percentiles"]["open"] == pytest.approx(0.38)
+    assert relaxed["atr_percentiles"]["mid"] == pytest.approx(0.36)
+    assert relaxed["tp_min_pct"] == pytest.approx(0.0065)
+    assert relaxed["sl_buffer"]["atr_mult"] == pytest.approx(0.26)
+    assert relaxed["sl_buffer"]["abs_min"] == pytest.approx(85.0)
+    assert relaxed["bias_relax"]["vwap_ofi_threshold"] == pytest.approx(0.9)
 
     # SUPPRESSED BTC override-ok (maradtak)
     suppressed = overrides["suppressed"]
-    assert suppressed["rr"]["range_breakeven"] == pytest.approx(0.25)
-    assert suppressed["momentum_override"]["no_chase_r"] == pytest.approx(0.32)
-    assert suppressed["atr_floor_usd"] == pytest.approx(120.0)
-    assert suppressed["atr_percentiles"]["open"] == pytest.approx(0.3)
-    assert suppressed["atr_percentiles"]["mid"] == pytest.approx(0.28)
+    assert suppressed["rr"]["range_breakeven"] == pytest.approx(0.24)
+    assert suppressed["momentum_override"]["no_chase_r"] == pytest.approx(0.18)
+    assert suppressed["atr_floor_usd"] == pytest.approx(70.0)
+    assert suppressed["atr_percentiles"]["open"] == pytest.approx(0.32)
+    assert suppressed["atr_percentiles"]["mid"] == pytest.approx(0.30)
     assert suppressed["tp_min_pct"] == pytest.approx(0.006)
-    assert suppressed["sl_buffer"]["atr_mult"] == pytest.approx(0.26)
-    assert suppressed["sl_buffer"]["abs_min"] == pytest.approx(120.0)
-    assert suppressed["momentum_override"]["rr_min"] == pytest.approx(1.45)
+    assert suppressed["sl_buffer"]["atr_mult"] == pytest.approx(0.24)
+    assert suppressed["sl_buffer"]["abs_min"] == pytest.approx(80.0)
+    assert suppressed["momentum_override"]["rr_min"] == pytest.approx(1.35)
     assert suppressed["range_guard_requires_override"] is True
 
     _reload_settings(monkeypatch)
