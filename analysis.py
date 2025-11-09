@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 from zoneinfo import ZoneInfo
 
+from logging_utils import ensure_json_file_handler
+
 from active_anchor import load_anchor_state, record_anchor, update_anchor_metrics
 from ml_model import (
     ProbabilityPrediction,
@@ -9915,15 +9917,11 @@ def main():
         except Exception:
             pipeline_log_path = None
     if pipeline_log_path:
-        pipeline_log_path.parent.mkdir(parents=True, exist_ok=True)
-        if not any(getattr(handler, "_pipeline_log", False) for handler in LOGGER.handlers):
-            handler = logging.FileHandler(pipeline_log_path, encoding="utf-8")
-            handler.setFormatter(logging.Formatter("%(asctime)sZ %(levelname)s %(message)s"))
-            handler._pipeline_log = True  # type: ignore[attr-defined]
-            LOGGER.addHandler(handler)
-        if LOGGER.level > logging.INFO:
-            LOGGER.setLevel(logging.INFO)
-        LOGGER.propagate = False
+        ensure_json_file_handler(
+            LOGGER,
+            pipeline_log_path,
+            static_fields={"component": "analysis"},
+        )
 
     pipeline_payload = None
     analysis_delay_seconds: Optional[float] = None
@@ -10215,6 +10213,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
