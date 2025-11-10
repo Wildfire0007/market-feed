@@ -47,7 +47,7 @@ def test_weekend_session_status_profile(monkeypatch):
         assert profile_name == "weekend"
         assert profile.get("force_session_closed") is True
 
-        entry_open, info = analysis_module.session_state("EURUSD")
+        entry_open, info = analysis_module.session_state("EURUSD", now=fake_now)
 
         assert entry_open is False
         assert info["status"] == "closed_weekend"
@@ -72,7 +72,7 @@ def test_weekend_profile_skips_non_target_assets(monkeypatch):
         assert name == "default"
         assert profile.get("force_session_closed") is not True
 
-        entry_open, info = analysis_module.session_state("BTCUSD")
+        entry_open, info = analysis_module.session_state("BTCUSD", now=fake_now)
         assert entry_open is True
         assert info["status_profile"] == "default"
         assert info.get("market_closed_reason") != "weekend"
