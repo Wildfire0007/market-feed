@@ -948,6 +948,8 @@ PRECISION_FLOW_SCALE_MIN = float(os.getenv("PRECISION_FLOW_SCALE_MIN", "0.75"))
 PRECISION_FLOW_MARGIN_MIN = float(os.getenv("PRECISION_FLOW_MARGIN_MIN", "0.9"))
 PRECISION_FLOW_STRENGTH_BASE = float(os.getenv("PRECISION_FLOW_STRENGTH_BASE", "0.85"))
 PRECISION_FLOW_STRENGTH_MIN = float(os.getenv("PRECISION_FLOW_STRENGTH_MIN", "0.65"))
+PRECISION_FLOW_STALLED_EPS = float(os.getenv("PRECISION_FLOW_STALLED_EPS", "0.002"))
+PRECISION_FLOW_STALLED_DELTA_EPS = float(os.getenv("PRECISION_FLOW_STALLED_DELTA_EPS", "0.05"))
 PRECISION_SCORE_THRESHOLD_DEFAULT = 55.0
 PRECISION_SCORE_THRESHOLD = PRECISION_SCORE_THRESHOLD_DEFAULT
 PRECISION_READY_TIMEOUT_DEFAULT = 15
@@ -4981,6 +4983,35 @@ def compute_precision_entry(
         flow_ready = True
         flow_blockers = []
         flow_reasons.append("order flow optional (volume unavailable)")
+
+    def _abs_or_none(value: Any) -> Optional[float]:
+        try:
+            return abs(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    metrics_near_zero = True
+    for candidate, eps in (
+        (imb, PRECISION_FLOW_STALLED_EPS),
+        (pressure, PRECISION_FLOW_STALLED_EPS),
+    ):
+        candidate_abs = _abs_or_none(candidate)
+        if candidate_abs is not None and candidate_abs > eps:
+            metrics_near_zero = False
+            break
+    if metrics_near_zero:
+        delta_abs = _abs_or_none(delta_volume)
+        if delta_abs is not None and delta_abs > PRECISION_FLOW_STALLED_DELTA_EPS:
+            metrics_near_zero = False
+
+    stalled_flow = (
+        not flow_optional
+        and metrics_near_zero
+        and flow_signal_count == 0
+        and (_abs_or_none(flow_strength) or 0.0) <= PRECISION_FLOW_STALLED_EPS
+        and not flow_blockers
+    )
+
     plan["order_flow_ready"] = flow_ready
     if flow_blockers:
         plan["order_flow_blockers"] = flow_blockers
@@ -4988,6 +5019,7 @@ def compute_precision_entry(
         plan["order_flow_blockers"] = []
     if flow_reasons:
         plan["trigger_reasons"].extend(flow_reasons)
+    plan["order_flow_stalled"] = stalled_flow
       
     if micro_bos_with_retest(k1m, k5m, direction):
         score += 12.0
@@ -5150,6 +5182,18 @@ def compute_precision_entry(
             trigger_state = "fire"
             trigger_progress = 1.0
             plan["trigger_reasons"].append("price hit entry")
+
+    if (
+        asset.upper() == "BTCUSD"
+        and not flow_ready
+        and stalled_flow
+        and trigger_state == "fire"
+    ):
+        flow_ready = True
+        plan["order_flow_ready"] = True
+        plan["order_flow_stalled"] = True
+        plan["order_flow_fallback"] = "stalled_flow_trigger_fire"
+        plan["trigger_reasons"].append("order flow stalled override")
 
     plan["trigger_state"] = trigger_state
     plan["trigger_ready"] = trigger_state in {"arming", "fire"}
@@ -10623,6 +10667,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
