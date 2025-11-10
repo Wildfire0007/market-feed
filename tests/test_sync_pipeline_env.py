@@ -1,5 +1,9 @@
 import json
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.sync_pipeline_env import (
     _sanitize_order_flow_summary_files,
@@ -31,6 +35,45 @@ def test_sanitize_spot_snapshot_marks_missing_bid_ask(tmp_path):
     assert payload["ok"] is False
     assert payload["stale_reason"] == "missing_bid_ask"
     assert "price" not in payload
+    assert payload.get("stale_snapshot_utc") == timestamp
+    assert payload.get("stale_snapshot_retrieved_at_utc") == timestamp
+    assert payload.get("stale_age_seconds") == 60.0
+
+
+def test_sanitize_spot_snapshot_marks_old_snapshot(tmp_path):
+    asset_dir = tmp_path / "EURUSD"
+    asset_dir.mkdir()
+    timestamp_dt = datetime(2025, 11, 9, 7, 30, tzinfo=timezone.utc)
+    timestamp = timestamp_dt.isoformat()
+    snapshot = {
+        "asset": "EURUSD",
+        "ok": True,
+        "transport": "http",
+        "retrieved_at_utc": timestamp,
+        "utc": timestamp,
+        "price": 1.0642,
+        "frames": [
+            {
+                "price": 1.0641,
+                "utc": timestamp,
+                "retrieved_at_utc": timestamp,
+                "bid": 1.064,
+                "ask": 1.0642,
+            }
+        ],
+    }
+    path = asset_dir / "spot_realtime.json"
+    path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+    now_dt = datetime(2025, 11, 9, 10, 0, tzinfo=timezone.utc)
+    marked = _sanitize_spot_snapshots(tmp_path, now=now_dt)
+    assert marked == 1
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["ok"] is False
+    assert payload["stale_reason"] == "older_than_300s"
+    assert payload.get("stale_snapshot_utc") == timestamp
+    assert payload.get("stale_age_seconds") == (now_dt - timestamp_dt).total_seconds()
 
 
 def test_sanitize_order_flow_summary_adds_status(tmp_path):
