@@ -18,8 +18,10 @@ from datetime import datetime, timezone, timedelta
 from datetime import time as dtime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Set
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Set
 from zoneinfo import ZoneInfo
+
+LOCAL_TZ = ZoneInfo("Europe/Budapest")
 
 from logging_utils import ensure_json_file_handler
 
@@ -41,12 +43,19 @@ except Exception:  # pragma: no cover - optional dependency guard
         return None
 
 try:
-    from reports.monitoring import update_signal_health_report, update_data_latency_report
+    from reports.monitoring import (
+        update_signal_health_report,
+        update_data_latency_report,
+        record_latency_alert,
+    )
 except Exception:  # pragma: no cover - optional dependency guard
     def update_signal_health_report(*_args, **_kwargs):
         return None
 
     def update_data_latency_report(*_args, **_kwargs):
+        return None
+
+    def record_latency_alert(*_args, **_kwargs):
         return None
 
 try:
@@ -146,6 +155,7 @@ from config.analysis_settings import (
     ATR5_MIN_MULT_ASSET,
     ATR_LOW_TH_ASSET,
     ATR_LOW_TH_DEFAULT,
+    DATA_LATENCY_GUARD,
     ATR_VOL_HIGH_REL,
     ATR_PERCENTILE_TOD,
     ASSETS,
@@ -1023,20 +1033,21 @@ def _should_use_realtime_spot(
 ) -> Tuple[bool, Dict[str, Any]]:
     """Decide whether the realtime spot snapshot should override the last spot close."""
 
+    meta_base = {"max_age_seconds": float(max_age_seconds)}
     if rt_price is None:
-        return False, {"reason": "missing_price"}
+        return False, dict(meta_base, reason="missing_price")
     if rt_ts is None:
-        return False, {"reason": "missing_timestamp"}
+        return False, dict(meta_base, reason="missing_timestamp")
     if rt_ts.tzinfo is None:
         rt_ts = rt_ts.replace(tzinfo=timezone.utc)
     age_seconds = (now_utc - rt_ts).total_seconds()
     if age_seconds < 0:
         age_seconds = 0.0
     if age_seconds > float(max_age_seconds):
-        return False, {"reason": "stale", "age_seconds": age_seconds}
+        return False, dict(meta_base, reason="stale", age_seconds=age_seconds)
     if spot_ts is not None and rt_ts <= spot_ts:
-        return False, {"reason": "not_newer"}
-    return True, {"reason": "ok", "age_seconds": age_seconds}
+        return False, dict(meta_base, reason="not_newer", age_seconds=age_seconds)
+    return True, dict(meta_base, reason="ok", age_seconds=age_seconds)
 
 
 def _extract_bid_ask_spread(snapshot: Any) -> Optional[float]:
@@ -1371,14 +1382,14 @@ def next_session_open(asset: str, now: Optional[datetime] = None) -> Optional[da
 
     return None
 
-def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
-    now = datetime.now(timezone.utc)
-    h, m = now.hour, now.minute
+def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dict[str, Any]]:
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    h, m = now_utc.hour, now_utc.minute
     minute_of_day = h * 60 + m
     entry_windows, monitor_windows = session_windows_utc(asset)
     monitor_ok = in_any_window_utc(monitor_windows, h, m)
     entry_window_ok = in_any_window_utc(entry_windows, h, m)
-    weekday_ok = session_weekday_ok(asset, now)
+    weekday_ok = session_weekday_ok(asset, now_utc)
     status_profile_name, status_profile = resolve_session_status_for_asset(asset)
     if not isinstance(status_profile, dict):
         status_profile = {}
@@ -1395,7 +1406,7 @@ def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
 
     rules = SESSION_TIME_RULES.get(asset, {})
     sunday_open = rules.get("sunday_open_minute")
-    if sunday_open is not None and now.weekday() == 6 and minute_of_day < sunday_open:
+    if sunday_open is not None and now_utc.weekday() == 6 and minute_of_day < sunday_open:
         monitor_ok = False
         entry_window_ok = False
         special_status = "closed_out_of_hours"
@@ -1418,7 +1429,7 @@ def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
                 break
 
     friday_close = rules.get("friday_close_minute")
-    if friday_close is not None and now.weekday() == 4 and minute_of_day >= friday_close:
+    if friday_close is not None and now_utc.weekday() == 4 and minute_of_day >= friday_close:
         monitor_ok = False
         entry_window_ok = False
         special_status = "closed_out_of_hours"
@@ -1479,7 +1490,7 @@ def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
         "within_entry_window": entry_window_ok,
         "within_monitor_window": monitor_ok,
         "weekday_ok": weekday_ok,
-        "now_utc": now.isoformat(),
+        "now_utc": now_utc.isoformat(),
         "windows_utc": entry_windows,
     }
     if monitor_windows and monitor_windows != entry_windows:
@@ -1555,7 +1566,7 @@ def session_state(asset: str) -> Tuple[bool, Dict[str, Any]]:
     if next_open_override:
         info["next_open_utc"] = next_open_override
     elif not entry_open:
-        nxt = next_session_open(asset, now)
+        nxt = next_session_open(asset, now_utc)
         if nxt:
             info["next_open_utc"] = nxt.isoformat()
     return entry_open, info
@@ -3556,6 +3567,160 @@ def diagnostics_payload(tf_meta: Dict[str, Dict[str, Any]],
         "latency_flags": list(latency_flags),
         "refresh_tips": list(REFRESH_TIPS),
     }
+
+
+def _latency_guard_status(
+    asset: str,
+    latency_seconds: Dict[str, Optional[int]],
+    guard_config: Dict[str, Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    asset_key = str(asset or "").upper()
+    cfg = guard_config.get(asset_key) or guard_config.get("DEFAULT")
+    if not isinstance(cfg, dict):
+        return None
+    limit_raw = cfg.get("latency_k1m_sec_max")
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        return None
+    if limit <= 0:
+        return None
+    age_raw = latency_seconds.get("k1m")
+    try:
+        age_seconds = int(age_raw) if age_raw is not None else None
+    except (TypeError, ValueError):
+        age_seconds = None
+    if age_seconds is None:
+        return None
+    if age_seconds > limit:
+        return {
+            "asset": asset_key,
+            "feed": "k1m",
+            "age_seconds": age_seconds,
+            "limit_seconds": limit,
+        }
+    return None
+
+
+def _emit_precision_gate_log(
+    asset: str,
+    gate_name: str,
+    decision: bool,
+    reason_code: str,
+    *,
+    order_flow_metrics: Dict[str, Any],
+    tick_order_flow: Dict[str, Any],
+    latency_seconds: Dict[str, Optional[int]],
+    precision_plan: Optional[Dict[str, Any]] = None,
+    logger: logging.Logger = LOGGER,
+    timestamp: Optional[datetime] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    now_utc = (timestamp or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    ts_format = "%Y-%m-%d %H:%M:%S"
+    latency_payload = latency_seconds if isinstance(latency_seconds, dict) else {}
+    order_flow = order_flow_metrics if isinstance(order_flow_metrics, dict) else {}
+    tick_flow = tick_order_flow if isinstance(tick_order_flow, dict) else {}
+    age_raw = latency_payload.get("k1m")
+    try:
+        age_seconds = int(age_raw) if age_raw is not None else None
+    except (TypeError, ValueError):
+        age_seconds = None
+    window_minutes = tick_flow.get("window_minutes")
+    if window_minutes is None:
+        window_minutes = OFI_Z_LOOKBACK if OFI_Z_LOOKBACK > 0 else None
+    ofi_present = False
+    try:
+        ofi_present = np.isfinite(float(order_flow.get("imbalance_z")))
+    except Exception:
+        ofi_present = False
+    flow_strength = None
+    trigger_state = None
+    trigger_ready = None
+    precision_score = None
+    if precision_plan:
+        flow_strength = precision_plan.get("order_flow_strength")
+        trigger_state = precision_plan.get("trigger_state")
+        trigger_ready = precision_plan.get("trigger_ready")
+        precision_score = precision_plan.get("score")
+    payload: Dict[str, Any] = {
+        "asset": asset,
+        "gate": gate_name,
+        "decision": bool(decision),
+        "reason_code": reason_code,
+        "ofi_present": bool(ofi_present),
+        "ofi_age_seconds": age_seconds,
+        "ofi_window_minutes": window_minutes,
+        "ofi_conf": flow_strength,
+        "ofi_source": tick_flow.get("source")
+        or order_flow.get("status"),
+        "timestamp_utc": now_utc.strftime(ts_format),
+        "timestamp_cet": now_utc.astimezone(LOCAL_TZ).strftime(ts_format),
+    }
+    if trigger_state is not None:
+        payload["precision_trigger_state"] = trigger_state
+    if trigger_ready is not None:
+        payload["precision_trigger_ready"] = bool(trigger_ready)
+    if precision_score is not None:
+        payload["precision_score"] = precision_score
+    if extra:
+        payload.update(extra)
+    logger.info("Precision kapu állapot", extra=payload)
+
+
+def _handle_spot_realtime_staleness(
+    asset: str,
+    rt_meta: Dict[str, Any],
+    now_utc: datetime,
+    notifier: Callable[..., Any],
+    logger: logging.Logger,
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    if not isinstance(rt_meta, dict):
+        return result
+    age_raw = rt_meta.get("age_seconds")
+    try:
+        age_seconds = int(age_raw) if age_raw is not None else None
+    except (TypeError, ValueError):
+        age_seconds = None
+    result["age_seconds"] = age_seconds
+    if age_seconds is None:
+        return result
+    try:
+        threshold = int(rt_meta.get("max_age_seconds") or 600)
+    except (TypeError, ValueError):
+        threshold = 600
+    if age_seconds <= threshold:
+        return result
+    ts_format = "%Y-%m-%d %H:%M:%S"
+    payload = {
+        "asset": asset,
+        "feed": "spot_realtime",
+        "age_seconds": age_seconds,
+        "threshold_seconds": threshold,
+        "timestamp_utc": now_utc.strftime(ts_format),
+        "timestamp_cet": now_utc.astimezone(LOCAL_TZ).strftime(ts_format),
+    }
+    try:
+        notifier(
+            asset,
+            "spot_realtime",
+            f"Realtime spot frissítés szükséges — {age_seconds} másodperces késés",
+            metadata=payload,
+        )
+        result["notified"] = True
+        result["refresh_requested"] = True
+        result.setdefault("retry_after_seconds", 60)
+        logger.info(
+            "Realtime spot frissítés jelzés elküldve",
+            extra=dict(payload, action="refresh_request"),
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        result["notified"] = False
+        result["refresh_requested"] = False
+        result["error"] = str(exc)
+        logger.warning("Realtime spot frissítés jelzés hibára futott: %s", exc)
+    return result
 
 
 def should_enforce_stale_frame(asset: str,
@@ -5580,8 +5745,19 @@ def analyze(asset: str) -> Dict[str, Any]:
         realtime_used = True
         realtime_reason = "Realtime spot feed override"
     elif rt_decision_meta:
-        entry_thresholds_meta["spot_realtime_ignored"] = dict(rt_decision_meta, used=False)
-    session_ok_flag, session_meta = session_state(asset)
+        rt_meta_payload = dict(rt_decision_meta, used=False)
+        rt_meta_payload.setdefault("max_age_seconds", spot_max_age)
+        entry_thresholds_meta["spot_realtime_ignored"] = rt_meta_payload
+        refresh_state = _handle_spot_realtime_staleness(
+            asset,
+            rt_meta_payload,
+            now,
+            record_latency_alert,
+            LOGGER,
+        )
+        if refresh_state:
+            entry_thresholds_meta["spot_realtime_refresh"] = refresh_state
+    session_ok_flag, session_meta = session_state(asset, now=now)
     if asset == "BTCUSD":
         news_lockout_active = False
         news_reason = None
@@ -5973,6 +6149,60 @@ def analyze(asset: str) -> Dict[str, Any]:
         "klines_1h.json": tf_meta["k1h"].get("source_mtime_utc"),
         "klines_4h.json": tf_meta["k4h"].get("source_mtime_utc"),
     }
+
+    guard_status = _latency_guard_status(asset, latency_by_frame, DATA_LATENCY_GUARD)
+    if guard_status:
+        k1m_meta = tf_meta.setdefault("k1m", {})
+        k1m_meta["latency_guard_triggered"] = True
+        k1m_meta["latency_guard_age_seconds"] = guard_status["age_seconds"]
+        k1m_meta["latency_guard_limit_seconds"] = guard_status["limit_seconds"]
+        guard_minutes = guard_status["age_seconds"] // 60
+        guard_limit_minutes = guard_status["limit_seconds"] // 60
+        guard_note = (
+            f"{guard_status['feed']}: latency guard {guard_minutes} perc késés (limit {guard_limit_minutes} perc)"
+        )
+        if guard_note not in latency_flags:
+            latency_flags.append(guard_note)
+        ts_format = "%Y-%m-%d %H:%M:%S"
+        triggered_utc = analysis_now.strftime(ts_format)
+        triggered_cet = analysis_now.astimezone(LOCAL_TZ).strftime(ts_format)
+        guard_meta = dict(guard_status)
+        guard_meta.update({
+            "triggered_utc": triggered_utc,
+            "triggered_cet": triggered_cet,
+        })
+        entry_thresholds_meta["latency_guard"] = guard_meta
+        log_payload = dict(guard_meta, action="block_trade", asset=asset)
+        LOGGER.warning("Latency guard aktiválva", extra=log_payload)
+        try:
+            record_latency_alert(
+                asset,
+                guard_status["feed"],
+                f"{asset} {guard_status['feed']} késés {guard_minutes} perc — latency guard aktív",
+                metadata=guard_meta,
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            LOGGER.warning("Latency guard értesítés hibás: %s", exc)
+        guard_reasons = [
+            "Critical data latency — belépés tiltva",
+            guard_note,
+        ]
+        diag_payload = diagnostics_payload(tf_meta, source_files, latency_flags)
+        msg = build_data_gap_signal(
+            asset,
+            spot_price,
+            spot_utc,
+            spot_retrieved,
+            LEVERAGE.get(asset, 2.0),
+            guard_reasons,
+            display_spot,
+            diag_payload,
+            session_meta=session_meta,
+        )
+        if realtime_used and realtime_reason:
+            msg.setdefault("reasons", []).append(realtime_reason)
+        save_json(os.path.join(outdir, "signal.json"), msg)
+        return msg
 
     diag_factory = lambda: diagnostics_payload(tf_meta, source_files, latency_flags)
 
@@ -6430,6 +6660,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         tol_abs=atr1h_tol * 0.75,   # SZÉLESÍTVE: ±0.75×ATR(1h)
         tol_frac=fib_tol
     )
+    entry_thresholds_meta["fib_tolerance_fraction"] = float(fib_tol)
 
     # 6/b) Kiegészítő likviditás kontextus (1h EMA21 közelség + szerkezeti retest)
     ema21_1h = float(ema(k1h_closed["close"], 21).iloc[-1]) if not k1h_closed.empty else float("nan")
@@ -8288,6 +8519,23 @@ def analyze(asset: str) -> Dict[str, Any]:
         else:
             p_score_label = f"{p_score_min_local:.1f}"
         missing_core.append(f"P_score>={p_score_label}")
+    _emit_precision_gate_log(
+        asset,
+        "can_enter_core",
+        bool(can_enter_core),
+        "core_ok" if can_enter_core else "core_blockers",
+        order_flow_metrics=order_flow_metrics,
+        tick_order_flow=tick_order_flow,
+        latency_seconds=latency_by_frame,
+        precision_plan=None,
+        timestamp=analysis_now,
+        extra={
+            "missing": list(missing_core),
+            "p_score": P,
+            "p_score_min": p_score_min_local,
+            "base_core_ok": bool(base_core_ok),
+        },
+    )
     if liquidity_relaxed:
         reasons.append("Likviditási kapu lazítva erős momentum miatt")
 
@@ -9034,6 +9282,21 @@ def analyze(asset: str) -> Dict[str, Any]:
         precision_plan["trigger_ready"] = precision_trigger_ready
         if precision_plan.get("trigger_levels") is None:
             precision_plan["trigger_levels"] = {}
+        _emit_precision_gate_log(
+            asset,
+            "precision_score",
+            precision_ready_for_entry,
+            "score_ready" if precision_ready_for_entry else "score_below",
+            order_flow_metrics=order_flow_metrics,
+            tick_order_flow=tick_order_flow,
+            latency_seconds=latency_by_frame,
+            precision_plan=precision_plan,
+            timestamp=analysis_now,
+            extra={
+                "score": precision_score_val,
+                "threshold": precision_threshold_value,
+            },
+        )
         if precision_gate_label not in required_list:
             required_list.append(precision_gate_label)
         if not precision_ready_for_entry and precision_gate_label not in missing:
@@ -9072,6 +9335,30 @@ def analyze(asset: str) -> Dict[str, Any]:
             missing = [item for item in missing if item != precision_flow_gate_label]
         if precision_trigger_ready:
             missing = [item for item in missing if item != precision_trigger_gate_label]
+        _emit_precision_gate_log(
+            asset,
+            "precision_flow",
+            precision_flow_ready,
+            "flow_ready" if precision_flow_ready else "flow_blocked",
+            order_flow_metrics=order_flow_metrics,
+            tick_order_flow=tick_order_flow,
+            latency_seconds=latency_by_frame,
+            precision_plan=precision_plan,
+            timestamp=analysis_now,
+            extra={"blockers": precision_plan.get("order_flow_blockers")},
+        )
+        _emit_precision_gate_log(
+            asset,
+            "precision_trigger",
+            precision_trigger_ready,
+            "trigger_ready" if precision_trigger_ready else f"trigger_{precision_trigger_state}",
+            order_flow_metrics=order_flow_metrics,
+            tick_order_flow=tick_order_flow,
+            latency_seconds=latency_by_frame,
+            precision_plan=precision_plan,
+            timestamp=analysis_now,
+            extra={"trigger_state": precision_trigger_state},
+        )
 
     if precision_plan:
         if not precision_ready_for_entry:
@@ -9113,6 +9400,21 @@ def analyze(asset: str) -> Dict[str, Any]:
                 armed_note = "Precision trigger kész → limit figyelés"
                 if armed_note not in reasons:
                     reasons.append(armed_note)
+        _emit_precision_gate_log(
+            asset,
+            "precision_state",
+            decision in {"buy", "sell", "precision_ready", "precision_arming"},
+            f"state_{decision}",
+            order_flow_metrics=order_flow_metrics,
+            tick_order_flow=tick_order_flow,
+            latency_seconds=latency_by_frame,
+            precision_plan=precision_plan,
+            timestamp=analysis_now,
+            extra={
+                "decision": decision,
+                "missing": list(missing),
+            },
+        )
 
     def _fmt_price(value: Optional[float]) -> str:
         if value is None or not np.isfinite(value):
@@ -10321,6 +10623,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
