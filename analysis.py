@@ -18,7 +18,7 @@ from datetime import datetime, timezone, timedelta
 from datetime import time as dtime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Set
 from zoneinfo import ZoneInfo
 
 from logging_utils import ensure_json_file_handler
@@ -206,6 +206,7 @@ from config.analysis_settings import (
     get_fib_tolerance,
     get_max_risk_pct,
     get_p_score_min,
+    get_realtime_price_guard,
     get_spread_max_atr_pct,
     load_config,
 )
@@ -3013,6 +3014,77 @@ def safe_float(value: Any) -> Optional[float]:
     return result
 
 
+def _guard_realtime_price_stats(
+    asset: str,
+    stats: Dict[str, Any],
+    reference_candidates: Sequence[Optional[float]],
+) -> Dict[str, Any]:
+    """Clamp realtime statistics that drift too far from trusted spot prices."""
+
+    if not isinstance(stats, dict):
+        return stats
+
+    guard_cfg = get_realtime_price_guard(asset)
+    limit_pct_raw = guard_cfg.get("limit_pct")
+    min_abs_raw = guard_cfg.get("min_abs")
+
+    try:
+        limit_pct = float(limit_pct_raw)
+    except (TypeError, ValueError):
+        return stats
+    if limit_pct <= 0:
+        return stats
+
+    try:
+        min_abs = float(min_abs_raw) if min_abs_raw is not None else 0.0
+    except (TypeError, ValueError):
+        min_abs = 0.0
+    min_abs = max(0.0, min_abs)
+
+    reference: Optional[float] = None
+    for candidate in reference_candidates:
+        ref_val = safe_float(candidate)
+        if ref_val is not None and ref_val > 0:
+            reference = ref_val
+            break
+
+    if reference is None:
+        return stats
+
+    allowed_abs = max(min_abs, abs(reference) * limit_pct)
+    if allowed_abs <= 0:
+        return stats
+
+    sanitized = dict(stats)
+    adjustments: Dict[str, Dict[str, float]] = {}
+    for key in ("min_price", "max_price", "mean_price"):
+        price_val = safe_float(stats.get(key))
+        if price_val is None:
+            continue
+        if abs(price_val - reference) > allowed_abs:
+            sanitized[key] = float(reference)
+            deviation_pct = None
+            if reference != 0:
+                deviation_pct = abs(price_val - reference) / abs(reference)
+            adj_meta: Dict[str, float] = {"original": float(price_val)}
+            if deviation_pct is not None and np.isfinite(deviation_pct):
+                adj_meta["deviation_pct"] = float(deviation_pct)
+            adjustments[key] = adj_meta
+
+    if not adjustments:
+        return stats
+
+    sanitized["price_guard"] = {
+        "reference": float(reference),
+        "limit_pct": float(limit_pct),
+        "min_abs": float(min_abs),
+        "effective_limit": float(allowed_abs),
+        "adjusted": sorted(adjustments.keys()),
+        "original_values": adjustments,
+    }
+    return sanitized
+
+
 _PRECISION_FLOW_CACHE: Dict[str, Any] = {"mtime": None, "data": {}}
 
 
@@ -5689,6 +5761,24 @@ def analyze(asset: str) -> Dict[str, Any]:
             spot_stale_reason = None
         else:
             spot_stale_reason = spot_stale_reason or "Spot fallback timestamp missing"
+
+    if isinstance(realtime_stats, dict):
+        guard_candidates = (
+            display_spot,
+            spot_price_reference,
+            last5_close,
+            safe_float(rt_price) if rt_price is not None else None,
+        )
+        guarded_stats = _guard_realtime_price_stats(asset, realtime_stats, guard_candidates)
+        if guarded_stats is not realtime_stats:
+            realtime_stats = guarded_stats
+            guard_meta = realtime_stats.get("price_guard")
+            if isinstance(guard_meta, dict) and guard_meta.get("adjusted"):
+                adjusted_keys = ", ".join(str(key) for key in guard_meta.get("adjusted", []))
+                note = "spot: realtime stat outlier guard aktiv"
+                if adjusted_keys:
+                    note += f" ({adjusted_keys})"
+                spot_latency_notes.append(note)
 
     if spot_fallback_used:
         if spot_issue_initial:
@@ -10231,6 +10321,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
