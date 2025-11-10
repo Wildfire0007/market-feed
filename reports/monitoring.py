@@ -245,4 +245,53 @@ def update_data_latency_report(public_dir: Path = PUBLIC_DIR, summary: Optional[
     return report_path
 
 
-__all__ = ["update_signal_health_report", "update_data_latency_report"]
+def record_latency_alert(
+    asset: str,
+    feed: str,
+    message: str,
+    *,
+    metadata: Optional[Dict[str, Any]] = None,
+    public_dir: Path = PUBLIC_DIR,
+) -> Path:
+    """Persistálja a latency riasztást monitorozási célból."""
+
+    monitor_dir = Path(public_dir) / "monitoring"
+    monitor_dir.mkdir(parents=True, exist_ok=True)
+    alert_path = monitor_dir / "latency_alerts.json"
+    log_path = monitor_dir / "latency_alerts.log"
+
+    now = _now().astimezone(timezone.utc)
+    payload: Dict[str, Any] = {
+        "asset": str(asset),
+        "feed": str(feed),
+        "message": str(message),
+        "created_utc": now.isoformat(),
+    }
+    if metadata:
+        try:
+            payload["metadata"] = dict(metadata)
+        except Exception:
+            payload["metadata"] = {"repr": repr(metadata)}
+
+    try:
+        existing_raw = json.loads(alert_path.read_text(encoding="utf-8"))
+        existing = existing_raw[-199:] if isinstance(existing_raw, list) else []
+    except FileNotFoundError:
+        existing = []
+    except Exception:
+        existing = []
+
+    existing.append(payload)
+    alert_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    try:
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        # Naplózási hiba esetén sem bukjon a stratégia.
+        pass
+
+    return alert_path
+
+
+__all__ = ["update_signal_health_report", "update_data_latency_report", "record_latency_alert"]
