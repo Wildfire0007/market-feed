@@ -231,7 +231,13 @@ def _extract_bid_ask(frame: Dict[str, Any]) -> Tuple[Optional[float], Optional[f
     return bid_val, ask_val
 
 
-def _mark_snapshot_stale(payload: Dict[str, Any], reason: str, *, now: datetime) -> bool:
+def _mark_snapshot_stale(
+    payload: Dict[str, Any],
+    reason: str,
+    *,
+    now: datetime,
+    age_seconds: Optional[float] = None,
+) -> bool:
     changed = False
     if payload.get("ok") is not False:
         payload["ok"] = False
@@ -241,6 +247,16 @@ def _mark_snapshot_stale(payload: Dict[str, Any], reason: str, *, now: datetime)
         changed = True
     payload["stale_marked_at_utc"] = now.isoformat()
     payload["suggested_refresh"] = "now"
+    if age_seconds is not None:
+        payload["stale_age_seconds"] = float(age_seconds)
+    snapshot_utc = payload.pop("utc", None)
+    if snapshot_utc is not None:
+        payload["stale_snapshot_utc"] = snapshot_utc
+        changed = True
+    retrieved_utc = payload.pop("retrieved_at_utc", None)
+    if retrieved_utc is not None:
+        payload["stale_snapshot_retrieved_at_utc"] = retrieved_utc
+        changed = True
     for field in ("price", "frames", "statistics", "forced", "force_reason"):
         if field in payload:
             payload.pop(field, None)
@@ -257,23 +273,28 @@ def _sanitize_spot_snapshots(public_dir: Path, *, now: Optional[datetime] = None
         payload = _load_json(snapshot_path)
         if not isinstance(payload, dict) or not payload:
             continue
-        forced = bool(payload.get("forced")) or payload.get("stale_reason") in {"missing_bid_ask", "older_than_300s"}
-        if not forced:
-            continue
+        forced = bool(payload.get("forced")) or payload.get("stale_reason") in {"missing_bid_ask", "older_than_300s"}        
         reason: Optional[str] = None
         frames = payload.get("frames") if isinstance(payload.get("frames"), list) else []
         last_frame: Dict[str, Any] = frames[-1] if frames else {}
         bid_val, ask_val = _extract_bid_ask(last_frame)
-        if bid_val is None or ask_val is None:
+        if forced and (bid_val is None or ask_val is None):
             reason = "missing_bid_ask"
         snapshot_ts = _parse_iso_timestamp(payload.get("utc") or payload.get("retrieved_at_utc"))
+        age_seconds: Optional[float] = None
+        if snapshot_ts is not None:
+            age_seconds = (now - snapshot_ts).total_seconds()
+            if age_seconds < 0:
+                age_seconds = 0.0
         if snapshot_ts is None:
             reason = reason or "missing_timestamp"
-        elif (now - snapshot_ts).total_seconds() > 300:
-            reason = "older_than_300s"
+        elif age_seconds is not None and age_seconds > 300:
+            reason = reason or "older_than_300s"
+        if forced is False and reason not in {"missing_timestamp", "older_than_300s"}:
+            continue
         if not reason:
             continue
-        if _mark_snapshot_stale(payload, reason, now=now):
+        if _mark_snapshot_stale(payload, reason, now=now, age_seconds=age_seconds):
             with snapshot_path.open("w", encoding="utf-8") as handle:
                 json.dump(payload, handle, ensure_ascii=False, indent=2)
             updated += 1
