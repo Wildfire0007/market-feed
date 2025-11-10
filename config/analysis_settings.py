@@ -672,6 +672,81 @@ NVDA_POSITION_SCALE: Dict[str, float] = {
     key: float(value)
     for key, value in dict(_get_config_value("nvda_position_scale") or {}).items()
 }
+
+
+_REALTIME_PRICE_GUARD_FALLBACK: Dict[str, float] = {"limit_pct": 0.01, "min_abs": 0.1}
+
+
+def _normalize_price_guard_map(raw: Any) -> Dict[str, Dict[str, float]]:
+    """Validate and normalise realtime price guard thresholds."""
+
+    guard_map: Dict[str, Dict[str, float]] = {
+        "default": dict(_REALTIME_PRICE_GUARD_FALLBACK)
+    }
+    if not isinstance(raw, dict):
+        return guard_map
+
+    for key, meta in raw.items():
+        guard_key = "default" if str(key).lower() == "default" else str(key).upper()
+        if not isinstance(meta, dict):
+            LOGGER.warning(
+                "Ignoring realtime_price_guard entry for %s — expected mapping, got %r",
+                guard_key,
+                type(meta).__name__,
+            )
+            continue
+        limit_val = meta.get("limit_pct")
+        min_abs_val = meta.get("min_abs")
+        try:
+            limit_pct = float(limit_val)
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "Invalid limit_pct %r for realtime_price_guard[%s] — using fallback",
+                limit_val,
+                guard_key,
+            )
+            continue
+        if limit_pct <= 0:
+            LOGGER.warning(
+                "Non-positive limit_pct %s for realtime_price_guard[%s] — using fallback",
+                limit_pct,
+                guard_key,
+            )
+            continue
+        try:
+            min_abs = float(min_abs_val) if min_abs_val is not None else _REALTIME_PRICE_GUARD_FALLBACK["min_abs"]
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "Invalid min_abs %r for realtime_price_guard[%s] — using fallback",
+                min_abs_val,
+                guard_key,
+            )
+            min_abs = _REALTIME_PRICE_GUARD_FALLBACK["min_abs"]
+        guard_map[guard_key] = {
+            "limit_pct": float(limit_pct),
+            "min_abs": max(0.0, float(min_abs)),
+        }
+
+    if "default" not in guard_map:
+        guard_map["default"] = dict(_REALTIME_PRICE_GUARD_FALLBACK)
+    else:
+        guard_map["default"].setdefault("min_abs", _REALTIME_PRICE_GUARD_FALLBACK["min_abs"])
+
+    return guard_map
+
+
+REALTIME_PRICE_GUARD: Dict[str, Dict[str, float]] = _normalize_price_guard_map(
+    _get_config_value("realtime_price_guard")
+)
+
+
+def get_realtime_price_guard(asset: Optional[str]) -> Dict[str, float]:
+    """Return the configured realtime price guard thresholds for ``asset``."""
+
+    asset_key = str(asset or "").upper()
+    if asset_key and asset_key in REALTIME_PRICE_GUARD:
+        return dict(REALTIME_PRICE_GUARD[asset_key])
+    return dict(REALTIME_PRICE_GUARD.get("default", _REALTIME_PRICE_GUARD_FALLBACK))
 def _resolve_momentum_assets() -> Set[str]:
     """Return the configured momentum-capable assets with fallbacks."""
 
