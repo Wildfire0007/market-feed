@@ -150,6 +150,10 @@ jobs:
           git fetch origin main
           git reset --hard origin/main
 
+      - name: Record synced commit
+        id: record_synced_commit
+        run: echo "synced_rev=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        
       - name: Clean Python caches
         run: |
           find . -type d -name "__pycache__" -exec rm -rf {} +
@@ -184,17 +188,23 @@ jobs:
       - name: Run pytest suite
         run: pytest
 
-      - name: Ensure checked-out commit matches origin/main HEAD
+      - name: Ensure checked-out commit remains consistent
         run: |
-          set -euo pipefail
-          git fetch origin main
+          set -euo pipefail          
           head_rev=$(git rev-parse HEAD)
-          main_rev=$(git rev-parse origin/main)
+          baseline_rev="${{ steps.record_synced_commit.outputs.synced_rev }}"
           echo "HEAD revision: $head_rev"
-          echo "origin/main revision: $main_rev"
-          if [ "$head_rev" != "$main_rev" ]; then
-            echo "Working commit diverges from origin/main" >&2
+          echo "Baseline revision: $baseline_rev"
+          if [ "$head_rev" != "$baseline_rev" ]; then
+            echo "Working commit diverges from recorded baseline" >&2
             exit 1
+          fi
+
+          git fetch origin main
+          main_rev=$(git rev-parse origin/main)
+          echo "origin/main revision: $main_rev"
+          if [ "$main_rev" != "$baseline_rev" ]; then
+            echo "origin/main advanced during job run; proceeding with baseline validation." >&2
           fi
 
   notify:
