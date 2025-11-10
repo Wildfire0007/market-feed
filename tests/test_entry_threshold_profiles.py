@@ -189,7 +189,9 @@ def test_profile_specific_helpers(monkeypatch):
     assert baseline.get_atr_period("EURUSD") == 14
     assert baseline.get_atr_abs_min("BTCUSD") == pytest.approx(80.0)
     assert baseline.get_spread_max_atr_pct("EURUSD") == pytest.approx(0.45)
-    assert baseline.get_fib_tolerance("GOLD_CFD") == pytest.approx(0.02)
+    assert baseline.get_fib_tolerance("GOLD_CFD") == pytest.approx(0.004)
+    assert baseline.get_fib_tolerance("NVDA") == pytest.approx(0.004)
+    assert baseline.get_fib_tolerance("EURUSD") == pytest.approx(0.005)
     assert baseline.get_max_risk_pct("NVDA") == pytest.approx(1.4)
     assert baseline.get_bos_lookback("EURUSD") == 30
 
@@ -197,12 +199,16 @@ def test_profile_specific_helpers(monkeypatch):
     assert suppressed.get_atr_period("EURUSD") == 12
     assert suppressed.get_atr_abs_min("EURUSD") == pytest.approx(0.0008)
     assert suppressed.get_spread_max_atr_pct("BTCUSD") == pytest.approx(0.6)
-    assert suppressed.get_fib_tolerance("BTCUSD") == pytest.approx(0.03)
+    assert suppressed.get_fib_tolerance("BTCUSD") == pytest.approx(0.007)
+    assert suppressed.get_fib_tolerance("GOLD_CFD") == pytest.approx(0.005)
+    assert suppressed.get_fib_tolerance("NVDA") == pytest.approx(0.005)
     assert suppressed.get_max_risk_pct("BTCUSD") == pytest.approx(1.2)
     assert suppressed.get_bos_lookback("BTCUSD") == 24
 
     relaxed = _reload_settings(monkeypatch, profile="relaxed")
     assert relaxed.get_spread_max_atr_pct("GOLD_CFD") == pytest.approx(0.33)
     assert relaxed.get_bos_lookback(None) == 28
+    assert relaxed.get_fib_tolerance("GOLD_CFD") == pytest.approx(0.0045)
+    assert relaxed.get_fib_tolerance("NVDA") == pytest.approx(0.0045)
 
     _reload_settings(monkeypatch)
