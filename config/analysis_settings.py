@@ -294,6 +294,69 @@ def _normalize_profiled_numeric_map(
     return profiles
 
 
+def _normalize_fib_tolerance_profiles(raw_map: Any) -> Dict[str, Dict[str, Any]]:
+    profiles: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(raw_map, dict):
+        return profiles
+
+    for profile_name, mapping in raw_map.items():
+        if not isinstance(mapping, dict):
+            continue
+        default_value = 0.02
+        by_asset: Dict[str, float] = {}
+        by_class: Dict[str, float] = {}
+
+        if "default" in mapping:
+            try:
+                default_raw = mapping.get("default")
+                if default_raw is not None:
+                    default_value = float(default_raw)
+            except (TypeError, ValueError):
+                LOGGER.warning(
+                    "Ignoring invalid fib_tolerance default %r for profile %s",
+                    mapping.get("default"),
+                    profile_name,
+                )
+
+        classes_map = mapping.get("classes")
+        if isinstance(classes_map, dict):
+            for class_name, class_value in classes_map.items():
+                try:
+                    if class_value is None:
+                        continue
+                    by_class[str(class_name)] = float(class_value)
+                except (TypeError, ValueError):
+                    LOGGER.warning(
+                        "Ignoring invalid fib_tolerance class override %r for %s in profile %s",
+                        class_value,
+                        class_name,
+                        profile_name,
+                    )
+
+        for asset_key, value in mapping.items():
+            if asset_key in {"default", "classes"}:
+                continue
+            try:
+                if value is None:
+                    continue
+                by_asset[str(asset_key)] = float(value)
+            except (TypeError, ValueError):
+                LOGGER.warning(
+                    "Ignoring invalid fib_tolerance override %r for %s in profile %s",
+                    value,
+                    asset_key,
+                    profile_name,
+                )
+
+        profiles[str(profile_name)] = {
+            "default": default_value,
+            "by_asset": by_asset,
+            "by_class": by_class,
+        }
+
+    return profiles
+
+
 def _normalize_bias_relax(raw_map: Any) -> Dict[str, Dict[str, Any]]:
     result: Dict[str, Dict[str, Any]] = {}
     if not isinstance(raw_map, dict):
@@ -779,12 +842,22 @@ SESSION_WINDOWS_UTC: Dict[str, Dict[str, Optional[List[Tuple[int, int, int, int]
 SPOT_MAX_AGE_SECONDS: Dict[str, int] = {
     k: int(v) for k, v in dict(_get_config_value("spot_max_age_seconds") or {}).items()
 }
+_RAW_LATENCY_GUARD = dict(_get_config_value("data_latency_guard") or {})
+DATA_LATENCY_GUARD: Dict[str, Dict[str, Any]] = {}
+for key, value in _RAW_LATENCY_GUARD.items():
+    if isinstance(value, dict):
+        DATA_LATENCY_GUARD[str(key).upper()] = dict(value)
 INTERVENTION_WATCH_DEFAULT: Dict[str, Any] = dict(_get_config_value("intervention_watch_default") or {})
 SESSION_WEEKDAYS: Dict[str, Any] = dict(_get_config_value("session_weekdays") or {})
 SESSION_TIME_RULES: Dict[str, Dict[str, Any]] = load_config()["session_time_rules"]
 ATR_PERCENTILE_TOD: Dict[str, Any] = dict(_get_config_value("atr_percentile_min_by_tod") or {})
 P_SCORE_TIME_BONUS: Dict[str, Any] = dict(_get_config_value("p_score_time_bonus") or {})
 ADX_RR_BANDS: Dict[str, Any] = dict(_get_config_value("adx_rr_bands") or {})
+ASSET_CLASS_MAP: Dict[str, str] = {
+    str(asset).upper(): str(class_name)
+    for asset, class_name in dict(_get_config_value("asset_classes") or {}).items()
+    if isinstance(class_name, str)
+}
 
 _RAW_SPREAD_MAX = dict(_get_config_value("spread_max_atr_pct") or {})
 SPREAD_MAX_ATR_PCT: Dict[str, float] = {}
@@ -804,8 +877,8 @@ _SPREAD_PROFILE_DEFAULT = float(SPREAD_MAX_ATR_PCT.get("default", 0.0) or 0.0)
 _SPREAD_MAX_ATR_PCT_PROFILES = _normalize_profiled_numeric_map(
     _get_config_value("spread_max_atr_pct_profiles"), float, _SPREAD_PROFILE_DEFAULT
 )
-_FIB_TOLERANCE_PROFILES = _normalize_profiled_numeric_map(
-    _get_config_value("fib_tolerance_profiles"), float, 0.02
+_FIB_TOLERANCE_PROFILES = _normalize_fib_tolerance_profiles(
+    _get_config_value("fib_tolerance_profiles")
 )
 _MAX_RISK_PCT_PROFILES = _normalize_profiled_numeric_map(
     _get_config_value("max_risk_pct_profiles"), float, 1.5
@@ -909,9 +982,16 @@ def get_fib_tolerance(asset: str, profile: Optional[str] = None) -> float:
     profile_name = profile or ENTRY_THRESHOLD_PROFILE_NAME
     profile_cfg = _FIB_TOLERANCE_PROFILES.get(profile_name) or {}
     overrides = profile_cfg.get("by_asset", {})
-    value = overrides.get(asset)
+    asset_key = str(asset or "").upper()
+    value = overrides.get(asset_key)
     if value is not None and value > 0:
         return float(value)
+    class_overrides = profile_cfg.get("by_class", {})
+    asset_class = ASSET_CLASS_MAP.get(asset_key)
+    if asset_class:
+        class_value = class_overrides.get(asset_class)
+        if class_value is not None and class_value > 0:
+            return float(class_value)
     default_val = profile_cfg.get("default")
     if default_val is not None and default_val > 0:
         return float(default_val)
