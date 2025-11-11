@@ -1052,6 +1052,31 @@ def _should_use_realtime_spot(
     return True, dict(meta_base, reason="ok", age_seconds=age_seconds)
 
 
+def _normalize_realtime_meta(
+    meta: Dict[str, Any], *, max_age_seconds: int, now_utc: Optional[datetime] = None
+) -> Dict[str, Any]:
+    """Return a sanitised realtime meta payload that avoids stale blockers."""
+
+    normalised = dict(meta)
+    try:
+        age_seconds = float(normalised.get("age_seconds", 0.0))
+    except (TypeError, ValueError):
+        age_seconds = 0.0
+    used = bool(normalised.get("used"))
+    if not used and age_seconds and max_age_seconds > 0:
+        stale_ceiling = float(max_age_seconds) * 4.0
+        if age_seconds >= stale_ceiling:
+            normalised["age_seconds_original"] = age_seconds
+            normalised["age_seconds"] = None
+            normalised["cleared_stale_meta"] = True
+            if now_utc:
+                normalised["cleared_at_utc"] = now_utc.replace(microsecond=0).isoformat().replace(
+                    "+00:00", "Z"
+                )
+            normalised.setdefault("reason", "stale")
+    return normalised
+
+
 def _extract_bid_ask_spread(snapshot: Any) -> Optional[float]:
     """Return the bid/ask spread from a realtime snapshot when available."""
 
@@ -1098,6 +1123,33 @@ def _resolve_spread_for_entry(
 def now_utctime_hm() -> Tuple[int,int]:
     t = datetime.now(timezone.utc)
     return t.hour, t.minute
+
+
+def _log_gate_summary(asset: str, decision: Dict[str, Any]) -> None:
+    """Emit a structured log line describing the gate evaluation outcome."""
+
+    try:
+        gates = decision.get("gates") or {}
+        entry_meta = decision.get("entry_thresholds") or {}
+        active_meta = decision.get("active_position_meta") or {}
+        summary = {
+            "asset": asset,
+            "profile": entry_meta.get("profile"),
+            "mode": gates.get("mode"),
+            "missing": list(gates.get("missing") or []),
+            "p_score": decision.get("probability_raw"),
+            "p_score_min": entry_meta.get("p_score_min_effective")
+            or entry_meta.get("p_score_min")
+            or entry_meta.get("p_score_min_base"),
+            "atr_rel": active_meta.get("atr5_rel"),
+            "atr_threshold": entry_meta.get("atr_threshold_effective"),
+            "atr_ok": entry_meta.get("atr_ratio_ok"),
+            "spread_ok": entry_meta.get("spread_gate_ok"),
+            "liquidity_ok": decision.get("momentum_liquidity_ok"),
+        }
+        LOGGER.info("gate_summary", extra={"asset": asset, "gate_summary": summary})
+    except Exception:
+        LOGGER.debug("gate_summary_logging_failed", exc_info=True)
 
 
 def _btc_time_of_day_bucket(minute: int) -> str:
@@ -5791,6 +5843,9 @@ def analyze(asset: str) -> Dict[str, Any]:
     elif rt_decision_meta:
         rt_meta_payload = dict(rt_decision_meta, used=False)
         rt_meta_payload.setdefault("max_age_seconds", spot_max_age)
+        rt_meta_payload = _normalize_realtime_meta(
+            rt_meta_payload, max_age_seconds=spot_max_age, now_utc=now
+        )
         entry_thresholds_meta["spot_realtime_ignored"] = rt_meta_payload
         refresh_state = _handle_spot_realtime_staleness(
             asset,
@@ -10353,6 +10408,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             ANCHOR_STATE_CACHE = update_anchor_metrics(asset, anchor_metrics_payload)
         except Exception:
             pass
+    _log_gate_summary(asset, decision_obj)
     save_json(os.path.join(outdir, "signal.json"), decision_obj)
     try:
         record_signal_event(asset, decision_obj)
@@ -10667,6 +10723,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
