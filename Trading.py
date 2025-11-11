@@ -431,7 +431,18 @@ ASSETS = {
         "mic": "COMMODITY",
         "currency": "USD",
         "disable_compact_variants": True,
-        "disable_exchange_fallbacks": True,
+        "alt": [
+            {
+                "symbol": "WTI/USD",
+                "exchange": "NYMEX",
+                "note": "Twelve Data NYMEX crude fallback",
+            },
+            {
+                "symbol": "WTI/USD",
+                "exchange": "ICE",
+                "note": "Twelve Data ICE crude fallback",
+            },
+        ],
     },
 
 # Egyedi részvény és ETF kiterjesztések
@@ -3828,3 +3839,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
