@@ -59,6 +59,8 @@ def test_xagusd_attempts_cover_physical_metal_exchange() -> None:
 
     assert attempts[0] == ("XAG/USD", "COMMODITY")
     assert ("XAG/USD", None) in attempts
+    assert ("XAG/USD", "FOREXCOM") in attempts
+    assert ("XAG/USD", "METAL") in attempts
     assert all(symbol != "XAGUSD" for symbol, _ in attempts)
 
 
@@ -110,6 +112,23 @@ def test_global_bad_symbol_cache_short_circuits_attempts() -> None:
 
     assert second["ok"]
     assert calls == {"bad": 1, "good": 2}
+
+
+
+def test_try_symbols_raises_on_all_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts = [("XAG/USD", None), ("XAG/USD", "FOREXCOM")]
+
+    def fetch(symbol: str, exchange: str | None) -> dict[str, object]:
+        raise Trading.TDError("not found", status_code=404)
+
+    with pytest.raises(Trading.SymbolAttemptsExhausted):
+        Trading.try_symbols(
+            attempts,
+            fetch,
+            freshness_limit=None,
+            attempt_memory=Trading.AttemptMemory(),
+            raise_on_all_client_errors=True,
+        )
 
 
 
