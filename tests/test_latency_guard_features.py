@@ -13,14 +13,14 @@ from reports import monitoring
 def test_latency_guard_status_triggers():
     status = analysis._latency_guard_status(
         "USOIL",
-        {"k1m": 420},
-        {"USOIL": {"latency_k1m_sec_max": 300}},
+        {"k1m": 840},
+        {"USOIL": {"latency_k1m_sec_max": 720}},
     )
     assert status is not None
     assert status["asset"] == "USOIL"
     assert status["feed"] == "k1m"
-    assert status["age_seconds"] == 420
-    assert status["limit_seconds"] == 300
+    assert status["age_seconds"] == 840
+    assert status["limit_seconds"] == 720
 
 
 def test_handle_spot_realtime_staleness_requests_refresh(caplog):
@@ -58,7 +58,7 @@ def test_record_latency_alert_writes_payload(tmp_path):
         "USOIL",
         "k1m",
         "USOIL k1m latency guard teszt riasztás",
-        metadata={"latency": 420},
+        metadata={"latency": 840},
         public_dir=public_dir,
     )
 
@@ -69,7 +69,7 @@ def test_record_latency_alert_writes_payload(tmp_path):
     entry = payload[0]
     assert entry["asset"] == "USOIL"
     assert entry["feed"] == "k1m"
-    assert entry["metadata"]["latency"] == 420
+    assert entry["metadata"]["latency"] == 840
 
     log_path = alert_path.with_name("latency_alerts.log")
     assert log_path.exists()
