@@ -9,6 +9,7 @@ from scripts.notify_discord import (
     _default_asset_state,
     _sanitize_last_sent,
     LAST_SENT_RETENTION_DAYS,
+    missing_from_sig,
     to_utc_iso,
 )
 
@@ -62,3 +63,8 @@ def test_sanitize_last_sent_within_retention_kept():
     assert record["last_sent"] == to_utc_iso(recent)
     assert record["last_sent_known"] is True
     assert archived == []
+
+
+def test_missing_from_sig_translates_precision_warning():
+    sig = {"gates": {"missing": ["precision warning"]}}
+    assert "Precision figyelmeztetés" in missing_from_sig(sig)
