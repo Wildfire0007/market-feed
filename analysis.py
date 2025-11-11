@@ -944,12 +944,13 @@ PRECISION_FLOW_STATS_FILE = Path(
     )
 )
 PRECISION_FLOW_TARGET_RATIO = float(os.getenv("PRECISION_FLOW_TARGET_RATIO", "0.14"))
-PRECISION_FLOW_SCALE_MIN = float(os.getenv("PRECISION_FLOW_SCALE_MIN", "0.75"))
+PRECISION_FLOW_SCALE_MIN = float(os.getenv("PRECISION_FLOW_SCALE_MIN", "0.6"))
 PRECISION_FLOW_MARGIN_MIN = float(os.getenv("PRECISION_FLOW_MARGIN_MIN", "0.9"))
-PRECISION_FLOW_STRENGTH_BASE = float(os.getenv("PRECISION_FLOW_STRENGTH_BASE", "0.85"))
+PRECISION_FLOW_STRENGTH_BASE = float(os.getenv("PRECISION_FLOW_STRENGTH_BASE", "0.74"))
 PRECISION_FLOW_STRENGTH_MIN = float(os.getenv("PRECISION_FLOW_STRENGTH_MIN", "0.65"))
 PRECISION_FLOW_STALLED_EPS = float(os.getenv("PRECISION_FLOW_STALLED_EPS", "0.002"))
 PRECISION_FLOW_STALLED_DELTA_EPS = float(os.getenv("PRECISION_FLOW_STALLED_DELTA_EPS", "0.05"))
+SPOT_REALTIME_TTL_SECONDS = int(os.getenv("SPOT_REALTIME_TTL_SECONDS", "300"))
 PRECISION_SCORE_THRESHOLD_DEFAULT = 55.0
 PRECISION_SCORE_THRESHOLD = PRECISION_SCORE_THRESHOLD_DEFAULT
 PRECISION_READY_TIMEOUT_DEFAULT = 15
@@ -5823,6 +5824,65 @@ def analyze(asset: str) -> Dict[str, Any]:
         rt_price = spot_realtime.get("price") if spot_realtime.get("price") is not None else spot_realtime.get("price_usd")
         rt_utc = spot_realtime.get("utc") or spot_realtime.get("timestamp") or spot_realtime.get("retrieved_at_utc")
 
+    realtime_ttl = max(0, SPOT_REALTIME_TTL_SECONDS)
+    realtime_expired_reason: Optional[str] = None
+    realtime_age: Optional[float] = None
+    if spot_realtime:
+        if rt_ts := parse_utc_timestamp(rt_utc):
+            realtime_age = (now - rt_ts).total_seconds()
+            if realtime_ttl and realtime_age > realtime_ttl:
+                realtime_expired_reason = "ttl_expired"
+        elif rt_price is None:
+            realtime_expired_reason = "missing_timestamp"
+        if not realtime_expired_reason and spot_realtime.get("forced") and not spot_realtime.get("ok"):
+            realtime_expired_reason = spot_realtime.get("stale_reason") or "forced_snapshot_stale"
+            if spot_realtime.get("utc"):
+                rt_ts = parse_utc_timestamp(spot_realtime.get("utc"))
+                if rt_ts:
+                    realtime_age = (now - rt_ts).total_seconds()
+    if realtime_expired_reason:
+        expire_meta = {
+            "used": False,
+            "reason": realtime_expired_reason,
+            "max_age_seconds": float(realtime_ttl or 0),
+        }
+        if realtime_age is not None and realtime_age >= 0:
+            expire_meta["age_seconds"] = float(realtime_age)
+        if isinstance(spot_realtime, dict) and spot_realtime.get("retrieved_at_utc"):
+            expire_meta["retrieved_at_utc"] = spot_realtime.get("retrieved_at_utc")
+        expire_meta = _normalize_realtime_meta(
+            expire_meta,
+            max_age_seconds=realtime_ttl or spot_max_age,
+            now_utc=now,
+        )
+        entry_thresholds_meta["spot_realtime_expired"] = expire_meta
+        refresh_state = _handle_spot_realtime_staleness(
+            asset,
+            expire_meta,
+            now,
+            record_latency_alert,
+            LOGGER,
+        )
+        if refresh_state:
+            entry_thresholds_meta["spot_realtime_refresh"] = refresh_state
+        realtime_path = os.path.join(outdir, "spot_realtime.json")
+        try:
+            os.remove(realtime_path)
+        except FileNotFoundError:
+            pass
+        LOGGER.warning(
+            "Realtime spot snapshot törölve a TTL miatt",
+            extra={
+                "asset": asset,
+                "reason": realtime_expired_reason,
+                "age_seconds": expire_meta.get("age_seconds"),
+                "ttl_seconds": realtime_ttl,
+            },
+        )
+        spot_realtime = {}
+        rt_price = None
+        rt_utc = None
+
     spot_ts_existing = parse_utc_timestamp(spot_utc)
     rt_ts = parse_utc_timestamp(rt_utc)
     use_realtime = False
@@ -9458,6 +9518,25 @@ def analyze(asset: str) -> Dict[str, Any]:
             timestamp=analysis_now,
             extra={"trigger_state": precision_trigger_state},
         )
+        blockers = precision_plan.get("order_flow_blockers")
+        blockers_snapshot = list(blockers) if isinstance(blockers, list) else blockers
+        precision_gate_snapshot = {
+            "score_ready": precision_ready_for_entry,
+            "score": precision_score_val,
+            "threshold": precision_threshold_value,
+            "flow_ready": precision_flow_ready,
+            "trigger_ready": precision_trigger_ready,
+            "trigger_state": precision_trigger_state,
+            "flow_blockers": blockers_snapshot,
+        }
+        entry_thresholds_meta["precision_gate_state"] = precision_gate_snapshot
+        LOGGER.info(
+            "Precision kapu összegzés",
+            extra={
+                "asset": asset,
+                **precision_gate_snapshot,
+            },
+        )
 
     if precision_plan:
         if not precision_ready_for_entry:
@@ -10721,8 +10800,21 @@ def main():
     except Exception:
         pass
 
+    data_gap_assets = [
+        asset
+        for asset, payload in (summary.get("assets") or {}).items()
+        if isinstance(payload, dict)
+        and isinstance(payload.get("probability_stack"), dict)
+        and payload["probability_stack"].get("status") == "data_gap"
+    ]
+    if data_gap_assets:
+        message = "Probability stack data gap detected for: " + ", ".join(sorted(data_gap_assets))
+        LOGGER.error(message)
+        raise SystemExit(message)
+
 if __name__ == "__main__":
     main()
+
 
 
 
