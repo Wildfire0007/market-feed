@@ -100,7 +100,7 @@ def test_integration_latency_guard_and_precision(monkeypatch, tmp_path, caplog):
     monkeypatch.setattr(analysis, "file_mtime", lambda path: None)
 
     data_registry = {}
-    for asset, stale_offset in {"USOIL": timedelta(minutes=8), "NVDA": timedelta(minutes=1)}.items():
+    for asset, stale_offset in {"USOIL": timedelta(minutes=14), "NVDA": timedelta(minutes=1)}.items():
         asset_map = {}
         final_k1m = fixed_now - stale_offset
         asset_map["klines_1m.json"] = _make_raw_klines(final_k1m, 30, timedelta(minutes=1), 70.0 if asset == "USOIL" else 450.0)
