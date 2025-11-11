@@ -6153,7 +6153,25 @@ def analyze(asset: str) -> Dict[str, Any]:
     if asset == "BTCUSD":
         intervention_config = load_intervention_config(outdir)
         news_flag = load_intervention_news_flag(outdir, intervention_config)
-        sentiment_signal = load_sentiment(asset, Path(outdir))
+        raw_sentiment = load_sentiment(asset, Path(outdir))
+        sentiment_signal = None
+        if isinstance(raw_sentiment, SentimentSignal):
+            sentiment_signal = raw_sentiment
+        elif isinstance(raw_sentiment, (list, tuple)) and raw_sentiment:
+            candidate = raw_sentiment[0]
+            try:
+                if isinstance(candidate, SentimentSignal):
+                    sentiment_signal = candidate
+                else:
+                    sentiment_signal = SentimentSignal(*raw_sentiment)
+            except Exception:
+                sentiment_signal = None
+            finally:
+                LOGGER.warning(
+                    "btc_sentiment_tuple", extra={"asset": asset, "raw_type": type(raw_sentiment).__name__}
+                )
+        else:
+            sentiment_signal = None
         irs_value, irs_band, irs_metrics = compute_btcusd_intraday_watch(
             k1m_closed,
             k5m_closed,
@@ -10838,6 +10856,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
