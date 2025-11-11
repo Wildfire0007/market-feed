@@ -18,6 +18,7 @@ from scripts.market_open_watchdog import (
     _reset_health_file,
     _state_path,
 )
+from scripts.reset_dashboard_state import RESET_STATUS
 
 
 UTC = timezone.utc
@@ -105,6 +106,7 @@ def test_should_trigger_reset_after_open(tmp_path: Path) -> None:
     assert health_result.changed
 
     status_payload = json.loads((public_dir / "status.json").read_text(encoding="utf-8"))
+    assert status_payload["status"] == RESET_STATUS
     assert status_payload["notes"][0]["message"] == "market open reset"
 
     health_payload = json.loads(
