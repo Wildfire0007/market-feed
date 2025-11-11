@@ -756,6 +756,8 @@ def missing_from_sig(sig: dict):
         # momentum
         "momentum(ema9x21)": "Momentum (EMA9×21)",
         "bos5m|struct_break": "BOS/Structure",
+        "precision warning": "Precision figyelmeztetés",
+        "precision_warning": "Precision figyelmeztetés",
     }
     out = []
     for k in miss:
