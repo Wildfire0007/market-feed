@@ -1,5 +1,9 @@
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import analysis
 
@@ -53,3 +57,45 @@ def test_precision_gate_log_captures_missing_ofi():
     assert record.missing == ["ofi"]
     assert record.timestamp_utc.startswith("2024-01-01 12:00")
     assert record.timestamp_cet.startswith("2024-01-01")
+
+
+def test_precision_flow_missing_components_logged_for_special_assets():
+    handler = ListHandler()
+    logger = logging.getLogger("analysis.precision_flow_test")
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    plan = {
+        "order_flow_strength": 0.12,
+        "order_flow_signals": 0,
+        "order_flow_ready": False,
+        "order_flow_blockers": ["imbalance -0.4"],
+        "order_flow_settings": {"min_signals": 2, "strength_floor": 0.5},
+        "order_flow_status": "stale",
+        "order_flow_stalled": True,
+        "trigger_state": "standby",
+        "trigger_ready": False,
+        "score": 48.5,
+    }
+    try:
+        analysis._emit_precision_gate_log(
+            "XAGUSD",
+            "precision_flow",
+            False,
+            "flow_blocked",
+            order_flow_metrics={},
+            tick_order_flow={},
+            latency_seconds={},
+            precision_plan=plan,
+            logger=logger,
+            timestamp=datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc),
+        )
+    finally:
+        logger.removeHandler(handler)
+
+    record = handler.records[-1]
+    details = record.missing_precision_components
+    assert details["blockers"] == ["imbalance -0.4"]
+    assert details["signals"] == {"actual": 0, "required": 2}
+    assert details["strength"] == {"actual": 0.12, "required": 0.5}
+    assert details["status"] == "stale"
+    assert details["stalled"] is True
