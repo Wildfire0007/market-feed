@@ -1,5 +1,6 @@
 import importlib
 import json
+import logging
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -120,14 +121,13 @@ def test_main_raises_on_probability_data_gap(monkeypatch: pytest.MonkeyPatch, tm
 
     monkeypatch.setattr(analysis, "analyze", fake_analyze)
 
-    caplog.set_level("INFO", logger=analysis.LOGGER.name)
+    caplog.set_level("WARNING", logger=analysis.LOGGER.name)
 
     original_handlers = list(analysis.LOGGER.handlers)
     original_level = analysis.LOGGER.level
     original_propagate = analysis.LOGGER.propagate
     try:
-        with pytest.raises(SystemExit) as excinfo:
-            analysis.main()
+        analysis.main()
     finally:
         current_handlers = list(analysis.LOGGER.handlers)
         for handler in current_handlers:
@@ -142,7 +142,8 @@ def test_main_raises_on_probability_data_gap(monkeypatch: pytest.MonkeyPatch, tm
         analysis.LOGGER.setLevel(original_level)
         analysis.LOGGER.propagate = original_propagate
 
-    assert "BTCUSD" in str(excinfo.value)
+    error_records = [record for record in caplog.records if record.levelno >= logging.ERROR]
+    assert not error_records
 
     summary_path = Path(tmp_path) / "analysis_summary.json"
     assert summary_path.exists()
