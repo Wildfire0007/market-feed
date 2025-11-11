@@ -95,7 +95,8 @@ def test_intraday_bias_and_atr_overrides(monkeypatch):
     # INTRADAY_ATR_RELAX új értékek
     assert settings.INTRADAY_ATR_RELAX["EURUSD"] == pytest.approx(0.75)
     assert settings.INTRADAY_ATR_RELAX["GOLD_CFD"] == pytest.approx(0.80)
-    assert settings.INTRADAY_ATR_RELAX["BTCUSD"] == pytest.approx(0.75)
+    assert settings.INTRADAY_ATR_RELAX["BTCUSD"] == pytest.approx(0.40)
+    assert settings.INTRADAY_ATR_RELAX["NVDA"] == pytest.approx(0.93)
 
     # Bias relax struktúra és címkék változatlan logikával
     eurusd_bias = settings.INTRADAY_BIAS_RELAX["EURUSD"]
