@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from scripts.reset_notify_state import normalise_notify_state_file
+
 LOGGER = logging.getLogger("pipeline_env")
 
 
@@ -469,6 +471,21 @@ def _maybe_reset_notify_state(
 
     now = now or datetime.now(timezone.utc)
     state_path = public_dir / "_notify_state.json"
+    normalise_result = normalise_notify_state_file(
+        path=state_path,
+        now=now,
+        reset_counts=True,
+        reason="pipeline_cleanup_normalise",
+    )
+    if normalise_result.changed:
+        LOGGER.info(
+            "notify_state_normalised",
+            extra={
+                "path": str(state_path),
+                "assets_reset": normalise_result.reset_assets,
+                "cleared_counts": normalise_result.cleared_counts,
+            },
+        )
     payload = _load_json(state_path)
     latest = None
     if isinstance(payload, dict):
