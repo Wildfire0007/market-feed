@@ -29,6 +29,7 @@ PUBLIC_DIR = Path(os.getenv("PUBLIC_DIR", "public"))
 STATUS_PATH = PUBLIC_DIR / "status.json"
 DEFAULT_STATUS_MESSAGE = "scheduled monitoring reset"
 DEFAULT_BACKUP_DIR = PUBLIC_DIR / "monitoring" / "reset_backups"
+RESET_STATUS = "reset"
 
 
 @dataclass
@@ -181,6 +182,7 @@ def reset_status_file(
     timestamp = to_utc_iso(now or datetime.now(timezone.utc))
     payload: Dict[str, Any] = {
         "ok": False,
+        "status": RESET_STATUS,
         "generated_utc": timestamp,
         "td_base": existing.get("td_base"),
         "assets": {},
