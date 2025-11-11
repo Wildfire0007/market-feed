@@ -3718,6 +3718,76 @@ def _emit_precision_gate_log(
         payload["precision_trigger_ready"] = bool(trigger_ready)
     if precision_score is not None:
         payload["precision_score"] = precision_score
+
+    if (
+        str(asset or "").upper() in {"NVDA", "XAGUSD"}
+        and gate_name == "precision_flow"
+        and not bool(decision)
+    ):
+        missing_components: Dict[str, Any] = {}
+        if isinstance(precision_plan, dict):
+            blockers_raw = precision_plan.get("order_flow_blockers")
+            blockers: List[str] = []
+            if isinstance(blockers_raw, list):
+                blockers = [str(item) for item in blockers_raw if item]
+            elif blockers_raw:
+                blockers = [str(blockers_raw)]
+            if blockers:
+                missing_components["blockers"] = blockers
+
+            settings = precision_plan.get("order_flow_settings") or {}
+
+            def _safe_int(value: Any) -> Optional[int]:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return None
+
+            def _safe_float(value: Any) -> Optional[float]:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return None
+
+            required_signals: Optional[int] = None
+            signals_required_raw = _safe_int(settings.get("min_signals"))
+            if signals_required_raw is not None:
+                required_signals = max(1, signals_required_raw)
+
+            signals_actual = _safe_int(precision_plan.get("order_flow_signals"))
+            if required_signals is not None:
+                if signals_required_raw is not None and signals_required_raw <= 0:
+                    missing_signals = (signals_actual or 0) <= 0
+                else:
+                    missing_signals = (
+                        signals_actual is None or signals_actual < required_signals
+                    )
+                if missing_signals:
+                    missing_components["signals"] = {
+                        "actual": signals_actual,
+                        "required": required_signals,
+                    }
+
+            strength_floor = _safe_float(settings.get("strength_floor"))
+            strength_actual = _safe_float(precision_plan.get("order_flow_strength"))
+            if (
+                strength_floor is not None
+                and (strength_actual is None or strength_actual < strength_floor)
+            ):
+                missing_components["strength"] = {
+                    "actual": strength_actual,
+                    "required": strength_floor,
+                }
+
+            status_raw = str(precision_plan.get("order_flow_status") or "").strip()
+            if status_raw and status_raw.lower() not in {"ok", "ready", "available"}:
+                missing_components["status"] = status_raw
+
+            if precision_plan.get("order_flow_stalled"):
+                missing_components["stalled"] = True
+
+        if missing_components:
+            payload["missing_precision_components"] = missing_components
     if extra:
         payload.update(extra)
     logger.info("Precision kapu állapot", extra=payload)
@@ -10855,5 +10925,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
