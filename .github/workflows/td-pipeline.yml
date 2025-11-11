@@ -9,7 +9,12 @@ permissions:
   contents: read
   
 concurrency:
-  group: td-pipeline
+  # Allow manual dispatches to finish even if a scheduled run starts by
+  # separating the concurrency group based on the triggering event.
+  # Scheduled runs ("auto") still cancel their predecessors to avoid
+  # overlapping cron executions, while manual runs ("manual") can execute
+  # independently without being pre-empted by the cron trigger.
+  group: td-pipeline-${{ github.ref }}-${{ github.event_name == 'schedule' && 'auto' || 'manual' }}
   cancel-in-progress: true
 
 jobs:
