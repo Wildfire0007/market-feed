@@ -6226,6 +6226,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         ("k1h", k1h, k1h_closed, os.path.join(outdir, "klines_1h.json")),
         ("k4h", k4h, k4h_closed, os.path.join(outdir, "klines_4h.json")),
     ]
+    latency_guard_seconds: Dict[str, Optional[int]] = dict(latency_by_frame)
     for key, df_full, df_closed, path in tf_inputs:
         meta_info = timeframe_meta_lookup.get(key, {})
         last_raw = df_last_timestamp(df_full)
@@ -6244,6 +6245,21 @@ def analyze(asset: str) -> Dict[str, Any]:
                 if flag_msg not in latency_flags:
                     latency_flags.append(flag_msg)
         latency_by_frame[key] = latency_sec
+        guard_latency = latency_sec
+        retrieved_iso = None
+        if isinstance(meta_info, dict):
+            retrieved_iso = (
+                meta_info.get("retrieved_at_utc")
+                or meta_info.get("retrieved_at")
+                or meta_info.get("retrieved")
+            )
+        guard_adjustment: Optional[int] = None
+        retrieved_ts = parse_utc_timestamp(retrieved_iso) if retrieved_iso else None
+        if guard_latency is not None and retrieved_ts:
+            adjustment = int(max((now - retrieved_ts).total_seconds(), 0.0))
+            guard_adjustment = adjustment
+            guard_latency = max(0, guard_latency - adjustment)
+        latency_guard_seconds[key] = guard_latency
         tf_meta[key] = {
             "last_raw_utc": to_utc_iso(last_raw) if last_raw else None,
             "last_closed_utc": to_utc_iso(last_closed) if last_closed else None,
@@ -6257,6 +6273,14 @@ def analyze(asset: str) -> Dict[str, Any]:
             "used_symbol": meta_info.get("used_symbol"),
             "used_exchange": meta_info.get("used_exchange"),
         }
+        if retrieved_ts:
+            tf_meta[key]["retrieved_at_utc"] = to_utc_iso(retrieved_ts)
+        elif retrieved_iso:
+            tf_meta[key]["retrieved_at_utc"] = retrieved_iso
+        if guard_latency is not None:
+            tf_meta[key]["latency_guard_seconds"] = guard_latency
+        if guard_adjustment is not None:
+            tf_meta[key]["latency_guard_adjustment_seconds"] = guard_adjustment
         if meta_info.get("fallback_previous_payload"):
             tf_meta[key]["fallback_previous_payload"] = True
         fallback_reason = meta_info.get("fallback_reason")
@@ -6309,7 +6333,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "klines_4h.json": tf_meta["k4h"].get("source_mtime_utc"),
     }
 
-    guard_status = _latency_guard_status(asset, latency_by_frame, DATA_LATENCY_GUARD)
+    guard_status = _latency_guard_status(asset, latency_guard_seconds, DATA_LATENCY_GUARD)
     if guard_status:
         k1m_meta = tf_meta.setdefault("k1m", {})
         k1m_meta["latency_guard_triggered"] = True
@@ -10814,6 +10838,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
