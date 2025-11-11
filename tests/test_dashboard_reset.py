@@ -9,6 +9,7 @@ from active_anchor import load_anchor_state, save_anchor_state
 from config.analysis_settings import ASSETS
 from scripts.notify_discord import build_default_state, to_utc_iso
 from scripts.reset_dashboard_state import (
+    RESET_STATUS,
     reset_anchor_state_file,
     reset_notify_state_file,
     reset_status_file,
@@ -140,6 +141,7 @@ def test_reset_status_file_writes_reset_snapshot(tmp_path: Path) -> None:
         data = json.load(fh)
 
     assert data["ok"] is False
+    assert data["status"] == RESET_STATUS
     assert data["generated_utc"] == _iso(now)
     assert data["assets"] == {}
     assert data["notes"][0]["message"] == "daily cleanup"
