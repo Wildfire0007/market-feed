@@ -470,7 +470,17 @@ ASSETS = {
                 "exchange": None,
                 "disable_compact_variants": True,
                 "disable_exchange_fallbacks": True,
-            }
+            },
+            {
+                "symbol": "XAG/USD",
+                "exchange": "FOREXCOM",
+                "note": "Twelve Data metals fallback",
+            },
+            {
+                "symbol": "XAG/USD",
+                "exchange": "METAL",
+                "note": "Twelve Data metals fallback",
+            },
         ],
     },
 }
@@ -760,6 +770,21 @@ class AttemptMemory:
     def is_blacklisted(self, symbol: str, exchange: Optional[str]) -> Optional[str]:
         with self._lock:
             return self._hard_failures.get((symbol, exchange))
+
+
+class SymbolAttemptsExhausted(RuntimeError):
+    """Raised when every Twelve Data attempt ends with client-side errors."""
+
+    def __init__(self, failures: List[Dict[str, Any]]) -> None:
+        self.failures = failures
+        formatted = ", ".join(
+            f"{entry.get('symbol')}@{entry.get('exchange') or 'default'} ({entry.get('status_code')})"
+            for entry in failures
+        )
+        message = "All Twelve Data symbol attempts failed with client errors"
+        if formatted:
+            message = f"{message}: {formatted}"
+        super().__init__(message)
 
 # HTTP státuszkódok, amelyeknél a kliens oldali hibát tartósnak tekintjük.
 CLIENT_ERROR_STATUS_CODES: Set[Optional[int]] = {
@@ -1308,6 +1333,7 @@ def _collect_series_payloads(
                 freshness_limit=freshness_limit,
                 max_refreshes=1,
                 attempt_memory=attempt_memory,
+                raise_on_all_client_errors=True,
             )
             future_map[future] = (name, interval, freshness_limit)
 
@@ -1386,6 +1412,7 @@ def _refresh_series_if_stale(
             lambda s, ex: td_time_series(s, interval, 180, ex, "desc"),
             freshness_limit=None,
             attempt_memory=attempt_memory,
+            raise_on_all_client_errors=True,
         )
         attempts_made += 1
         if not isinstance(refreshed, dict) or not refreshed.get("ok"):
@@ -3204,12 +3231,15 @@ def try_symbols(
     freshness_limit: Optional[float] = None,
     *,
     attempt_memory: Optional[AttemptMemory] = None,
+    raise_on_all_client_errors: bool = False,
 ):
     """Iterate over symbol candidates and prefer the freshest successful payload."""
 
     last: Optional[Dict[str, Any]] = None
     best: Optional[Dict[str, Any]] = None
     best_latency: Optional[float] = None
+    attempts_made = 0
+    client_failures: List[Dict[str, Any]] = []
 
     for sym, exch in attempts:
         skip = False
@@ -3231,6 +3261,7 @@ def try_symbols(
                     "used_exchange": exch,
                 }
                 continue
+        attempts_made += 1
         try:
             result = fetch_fn(sym, exch)
         except TDError as exc:
@@ -3246,6 +3277,15 @@ def try_symbols(
                 and exc.status_code in CLIENT_ERROR_STATUS_CODES
             ):
                 attempt_memory.record_hard_failure(sym, exch, str(exc))
+            if exc.status_code in CLIENT_ERROR_STATUS_CODES:
+                client_failures.append(
+                    {
+                        "symbol": sym,
+                        "exchange": exch,
+                        "status_code": exc.status_code,
+                        "reason": str(exc),
+                    }
+                )
             time.sleep(max(TD_RATE_LIMITER.current_delay * 0.5, 0.1))
             continue
         except Exception as exc:
@@ -3287,6 +3327,14 @@ def try_symbols(
             if error_code in CLIENT_ERROR_STATUS_CODES:
                 reason = result.get("error") or result.get("message") or f"code {error_code}"
                 attempt_memory.record_hard_failure(sym, exch, str(reason))
+                client_failures.append(
+                    {
+                        "symbol": sym,
+                        "exchange": exch,
+                        "status_code": error_code,
+                        "reason": str(reason),
+                    }
+                )
 
         if result.get("ok"):
             if not violation:
@@ -3312,6 +3360,21 @@ def try_symbols(
 
     if best is not None:
         return best
+    if (
+        raise_on_all_client_errors
+        and attempts_made
+        and client_failures
+        and len(client_failures) >= attempts_made
+        and all(item.get("status_code") == 404 for item in client_failures if item.get("status_code") is not None)
+    ):
+        LOGGER.error(
+            "All symbol attempts returned 404 client errors",
+            extra={
+                "event": "symbol_attempts_exhausted",
+                "attempts": client_failures,
+            },
+        )
+        raise SymbolAttemptsExhausted(client_failures)
     return last or {"ok": False}
 
 
@@ -3378,12 +3441,14 @@ def fetch_with_freshness(
     max_refreshes: int = 1,
     *,
     attempt_memory: Optional[AttemptMemory] = None,
+    raise_on_all_client_errors: bool = False,
 ):
     result = try_symbols(
         attempts,
         fetch_fn,
         freshness_limit=freshness_limit,
         attempt_memory=attempt_memory,
+        raise_on_all_client_errors=raise_on_all_client_errors,
     )
     if _accept_market_closed_staleness(result, freshness_limit):
         if isinstance(result, dict):
@@ -3404,6 +3469,7 @@ def fetch_with_freshness(
             fetch_fn,
             freshness_limit=freshness_limit,
             attempt_memory=attempt_memory,
+            raise_on_all_client_errors=raise_on_all_client_errors,
         )
         if _accept_market_closed_staleness(result, freshness_limit):
             break
@@ -3556,6 +3622,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
             freshness_limit=spot_limit,
             max_refreshes=1,
             attempt_memory=attempt_memory,
+            raise_on_all_client_errors=True,
         )
         if isinstance(spot, dict):
             spot = _maybe_use_secondary_spot(asset, spot)
@@ -3686,6 +3753,10 @@ def _write_error_payload(asset: str, error: Exception) -> None:
 def _process_asset_guard(asset: str, cfg: Dict[str, Any]) -> None:
     try:
         process_asset(asset, cfg)
+    except SymbolAttemptsExhausted as error:
+        _write_error_payload(asset, error)
+        _record_asset_failure(asset, str(error))
+        raise
     except Exception as error:
         _write_error_payload(asset, error)
         _record_asset_failure(asset, str(error))
@@ -3757,34 +3828,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
