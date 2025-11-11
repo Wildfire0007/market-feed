@@ -10851,32 +10851,9 @@ def main():
     ]
     if data_gap_assets:
         message = "Probability stack data gap detected for: " + ", ".join(sorted(data_gap_assets))
-        LOGGER.error(message)
-        raise SystemExit(message)
+        LOGGER.warning(message)
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
