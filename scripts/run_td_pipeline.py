@@ -41,9 +41,21 @@ def _news_available(force: bool) -> bool:
     return bool(api_key)
 
 
+def _trading_available(force: bool) -> bool:
+    if force:
+        return True
+    api_key = os.getenv("TWELVEDATA_API_KEY", "").strip()
+    return bool(api_key)
+
+
 def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Trading → Analysis pipeline")
     parser.add_argument("--skip-trading", action="store_true", help="Skip Trading.py")
+    parser.add_argument(
+        "--force-trading",
+        action="store_true",
+        help="Attempt Trading.py even without TWELVEDATA_API_KEY",
+    )
     parser.add_argument(
         "--skip-volatility",
         action="store_true",
@@ -149,7 +161,13 @@ def main(argv: List[str] | None = None) -> int:
         _run_step("Pipeline environment", env_cmd)
         
     if not args.skip_trading:
-        _run_step("Trading", [python, "Trading.py"])
+        if _trading_available(args.force_trading):
+            _run_step("Trading", [python, "Trading.py"])
+        else:
+            print(
+                "⚠️  Skipping Trading step (TWELVEDATA_API_KEY not configured)",
+                file=sys.stderr,
+            )
 
     if not args.skip_volatility:
         vol_cmd: List[str] = [
