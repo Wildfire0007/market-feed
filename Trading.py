@@ -1004,7 +1004,8 @@ def _record_asset_status(
     attempt_memory: Optional[AttemptMemory] = None,
 ) -> None:
     summary_series: Dict[str, Dict[str, Any]] = {}
-    for name, payload in series_payloads.items():
+    sorted_series_items = sorted(series_payloads.items(), key=lambda item: item[0])
+    for name, payload in sorted_series_items:
         if not isinstance(payload, dict):
             continue
         values = []
@@ -1074,7 +1075,7 @@ def _write_trading_status_summary(out_dir: str) -> None:
         series_info = item.get("series", {})
         frames_ok = all(
             bool(frame.get("ok")) and frame.get("values", 0) > 0
-            for frame in series_info.values()
+            for _, frame in sorted(series_info.items(), key=lambda kv: kv[0])
         ) if series_info else False
         if not (spot_ok and frames_ok):
             all_ready = False
@@ -1392,6 +1393,9 @@ def _collect_series_payloads(
                         result_payload.get("error") or result_payload.get("message"),
                     )
 
+    if results:
+        ordered = {key: results[key] for key in sorted(results)}
+        return ordered
     return results
 
 
@@ -3689,9 +3693,10 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     )
 
     spot_payload = spot if isinstance(spot, dict) else {}
+    sorted_series_items = sorted(series_payloads.items(), key=lambda item: item[0])
     series_ok = {
         name: bool(payload.get("ok")) if isinstance(payload, dict) else False
-        for name, payload in series_payloads.items()
+        for name, payload in sorted_series_items
     }
     series_fallback = {
         name: bool(
@@ -3701,7 +3706,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
                 or payload.get("fallback_previous_payload")
             )
         )
-        for name, payload in series_payloads.items()
+        for name, payload in sorted_series_items
     }
     LOGGER.info(
         "fetch_completed",
@@ -3839,4 +3844,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
