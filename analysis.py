@@ -4241,31 +4241,79 @@ def update_latency_profile(outdir: str, latency_seconds: Optional[int]) -> None:
     payload = {"ema_delay": ema_delay, "alpha": alpha, "samples": int(data.get("samples", 0)) + 1}
     save_json(profile_path, payload)
 
+_EMPTY_KLINE_COLUMNS = ["open", "high", "low", "close", "volume"]
+
+
+def _empty_klines_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=_EMPTY_KLINE_COLUMNS)
+
+
 def as_df_klines(raw: Any) -> pd.DataFrame:
     if not raw:
-        return pd.DataFrame(columns=["open","high","low","close"])
+        return _empty_klines_df()
+
     arr = raw if isinstance(raw, list) else (raw.get("values") or [])
-    rows: List[Dict[str, Any]] = []
-    for x in arr:
-        try:
-            if "datetime" in x:
-                dt = pd.to_datetime(x["datetime"], utc=True)
-                o = float(x["open"]); h = float(x["high"]); l = float(x["low"]); c = float(x["close"])
-                v = float(x.get("volume", 0.0) or 0.0)
-            elif "t" in x:
-                dt = pd.to_datetime(x["t"], utc=True)
-                o = float(x["o"]); h = float(x["h"]); l = float(x["l"]); c = float(x["c"])
-                v = float(x.get("v", 0.0) or 0.0)
-            else:
-                continue
-            rows.append({"time": dt, "open": o, "high": h, "low": l, "close": c, "volume": v})
-        except Exception:
-            continue
-    if not rows:
-        return pd.DataFrame(columns=["open","high","low","close","volume"])
-    df = pd.DataFrame(rows).sort_values("time").set_index("time")
-    cols = ["open", "high", "low", "close", "volume"]
-    return df[cols]
+    if not arr:
+        return _empty_klines_df()
+
+    records = [entry for entry in arr if isinstance(entry, dict)]
+    if not records:
+        return _empty_klines_df()
+
+    schema_map: List[Tuple[str, Dict[str, str]]] = [
+        ("datetime", {"open": "open", "high": "high", "low": "low", "close": "close", "volume": "volume"}),
+        ("t", {"open": "o", "high": "h", "low": "l", "close": "c", "volume": "v"}),
+    ]
+
+    timestamp_key: Optional[str] = None
+    value_keys: Dict[str, str] = {}
+    for ts_key, mapping in schema_map:
+        if any(ts_key in rec for rec in records):
+            timestamp_key = ts_key
+            value_keys = mapping
+            break
+
+    if not timestamp_key:
+        return _empty_klines_df()
+
+    df = pd.DataFrame.from_records(records)
+
+    time_values = pd.to_datetime(df.get(timestamp_key), errors="coerce", utc=True)
+    if time_values.isna().all():
+        return _empty_klines_df()
+
+    open_series = pd.to_numeric(df.get(value_keys["open"]), errors="coerce")
+    high_series = pd.to_numeric(df.get(value_keys["high"]), errors="coerce")
+    low_series = pd.to_numeric(df.get(value_keys["low"]), errors="coerce")
+    close_series = pd.to_numeric(df.get(value_keys["close"]), errors="coerce")
+    volume_source = df.get(value_keys.get("volume", "volume"))
+    volume_series = pd.to_numeric(volume_source, errors="coerce") if volume_source is not None else pd.Series(0.0, index=df.index)
+    volume_series = volume_series.fillna(0.0)
+
+    valid_mask = (
+        time_values.notna()
+        & open_series.notna()
+        & high_series.notna()
+        & low_series.notna()
+        & close_series.notna()
+    )
+
+    if not valid_mask.any():
+        return _empty_klines_df()
+
+    filtered_index = pd.DatetimeIndex(time_values[valid_mask].to_numpy(), name="time")
+    result = pd.DataFrame(
+        {
+            "open": open_series[valid_mask].to_numpy(dtype=float),
+            "high": high_series[valid_mask].to_numpy(dtype=float),
+            "low": low_series[valid_mask].to_numpy(dtype=float),
+            "close": close_series[valid_mask].to_numpy(dtype=float),
+            "volume": volume_series[valid_mask].to_numpy(dtype=float),
+        },
+        index=filtered_index,
+    )
+
+    return result.sort_index()
 
 
 def load_tick_order_flow(asset: str, outdir: str) -> Dict[str, Any]:
@@ -11101,6 +11149,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
