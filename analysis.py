@@ -79,12 +79,14 @@ except Exception:  # pragma: no cover - optional helper
 try:
     from reports.pipeline_monitor import (
         record_analysis_run,
+        finalize_analysis_run,
         get_pipeline_log_path,
         DEFAULT_MAX_LAG_SECONDS as PIPELINE_MAX_LAG_SECONDS,
         record_ml_model_status,
     )
 except Exception:  # pragma: no cover - optional helper
     record_analysis_run = None
+    finalize_analysis_run = None
     get_pipeline_log_path = None
     PIPELINE_MAX_LAG_SECONDS = None
     record_ml_model_status = None
@@ -1877,7 +1879,7 @@ def build_action_plan(
                 profile_name,
                 asset,
                 atr_value,
-                datetime.utcnow(),
+                datetime.now(timezone.utc),
             )
 
             adx_raw = (
@@ -6444,6 +6446,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         })
         entry_thresholds_meta["latency_guard"] = guard_meta
         log_payload = dict(guard_meta, action="block_trade", asset=asset)
+        log_payload["latency_guard"] = guard_meta
         LOGGER.warning("Latency guard aktiválva", extra=log_payload)
         try:
             record_latency_alert(
@@ -10881,6 +10884,24 @@ def main():
                 LOGGER.exception("Failed to persist analysis error placeholder for %s", asset)
     save_json(os.path.join(PUBLIC_DIR, "analysis_summary.json"), summary)
 
+    analysis_completed_at = datetime.now(timezone.utc)
+    if finalize_analysis_run:
+        try:
+            duration_seconds = max(
+                (analysis_completed_at - analysis_started_at).total_seconds(),
+                0.0,
+            )
+            finalize_analysis_run(
+                completed_at=analysis_completed_at,
+                duration_seconds=duration_seconds,
+            )
+            LOGGER.info(
+                "Analysis run completed in %.1f seconds",
+                duration_seconds,
+            )
+        except Exception as exc:
+            LOGGER.warning("Failed to finalize analysis pipeline metrics: %s", exc)
+
     html = "<!doctype html><meta charset='utf-8'><title>Analysis Summary</title>"
     html += "<h1>Analysis Summary (TD-only)</h1>"
     html += "<pre>" + json.dumps(summary, ensure_ascii=False, indent=2) + "</pre>"
@@ -10925,6 +10946,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
