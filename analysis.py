@@ -6928,7 +6928,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         else None
     )
     atr1h_tol = atr1h_val if np.isfinite(atr1h_val) else 0.0
-    fib_tol = get_fib_tolerance(asset)
+    fib_tol = get_fib_tolerance(asset, profile=ENTRY_THRESHOLD_PROFILE_NAME)
     fib_ok = fib_zone_ok(
         move_hi, move_lo, price_for_calc,
         low=0.618, high=0.886,
@@ -11018,6 +11018,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
