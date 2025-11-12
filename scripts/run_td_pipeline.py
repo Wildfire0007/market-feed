@@ -145,7 +145,7 @@ def main(argv: List[str] | None = None) -> int:
     python = sys.executable or "python3"
 
     if not args.skip_env_sync:
-        env_cmd = [python, "scripts/sync_pipeline_env.py", "--public-dir", args.public_dir]
+        env_cmd = [python, "-m", "scripts.sync_pipeline_env", "--public-dir", args.public_dir]
         _run_step("Pipeline environment", env_cmd)
         
     if not args.skip_trading:
