@@ -201,25 +201,26 @@ from config.analysis_settings import (
     SESSION_WINDOWS_UTC,
     resolve_session_status_for_asset,
     is_momentum_asset,
-    SL_BUFFER_RULES,
     SMT_AUTO_CONFIG,
     SMT_PENALTY_VALUE,
     SMT_REQUIRED_BARS,
     SPOT_MAX_AGE_SECONDS,
-    TP_MIN_ABS,
-    TP_MIN_PCT,
-    TP_NET_MIN_ASSET,
-    TP_NET_MIN_DEFAULT,
     VWAP_BAND_MULT,
     get_atr_abs_min,
     get_atr_period,
     get_atr_threshold_multiplier,
     get_bos_lookback,
     get_fib_tolerance,
+    get_max_slippage_r,
     get_max_risk_pct,
     get_p_score_min,
     get_realtime_price_guard,
+    get_sl_buffer_config,
     get_spread_max_atr_pct,
+    get_tp_min_abs_value,
+    get_tp_min_pct_value,
+    get_tp_net_min,
+    get_risk_template,
     load_config,
 )
 
@@ -3026,7 +3027,7 @@ def atr_low_threshold(asset: str) -> float:
     return base * multiplier
 
 def tp_min_pct_for(asset: str, rel_atr: float, session_flag: bool) -> float:
-    base = TP_MIN_PCT.get(asset, TP_MIN_PCT["default"])
+    base = get_tp_min_pct_value(asset)
     if asset == "BTCUSD":
         profile = _btc_active_profile()
         override_tp = BTC_TP_MIN_PCT.get(profile)
@@ -3037,7 +3038,7 @@ def tp_min_pct_for(asset: str, rel_atr: float, session_flag: bool) -> float:
     return base
 
 def tp_net_min_for(asset: str) -> float:
-    return TP_NET_MIN_ASSET.get(asset, TP_NET_MIN_DEFAULT)
+    return get_tp_net_min(asset)
 
 
 def pip_size(asset: str) -> float:
@@ -8293,8 +8294,9 @@ def analyze(asset: str) -> Dict[str, Any]:
     tp_net_pct_display = f"{tp_net_threshold * 100:.2f}".rstrip("0").rstrip(".")
     tp_net_label = f"tp1_net>=+{tp_net_pct_display}%"
 
-    core_rr_min = CORE_RR_MIN.get(asset, CORE_RR_MIN["default"])
-    momentum_rr_min = MOMENTUM_RR_MIN.get(asset, MOMENTUM_RR_MIN["default"])
+    risk_template_values = get_risk_template(asset)
+    core_rr_min = float(risk_template_values.get("core_rr_min", CORE_RR_MIN.get(asset, CORE_RR_MIN["default"])))
+    momentum_rr_min = float(risk_template_values.get("momentum_rr_min", MOMENTUM_RR_MIN.get(asset, MOMENTUM_RR_MIN["default"])))
     if asset == "BTCUSD":
         profile = btc_profile_name or _btc_active_profile()
         core_rr_min = max(core_rr_min, BTC_RR_MIN_TREND.get(profile, core_rr_min))
@@ -9012,6 +9014,37 @@ def analyze(asset: str) -> Dict[str, Any]:
     precision_trigger_gate_label = "precision_trigger_sync"
     precision_timeouts = get_precision_timeouts(asset)
 
+    sl_buffer_defaults = get_sl_buffer_config(asset)
+    if not sl_buffer_defaults:
+        sl_buffer_defaults = {"atr_mult": 0.2, "abs_min": 0.0005}
+    tp_min_abs_default = get_tp_min_abs_value(asset)
+    profile_slippage_limit = get_max_slippage_r(asset)
+
+    def compute_slippage_state(decision_side: str, limit_r: Optional[float]) -> Optional[Dict[str, float]]:
+        if (
+            limit_r is None
+            or last_computed_risk is None
+            or price_for_calc is None
+            or last5_close is None
+        ):
+            return None
+        slip = (
+            max(0.0, price_for_calc - last5_close)
+            if decision_side == "buy"
+            else max(0.0, last5_close - price_for_calc)
+        )
+        allowed = float(limit_r) * float(last_computed_risk)
+        slip_r = slip / max(1e-9, float(last_computed_risk))
+        return {
+            "slip": float(slip),
+            "allowed": float(allowed),
+            "limit_r": float(limit_r),
+            "slip_r": float(slip_r),
+            "entry_price": float(price_for_calc),
+            "trigger_price": float(last5_close),
+            "risk_abs": float(last_computed_risk),
+        }
+
     if (
         asset == "BTCUSD"
         and BTC_PROFILE_CONFIG.get("range_guard_requires_override")
@@ -9027,8 +9060,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         current_tp2_mult = tp2_mult
         atr5_val  = float(atr5 or 0.0)
 
-        buf_rule_raw = SL_BUFFER_RULES.get(asset, SL_BUFFER_RULES["default"])
-        buf_rule = dict(buf_rule_raw) if isinstance(buf_rule_raw, dict) else {}
+        buf_rule = dict(sl_buffer_defaults) if isinstance(sl_buffer_defaults, dict) else {}
         if asset == "BTCUSD":
             sl_cfg = BTC_PROFILE_CONFIG.get("sl_buffer")
             if isinstance(sl_cfg, dict):
@@ -9054,7 +9086,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             )
         buf = max(
             float(buf_rule.get("atr_mult", 0.2)) * atr5_val,
-            float(buf_rule.get("abs_min", 0.5)),
+            float(buf_rule.get("abs_min", tp_min_abs_default)),
         )
       
         k5_sw = find_swings(k5m_closed, lb=2)
@@ -9268,7 +9300,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         atr5_min_mult = ATR5_MIN_MULT_ASSET.get(asset, ATR5_MIN_MULT)
 
         min_profit_abs = max(
-            TP_MIN_ABS.get(asset, TP_MIN_ABS["default"]),
+            tp_min_abs_default,
             tp_min_pct * entry,
             (cost_mult * cost_round_pct + overnight_pct) * entry,
             atr5_min_mult * atr5_val,
@@ -9364,6 +9396,21 @@ def analyze(asset: str) -> Dict[str, Any]:
                         entry_thresholds_meta.setdefault("core_no_chase", {}).setdefault(
                             "evaluated", False
                         )
+                if decision in ("buy", "sell") and profile_slippage_limit is not None:
+                    slip_state = compute_slippage_state(decision, profile_slippage_limit)
+                    if slip_state:
+                        entry_thresholds_meta.setdefault("slippage_guard", {})["core"] = slip_state
+                        if slip_state["slip"] > slip_state["allowed"] + 1e-9:
+                            if "slippage_guard" not in missing:
+                                missing.append("slippage_guard")
+                            slip_reason = (
+                                f"Belépési csúszás {slip_state['slip_r']:.2f}R meghaladja a limitet"
+                                f" ({profile_slippage_limit:.2f}R)"
+                            )
+                            if slip_reason not in reasons:
+                                reasons.append(slip_reason)
+                            decision = "no entry"
+                            entry = sl = tp1 = tp2 = rr = None
                 if decision in ("buy", "sell") and tp1_net_pct_value is not None:
                     msg_net = f"TP1 nettó profit ≈ {tp1_net_pct_value*100:.2f}%"
                     if msg_net not in reasons:
@@ -9392,6 +9439,11 @@ def analyze(asset: str) -> Dict[str, Any]:
                         if asset == "BTCUSD"
                         else 0.2
                     )
+                    if asset != "BTCUSD" and profile_slippage_limit is not None:
+                        try:
+                            slip_limit_r = float(profile_slippage_limit)
+                        except (TypeError, ValueError):
+                            slip_limit_r = slip_limit_r
                     profile_for_no_chase = btc_profile_name or _btc_active_profile()
                     no_chase_limit_r = slip_limit_r
                     if asset == "BTCUSD":
@@ -9457,6 +9509,12 @@ def analyze(asset: str) -> Dict[str, Any]:
                         "slip_r": float(slip_r),
                     }
                 if slip_info:
+                    entry_thresholds_meta.setdefault("slippage_guard", {})["momentum"] = {
+                        "slip": float(slip),
+                        "allowed": float(allowed_slip),
+                        "limit_r": float(slip_limit_r),
+                        "slip_r": float(slip_r),
+                    }
                     if asset == "BTCUSD":
                         slip_info["no_chase_r"] = {
                             "slip_r": float(slip_info.get("slip_r", slip_r)),
@@ -10208,6 +10266,20 @@ def analyze(asset: str) -> Dict[str, Any]:
         "required": required_list,
         "missing": missing,
     }
+    if session_meta:
+        session_window_status = {
+            "entry_open": bool(session_meta.get("entry_open")),
+            "monitor_window": bool(session_meta.get("within_monitor_window")),
+            "status": session_meta.get("status"),
+        }
+        status_note = session_meta.get("status_note")
+        if isinstance(status_note, str) and status_note.strip():
+            session_window_status["status_note"] = status_note.strip()
+        summary_bits = []
+        summary_bits.append("Entry ablak NYITVA" if session_meta.get("entry_open") else "Entry ablak ZÁRVA")
+        summary_bits.append("Megfigyelés aktív" if session_meta.get("within_monitor_window") else "Megfigyelési ablakon kívül")
+        session_window_status["összefoglaló"] = ", ".join(summary_bits)
+        gates_payload["session_window_status"] = session_window_status
     if intraday_bias_gate_meta:
         gates_payload["intraday_bias"] = intraday_bias_gate_meta
 
@@ -10946,6 +11018,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
