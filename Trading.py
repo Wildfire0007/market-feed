@@ -1210,92 +1210,12 @@ def _load_existing_series(out_dir: str, name: str) -> Tuple[Optional[Dict[str, A
     return meta, raw
 
 
-def _load_existing_spot(out_dir: str) -> Optional[Dict[str, Any]]:
-    payload = load_json(os.path.join(out_dir, "spot.json"))
-    return payload if isinstance(payload, dict) else None
-
-
-def _payload_age_seconds(payload: Dict[str, Any]) -> Optional[float]:
-    latency = _coerce_float(payload.get("latency_seconds"))
-    if latency is not None:
-        return latency
-    latest_iso = payload.get("latest_utc") or payload.get("utc")
-    return _age_seconds_from_iso(latest_iso)
-
-
-def _series_cache_payload(
-    meta: Dict[str, Any],
-    raw: Dict[str, Any],
-    freshness_limit: Optional[float],
-) -> Optional[Dict[str, Any]]:
-    values = raw.get("values") if isinstance(raw, dict) else None
-    if not isinstance(values, list) or not values:
-        return None
-
-    if not bool(meta.get("ok", True)):
-        return None
-
-    if bool(meta.get("freshness_violation")):
-        return None
-
-    limit = freshness_limit
-    if limit is None:
-        limit = _coerce_float(meta.get("freshness_limit_seconds"))
-    if limit is None:
-        return None
-
-    age = _payload_age_seconds(meta)
-    if age is None or age > limit:
-        return None
-
-    payload = dict(meta)
-    payload["raw"] = raw
-    payload["retrieved_at_utc"] = now_utc()
-    payload["latency_seconds"] = age
-    payload["freshness_violation"] = False
-    payload.setdefault("freshness_limit_seconds", limit)
-    payload.pop("fallback_reuse_count", None)
-    payload.pop("fallback_reason", None)
-    payload.pop("fallback_previous_payload", None)
-    return payload
-
-
-def _spot_cache_payload(
-    payload: Dict[str, Any],
-    freshness_limit: float,
-) -> Optional[Dict[str, Any]]:
-    if not payload.get("ok"):
-        return None
-
-    price = _coerce_float(payload.get("price"))
-    if price is None:
-        return None
-
-    if bool(payload.get("freshness_violation")):
-        return None
-
-    age = _payload_age_seconds(payload)
-    if age is None or age > freshness_limit:
-        return None
-
-    reused = dict(payload)
-    reused["retrieved_at_utc"] = now_utc()
-    reused["latency_seconds"] = age
-    reused["freshness_violation"] = False
-    reused.setdefault("freshness_limit_seconds", freshness_limit)
-    reused.pop("fallback_reuse_count", None)
-    reused.pop("fallback_reason", None)
-    reused.pop("fallback_previous_payload", None)
-    return reused
-
-
 def _age_seconds_from_iso(ts: Optional[str]) -> Optional[float]:
     parsed = _parse_iso_utc(ts)
     if not parsed:
         return None
     return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
   
-
 def _reuse_previous_series_payload(
     out_dir: str,
     name: str,
@@ -1440,28 +1360,12 @@ def _collect_series_payloads(
     results: Dict[str, Dict[str, Any]] = {}
     future_map = {}
 
+    
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for name, interval in SERIES_FETCH_PLAN:
             outputsize = SERIES_OUTPUT_SIZES.get(interval, 500)
-            freshness_limit = SERIES_FRESHNESS_LIMITS.get(interval)
-            meta_prev, raw_prev = _load_existing_series(out_dir, name)
-            cached_payload = None
-            if meta_prev and raw_prev:
-                cached_payload = _series_cache_payload(meta_prev, raw_prev, freshness_limit)
-            if cached_payload is not None:
-                results[name] = _finalize_series_payload(
-                    attempts,
-                    out_dir,
-                    name,
-                    interval,
-                    freshness_limit,
-                    cached_payload,
-                    outputsize,
-                    attempt_memory=attempt_memory,
-                )
-                continue
-
             fetch_fn = _series_fetcher(interval, outputsize)
+            freshness_limit = SERIES_FRESHNESS_LIMITS.get(interval)
             future = pool.submit(
                 fetch_with_freshness,
                 attempts,
@@ -1471,10 +1375,10 @@ def _collect_series_payloads(
                 attempt_memory=attempt_memory,
                 raise_on_all_client_errors=True,
             )
-            future_map[future] = (name, interval, freshness_limit, outputsize)
+            future_map[future] = (name, interval, freshness_limit)
 
         for future in as_completed(future_map):
-            name, interval, freshness_limit, outputsize = future_map[future]
+            name, interval, freshness_limit = future_map[future]
             try:
                 payload = future.result()
             except Exception as exc:
@@ -1516,7 +1420,7 @@ def _collect_series_payloads(
                         attempts_fmt,
                         result_payload.get("error") or result_payload.get("message"),
                     )
-
+                  
     if results:
         ordered = {key: results[key] for key in sorted(results)}
         return ordered
@@ -3755,29 +3659,21 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
         spot_violation = False
         force_reason: Optional[str] = None
     else:
-        cached_spot: Optional[Dict[str, Any]] = None
-        existing_spot = _load_existing_spot(adir)
-        if existing_spot:
-            cached_spot = _spot_cache_payload(existing_spot, spot_limit)
-
-        if cached_spot is not None:
-            spot = cached_spot
+        spot = fetch_with_freshness(
+            attempts,
+            lambda s, ex: td_spot_with_fallback(s, ex),
+            freshness_limit=spot_limit,
+            max_refreshes=1,
+            attempt_memory=attempt_memory,
+            raise_on_all_client_errors=True,
+        )
+        if isinstance(spot, dict):
+            spot = _maybe_use_secondary_spot(asset, spot)
+            spot.setdefault("freshness_limit_seconds", spot_limit)
         else:
-            spot = fetch_with_freshness(
-                attempts,
-                lambda s, ex: td_spot_with_fallback(s, ex),
-                freshness_limit=spot_limit,
-                max_refreshes=1,
-                attempt_memory=attempt_memory,
-                raise_on_all_client_errors=True,
-            )
-            if isinstance(spot, dict):
-                spot = _maybe_use_secondary_spot(asset, spot)
-                spot.setdefault("freshness_limit_seconds", spot_limit)
-            else:
-                spot = {"ok": False, "freshness_limit_seconds": spot_limit}
-            if isinstance(spot, dict):
-                spot = _reuse_previous_spot(adir, spot, spot_limit)
+            spot = {"ok": False, "freshness_limit_seconds": spot_limit}
+        if isinstance(spot, dict):
+            spot = _reuse_previous_spot(adir, spot, spot_limit)
         spot_violation = bool(spot.get("freshness_violation")) if isinstance(spot, dict) else False
         force_reason = None
         if not spot.get("ok"):
@@ -3976,6 +3872,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
