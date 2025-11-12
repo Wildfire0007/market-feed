@@ -357,6 +357,100 @@ def _normalize_fib_tolerance_profiles(raw_map: Any) -> Dict[str, Dict[str, Any]]
     return profiles
 
 
+def _normalize_risk_templates(raw_map: Any) -> Dict[str, Dict[str, Any]]:
+    """Normalise risk template profiles and coerce numeric fields."""
+
+    if not isinstance(raw_map, dict):
+        return {}
+
+    numeric_fields = {
+        "risk_pct",
+        "core_rr_min",
+        "momentum_rr_min",
+        "tp_net_min",
+        "tp_min_pct",
+        "tp_min_abs",
+        "max_slippage_r",
+        "max_spread_atr_pct",
+    }
+    int_fields = {"cooldown_minutes", "max_concurrent"}
+
+    def normalise_leaf(meta: Any) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        if not isinstance(meta, dict):
+            return result
+
+        for key, value in meta.items():
+            if key in numeric_fields:
+                try:
+                    if value is not None:
+                        result[key] = float(value)
+                except (TypeError, ValueError):
+                    LOGGER.warning(
+                        "Ignoring invalid numeric risk template value %r for %s", value, key
+                    )
+            elif key in int_fields:
+                try:
+                    if value is not None:
+                        result[key] = int(float(value))
+                except (TypeError, ValueError):
+                    LOGGER.warning(
+                        "Ignoring invalid integer risk template value %r for %s", value, key
+                    )
+            elif key == "sl_buffer" and isinstance(value, dict):
+                buf: Dict[str, float] = {}
+                atr_val = value.get("atr_mult")
+                abs_val = value.get("abs_min")
+                try:
+                    if atr_val is not None:
+                        buf["atr_mult"] = float(atr_val)
+                except (TypeError, ValueError):
+                    LOGGER.warning(
+                        "Ignoring invalid atr_mult %r in sl_buffer template", atr_val
+                    )
+                try:
+                    if abs_val is not None:
+                        buf["abs_min"] = float(abs_val)
+                except (TypeError, ValueError):
+                    LOGGER.warning(
+                        "Ignoring invalid abs_min %r in sl_buffer template", abs_val
+                    )
+                if buf:
+                    result["sl_buffer"] = buf
+            elif key == "sl_tp_rule" and isinstance(value, str):
+                text = value.strip()
+                if text:
+                    result["sl_tp_rule"] = text
+            else:
+                result[key] = value
+
+        return result
+
+    templates: Dict[str, Dict[str, Any]] = {}
+    for profile_name, mapping in raw_map.items():
+        if not isinstance(mapping, dict):
+            continue
+        profile_cfg: Dict[str, Any] = {"default": {}, "assets": {}}
+        default_meta = mapping.get("default")
+        if isinstance(default_meta, dict):
+            profile_cfg["default"] = normalise_leaf(default_meta)
+        assets_meta = mapping.get("assets")
+        if isinstance(assets_meta, dict):
+            asset_cfg: Dict[str, Dict[str, Any]] = {}
+            for asset_key, meta in assets_meta.items():
+                if not isinstance(meta, dict):
+                    continue
+                asset_cfg[str(asset_key).upper()] = normalise_leaf(meta)
+            profile_cfg["assets"] = asset_cfg
+        templates[str(profile_name)] = profile_cfg
+
+    baseline_cfg = templates.setdefault("baseline", {"default": {}, "assets": {}})
+    baseline_cfg.setdefault("default", {})
+    baseline_cfg.setdefault("assets", {})
+
+    return templates
+
+
 def _normalize_bias_relax(raw_map: Any) -> Dict[str, Dict[str, Any]]:
     result: Dict[str, Dict[str, Any]] = {}
     if not isinstance(raw_map, dict):
@@ -699,6 +793,9 @@ TP_NET_MIN_ASSET: Dict[str, float] = dict(_get_config_value("tp_net_min") or {})
 TP_MIN_PCT: Dict[str, float] = dict(_get_config_value("tp_min_pct") or {})
 TP_MIN_ABS: Dict[str, float] = dict(_get_config_value("tp_min_abs") or {})
 SL_BUFFER_RULES: Dict[str, Any] = dict(_get_config_value("sl_buffer_rules") or {})
+RISK_TEMPLATES: Dict[str, Dict[str, Any]] = _normalize_risk_templates(
+    _get_config_value("risk_templates")
+)
 MIN_RISK_ABS: Dict[str, float] = dict(_get_config_value("min_risk_abs") or {})
 ACTIVE_INVALID_BUFFER_ABS: Dict[str, float] = dict(_get_config_value("active_invalid_buffer_abs") or {})
 ASSET_COST_MODEL: Dict[str, Any] = dict(_get_config_value("asset_cost_model") or {})
@@ -960,10 +1057,147 @@ def get_atr_abs_min(asset: str, profile: Optional[str] = None) -> Optional[float
     return None
 
 
+def get_risk_template(asset: str, profile: Optional[str] = None) -> Dict[str, Any]:
+    """Return the merged risk template for ``asset`` and profile."""
+
+    asset_key = str(asset or "").upper()
+    profile_name = profile or ENTRY_THRESHOLD_PROFILE_NAME
+    merged: Dict[str, Any] = {}
+
+    def merge(source: Optional[Dict[str, Any]]) -> None:
+        if not isinstance(source, dict):
+            return
+        for key, value in source.items():
+            if isinstance(value, dict):
+                existing = merged.get(key)
+                if isinstance(existing, dict):
+                    existing.update(value)
+                else:
+                    merged[key] = dict(value)
+            else:
+                merged[key] = value
+
+    baseline_cfg = RISK_TEMPLATES.get("baseline") or {}
+    merge(baseline_cfg.get("default"))
+    merge((baseline_cfg.get("assets") or {}).get(asset_key))
+
+    profile_cfg = RISK_TEMPLATES.get(profile_name)
+    if profile_cfg and profile_name != "baseline":
+        merge(profile_cfg.get("default"))
+        merge((profile_cfg.get("assets") or {}).get(asset_key))
+    elif profile_cfg:
+        merge((profile_cfg.get("assets") or {}).get(asset_key))
+
+    return merged
+
+
+def get_tp_net_min(asset: str, profile: Optional[str] = None) -> float:
+    template_value = get_risk_template(asset, profile).get("tp_net_min")
+    if template_value is not None:
+        try:
+            return float(template_value)
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "Invalid tp_net_min %r in risk template for %s", template_value, asset
+            )
+    return float(TP_NET_MIN_ASSET.get(asset, TP_NET_MIN_DEFAULT))
+
+
+def get_tp_min_pct_value(asset: str, profile: Optional[str] = None) -> float:
+    template_value = get_risk_template(asset, profile).get("tp_min_pct")
+    if template_value is not None:
+        try:
+            return float(template_value)
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "Invalid tp_min_pct %r in risk template for %s", template_value, asset
+            )
+    return float(TP_MIN_PCT.get(asset, TP_MIN_PCT.get("default", 0.0)))
+
+
+def get_tp_min_abs_value(asset: str, profile: Optional[str] = None) -> float:
+    template_value = get_risk_template(asset, profile).get("tp_min_abs")
+    if template_value is not None:
+        try:
+            return float(template_value)
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "Invalid tp_min_abs %r in risk template for %s", template_value, asset
+            )
+    base = TP_MIN_ABS.get(asset)
+    if base is None:
+        base = TP_MIN_ABS.get("default", 0.0)
+    return float(base)
+
+
+def get_sl_buffer_config(asset: str, profile: Optional[str] = None) -> Dict[str, float]:
+    template_buffer = get_risk_template(asset, profile).get("sl_buffer")
+    result: Dict[str, float] = {}
+    if isinstance(template_buffer, dict):
+        for key in ("atr_mult", "abs_min"):
+            value = template_buffer.get(key)
+            if value is None:
+                continue
+            try:
+                result[key] = float(value)
+            except (TypeError, ValueError):
+                LOGGER.warning(
+                    "Invalid %s value %r in sl_buffer template for %s",
+                    key,
+                    value,
+                    asset,
+                )
+    base_rules: Optional[Dict[str, Any]] = None
+    if asset in SL_BUFFER_RULES:
+        raw_rule = SL_BUFFER_RULES.get(asset)
+        if isinstance(raw_rule, dict):
+            base_rules = raw_rule
+    if base_rules is None:
+        raw_default = SL_BUFFER_RULES.get("default")
+        if isinstance(raw_default, dict):
+            base_rules = raw_default
+    if base_rules:
+        for key in ("atr_mult", "abs_min"):
+            if key in result:
+                continue
+            value = base_rules.get(key)
+            if value is None:
+                continue
+            try:
+                result[key] = float(value)
+            except (TypeError, ValueError):
+                continue
+    return result
+
+
+def get_max_slippage_r(asset: str, profile: Optional[str] = None) -> Optional[float]:
+    template_value = get_risk_template(asset, profile).get("max_slippage_r")
+    if template_value is not None:
+        try:
+            return float(template_value)
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "Invalid max_slippage_r %r in risk template for %s",
+                template_value,
+                asset,
+            )
+    return None
+
+
 def get_spread_max_atr_pct(asset: str, profile: Optional[str] = None) -> float:
     """Return the maximum spread/ATR ratio for the given profile."""
 
     profile_name = profile or ENTRY_THRESHOLD_PROFILE_NAME
+    template_value = get_risk_template(asset, profile_name).get("max_spread_atr_pct")
+    if template_value is not None:
+        try:
+            return float(template_value)
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "Invalid max_spread_atr_pct %r in risk template for %s",
+                template_value,
+                asset,
+            )
     profile_cfg = _SPREAD_MAX_ATR_PCT_PROFILES.get(profile_name) or {}
     overrides = profile_cfg.get("by_asset", {})
     value = overrides.get(asset)
@@ -1005,6 +1239,14 @@ def get_max_risk_pct(asset: str, profile: Optional[str] = None) -> float:
     """Return the maximum per-trade risk percentage for the active profile."""
 
     profile_name = profile or ENTRY_THRESHOLD_PROFILE_NAME
+    template_value = get_risk_template(asset, profile_name).get("risk_pct")
+    if template_value is not None:
+        try:
+            return float(template_value)
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "Invalid risk_pct %r in risk template for %s", template_value, asset
+            )
     profile_cfg = _MAX_RISK_PCT_PROFILES.get(profile_name) or {}
     overrides = profile_cfg.get("by_asset", {})
     value = overrides.get(asset)
