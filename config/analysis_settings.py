@@ -632,6 +632,19 @@ def _normalize_btc_profiles(raw_map: Any) -> Dict[str, Dict[str, Any]]:
 
 # Module level shortcuts used by ``analysis.py`` and helper scripts.
 ASSETS: List[str] = load_config()["assets"]
+_ASSET_FILTER_ENV = os.getenv("ANALYSIS_ASSET_FILTER", "").strip()
+if _ASSET_FILTER_ENV:
+    _asset_filter = {
+        item.strip().upper()
+        for item in _ASSET_FILTER_ENV.split(",")
+        if item and item.strip()
+    }
+    if _asset_filter:
+        ASSETS = [
+            asset
+            for asset in ASSETS
+            if asset.upper() in _asset_filter
+        ]
 LEVERAGE: Dict[str, float] = load_config()["leverage"]
 _ENTRY_THRESHOLD_PROFILES_RAW: Dict[str, Any] = dict(
     _get_config_value("entry_threshold_profiles") or {}
