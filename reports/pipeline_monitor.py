@@ -205,6 +205,50 @@ def record_analysis_run(
     return payload, lag_seconds, threshold, breach
 
 
+def finalize_analysis_run(
+    completed_at: Optional[datetime] = None,
+    duration_seconds: Optional[float] = None,
+    path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Update the pipeline timing payload when the analysis stage finishes."""
+
+    completed = completed_at or _now()
+    payload = _load_payload(path)
+    analysis_meta = payload.get("analysis") if isinstance(payload, dict) else {}
+    if not isinstance(analysis_meta, dict):
+        analysis_meta = {}
+    started = _parse_iso(analysis_meta.get("started_utc"))
+    trading_meta = payload.get("trading") if isinstance(payload, dict) else {}
+    trading_completed = None
+    if isinstance(trading_meta, dict):
+        trading_completed = _parse_iso(trading_meta.get("completed_utc"))
+
+    computed_duration = duration_seconds
+    if computed_duration is None and started is not None:
+        computed_duration = max((completed - started).total_seconds(), 0.0)
+
+    if started is not None and trading_completed is not None:
+        lag_seconds = max((started - trading_completed).total_seconds(), 0.0)
+        analysis_meta["lag_from_trading_seconds"] = round(float(lag_seconds), 3)
+        threshold_raw = analysis_meta.get("lag_threshold_seconds")
+        try:
+            threshold = float(threshold_raw) if threshold_raw is not None else DEFAULT_MAX_LAG_SECONDS
+        except (TypeError, ValueError):
+            threshold = float(DEFAULT_MAX_LAG_SECONDS)
+        analysis_meta["lag_threshold_seconds"] = threshold
+        analysis_meta["lag_breached"] = bool(lag_seconds > threshold)
+
+    analysis_meta["completed_utc"] = _to_iso(completed)
+    analysis_meta["duration_seconds"] = (
+        round(float(computed_duration), 3) if computed_duration is not None else None
+    )
+
+    payload["analysis"] = analysis_meta
+    payload["updated_utc"] = _to_iso(_now())
+    _save_payload(payload, path)
+    return payload
+
+
 def get_pipeline_log_path(path: Optional[Path] = None) -> Path:
     """Return the file path used for pipeline level logging."""
 
@@ -530,6 +574,7 @@ __all__ = [
     "PIPELINE_MONITOR_PATH",
     "PIPELINE_LOG_PATH",
     "get_pipeline_log_path",
+    "finalize_analysis_run",
     "record_ml_model_status",
     "record_analysis_run",
     "record_trading_run",
