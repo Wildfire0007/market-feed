@@ -496,6 +496,34 @@ ASSETS = {
     },
 }
 
+_ASSET_FILTER_ENV = os.getenv("TD_ASSET_FILTER", "").strip()
+if _ASSET_FILTER_ENV:
+    _asset_filter = {
+        item.strip().upper()
+        for item in _ASSET_FILTER_ENV.split(",")
+        if item and item.strip()
+    }
+    if _asset_filter:
+        filtered_assets = {
+            key: value
+            for key, value in ASSETS.items()
+            if key.upper() in _asset_filter
+        }
+        missing_assets = sorted(_asset_filter - {key.upper() for key in ASSETS})
+        if missing_assets:
+            LOGGER.warning(
+                "TD_ASSET_FILTER tartalmaz ismeretlen eszközöket: %s",
+                ", ".join(missing_assets),
+            )
+        if not filtered_assets:
+            raise SystemExit("TD_ASSET_FILTER nem tartalmaz érvényes eszközt")
+        LOGGER.info(
+            "TD_ASSET_FILTER aktív, %d eszköz feldolgozása: %s",
+            len(filtered_assets),
+            ", ".join(sorted(filtered_assets.keys())),
+        )
+        ASSETS = filtered_assets
+
 
 def _normalize_symbol_token(symbol: str) -> str:
     return symbol.replace("/", "").replace(":", "").replace("-", "").strip().upper()
@@ -3844,5 +3872,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
