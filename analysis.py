@@ -3660,6 +3660,34 @@ def _latency_guard_status(
     return None
 
 
+def _normalize_blockers(blockers: Any) -> List[str]:
+    if isinstance(blockers, list):
+        return [str(item) for item in blockers if item]
+    if isinstance(blockers, (set, tuple)):
+        return [str(item) for item in blockers if item]
+    if blockers:
+        return [str(blockers)]
+    return []
+
+
+def _log_precision_gate_summary(
+    asset: str,
+    precision_gate_snapshot: Dict[str, Any],
+    blockers_snapshot: Any,
+    *,
+    logger: logging.Logger = LOGGER,
+) -> None:
+    blockers_list = _normalize_blockers(blockers_snapshot)
+    logger.info(
+        "Precision kapu összegzés",
+        extra={
+            "asset": asset,
+            **precision_gate_snapshot,
+            "precision_block_reason": ",".join(blockers_list),
+        },
+    )
+
+
 def _emit_precision_gate_log(
     asset: str,
     gate_name: str,
@@ -9703,12 +9731,10 @@ def analyze(asset: str) -> Dict[str, Any]:
             "flow_blockers": blockers_snapshot,
         }
         entry_thresholds_meta["precision_gate_state"] = precision_gate_snapshot
-        LOGGER.info(
-            "Precision kapu összegzés",
-            extra={
-                "asset": asset,
-                **precision_gate_snapshot,
-            },
+        _log_precision_gate_summary(
+            asset,
+            precision_gate_snapshot,
+            blockers_snapshot,
         )
 
     if precision_plan:
@@ -11018,6 +11044,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
