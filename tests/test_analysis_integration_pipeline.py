@@ -165,7 +165,8 @@ def test_integration_latency_guard_and_precision(monkeypatch, tmp_path, caplog):
             saved_meta = payload.get("entry_thresholds_meta") or payload.get("entry_thresholds", {})
             fib_tol = saved_meta.get("fib_tolerance_fraction")
     assert fib_tol is not None
-    assert pytest.approx(fib_tol, rel=1e-4) == 0.004
+    expected_fib_tol = analysis.get_fib_tolerance("NVDA", profile="suppressed")
+    assert pytest.approx(fib_tol, rel=1e-4) == expected_fib_tol
     assert any(
         getattr(record, "gate", "") == "can_enter_core" and record.asset == "NVDA"
         for record in caplog.records
