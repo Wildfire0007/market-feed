@@ -13,6 +13,7 @@ import logging
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from datetime import datetime, timezone, timedelta
 from datetime import time as dtime
@@ -10710,6 +10711,43 @@ def analyze(asset: str) -> Dict[str, Any]:
     return decision_obj
 # ------------------------------- főfolyamat ------------------------------------
 
+
+def _determine_analysis_workers(asset_count: int) -> int:
+    if asset_count <= 1:
+        return 1
+
+    default_workers = min(asset_count, max(1, os.cpu_count() or 1))
+    env_value = os.getenv("ANALYSIS_MAX_WORKERS")
+    if env_value:
+        try:
+            configured = int(env_value)
+        except ValueError:
+            LOGGER.warning("Ignoring invalid ANALYSIS_MAX_WORKERS value: %r", env_value)
+        else:
+            if configured > 0:
+                default_workers = min(asset_count, configured)
+            else:
+                LOGGER.warning(
+                    "ANALYSIS_MAX_WORKERS must be positive; received %r", env_value
+                )
+    return max(1, default_workers)
+
+
+def _analyze_asset_guard(asset: str) -> Tuple[str, Dict[str, Any]]:
+    try:
+        result = analyze(asset)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        LOGGER.exception("Analysis failed for asset %s", asset)
+        failure_result: Dict[str, Any] = {"asset": asset, "ok": False, "error": str(exc)}
+        try:
+            failure_payload = build_analysis_error_signal(asset, exc)
+            save_json(os.path.join(PUBLIC_DIR, asset, "signal.json"), failure_payload)
+        except Exception:  # pragma: no cover - ensure pipeline resiliency
+            LOGGER.exception("Failed to persist analysis error placeholder for %s", asset)
+        return asset, failure_result
+    return asset, result
+
+
 def main():
     analysis_started_at = datetime.now(timezone.utc)
     pipeline_log_path = None
@@ -10756,7 +10794,8 @@ def main():
                         analysis_delay_seconds,
                     )
 
-    LOGGER.info("Starting analysis run for %d assets", len(ASSETS))
+    asset_count = len(ASSETS)
+    LOGGER.info("Starting analysis run for %d assets", asset_count)
     missing_models = {}
     dependency_issues: Dict[str, str] = {}
     placeholder_models: Dict[str, Dict[str, Any]] = {}
@@ -10905,81 +10944,99 @@ def main():
             "ML valószínűség számítás ideiglenesen letiltva"
             + (f" ({reason_text})." if reason_text else ".")
         )
-    for asset in ASSETS:
-        try:
-            res = analyze(asset)
-            summary["assets"][asset] = res
-            diag = res.get("diagnostics", {}) if isinstance(res, dict) else {}
-            flags = diag.get("latency_flags") if isinstance(diag, dict) else None
-            if flags:
-                summary["latency_flags"].extend(flags)
-            if isinstance(res, dict):
-                sentiment_payload = res.get("sentiment_exit_summary")
-                if not sentiment_payload:
-                    exit_payload = res.get("position_exit_signal")
-                    if not exit_payload and isinstance(res.get("active_position_meta"), dict):
-                        exit_payload = res["active_position_meta"].get("exit_signal")
-                    if isinstance(exit_payload, dict) and exit_payload.get("category") == "sentiment_risk":
-                        sentiment_payload = {
-                            key: exit_payload.get(key)
-                            for key in (
-                                "state",
-                                "severity",
-                                "sentiment_severity",
-                                "sentiment_score",
-                                "sentiment_bias",
-                                "sentiment_category",
-                                "triggered_at",
-                            )
-                        }
-                        headlines = exit_payload.get("headlines")
-                        if isinstance(headlines, (list, tuple)) and headlines:
-                            headline = headlines[0]
-                            if isinstance(headline, str):
-                                sentiment_payload["headline"] = headline
-                    if sentiment_payload:
-                        mapped = {
-                            "state": sentiment_payload.get("state"),
-                            "severity_label": sentiment_payload.get("severity"),
-                            "severity_score": sentiment_payload.get("sentiment_severity"),
-                            "score": sentiment_payload.get("sentiment_score"),
-                            "bias": sentiment_payload.get("sentiment_bias"),
-                            "category": sentiment_payload.get("sentiment_category"),
-                            "triggered_at": sentiment_payload.get("triggered_at"),
-                        }
-                        if "headline" in sentiment_payload:
-                            mapped["headline"] = sentiment_payload["headline"]
-                        sentiment_payload = mapped
-                if sentiment_payload:
-                    alert_payload = {"asset": asset}
-                    alert_payload.update(
-                        {
-                            key: sentiment_payload.get(key)
-                            for key in (
-                                "state",
-                                "severity_label",
-                                "severity_score",
-                                "score",
-                                "bias",
-                                "category",
-                                "triggered_at",
-                                "headline",
-                            )
-                        }
-                    )
-                    alert_payload = {
-                        key: value for key, value in alert_payload.items() if value is not None
+    worker_count = _determine_analysis_workers(asset_count)
+    if worker_count > 1:
+        LOGGER.info("Running asset analysis with up to %d workers", worker_count)
+    asset_results: Dict[str, Dict[str, Any]] = {}
+    if worker_count <= 1:
+        for asset in ASSETS:
+            asset_key, result = _analyze_asset_guard(asset)
+            asset_results[asset_key] = result
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            future_map = {pool.submit(_analyze_asset_guard, asset): asset for asset in ASSETS}
+            for future in as_completed(future_map):
+                asset_name = future_map[future]
+                try:
+                    asset_key, result = future.result()
+                except Exception as exc:  # pragma: no cover - executor safeguard
+                    LOGGER.exception("Unhandled analysis error for asset %s", asset_name)
+                    asset_results[asset_name] = {
+                        "asset": asset_name,
+                        "ok": False,
+                        "error": str(exc),
                     }
-                    if alert_payload not in summary["sentiment_alerts"]:
-                        summary["sentiment_alerts"].append(alert_payload)
-        except Exception as exc:
-            LOGGER.exception("Analysis failed for asset %s", asset)
-            summary["assets"][asset] = {"asset": asset, "ok": False, "error": str(exc)}
-            try:
-                failure_payload = build_analysis_error_signal(asset, exc)
-                save_json(os.path.join(PUBLIC_DIR, asset, "signal.json"), failure_payload)
-            except Exception:
-                LOGGER.exception("Failed to persist analysis error placeholder for %s", asset)
+                else:
+                    asset_results[asset_key] = result
+
+    for asset in ASSETS:
+        res = asset_results.get(asset)
+        if res is None:
+            continue
+        summary["assets"][asset] = res
+        diag = res.get("diagnostics", {}) if isinstance(res, dict) else {}
+        flags = diag.get("latency_flags") if isinstance(diag, dict) else None
+        if flags:
+            summary["latency_flags"].extend(flags)
+        if isinstance(res, dict):
+            sentiment_payload = res.get("sentiment_exit_summary")
+            if not sentiment_payload:
+                exit_payload = res.get("position_exit_signal")
+                if not exit_payload and isinstance(res.get("active_position_meta"), dict):
+                    exit_payload = res["active_position_meta"].get("exit_signal")
+                if isinstance(exit_payload, dict) and exit_payload.get("category") == "sentiment_risk":
+                    sentiment_payload = {
+                        key: exit_payload.get(key)
+                        for key in (
+                            "state",
+                            "severity",
+                            "sentiment_severity",
+                            "sentiment_score",
+                            "sentiment_bias",
+                            "sentiment_category",
+                            "triggered_at",
+                        )
+                    }
+                    headlines = exit_payload.get("headlines")
+                    if isinstance(headlines, (list, tuple)) and headlines:
+                        headline = headlines[0]
+                        if isinstance(headline, str):
+                            sentiment_payload["headline"] = headline
+                if sentiment_payload:
+                    mapped = {
+                        "state": sentiment_payload.get("state"),
+                        "severity_label": sentiment_payload.get("severity"),
+                        "severity_score": sentiment_payload.get("sentiment_severity"),
+                        "score": sentiment_payload.get("sentiment_score"),
+                        "bias": sentiment_payload.get("sentiment_bias"),
+                        "category": sentiment_payload.get("sentiment_category"),
+                        "triggered_at": sentiment_payload.get("triggered_at"),
+                    }
+                    if "headline" in sentiment_payload:
+                        mapped["headline"] = sentiment_payload["headline"]
+                    sentiment_payload = mapped
+            if sentiment_payload:
+                alert_payload = {"asset": asset}
+                alert_payload.update(
+                    {
+                        key: sentiment_payload.get(key)
+                        for key in (
+                            "state",
+                            "severity_label",
+                            "severity_score",
+                            "score",
+                            "bias",
+                            "category",
+                            "triggered_at",
+                            "headline",
+                        )
+                    }
+                )
+                alert_payload = {
+                    key: value for key, value in alert_payload.items() if value is not None
+                }
+                if alert_payload not in summary["sentiment_alerts"]:
+                    summary["sentiment_alerts"].append(alert_payload)
     save_json(os.path.join(PUBLIC_DIR, "analysis_summary.json"), summary)
 
     analysis_completed_at = datetime.now(timezone.utc)
@@ -11044,6 +11101,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
