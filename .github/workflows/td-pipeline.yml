@@ -22,6 +22,7 @@ jobs:
     name: 1) Trading.py — adatszedés (TD)
     runs-on: ubuntu-latest
     env:
+      TZ: UTC
       OUT_DIR: public
       TD_PAUSE: "0.3"
       TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
@@ -70,6 +71,7 @@ jobs:
     needs: trading
     runs-on: ubuntu-latest
     env:
+      TZ: UTC
       SESSION_OVERRIDE_24_7: "1"
     steps:
       - name: Checkout (fresh HEAD incl. trading commit)
@@ -131,6 +133,10 @@ jobs:
               raise SystemExit("ML probability stack not sourced from scikit-learn")
           PY
 
+      - name: Generate latency monitoring snapshot
+        run: |
+          python scripts/check_latency_sources.py --output public/monitoring/data_latency.json --pretty
+          
       - name: Upload analysis outputs
         uses: actions/upload-artifact@v4
         with:
@@ -140,6 +146,8 @@ jobs:
     name: 3) Pre-deploy verification & tests
     needs: analysis
     runs-on: ubuntu-latest
+    env:
+      TZ: UTC
     steps:
       - name: Checkout latest main
         uses: actions/checkout@v4
