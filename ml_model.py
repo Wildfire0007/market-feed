@@ -1184,9 +1184,11 @@ def predict_signal_probability(asset: str, features: Dict[str, Any]) -> Probabil
         metadata["unavailable_reason"] = reason
         if fallback is None:
             metadata["source"] = "unavailable"
+            metadata["status"] = "unavailable"
             return ProbabilityPrediction(metadata=metadata)
         probability, threshold, fallback_meta = fallback
         metadata["source"] = "fallback"
+        metadata["status"] = "fallback"
         metadata["fallback"] = fallback_meta
         return ProbabilityPrediction(
             probability=probability,
@@ -1268,6 +1270,7 @@ def predict_signal_probability(asset: str, features: Dict[str, Any]) -> Probabil
         metadata["threshold"] = threshold_meta
 
     metadata["source"] = "sklearn"
+    metadata["status"] = "enabled"
     
     return ProbabilityPrediction(
         probability=calibrated_probability,
