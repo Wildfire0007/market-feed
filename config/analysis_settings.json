@@ -27,10 +27,10 @@
     "baseline": {
       "p_score_min": {
         "default": 46.0,
-        "BTCUSD": 46.0,
-        "EURUSD": 48.0,
+        "BTCUSD": 45.0,
+        "EURUSD": 47.0,
         "GOLD_CFD": 45.0,
-        "NVDA": 40.0,
+        "NVDA": 41.0,
         "USOIL": 46.0,
         "XAGUSD": 46.0
       },
@@ -59,8 +59,8 @@
     },
     "suppressed": {
       "p_score_min": {
-        "default": 43.0,        
-        "BTCUSD": 44.0,
+        "default": 43.0,
+        "BTCUSD": 43.0,
         "EURUSD": 45.0,
         "GOLD_CFD": 43.0,
         "NVDA": 38.0,
@@ -80,13 +80,13 @@
   },
   "atr_period_profiles": {
     "baseline": {
-      "default": 14,
-      "BTCUSD": 14,
-      "EURUSD": 14,
-      "GOLD_CFD": 14,
-      "NVDA": 14,
-      "USOIL": 14,
-      "XAGUSD": 14
+      "default": 13,
+      "BTCUSD": 13,
+      "EURUSD": 13,
+      "GOLD_CFD": 13,
+      "NVDA": 13,
+      "USOIL": 13,
+      "XAGUSD": 13
     },
     "relaxed": {
       "default": 13,
@@ -287,12 +287,12 @@
   },
   "spread_max_atr_pct": {
     "default": 0.35,
-    "EURUSD": 0.45,
-    "GOLD_CFD": 0.35,
-    "USOIL": 0.4,
-    "NVDA": 0.35,
-    "BTCUSD": 0.55,
-    "XAGUSD": 0.35
+    "EURUSD": 0.48,
+    "GOLD_CFD": 0.33,
+    "USOIL": 0.42,
+    "NVDA": 0.36,
+    "BTCUSD": 0.57,
+    "XAGUSD": 0.37
   },
   "spread_max_atr_pct_profiles": {
     "relaxed": {
@@ -321,8 +321,11 @@
         "metals": 0.004,
         "equities": 0.004
       },
-      "BTCUSD": 0.005,
-      "EURUSD": 0.006
+      "BTCUSD": 0.0065,
+      "EURUSD": 0.006,
+      "NVDA": 0.0045,
+      "USOIL": 0.0055,
+      "XAGUSD": 0.0045
     },
     "relaxed": {
       "default": 0.0055,
@@ -383,9 +386,13 @@
   },
   "max_risk_pct_profiles": {
     "baseline": {
-      "default": 1.5,
-      "NVDA": 1.4,
-      "XAGUSD": 1.4
+      "default": 1.4,
+      "NVDA": 1.3,
+      "XAGUSD": 1.4,
+      "GOLD_CFD": 1.5,
+      "USOIL": 1.4,
+      "EURUSD": 1.4,
+      "BTCUSD": 1.4
     },
     "relaxed": {
       "default": 1.4,
@@ -468,12 +475,12 @@
     "BTCUSD"
   ],
   "atr_abs_min": {
-    "EURUSD": 0.001,
-    "GOLD_CFD": 0.4,
-    "USOIL": 0.25,
-    "NVDA": 1.5,
-    "BTCUSD": 80.0,
-    "XAGUSD": 0.55
+    "EURUSD": 0.0009,
+    "GOLD_CFD": 0.36,
+    "USOIL": 0.24,
+    "NVDA": 1.35,
+    "BTCUSD": 75.0,
+    "XAGUSD": 0.5
   },
   "atr_abs_min_profiles": {
     "relaxed": {
@@ -500,8 +507,8 @@
     "EURUSD": 1.7,
     "GOLD_CFD": 1.6,
     "USOIL": 1.6,
-    "NVDA": 1.8,
-    "BTCUSD": 1.6,
+    "NVDA": 1.5,
+    "BTCUSD": 1.45,
     "XAGUSD": 1.7
   },
   "momentum_rr_min": {
@@ -523,7 +530,7 @@
   },
   "bos_lookback_profiles": {
     "baseline": {
-      "default": 30
+      "default": 28
     },
     "relaxed": {
       "default": 28
@@ -614,6 +621,14 @@
             "atr_strong"
           ],
           "label": "EMA9×21 short + magas ATR"
+        },
+        {
+          "direction": "short",
+          "requires": [
+            "bos5m_short",
+            "atr_ok"
+          ],
+          "label": "5m BOS short + ATR (momentum nélkül)"
         }
       ]
     },
@@ -653,6 +668,14 @@
             "atr_ok"
           ],
           "label": "5m BOS short + ATR"
+        },
+        {
+          "direction": "short",
+          "requires": [
+            "micro_bos_short",
+            "atr_ok"
+          ],
+          "label": "Micro BOS short + ATR (momentum nélkül)"
         }
       ]
     },
@@ -1122,5 +1145,510 @@
         ]
       ]
     }
-  }
+  },
+  "risk_templates": {
+    "baseline": {
+      "default": {
+        "risk_pct": 1.4,
+        "core_rr_min": 1.6,
+        "momentum_rr_min": 1.4,
+        "tp_net_min": 0.6,
+        "tp_min_pct": 0.002,
+        "tp_min_abs": 0.0,
+        "sl_buffer": {
+          "atr_mult": 0.2,
+          "abs_min": 0.0005
+        },
+        "max_slippage_r": 0.2,
+        "max_spread_atr_pct": 0.35,
+        "cooldown_minutes": 20,
+        "max_concurrent": 1,
+        "sl_tp_rule": "SL ≥max(0.2 ATR, 0.0005); TP1 nettó ≥0.6 %"
+      },
+      "assets": {
+        "EURUSD": {
+          "risk_pct": 1.4,
+          "core_rr_min": 1.7,
+          "momentum_rr_min": 1.5,
+          "tp_net_min": 0.6,
+          "tp_min_pct": 0.0018,
+          "tp_min_abs": 0.0,
+          "sl_buffer": {
+            "atr_mult": 0.2,
+            "abs_min": 0.0005
+          },
+          "max_slippage_r": 0.2,
+          "cooldown_minutes": 20,
+          "max_concurrent": 1,
+          "max_spread_atr_pct": 0.48,
+          "sl_tp_rule": "SL ≥max(0.2 ATR, 0.0005); TP1 nettó ≥0.6 %"
+        },
+        "GOLD_CFD": {
+          "risk_pct": 1.5,
+          "core_rr_min": 1.6,
+          "momentum_rr_min": 1.4,
+          "tp_net_min": 0.7,
+          "tp_min_pct": 0.003,
+          "tp_min_abs": 0.6,
+          "sl_buffer": {
+            "atr_mult": 0.3,
+            "abs_min": 0.4
+          },
+          "max_slippage_r": 0.2,
+          "cooldown_minutes": 20,
+          "max_concurrent": 1,
+          "max_spread_atr_pct": 0.33,
+          "sl_tp_rule": "SL ≥max(0.3 ATR, 0.4); TP1 nettó ≥0.7 %"
+        },
+        "NVDA": {
+          "risk_pct": 1.3,
+          "core_rr_min": 1.5,
+          "momentum_rr_min": 1.4,
+          "tp_net_min": 0.9,
+          "tp_min_pct": 0.002,
+          "tp_min_abs": 0.8,
+          "sl_buffer": {
+            "atr_mult": 0.4,
+            "abs_min": 0.9
+          },
+          "max_slippage_r": 0.2,
+          "max_spread_atr_pct": 0.36,
+          "cooldown_minutes": 20,
+          "max_concurrent": 1,
+          "sl_tp_rule": "SL ≥max(0.4 ATR, 0.9); TP1 nettó ≥0.9 %"
+        },
+        "XAGUSD": {
+          "risk_pct": 1.4,
+          "core_rr_min": 1.7,
+          "momentum_rr_min": 1.5,
+          "tp_net_min": 0.75,
+          "tp_min_pct": 0.002,
+          "tp_min_abs": 0.6,
+          "sl_buffer": {
+            "atr_mult": 0.22,
+            "abs_min": 0.4
+          },
+          "max_slippage_r": 0.22,
+          "max_spread_atr_pct": 0.37,
+          "cooldown_minutes": 20,
+          "max_concurrent": 1,
+          "sl_tp_rule": "SL ≥max(0.22 ATR, 0.4); TP1 nettó ≥0.75 %"
+        },
+        "BTCUSD": {
+          "risk_pct": 1.4,
+          "core_rr_min": 1.45,
+          "momentum_rr_min": 1.35,
+          "tp_net_min": 0.75,
+          "tp_min_pct": 0.006,
+          "tp_min_abs": 90.0,
+          "sl_buffer": {
+            "atr_mult": 0.26,
+            "abs_min": 85.0
+          },
+          "max_slippage_r": 0.2,
+          "max_spread_atr_pct": 0.57,
+          "cooldown_minutes": 20,
+          "max_concurrent": 1,
+          "sl_tp_rule": "SL ≥max(0.26 ATR, 85 USD); TP1 nettó ≥0.75 %"
+        },
+        "USOIL": {
+          "risk_pct": 1.4,
+          "core_rr_min": 1.6,
+          "momentum_rr_min": 1.5,
+          "tp_net_min": 0.7,
+          "tp_min_pct": 0.0035,
+          "tp_min_abs": 0.4,
+          "sl_buffer": {
+            "atr_mult": 0.22,
+            "abs_min": 0.35
+          },
+          "max_slippage_r": 0.2,
+          "max_spread_atr_pct": 0.42,
+          "cooldown_minutes": 20,
+          "max_concurrent": 1,
+          "sl_tp_rule": "SL ≥max(0.22 ATR, 0.35); TP1 nettó ≥0.7 %"
+        }
+      }
+    },
+    "suppressed": {
+      "default": {
+        "risk_pct": 1.2,
+        "core_rr_min": 1.5,
+        "momentum_rr_min": 1.35,
+        "tp_net_min": 0.6,
+        "tp_min_pct": 0.002,
+        "tp_min_abs": 0.0,
+        "sl_buffer": {
+          "atr_mult": 0.2,
+          "abs_min": 0.0005
+        },
+        "max_slippage_r": 0.18,
+        "max_spread_atr_pct": 0.4,
+        "cooldown_minutes": 15,
+        "max_concurrent": 1,
+        "sl_tp_rule": "SL ≥max(0.2 ATR, 0.0005); TP1 nettó ≥0.6 %"
+      },
+      "assets": {
+        "EURUSD": {
+          "risk_pct": 1.2,
+          "core_rr_min": 1.5,
+          "momentum_rr_min": 1.4,
+          "tp_net_min": 0.6,
+          "tp_min_pct": 0.0018,
+          "tp_min_abs": 0.0,
+          "sl_buffer": {
+            "atr_mult": 0.2,
+            "abs_min": 0.0005
+          },
+          "max_slippage_r": 0.18,
+          "cooldown_minutes": 15,
+          "max_concurrent": 1,
+          "max_spread_atr_pct": 0.5,
+          "sl_tp_rule": "SL ≥max(0.2 ATR, 0.0005); TP1 nettó ≥0.6 %"
+        },
+        "GOLD_CFD": {
+          "risk_pct": 1.2,
+          "core_rr_min": 1.4,
+          "momentum_rr_min": 1.3,
+          "tp_net_min": 0.7,
+          "tp_min_pct": 0.003,
+          "tp_min_abs": 0.6,
+          "sl_buffer": {
+            "atr_mult": 0.3,
+            "abs_min": 0.4
+          },
+          "max_slippage_r": 0.18,
+          "cooldown_minutes": 15,
+          "max_concurrent": 1,
+          "max_spread_atr_pct": 0.4,
+          "sl_tp_rule": "SL ≥max(0.3 ATR, 0.4); TP1 nettó ≥0.7 %"
+        },
+        "NVDA": {
+          "risk_pct": 1.2,
+          "core_rr_min": 1.35,
+          "momentum_rr_min": 1.3,
+          "tp_net_min": 0.9,
+          "tp_min_pct": 0.002,
+          "tp_min_abs": 0.8,
+          "sl_buffer": {
+            "atr_mult": 0.4,
+            "abs_min": 0.9
+          },
+          "max_slippage_r": 0.18,
+          "max_spread_atr_pct": 0.4,
+          "cooldown_minutes": 15,
+          "max_concurrent": 1,
+          "sl_tp_rule": "SL ≥max(0.4 ATR, 0.9); TP1 nettó ≥0.9 %"
+        },
+        "XAGUSD": {
+          "risk_pct": 1.2,
+          "core_rr_min": 1.5,
+          "momentum_rr_min": 1.4,
+          "tp_net_min": 0.75,
+          "tp_min_pct": 0.002,
+          "tp_min_abs": 0.6,
+          "sl_buffer": {
+            "atr_mult": 0.22,
+            "abs_min": 0.4
+          },
+          "max_slippage_r": 0.18,
+          "cooldown_minutes": 15,
+          "max_concurrent": 1,
+          "max_spread_atr_pct": 0.4,
+          "sl_tp_rule": "SL ≥max(0.22 ATR, 0.4); TP1 nettó ≥0.75 %"
+        },
+        "BTCUSD": {
+          "risk_pct": 1.2,
+          "core_rr_min": 1.35,
+          "momentum_rr_min": 1.25,
+          "tp_net_min": 0.75,
+          "tp_min_pct": 0.006,
+          "tp_min_abs": 80.0,
+          "sl_buffer": {
+            "atr_mult": 0.24,
+            "abs_min": 80.0
+          },
+          "max_slippage_r": 0.18,
+          "max_spread_atr_pct": 0.6,
+          "cooldown_minutes": 15,
+          "max_concurrent": 1,
+          "sl_tp_rule": "SL ≥max(0.24 ATR, 80 USD); TP1 nettó ≥0.75 %"
+        },
+        "USOIL": {
+          "risk_pct": 1.2,
+          "core_rr_min": 1.5,
+          "momentum_rr_min": 1.4,
+          "tp_net_min": 0.7,
+          "tp_min_pct": 0.0035,
+          "tp_min_abs": 0.4,
+          "sl_buffer": {
+            "atr_mult": 0.22,
+            "abs_min": 0.35
+          },
+          "max_slippage_r": 0.18,
+          "cooldown_minutes": 15,
+          "max_concurrent": 1,
+          "max_spread_atr_pct": 0.45,
+          "sl_tp_rule": "SL ≥max(0.22 ATR, 0.35); TP1 nettó ≥0.7 %"
+        }
+      }
+    }
+  },
+  "risk_template_changelog": [
+    {
+      "date": "2025-11-12",
+      "asset": "EURUSD",
+      "profiles": {
+        "baseline": {
+          "risk_pct": 1.4,
+          "core_rr_min": 1.7,
+          "momentum_rr_min": 1.5,
+          "tp_net_min": 0.6,
+          "tp_min_pct": 0.0018,
+          "tp_min_abs": 0.0,
+          "sl_buffer": {
+            "atr_mult": 0.2,
+            "abs_min": 0.0005
+          },
+          "max_slippage_r": 0.2,
+          "cooldown_minutes": 20,
+          "max_concurrent": 1,
+          "max_spread_atr_pct": 0.48,
+          "sl_tp_rule": "SL ≥max(0.2 ATR, 0.0005); TP1 nettó ≥0.6 %"
+        },
+        "suppressed": {
+          "risk_pct": 1.2,
+          "core_rr_min": 1.5,
+          "momentum_rr_min": 1.4,
+          "tp_net_min": 0.6,
+          "tp_min_pct": 0.0018,
+          "tp_min_abs": 0.0,
+          "sl_buffer": {
+            "atr_mult": 0.2,
+            "abs_min": 0.0005
+          },
+          "max_slippage_r": 0.18,
+          "cooldown_minutes": 15,
+          "max_concurrent": 1,
+          "max_spread_atr_pct": 0.5,
+          "sl_tp_rule": "SL ≥max(0.2 ATR, 0.0005); TP1 nettó ≥0.6 %"
+        }
+      },
+      "notes": "P-score/ATR gate lazítás, RR és slippage sablonok frissítve."
+    },
+    {
+      "date": "2025-11-12",
+      "asset": "GOLD_CFD",
+      "profiles": {
+        "baseline": {
+          "risk_pct": 1.5,
+          "core_rr_min": 1.6,
+          "momentum_rr_min": 1.4,
+          "tp_net_min": 0.7,
+          "tp_min_pct": 0.003,
+          "tp_min_abs": 0.6,
+          "sl_buffer": {
+            "atr_mult": 0.3,
+            "abs_min": 0.4
+          },
+          "max_slippage_r": 0.2,
+          "cooldown_minutes": 20,
+          "max_concurrent": 1,
+          "max_spread_atr_pct": 0.33,
+          "sl_tp_rule": "SL ≥max(0.3 ATR, 0.4); TP1 nettó ≥0.7 %"
+        },
+        "suppressed": {
+          "risk_pct": 1.2,
+          "core_rr_min": 1.4,
+          "momentum_rr_min": 1.3,
+          "tp_net_min": 0.7,
+          "tp_min_pct": 0.003,
+          "tp_min_abs": 0.6,
+          "sl_buffer": {
+            "atr_mult": 0.3,
+            "abs_min": 0.4
+          },
+          "max_slippage_r": 0.18,
+          "cooldown_minutes": 15,
+          "max_concurrent": 1,
+          "max_spread_atr_pct": 0.4,
+          "sl_tp_rule": "SL ≥max(0.3 ATR, 0.4); TP1 nettó ≥0.7 %"
+        }
+      },
+      "notes": "P-score/ATR gate lazítás, RR és slippage sablonok frissítve."
+    },
+    {
+      "date": "2025-11-12",
+      "asset": "NVDA",
+      "profiles": {
+        "baseline": {
+          "risk_pct": 1.3,
+          "core_rr_min": 1.5,
+          "momentum_rr_min": 1.4,
+          "tp_net_min": 0.9,
+          "tp_min_pct": 0.002,
+          "tp_min_abs": 0.8,
+          "sl_buffer": {
+            "atr_mult": 0.4,
+            "abs_min": 0.9
+          },
+          "max_slippage_r": 0.2,
+          "max_spread_atr_pct": 0.36,
+          "cooldown_minutes": 20,
+          "max_concurrent": 1,
+          "sl_tp_rule": "SL ≥max(0.4 ATR, 0.9); TP1 nettó ≥0.9 %"
+        },
+        "suppressed": {
+          "risk_pct": 1.2,
+          "core_rr_min": 1.35,
+          "momentum_rr_min": 1.3,
+          "tp_net_min": 0.9,
+          "tp_min_pct": 0.002,
+          "tp_min_abs": 0.8,
+          "sl_buffer": {
+            "atr_mult": 0.4,
+            "abs_min": 0.9
+          },
+          "max_slippage_r": 0.18,
+          "max_spread_atr_pct": 0.4,
+          "cooldown_minutes": 15,
+          "max_concurrent": 1,
+          "sl_tp_rule": "SL ≥max(0.4 ATR, 0.9); TP1 nettó ≥0.9 %"
+        }
+      },
+      "notes": "P-score/ATR gate lazítás, RR és slippage sablonok frissítve."
+    },
+    {
+      "date": "2025-11-12",
+      "asset": "XAGUSD",
+      "profiles": {
+        "baseline": {
+          "risk_pct": 1.4,
+          "core_rr_min": 1.7,
+          "momentum_rr_min": 1.5,
+          "tp_net_min": 0.75,
+          "tp_min_pct": 0.002,
+          "tp_min_abs": 0.6,
+          "sl_buffer": {
+            "atr_mult": 0.22,
+            "abs_min": 0.4
+          },
+          "max_slippage_r": 0.22,
+          "max_spread_atr_pct": 0.37,
+          "cooldown_minutes": 20,
+          "max_concurrent": 1,
+          "sl_tp_rule": "SL ≥max(0.22 ATR, 0.4); TP1 nettó ≥0.75 %"
+        },
+        "suppressed": {
+          "risk_pct": 1.2,
+          "core_rr_min": 1.5,
+          "momentum_rr_min": 1.4,
+          "tp_net_min": 0.75,
+          "tp_min_pct": 0.002,
+          "tp_min_abs": 0.6,
+          "sl_buffer": {
+            "atr_mult": 0.22,
+            "abs_min": 0.4
+          },
+          "max_slippage_r": 0.18,
+          "cooldown_minutes": 15,
+          "max_concurrent": 1,
+          "max_spread_atr_pct": 0.4,
+          "sl_tp_rule": "SL ≥max(0.22 ATR, 0.4); TP1 nettó ≥0.75 %"
+        }
+      },
+      "notes": "P-score/ATR gate lazítás, RR és slippage sablonok frissítve."
+    },
+    {
+      "date": "2025-11-12",
+      "asset": "BTCUSD",
+      "profiles": {
+        "baseline": {
+          "risk_pct": 1.4,
+          "core_rr_min": 1.45,
+          "momentum_rr_min": 1.35,
+          "tp_net_min": 0.75,
+          "tp_min_pct": 0.006,
+          "tp_min_abs": 90.0,
+          "sl_buffer": {
+            "atr_mult": 0.26,
+            "abs_min": 85.0
+          },
+          "max_slippage_r": 0.2,
+          "max_spread_atr_pct": 0.57,
+          "cooldown_minutes": 20,
+          "max_concurrent": 1,
+          "sl_tp_rule": "SL ≥max(0.26 ATR, 85 USD); TP1 nettó ≥0.75 %"
+        },
+        "suppressed": {
+          "risk_pct": 1.2,
+          "core_rr_min": 1.35,
+          "momentum_rr_min": 1.25,
+          "tp_net_min": 0.75,
+          "tp_min_pct": 0.006,
+          "tp_min_abs": 80.0,
+          "sl_buffer": {
+            "atr_mult": 0.24,
+            "abs_min": 80.0
+          },
+          "max_slippage_r": 0.18,
+          "max_spread_atr_pct": 0.6,
+          "cooldown_minutes": 15,
+          "max_concurrent": 1,
+          "sl_tp_rule": "SL ≥max(0.24 ATR, 80 USD); TP1 nettó ≥0.75 %"
+        }
+      },
+      "notes": "P-score/ATR gate lazítás, RR és slippage sablonok frissítve."
+    },
+    {
+      "date": "2025-11-12",
+      "asset": "USOIL",
+      "profiles": {
+        "baseline": {
+          "risk_pct": 1.4,
+          "core_rr_min": 1.6,
+          "momentum_rr_min": 1.5,
+          "tp_net_min": 0.7,
+          "tp_min_pct": 0.0035,
+          "tp_min_abs": 0.4,
+          "sl_buffer": {
+            "atr_mult": 0.22,
+            "abs_min": 0.35
+          },
+          "max_slippage_r": 0.2,
+          "max_spread_atr_pct": 0.42,
+          "cooldown_minutes": 20,
+          "max_concurrent": 1,
+          "sl_tp_rule": "SL ≥max(0.22 ATR, 0.35); TP1 nettó ≥0.7 %"
+        },
+        "suppressed": {
+          "risk_pct": 1.2,
+          "core_rr_min": 1.5,
+          "momentum_rr_min": 1.4,
+          "tp_net_min": 0.7,
+          "tp_min_pct": 0.0035,
+          "tp_min_abs": 0.4,
+          "sl_buffer": {
+            "atr_mult": 0.22,
+            "abs_min": 0.35
+          },
+          "max_slippage_r": 0.18,
+          "cooldown_minutes": 15,
+          "max_concurrent": 1,
+          "max_spread_atr_pct": 0.45,
+          "sl_tp_rule": "SL ≥max(0.22 ATR, 0.35); TP1 nettó ≥0.7 %"
+        }
+      },
+      "notes": "P-score/ATR gate lazítás, RR és slippage sablonok frissítve."
+    }
+  ],
+  "config_changelog": [
+    "2025-11-12: EURUSD baseline P-score 47, spread limit 0.48 ATR, risk sablon +0.20R slippage.",
+    "2025-11-12: GOLD_CFD spread limit 0.33 ATR, ATR-min lazítás és risk sablon frissítés.",
+    "2025-11-12: NVDA P-score 41, RR-min 1.5, bias rövidítés BOS+ATR-rel.",
+    "2025-11-12: XAGUSD risk sablon max slippage 0.22R, ATR-min 0.5 aktiválva.",
+    "2025-11-12: BTCUSD P-score kapu 45/43, risk sablon 0.20R slippage és BOS bias relax.",
+    "2025-11-12: USOIL risk sablon 1.6 RR és cooldown csökkentés 20/15 percre.",
+    "2025-11-13: Normál profil ATR(13), ATR-min és max spread limitek finomhangolva (EURUSD, GOLD_CFD, NVDA, USOIL, BTCUSD, XAGUSD); Fib zóna toleranciák frissítve."
+  ]
 }
