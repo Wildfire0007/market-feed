@@ -231,11 +231,100 @@ jobs:
             echo "origin/main advanced during job run; proceeding with baseline validation." >&2
           fi
 
+  canary:
+    name: 4) Canary rollout — BTCUSD session override
+    needs: predeploy
+    runs-on: ubuntu-latest
+    env:
+      TZ: UTC
+      TD_ASSET_FILTER: BTCUSD
+      ANALYSIS_ASSET_FILTER: BTCUSD
+      SESSION_OVERRIDE_24_7: "1"
+    steps:
+      - name: Checkout latest main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.lock
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock
+
+      - name: Run canary pipeline (BTCUSD)
+        id: run_canary
+        env:
+          PUBLIC_DIR: public
+        run: |
+          python scripts/run_td_pipeline.py \
+            --skip-volatility \
+            --skip-news \
+            --skip-discord \
+            --skip-watchdog
+
+      - name: Notify Slack and Discord
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          CANARY_STATUS: ${{ steps.run_canary.outcome }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.request
+
+          status = os.getenv("CANARY_STATUS", "success")
+          slack_url = (os.getenv("SLACK_WEBHOOK_URL") or "").strip()
+          discord_url = (os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
+          run_url = os.getenv("GITHUB_RUN_URL", "")
+
+          if status.lower() == "success":
+              label = "✅ Canary pipeline sikeres (BTCUSD, session override)"
+          else:
+              label = "❌ Canary pipeline hibával futott (BTCUSD, session override)"
+
+          if run_url:
+              message = f"{label}\nRun: {run_url}"
+          else:
+              message = label
+
+          def _post(url: str, payload: dict) -> None:
+              data = json.dumps(payload).encode("utf-8")
+              request = urllib.request.Request(
+                  url,
+                  data=data,
+                  headers={"Content-Type": "application/json"},
+                  method="POST",
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=10):
+                      pass
+              except Exception as exc:  # pragma: no cover - network side effect
+                  print(f"Notification failed for {url}: {exc}", file=sys.stderr)
+
+          if slack_url:
+              _post(slack_url, {"text": message})
+          if discord_url:
+              _post(discord_url, {"content": message})
+          PY
+
   notify:
-    name: 4) Discord értesítő
+    name: 5) Discord értesítő
     needs:
       - analysis
       - predeploy
+      - canary
     runs-on: ubuntu-latest
     env:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
