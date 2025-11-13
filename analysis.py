@@ -736,6 +736,7 @@ LOGGER = logging.getLogger(__name__)
 MARKET_TIMEZONE = ZoneInfo("Europe/Berlin")
 
 PUBLIC_DIR = "public"
+ENTRY_GATE_LOG_DIR: Path = Path(PUBLIC_DIR) / "debug" / "entry_gates"
 MACRO_DATA_DIR = Path("data") / "macro"
 MACRO_LOCKOUT_FILE = MACRO_DATA_DIR / "lockout_by_asset.json"
 
@@ -1145,6 +1146,42 @@ def _resolve_spread_for_entry(
 def now_utctime_hm() -> Tuple[int,int]:
     t = datetime.now(timezone.utc)
     return t.hour, t.minute
+
+
+def log_entry_gate_decision(
+    symbol: str,
+    bar_time: Optional[datetime],
+    reasons: Sequence[str],
+) -> None:
+    """Append a JSONL entry describing the gate outcome for a candidate."""
+
+    try:
+        ENTRY_GATE_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = bar_time
+        if ts is None:
+            ts = datetime.now(timezone.utc)
+        elif ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        else:
+            ts = ts.astimezone(timezone.utc)
+        normalized: List[str] = []
+        for reason in reasons:
+            if reason is None:
+                continue
+            reason_text = str(reason).strip()
+            if reason_text:
+                normalized.append(reason_text)
+        payload = {
+            "symbol": symbol,
+            "timestamp": ts.isoformat(),
+            "reasons": list(dict.fromkeys(normalized)),
+        }
+        log_path = ENTRY_GATE_LOG_DIR / f"entry_gates_{ts.date().isoformat()}.jsonl"
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True))
+            handle.write("\n")
+    except Exception:
+        LOGGER.debug("entry_gate_log_failed", exc_info=True)
 
 
 def _log_gate_summary(asset: str, decision: Dict[str, Any]) -> None:
@@ -10351,6 +10388,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         momentum_trailing_plan = None
 
     missing = list(dict.fromkeys(missing))
+    log_entry_gate_decision(asset, last5_closed_ts, missing)
 
     analysis_timestamp = nowiso()
     probability_percent = int(max(0, min(100, round(combined_probability * 100))))
@@ -11168,6 +11206,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
