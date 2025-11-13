@@ -17,6 +17,7 @@ import logging
 LOGGER = logging.getLogger(__name__)
 
 _DEFAULT_CONFIG_PATH = Path(__file__).with_name("analysis_settings.json")
+_ASSET_PROFILE_MAP_PATH = Path(__file__).with_name("asset_profile_map.json")
 _ENV_OVERRIDE = "ANALYSIS_CONFIG_FILE"
 
 SequenceTuple = Tuple[Any, ...]
@@ -663,6 +664,36 @@ if _DEFAULT_ENTRY_PROFILE_NAME not in ENTRY_THRESHOLD_PROFILES:
         _DEFAULT_ENTRY_PROFILE_NAME, {}
     )
 
+@lru_cache(maxsize=1)
+def _load_asset_entry_profile_map() -> Dict[str, str]:
+    """Return a normalised mapping of assets to entry profile names."""
+
+    if not _ASSET_PROFILE_MAP_PATH.exists():
+        return {}
+    try:
+        with _ASSET_PROFILE_MAP_PATH.open("r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        LOGGER.warning(
+            "Failed to load asset profile map from %s: %s", _ASSET_PROFILE_MAP_PATH, exc
+        )
+        return {}
+
+    mapping: Dict[str, str] = {}
+    if not isinstance(raw, dict):
+        return mapping
+
+    for asset, profile in raw.items():
+        if not isinstance(asset, str) or not asset.strip():
+            continue
+        asset_key = asset.strip().upper()
+        if not isinstance(profile, str) or not profile.strip():
+            continue
+        profile_name = profile.strip()
+        mapping[asset_key] = profile_name
+
+    return mapping
+    
 _ENV_PROFILE = os.getenv("ENTRY_THRESHOLD_PROFILE")
 _CFG_ACTIVE_PROFILE = _get_config_value("active_entry_threshold_profile")
 _ACTIVE_PROFILE_NAME = (
@@ -697,6 +728,32 @@ ATR_THRESHOLD_MULT_ASSET: Dict[str, float] = {
     if key != "default"
 }
 
+
+def get_entry_threshold_profile_name_for_asset(asset: str) -> str:
+    """Return the entry threshold profile name configured for ``asset``."""
+
+    asset_key = str(asset or "").upper()
+    if asset_key:
+        mapping = _load_asset_entry_profile_map()
+        profile_name = mapping.get(asset_key)
+        if profile_name:
+            if profile_name in ENTRY_THRESHOLD_PROFILES:
+                return profile_name
+            LOGGER.warning(
+                "Asset %s mapped to unknown entry profile '%s'; using %s",
+                asset_key,
+                profile_name,
+                ENTRY_THRESHOLD_PROFILE_NAME,
+            )
+    return ENTRY_THRESHOLD_PROFILE_NAME
+
+
+def get_entry_threshold_profile_for_asset(asset: str) -> Dict[str, Dict[str, float]]:
+    """Return the entry threshold profile dictionary for ``asset``."""
+
+    profile_name = get_entry_threshold_profile_name_for_asset(asset)
+    return ENTRY_THRESHOLD_PROFILES[profile_name]
+    
 BTC_PROFILE_OVERRIDES: Dict[str, Dict[str, Any]] = _normalize_btc_profiles(
     _get_config_value("btc_profile_overrides")
 )
