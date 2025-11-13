@@ -1,4 +1,5 @@
 import importlib
+import json
 import sys
 from pathlib import Path
 
@@ -23,19 +24,22 @@ def _reload_settings(monkeypatch, profile=None):
 def test_default_profile_configuration(monkeypatch):
     settings = _reload_settings(monkeypatch)
 
-    # Alapértelmezett aktív profil most már 'baseline'
-    assert settings.ENTRY_THRESHOLD_PROFILE_NAME == "baseline"
+    default_name = settings.ENTRY_THRESHOLD_PROFILE_NAME
     profile = settings.describe_entry_threshold_profile()
-    assert profile["name"] == "baseline"
-    assert profile["p_score_min"]["default"] == pytest.approx(46.0)
-    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(45.0)
-    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(47.0)
-    assert profile["p_score_min"]["by_asset"]["XAGUSD"] == pytest.approx(46.0)
-    assert profile["p_score_min"]["by_asset"]["NVDA"] == pytest.approx(41.0)
-    assert profile["p_score_min"]["by_asset"]["USOIL"] == pytest.approx(46.0)
-    assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(1.0)
-    assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(1.0)
-    assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(1.0)
+    assert profile["name"] == default_name
+    assert profile == settings.describe_entry_threshold_profile(default_name)
+    assert default_name in settings.list_entry_threshold_profiles()
+
+    baseline = settings.describe_entry_threshold_profile("baseline")
+    assert baseline["p_score_min"]["default"] == pytest.approx(46.0)
+    assert baseline["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(45.0)
+    assert baseline["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(47.0)
+    assert baseline["p_score_min"]["by_asset"]["XAGUSD"] == pytest.approx(46.0)
+    assert baseline["p_score_min"]["by_asset"]["NVDA"] == pytest.approx(41.0)
+    assert baseline["p_score_min"]["by_asset"]["USOIL"] == pytest.approx(46.0)
+    assert baseline["atr_threshold_multiplier"]["default"] == pytest.approx(1.0)
+    assert baseline["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(1.0)
+    assert baseline["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(1.0)
 
     suppressed = settings.describe_entry_threshold_profile("suppressed")
     assert suppressed["p_score_min"]["default"] == pytest.approx(43.0)
@@ -234,7 +238,43 @@ def test_profile_specific_helpers(monkeypatch):
     assert relaxed.get_fib_tolerance("NVDA") == pytest.approx(0.0045)
 
     _reload_settings(monkeypatch)
-    
+
+
+def test_entry_profile_routing_helpers(monkeypatch, tmp_path):
+    settings = _reload_settings(monkeypatch)
+    default_name = settings.ENTRY_THRESHOLD_PROFILE_NAME
+
+    custom_map_path = tmp_path / "asset_profile_map.json"
+    custom_map_path.write_text(
+        json.dumps(
+            {
+                "BTCUSD": "suppressed",
+                "EXTRA": "relaxed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "_ASSET_PROFILE_MAP_PATH", custom_map_path)
+    settings._load_asset_entry_profile_map.cache_clear()
+
+    mapped_name = settings.get_entry_threshold_profile_name_for_asset("BTCUSD")
+    assert mapped_name == "suppressed"
+    mapped_profile = settings.get_entry_threshold_profile_for_asset("BTCUSD")
+    assert mapped_profile == settings.ENTRY_THRESHOLD_PROFILES["suppressed"]
+
+    unmapped_name = settings.get_entry_threshold_profile_name_for_asset("EURUSD")
+    assert unmapped_name == default_name
+    unmapped_profile = settings.get_entry_threshold_profile_for_asset("EURUSD")
+    assert unmapped_profile == settings.ENTRY_THRESHOLD_PROFILES[default_name]
+
+    custom_map_path.write_text(json.dumps({"BTCUSD": "unknown"}), encoding="utf-8")
+    settings._load_asset_entry_profile_map.cache_clear()
+    fallback_name = settings.get_entry_threshold_profile_name_for_asset("BTCUSD")
+    assert fallback_name == default_name
+    fallback_profile = settings.get_entry_threshold_profile_for_asset("BTCUSD")
+    assert fallback_profile == settings.ENTRY_THRESHOLD_PROFILES[default_name]
+
+    _reload_settings(monkeypatch)
 
 def test_risk_template_helpers(monkeypatch):
     settings = _reload_settings(monkeypatch, profile="baseline")
