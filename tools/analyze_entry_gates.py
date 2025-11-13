@@ -197,7 +197,7 @@ def load_json_documents(path: Path) -> Iterable[Any]:
                 documents.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-            return documents
+        return documents
     else:
         return [data]
 
