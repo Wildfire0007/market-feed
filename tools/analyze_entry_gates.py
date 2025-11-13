@@ -59,6 +59,7 @@ REASON_KEYS_DIRECT = (
     "rejection_reasons",
     "rejections",
     "missing",
+    "reasons",
     "gate_failures",
     "failures",
 )
@@ -74,6 +75,7 @@ REASON_KEYS_NESTED = (
 
 JSON_EXTENSIONS = {".json", ".jsonl"}
 DEFAULT_SEARCH_SUBDIRS = ("public/debug", "public")
+ENTRY_GATE_LOG_SUBDIR = Path("public/debug/entry_gates")
 
 
 @dataclass
@@ -107,6 +109,33 @@ class SymbolStats:
 # ---------------------------------------------------------------------------
 # Filesystem helpers
 # ---------------------------------------------------------------------------
+
+def discover_entry_gate_logs(root: Path, limit: int) -> List[Path]:
+    """Return recent entry gate log files if the dedicated directory exists."""
+
+    base_dir = (root / ENTRY_GATE_LOG_SUBDIR).resolve()
+    try:
+        if not base_dir.exists() or not base_dir.is_dir():
+            return []
+    except OSError:
+        return []
+
+    candidates: List[Tuple[float, Path]] = []
+    try:
+        for path in base_dir.glob("entry_gates_*.jsonl"):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            candidates.append((stat.st_mtime, path))
+    except OSError:
+        return []
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    if limit > 0:
+        candidates = candidates[:limit]
+    return [path for _, path in candidates]
+
 
 def discover_recent_json_files(root: Path, limit: int) -> List[Path]:
     """Return up to ``limit`` JSON/JSONL files ordered by descending mtime.
@@ -555,7 +584,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     root: Path = args.root
     limit_runs: int = max(int(args.limit_runs), 1)
 
-    files = discover_recent_json_files(root, limit_runs)
+    entry_gate_files = discover_entry_gate_logs(root, limit_runs)
+    if entry_gate_files:
+        files = entry_gate_files
+    else:
+        files = discover_recent_json_files(root, limit_runs)
     if not files:
         print("No JSON files found for analysis.")
         return 0
