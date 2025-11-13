@@ -76,6 +76,7 @@ REASON_KEYS_NESTED = (
 JSON_EXTENSIONS = {".json", ".jsonl"}
 DEFAULT_SEARCH_SUBDIRS = ("public/debug", "public")
 ENTRY_GATE_LOG_SUBDIR = Path("public/debug/entry_gates")
+DEFAULT_STATS_OUTPUT_PATH = Path("public/debug/entry_gate_stats.json")
 
 
 @dataclass
@@ -581,7 +582,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
-    root: Path = args.root
+    root: Path = args.root.expanduser()
+    if not root.is_absolute():
+        root = (Path.cwd() / root).resolve()
     limit_runs: int = max(int(args.limit_runs), 1)
 
     entry_gate_files = discover_entry_gate_logs(root, limit_runs)
@@ -596,9 +599,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     stats = accumulate_statistics(files)
     print_human_readable_summary(stats)
 
-    if args.output_json:
-        summary_payload = build_json_summary(stats)
-        write_json_summary(args.output_json, summary_payload)
+    output_json: Path
+    if args.output_json is not None:
+        output_json = args.output_json.expanduser()
+        if not output_json.is_absolute():
+            output_json = (Path.cwd() / output_json).resolve()
+    else:
+        output_json = (root / DEFAULT_STATS_OUTPUT_PATH).resolve()
+
+    summary_payload = build_json_summary(stats)
+    write_json_summary(output_json, summary_payload)
 
     return 0
 
