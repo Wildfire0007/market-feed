@@ -212,9 +212,17 @@ jobs:
       - name: Run pytest suite
         run: pytest
 
+      - name: Generate entry gate statistics
+        run: |
+          mkdir -p public/debug
+          python tools/analyze_entry_gates.py \
+            --root . \
+            --limit-runs 40 \
+            --output-json public/debug/entry_gate_stats.json
+            
       - name: Ensure checked-out commit remains consistent
         run: |
-          set -euo pipefail          
+          set -euo pipefail
           head_rev=$(git rev-parse HEAD)
           baseline_rev="${{ steps.record_synced_commit.outputs.synced_rev }}"
           echo "HEAD revision: $head_rev"
