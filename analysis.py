@@ -26,6 +26,8 @@ LOCAL_TZ = ZoneInfo("Europe/Budapest")
 
 from logging_utils import ensure_json_file_handler
 
+from config import analysis_settings as settings
+
 from active_anchor import load_anchor_state, record_anchor, update_anchor_metrics
 from ml_model import (
     ProbabilityPrediction,
@@ -225,8 +227,23 @@ from config.analysis_settings import (
     load_config,
 )
 
+def _entry_threshold_profile_name(asset: str) -> str:
+    try:
+        profile_name = settings.get_entry_threshold_profile_name_for_asset(asset)
+    except Exception:
+        profile_name = None
+    analysis_default = globals().get("ENTRY_THRESHOLD_PROFILE_NAME", ENTRY_THRESHOLD_PROFILE_NAME)
+    try:
+        settings_default = settings.ENTRY_THRESHOLD_PROFILE_NAME  # type: ignore[attr-defined]
+    except Exception:
+        settings_default = ENTRY_THRESHOLD_PROFILE_NAME
+    if not profile_name or profile_name == settings_default:
+        profile_name = analysis_default
+    return str(profile_name)
+
+
 BTC_PROFILE_CONFIG: Dict[str, Any] = dict(
-    BTC_PROFILE_OVERRIDES.get(ENTRY_THRESHOLD_PROFILE_NAME) or {}
+    BTC_PROFILE_OVERRIDES.get(_entry_threshold_profile_name("BTCUSD")) or {}
 )
 
 SETTINGS: Dict[str, Any] = load_config()
@@ -613,7 +630,7 @@ def btc_sl_tp_checks(
 
 
 def _btc_active_profile() -> str:
-    profile = ENTRY_THRESHOLD_PROFILE_NAME
+    profile = _entry_threshold_profile_name("BTCUSD")
     if profile not in BTC_P_SCORE_MIN:
         return "baseline"
     return profile
@@ -5948,7 +5965,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     realtime_reason: Optional[str] = None
     realtime_confidence: float = 1.0
     realtime_transport = str(spot_realtime.get("transport") or "http").lower() if isinstance(spot_realtime, dict) else "http"
-    entry_thresholds_meta: Dict[str, Any] = {"profile": ENTRY_THRESHOLD_PROFILE_NAME}
+    asset_entry_profile = _entry_threshold_profile_name(asset)
+    entry_thresholds_meta: Dict[str, Any] = {"profile": asset_entry_profile}
     xag_overrides, usoil_overrides, eurusd_overrides = _initialize_asset_overrides(
         entry_thresholds_meta, asset
     )
@@ -7005,7 +7023,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         else None
     )
     atr1h_tol = atr1h_val if np.isfinite(atr1h_val) else 0.0
-    fib_tol = get_fib_tolerance(asset, profile=ENTRY_THRESHOLD_PROFILE_NAME)
+    fib_tol = get_fib_tolerance(asset, profile=asset_entry_profile)
     fib_ok = fib_zone_ok(
         move_hi, move_lo, price_for_calc,
         low=0.618, high=0.886,
@@ -8244,12 +8262,13 @@ def analyze(asset: str) -> Dict[str, Any]:
             long_combo = btc_structure_combos.get("long") or {}
             short_combo = btc_structure_combos.get("short") or {}
             selected_bias: Optional[str] = None
-            if ENTRY_THRESHOLD_PROFILE_NAME == "relaxed":
+            profile_lookup = btc_profile_name or _btc_active_profile()
+            if profile_lookup == "relaxed":
                 if long_combo.get("vwap") and long_combo.get("ofi"):
                     selected_bias = "long"
                 elif short_combo.get("vwap") and short_combo.get("ofi"):
                     selected_bias = "short"
-            elif ENTRY_THRESHOLD_PROFILE_NAME == "suppressed":
+            elif profile_lookup == "suppressed":
                 long_count = sum(1 for key in ("micro", "vwap", "ofi") if long_combo.get(key))
                 short_count = sum(1 for key in ("micro", "vwap", "ofi") if short_combo.get(key))
                 threshold = 2
@@ -8265,7 +8284,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 bias_override_reason = f"Bias override: BTC intraday combo {selected_bias}"
                 note = (
                     "BTC bias override — VWAP + OFI megerősítés"
-                    if ENTRY_THRESHOLD_PROFILE_NAME == "relaxed"
+                    if profile_lookup == "relaxed"
                     else "BTC bias override — 2/3 momentum kapu"
                 )
                 if note not in reasons:
@@ -11149,6 +11168,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
