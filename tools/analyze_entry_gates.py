@@ -1,302 +1,574 @@
 #!/usr/bin/env python3
-"""
-Diagnostic helper that aggregates entry gate rejection reasons per asset.
+"""CLI helper that aggregates entry gate rejection data across recent pipeline runs.
 
-Data sources (Step 1 discovery):
-- public/monitoring/pipeline.log → JSON lines emitted by the full TD pipeline. Each
-  line with message="gate_summary" contains a "gate_summary" payload with the
-  evaluated asset, the active profile/mode and, crucially, a "missing" list that
-  enumerates which gates blocked an entry on that run.
-- public/analysis_summary.json → Latest pipeline snapshot. The "assets" object
-  mirrors the per-asset decision and repeats the gate verdict via
-  assets[SYMBOL]["gates"]["missing"], while action_plan["blockers_raw"] and the
-  top-level "reasons" array provide textual explanations for the active
-  blockages.
+The script is intentionally defensive because TD pipeline debug logs may change
+slightly over time and different tasks may emit distinct JSON shapes.  It walks
+through recent JSON files, extracts candidate trade/signal evaluations, and
+summarises which entry gates act as bottlenecks per instrument.
 
-The script reads the log history to quantify how often every gate prevents
-entries per symbol and enriches the report with the current snapshot context.
+Assumptions
+-----------
+* Timestamps provided by the pipeline are interpreted as UTC.  If a timestamp
+  is naïve (i.e. lacks time-zone information) we treat it as UTC for the
+  purpose of the time-of-day bucketing.
+* When we encounter an entry-check structure but no failed reasons we treat the
+  candidate as accepted.  In other words, an empty reason list means "not
+  rejected" rather than creating a synthetic "no_reasons" bucket.  This mirrors
+  the typical pipeline semantics where missing reasons implies a successful
+  gate evaluation.
+* Time-of-day buckets follow the naming used by
+  ``analysis_settings["atr_percentile_min_by_tod"]["buckets"]`` and are
+  approximated here as:
+    - ``open``  → [00:00, 02:00)
+    - ``mid``   → [02:00, 18:00)
+    - ``close`` → [18:00, 24:00)
+  Adjust the :data:`TOD_BUCKETS` constant below if a different split is needed.
+
+Only the Python standard library is used so the tool can run in minimal
+execution environments.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import statistics
-from collections import Counter, defaultdict, deque
+import sys
+from collections import Counter, defaultdict
+from collections.abc import Iterable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Optional, Tuple
 
+# ---------------------------------------------------------------------------
+# Time-of-day handling
+# ---------------------------------------------------------------------------
 
-def _parse_iso8601(value: str) -> Optional[datetime]:
-    """Parse ISO-8601 timestamps that optionally end with "Z"."""
-    if not value:
-        return None
-    try:
-        if value.endswith("Z"):
-            value = value[:-1] + "+00:00"
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
+TOD_BUCKETS: Tuple[Tuple[str, range], ...] = (
+    ("open", range(0, 120)),     # 00:00 - 01:59 UTC
+    ("mid", range(120, 1080)),   # 02:00 - 17:59 UTC
+    ("close", range(1080, 1440)) # 18:00 - 23:59 UTC
+)
+
+SYMBOL_KEYS = ("symbol", "asset", "instrument", "ticker", "pair")
+TIMESTAMP_KEYS = ("timestamp", "ts", "time", "bar_time", "bar_timestamp")
+REASON_KEYS_DIRECT = (
+    "entry_gate_rejections",
+    "entry_gate_missing",
+    "entry_rejections",
+    "entry_reasons",
+    "rejection_reasons",
+    "rejections",
+    "missing",
+    "gate_failures",
+    "failures",
+)
+
+# Keys whose values are mappings containing gate evaluation details.
+REASON_KEYS_NESTED = (
+    "entry_gate",
+    "entry_gate_summary",
+    "entry_check_summary",
+    "entry_checks",
+    "gate_checks",
+)
+
+JSON_EXTENSIONS = {".json", ".jsonl"}
+DEFAULT_SEARCH_SUBDIRS = ("public/debug", "public")
 
 
 @dataclass
-class GateEventStats:
-    total_events: int = 0
-    gate_counts: Counter[str] = field(default_factory=Counter)
-    profile_counts: Counter[str] = field(default_factory=Counter)
-    mode_counts: Counter[str] = field(default_factory=Counter)
-    p_scores: list[float] = field(default_factory=list)
-    p_score_min: list[float] = field(default_factory=list)
-    atr_rel: list[float] = field(default_factory=list)
-    recent_events: Deque[Mapping[str, Any]] = field(default_factory=lambda: deque(maxlen=5))
+class SymbolStats:
+    """Aggregated statistics for a single instrument."""
 
-    def register_event(self, summary: Mapping[str, Any], raw_event: Mapping[str, Any]) -> None:
-        self.total_events += 1
-        missing = summary.get("missing") or []
-        for gate in set(missing):
-            self.gate_counts[gate] += 1
-        profile = summary.get("profile")
-        if profile:
-            self.profile_counts[profile] += 1
-        mode = summary.get("mode")
-        if mode:
-            self.mode_counts[mode] += 1
-        for key, bucket in (("p_score", self.p_scores), ("p_score_min", self.p_score_min), ("atr_rel", self.atr_rel)):
-            value = summary.get(key)
-            if isinstance(value, (int, float)):
-                bucket.append(float(value))
-        self.recent_events.append(
-            {
-                "timestamp": raw_event.get("timestamp"),
-                "missing": list(missing),
-                "p_score": summary.get("p_score"),
-                "p_score_min": summary.get("p_score_min"),
-            }
-        )
+    total_candidates: int = 0
+    total_rejected: int = 0
+    by_reason: Counter[str] = field(default_factory=Counter)
+    by_time_of_day: MutableMapping[str, Counter[str]] = field(
+        default_factory=lambda: defaultdict(Counter)
+    )
+    total_candidates_by_tod: Counter[str] = field(default_factory=Counter)
+
+    def register(self, reasons: Sequence[str], timestamp: Optional[datetime]) -> None:
+        self.total_candidates += 1
+        unique_reasons = sorted(set(reasons))
+        if unique_reasons:
+            self.total_rejected += 1
+            for reason in unique_reasons:
+                self.by_reason[reason] += 1
+        bucket = determine_time_of_day_bucket(timestamp)
+        if bucket is not None:
+            self.total_candidates_by_tod[bucket] += 1
+            if unique_reasons:
+                tod_counter = self.by_time_of_day[bucket]
+                for reason in unique_reasons:
+                    tod_counter[reason] += 1
 
 
-def analyze_pipeline_log(log_path: Path, *, since: Optional[datetime], assets: Optional[Sequence[str]]) -> dict[str, GateEventStats]:
-    stats: dict[str, GateEventStats] = defaultdict(GateEventStats)
-    if not log_path.exists():
-        return {}
-    asset_filter = {a.upper() for a in assets} if assets else None
-    with log_path.open("r", encoding="utf-8") as handle:
-        for line in handle:
+# ---------------------------------------------------------------------------
+# Filesystem helpers
+# ---------------------------------------------------------------------------
+
+def discover_recent_json_files(root: Path, limit: int) -> List[Path]:
+    """Return up to ``limit`` JSON/JSONL files ordered by descending mtime.
+
+    The discovery prefers ``public`` / ``public/debug`` if those directories
+    exist under *root*, but will fall back to the entire tree when necessary.
+    """
+
+    candidates: List[Tuple[float, Path]] = []
+
+    search_roots: List[Path] = []
+    seen_roots = set()
+    for sub in DEFAULT_SEARCH_SUBDIRS:
+        candidate_root = (root / sub).resolve()
+        if candidate_root.exists() and candidate_root.is_dir():
+            if candidate_root not in seen_roots:
+                search_roots.append(candidate_root)
+                seen_roots.add(candidate_root)
+    if root.resolve() not in seen_roots:
+        search_roots.append(root.resolve())
+
+    for search_root in search_roots:
+        for path in iterate_json_files(search_root):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            candidates.append((stat.st_mtime, path))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return [path for _, path in candidates[:limit]]
+
+
+def iterate_json_files(root: Path) -> Iterator[Path]:
+    """Yield JSON files under *root*.
+
+    We avoid ``Path.rglob`` so callers can decide how many directories to
+    traverse before enforcing limits.  ``os.walk`` keeps the implementation in
+    the standard library and provides predictable ordering.
+    """
+
+    for current_root, _, files in os_walk(root):
+        current_path = Path(current_root)
+        for name in files:
+            suffix = Path(name).suffix.lower()
+            if suffix in JSON_EXTENSIONS:
+                yield current_path / name
+
+
+def os_walk(root: Path) -> Iterator[Tuple[str, List[str], List[str]]]:
+    """Wrapper around ``os.walk`` so type-checkers remain happy."""
+
+    from os import walk
+
+    yield from walk(root)
+
+
+# ---------------------------------------------------------------------------
+# JSON loading and normalisation
+# ---------------------------------------------------------------------------
+
+def load_json_documents(path: Path) -> Iterable[Any]:
+    """Load JSON payloads from *path*.
+
+    If the file contains JSON Lines we fall back to parsing it line by line.
+    Malformed lines are skipped silently so that one broken entry does not
+    prevent processing the rest of the file.
+    """
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            content = handle.read()
+    except OSError:
+        return []
+
+    if not content.strip():
+        return []
+
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        documents: List[Any] = []
+        for line in content.splitlines():
             line = line.strip()
             if not line:
                 continue
             try:
-                event = json.loads(line)
+                documents.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-            if event.get("message") != "gate_summary":
+            return documents
+    else:
+        return [data]
+
+
+def extract_candidate_records(document: Any) -> Iterable[Tuple[str, Optional[datetime], List[str]]]:
+    """Yield ``(symbol, timestamp, reasons)`` tuples from *document*.
+
+    The traversal keeps track of the most recent symbol/timestamp context while
+    walking the structure.  A mapping qualifies as a candidate if it exposes a
+    recognisable entry-check or rejection payload.
+    """
+
+    def walk(node: Any, context: Dict[str, Any]) -> Iterator[Tuple[str, Optional[datetime], List[str]]]:
+        if isinstance(node, Mapping):
+            next_context = dict(context)
+
+            symbol = extract_symbol(node)
+            if symbol:
+                next_context["symbol"] = symbol
+
+            ts = extract_timestamp(node)
+            if ts is not None:
+                next_context["timestamp"] = ts
+
+            reasons, candidate_detected = collect_reasons(node)
+            if candidate_detected:
+                yield (
+                    next_context.get("symbol", "UNKNOWN"),
+                    next_context.get("timestamp"),
+                    reasons,
+                )
+
+            for value in node.values():
+                yield from walk(value, next_context)
+        elif isinstance(node, Sequence) and not isinstance(node, (str, bytes, bytearray)):
+            for item in node:
+                yield from walk(item, context)
+
+    yield from walk(document, {})
+
+
+def extract_symbol(candidate: Mapping[str, Any]) -> Optional[str]:
+    for key in SYMBOL_KEYS:
+        value = candidate.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().upper()
+    return None
+
+
+def extract_timestamp(candidate: Mapping[str, Any]) -> Optional[datetime]:
+    for key in TIMESTAMP_KEYS:
+        if key not in candidate:
+            continue
+        value = candidate.get(key)
+        parsed = parse_timestamp(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def parse_timestamp(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        # Try ISO-8601 (supporting trailing "Z").
+        try:
+            if text.endswith("Z") and "+" not in text:
+                return datetime.fromisoformat(text[:-1]).replace(tzinfo=timezone.utc)
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except ValueError:
+            # Fallback: treat as integer epoch seconds if possible.
+            try:
+                return datetime.fromtimestamp(float(text), tz=timezone.utc)
+            except (ValueError, OverflowError, OSError):
+                return None
+    return None
+
+
+def collect_reasons(candidate: Mapping[str, Any]) -> Tuple[List[str], bool]:
+    """Return a list of rejection reasons and whether the mapping is a candidate."""
+
+    reasons: List[str] = []
+    candidate_detected = False
+
+    for key in REASON_KEYS_DIRECT:
+        if key in candidate:
+            candidate_detected = True
+            reasons.extend(normalize_reason_container(candidate.get(key)))
+
+    for key in REASON_KEYS_NESTED:
+        value = candidate.get(key)
+        if isinstance(value, Mapping):
+            nested_reasons = []
+            # The nested mapping may itself contain "missing" or similar fields.
+            nested_reasons.extend(normalize_reason_container(value.get("missing")))
+            nested_reasons.extend(normalize_reason_container(value.get("rejections")))
+            nested_reasons.extend(normalize_reason_container(value.get("reasons")))
+
+            # Some pipelines store an "entry_checks" style mapping under this key.
+            checks = value.get("checks") if isinstance(value, Mapping) else None
+            if isinstance(checks, Mapping):
+                nested_reasons.extend(reasons_from_checks_mapping(checks))
+
+            if nested_reasons:
+                candidate_detected = True
+                reasons.extend(nested_reasons)
+            elif key == "entry_checks":
+                # Even if every check passed we still consider it a candidate.
+                candidate_detected = True
+
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            candidate_detected = True
+            for item in value:
+                reasons.extend(normalize_reason_container(item))
+
+    checks_mapping = candidate.get("entry_checks")
+    if isinstance(checks_mapping, Mapping):
+        candidate_detected = True
+        reasons.extend(reasons_from_checks_mapping(checks_mapping))
+
+    return reasons, candidate_detected
+
+
+def reasons_from_checks_mapping(checks: Mapping[str, Any]) -> List[str]:
+    failures: List[str] = []
+    for name, result in checks.items():
+        reason_name = normalize_reason_name(name)
+        if reason_name is None:
+            continue
+        if is_failure(result):
+            failures.append(reason_name)
+    return failures
+
+
+def is_failure(value: Any) -> bool:
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, Mapping):
+        for key in ("passed", "ok", "success", "result"):
+            if key in value:
+                nested_value = value.get(key)
+                if isinstance(nested_value, bool):
+                    return not nested_value
+        status = value.get("status")
+        if isinstance(status, str):
+            lowered = status.lower()
+            if lowered in {"fail", "failed", "blocked", "error"}:
+                return True
+    if isinstance(value, str):
+        lowered = value.lower()
+        return lowered in {"fail", "failed", "blocked", "rejected", "false"}
+    return False
+
+
+def normalize_reason_container(container: Any) -> List[str]:
+    if container is None:
+        return []
+    if isinstance(container, Mapping):
+        results: List[str] = []
+        for key, value in container.items():
+            reason_name = normalize_reason_name(key)
+            if reason_name is None:
                 continue
-            asset = (event.get("asset") or "").upper()
-            if not asset:
-                continue
-            if asset_filter and asset not in asset_filter:
-                continue
-            event_ts = _parse_iso8601(event.get("timestamp"))
-            if since and event_ts and event_ts < since:
-                continue
-            summary = event.get("gate_summary") or {}
-            stats[asset].register_event(summary, event)
+            if isinstance(value, bool):
+                if value:
+                    results.append(reason_name)
+            elif isinstance(value, Mapping):
+                if is_failure(value):
+                    results.append(reason_name)
+            else:
+                # Any truthy value counts as the reason being active.
+                if value:
+                    results.append(reason_name)
+        return results
+    if isinstance(container, (list, tuple, set)):
+        results: List[str] = []
+        for item in container:
+            if isinstance(item, Mapping):
+                # Common shapes: {"reason": "p_score_too_low"}
+                potential = item.get("reason") or item.get("name") or item.get("id")
+                if isinstance(potential, str) and potential:
+                    results.append(normalize_reason_name(potential) or potential)
+                    continue
+            results.extend(normalize_reason_container(item))
+        return results
+    if isinstance(container, str):
+        reason = normalize_reason_name(container)
+        return [reason] if reason else []
+    return []
+
+
+def normalize_reason_name(name: Any) -> Optional[str]:
+    if isinstance(name, str):
+        cleaned = name.strip()
+        if cleaned:
+            return cleaned.lower()
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Statistics aggregation
+# ---------------------------------------------------------------------------
+
+def determine_time_of_day_bucket(timestamp: Optional[datetime]) -> Optional[str]:
+    if timestamp is None:
+        return None
+    ts_utc = timestamp.astimezone(timezone.utc) if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+    minute_of_day = ts_utc.hour * 60 + ts_utc.minute
+    for bucket_name, minute_range in TOD_BUCKETS:
+        if minute_of_day in minute_range:
+            return bucket_name
+    return None
+
+
+def accumulate_statistics(files: Sequence[Path]) -> Dict[str, SymbolStats]:
+    stats: Dict[str, SymbolStats] = defaultdict(SymbolStats)
+    for path in files:
+        for document in load_json_documents(path):
+            for symbol, timestamp, reasons in extract_candidate_records(document):
+                stats[symbol].register(reasons, timestamp)
     return stats
 
 
-def load_latest_snapshot(snapshot_path: Path) -> dict[str, dict[str, Any]]:
-    if not snapshot_path.exists():
-        return {}
-    try:
-        data = json.loads(snapshot_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-    assets_payload = data.get("assets")
-    if not isinstance(assets_payload, Mapping):
-        return {}
-    latest: dict[str, dict[str, Any]] = {}
-    for asset, payload in assets_payload.items():
-        if not isinstance(payload, Mapping):
-            continue
-        gates = payload.get("gates")
-        missing: list[str] = []
-        if isinstance(gates, Mapping):
-            missing = list(gates.get("missing") or [])
-        action_plan = payload.get("action_plan")
-        blockers_raw: list[str] = []
-        blockers_pretty: list[str] = []
-        if isinstance(action_plan, Mapping):
-            blockers_raw = list(action_plan.get("blockers_raw") or [])
-            blockers_pretty = list(action_plan.get("blockers") or [])
-        reasons = payload.get("reasons")
-        reason_list = list(reasons or []) if isinstance(reasons, list) else []
-        latest[asset.upper()] = {
-            "missing": missing,
-            "blockers_raw": blockers_raw,
-            "blockers": blockers_pretty,
-            "reasons": reason_list,
-            "signal": payload.get("signal"),
-            "probability": payload.get("probability"),
-            "retrieved_at_utc": payload.get("retrieved_at_utc"),
+# ---------------------------------------------------------------------------
+# Output helpers
+# ---------------------------------------------------------------------------
+
+def print_human_readable_summary(stats: Mapping[str, SymbolStats]) -> None:
+    if not stats:
+        print("No candidate data found.")
+        return
+
+    print("=== Entry gate statistics ===\n")
+    for symbol in sorted(stats):
+        record = stats[symbol]
+        print(f"Symbol: {symbol}")
+        print(f"  total_candidates: {record.total_candidates}")
+        print(f"  total_rejected: {record.total_rejected}")
+        print("  by_reason:")
+        if record.by_reason:
+            for reason, count in sorted(record.by_reason.items(), key=lambda item: (-item[1], item[0])):
+                print(f"    {reason}: {count}")
+        else:
+            print("    (none)")
+        if record.by_time_of_day:
+            print("  by_time_of_day:")
+            for bucket in (name for name, _ in TOD_BUCKETS):
+                if bucket not in record.by_time_of_day and bucket not in record.total_candidates_by_tod:
+                    continue
+                bucket_counter = record.by_time_of_day.get(bucket)
+                total_in_bucket = record.total_candidates_by_tod.get(bucket, 0)
+                if bucket_counter or total_in_bucket:
+                    print(f"    {bucket}:")
+                    if total_in_bucket:
+                        print(f"      total_candidates: {total_in_bucket}")
+                    if bucket_counter:
+                        for reason, count in sorted(bucket_counter.items(), key=lambda item: (-item[1], item[0])):
+                            print(f"      {reason}: {count}")
+                    else:
+                        print("      (no rejections)")
+        print()
+
+
+def build_json_summary(stats: Mapping[str, SymbolStats]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {}
+    for symbol in sorted(stats):
+        record = stats[symbol]
+        symbol_payload: Dict[str, Any] = {
+            "total_candidates": record.total_candidates,
+            "total_rejected": record.total_rejected,
+            "by_reason": {
+                reason: record.by_reason[reason]
+                for reason in sorted(record.by_reason)
+            },
         }
-    return latest
-
-
-def render_text_report(
-    stats: Mapping[str, GateEventStats],
-    latest: Mapping[str, Mapping[str, Any]],
-    *,
-    assets: Optional[Sequence[str]],
-    top_n: int,
-) -> None:
-    all_assets = {asset.upper() for asset in assets} if assets else set(stats.keys()) | set(latest.keys())
-    for asset in sorted(all_assets):
-        print(f"\n=== {asset} ===")
-        asset_stats = stats.get(asset)
-        if not asset_stats or asset_stats.total_events == 0:
-            print("No gate_summary observations in log.")
-        else:
-            print(f"Observed gate_summary events: {asset_stats.total_events}")
-            for gate, count in asset_stats.gate_counts.most_common(top_n):
-                share = (count / asset_stats.total_events) * 100 if asset_stats.total_events else 0.0
-                print(f"  - {gate:<24} {count:>5} events  ({share:5.1f}% of runs)")
-            if len(asset_stats.gate_counts) > top_n:
-                remaining = len(asset_stats.gate_counts) - top_n
-                print(f"  ... {remaining} additional gate(s) with lower frequency")
-            if asset_stats.p_scores:
-                mean_p = statistics.fmean(asset_stats.p_scores)
-                min_p = min(asset_stats.p_scores)
-                max_p = max(asset_stats.p_scores)
-                mean_min = statistics.fmean(asset_stats.p_score_min) if asset_stats.p_score_min else None
-                line = f"Average P-score: {mean_p:.1f} (min {min_p:.1f}, max {max_p:.1f})"
-                if mean_min is not None:
-                    line += f" — required avg {mean_min:.1f}"
-                print(f"  {line}")
-            if asset_stats.atr_rel:
-                mean_atr = statistics.fmean(asset_stats.atr_rel)
-                print(f"  Average ATR ratio vs threshold: {mean_atr:.4f}")
-            recent = list(asset_stats.recent_events)
-            if recent:
-                print("  Recent missing gates (most recent last):")
-                for event in recent:
-                    ts = event.get("timestamp") or "?"
-                    missing = ", ".join(event.get("missing") or []) or "<none>"
-                    print(f"    • {ts}: {missing}")
-        latest_snapshot = latest.get(asset)
-        if latest_snapshot:
-            missing = ", ".join(latest_snapshot.get("missing") or []) or "<none>"
-            print(f"Latest snapshot missing gates: {missing}")
-            blockers = ", ".join(latest_snapshot.get("blockers_raw") or []) or "<none>"
-            print(f"Action plan blockers (raw): {blockers}")
-            reasons = latest_snapshot.get("reasons") or []
-            if reasons:
-                print("Sample textual reasons:")
-                for reason in reasons[:top_n]:
-                    print(f"  • {reason}")
-                extra = len(reasons) - top_n
-                if extra > 0:
-                    print(f"  • ... ({extra} more reason(s) omitted)")
-            else:
-                print("No textual reasons recorded in latest snapshot.")
-        else:
-            print("Latest snapshot unavailable for this asset.")
-
-
-def render_json_report(
-    stats: Mapping[str, GateEventStats],
-    latest: Mapping[str, Mapping[str, Any]],
-    *,
-    assets: Optional[Sequence[str]],
-) -> None:
-    asset_filter = {asset.upper() for asset in assets} if assets else None
-    output: dict[str, Any] = {"assets": {}}
-    asset_names = asset_filter or (set(stats.keys()) | set(latest.keys()))
-    for asset in sorted(asset_names):
-        entry: dict[str, Any] = {}
-        asset_stats = stats.get(asset)
-        if asset_stats and asset_stats.total_events:
-            entry["events"] = asset_stats.total_events
-            entry["gate_counts"] = dict(asset_stats.gate_counts)
-            if asset_stats.profile_counts:
-                entry["profile_counts"] = dict(asset_stats.profile_counts)
-            if asset_stats.mode_counts:
-                entry["mode_counts"] = dict(asset_stats.mode_counts)
-            if asset_stats.p_scores:
-                entry["p_score"] = {
-                    "mean": statistics.fmean(asset_stats.p_scores),
-                    "min": min(asset_stats.p_scores),
-                    "max": max(asset_stats.p_scores),
+        by_tod: Dict[str, Any] = {}
+        for bucket in (name for name, _ in TOD_BUCKETS):
+            reason_counts = record.by_time_of_day.get(bucket)
+            total_candidates_bucket = record.total_candidates_by_tod.get(bucket, 0)
+            if not reason_counts and total_candidates_bucket == 0:
+                continue
+            bucket_payload: Dict[str, Any] = {}
+            if reason_counts:
+                bucket_payload = {
+                    reason: reason_counts[reason]
+                    for reason in sorted(reason_counts)
                 }
-            if asset_stats.p_score_min:
-                entry["p_score_min"] = {
-                    "mean": statistics.fmean(asset_stats.p_score_min),
-                    "min": min(asset_stats.p_score_min),
-                    "max": max(asset_stats.p_score_min),
+            if total_candidates_bucket:
+                bucket_payload = {
+                    **bucket_payload,
+                    "total_candidates": total_candidates_bucket,
                 }
-            if asset_stats.atr_rel:
-                entry["atr_rel"] = {
-                    "mean": statistics.fmean(asset_stats.atr_rel),
-                    "min": min(asset_stats.atr_rel),
-                    "max": max(asset_stats.atr_rel),
-                }
-            entry["recent_events"] = list(asset_stats.recent_events)
-        if asset in latest:
-            entry["latest_snapshot"] = latest[asset]
-        output["assets"][asset] = entry
-    print(json.dumps(output, indent=2, sort_keys=True))
+            by_tod[bucket] = bucket_payload
+        if by_tod:
+            symbol_payload["by_time_of_day"] = by_tod
+        summary[symbol] = symbol_payload
+    return summary
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
+def write_json_summary(path: Path, summary: Mapping[str, Any]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(summary, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+    except OSError as exc:
+        print(f"Failed to write JSON summary to {path}: {exc}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Aggregate pipeline gate rejection frequencies per asset."
+        description="Analyse entry gate rejections across recent pipeline outputs.",
     )
     parser.add_argument(
-        "--pipeline-log",
-        default="public/monitoring/pipeline.log",
+        "--root",
+        default=".",
         type=Path,
-        help="Path to the pipeline JSONL log (defaults to public/monitoring/pipeline.log).",
+        help="Root directory to scan for JSON files (default: current directory).",
     )
     parser.add_argument(
-        "--analysis-summary",
-        default="public/analysis_summary.json",
-        type=Path,
-        help="Path to the latest analysis summary snapshot (defaults to public/analysis_summary.json).",
-    )
-    parser.add_argument(
-        "--since",
-        help="Only include gate_summary log lines at or after this ISO8601 timestamp.",
-    )
-    parser.add_argument(
-        "--assets",
-        nargs="*",
-        help="Optional list of asset symbols to include (defaults to all discovered).",
-    )
-    parser.add_argument(
-        "--top",
+        "--limit-runs",
+        "--max-files",
+        dest="limit_runs",
+        default=20,
         type=int,
-        default=10,
-        help="Number of gate/reason entries to display per asset in text mode.",
+        help="Maximum number of recent JSON files to analyse (default: 20).",
     )
     parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit a JSON report instead of human-readable text.",
+        "--output-json",
+        type=Path,
+        help="If provided, write a machine-readable summary to this path.",
     )
-    return parser
+    return parser.parse_args(argv)
 
 
-def main(argv: Optional[Sequence[str]] = None) -> None:
-    parser = build_arg_parser()
-    args = parser.parse_args(argv)
-    since_dt = _parse_iso8601(args.since) if args.since else None
-    stats = analyze_pipeline_log(args.pipeline_log, since=since_dt, assets=args.assets)
-    latest = load_latest_snapshot(args.analysis_summary)
-    if args.json:
-        render_json_report(stats, latest, assets=args.assets)
-    else:
-        render_text_report(stats, latest, assets=args.assets, top_n=args.top)
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parse_args(argv)
+    root: Path = args.root
+    limit_runs: int = max(int(args.limit_runs), 1)
+
+    files = discover_recent_json_files(root, limit_runs)
+    if not files:
+        print("No JSON files found for analysis.")
+        return 0
+
+    stats = accumulate_statistics(files)
+    print_human_readable_summary(stats)
+
+    if args.output_json:
+        summary_payload = build_json_summary(stats)
+        write_json_summary(args.output_json, summary_payload)
+
+    return 0
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    sys.exit(main())
