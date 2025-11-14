@@ -632,7 +632,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print_human_readable_summary(stats)
 
-     output_json: Path
+    output_json: Path
     if args.output_json is not None:
         output_json = args.output_json.expanduser()
         if not output_json.is_absolute():
