@@ -114,30 +114,27 @@ class SymbolStats:
 def discover_entry_gate_logs(root: Path, limit: int) -> List[Path]:
     """Return recent entry gate log files if the dedicated directory exists."""
 
-    base_dir = (root / ENTRY_GATE_LOG_SUBDIR).resolve()
-    try:
-        if not base_dir.exists() or not base_dir.is_dir():
-            return []
-    except OSError:
-        return []
-
+    logs_dir = (root / ENTRY_GATE_LOG_SUBDIR).resolve()
     candidates: List[Tuple[float, Path]] = []
     try:
-        for path in base_dir.glob("entry_gates_*.jsonl"):
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            candidates.append((stat.st_mtime, path))
+        if logs_dir.exists():
+            for path in logs_dir.iterdir():
+                if path.suffix.lower() != ".jsonl":
+                    continue
+                if not path.name.startswith("entry_gates_"):
+                    continue
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                candidates.append((stat.st_mtime, path))
     except OSError:
         return []
 
     candidates.sort(key=lambda item: item[0], reverse=True)
-    if limit > 0:
-        candidates = candidates[:limit]
-    return [path for _, path in candidates]
+    return [path for _, path in candidates[:limit]]
 
-
+  
 def discover_recent_json_files(root: Path, limit: int) -> List[Path]:
     """Return up to ``limit`` JSON/JSONL files ordered by descending mtime.
 
@@ -464,6 +461,20 @@ def accumulate_statistics(files: Sequence[Path]) -> Dict[str, SymbolStats]:
     return stats
 
 
+def accumulate_statistics_from_entry_gate_logs(files: Sequence[Path]) -> Dict[str, SymbolStats]:
+    stats: Dict[str, SymbolStats] = defaultdict(SymbolStats)
+    for path in files:
+        for document in load_json_documents(path):
+            if not isinstance(document, Mapping):
+                continue
+            symbol_value = document.get("symbol") or "UNKNOWN"
+            symbol = str(symbol_value).strip().upper() or "UNKNOWN"
+            timestamp = parse_timestamp(document.get("timestamp"))
+            reasons = normalize_reason_container(document.get("reasons"))
+            stats[symbol].register(reasons, timestamp)
+    return stats
+
+
 # ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
@@ -588,15 +599,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     limit_runs: int = max(int(args.limit_runs), 1)
 
     entry_gate_files = discover_entry_gate_logs(root, limit_runs)
+    fallback_files: List[Path] = []
     if entry_gate_files:
-        files = entry_gate_files
+        stats = accumulate_statistics_from_entry_gate_logs(entry_gate_files)
     else:
-        files = discover_recent_json_files(root, limit_runs)
-    if not files:
-        print("No JSON files found for analysis.")
-        return 0
+        fallback_files = discover_recent_json_files(root, limit_runs)
+        if fallback_files:
+            stats = accumulate_statistics(fallback_files)
+        else:
+            stats = {}
 
-    stats = accumulate_statistics(files)
+    if not entry_gate_files and not fallback_files:
+        print("No JSON files found for analysis.")
+
     print_human_readable_summary(stats)
 
     output_json: Path
@@ -615,3 +630,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
     sys.exit(main())
+
+
+      
+    
