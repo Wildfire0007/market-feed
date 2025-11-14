@@ -736,7 +736,10 @@ LOGGER = logging.getLogger(__name__)
 MARKET_TIMEZONE = ZoneInfo("Europe/Berlin")
 
 PUBLIC_DIR = "public"
-ENTRY_GATE_LOG_DIR: Path = Path(PUBLIC_DIR) / "debug" / "entry_gates"
+_ANALYSIS_BASE_DIR = Path(__file__).resolve().parent
+ENTRY_GATE_LOG_DIR: Path = (
+    _ANALYSIS_BASE_DIR / PUBLIC_DIR / "debug" / "entry_gates"
+).resolve()
 MACRO_DATA_DIR = Path("data") / "macro"
 MACRO_LOCKOUT_FILE = MACRO_DATA_DIR / "lockout_by_asset.json"
 
@@ -11206,6 +11209,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
