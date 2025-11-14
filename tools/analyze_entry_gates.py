@@ -160,7 +160,7 @@ def discover_recent_json_files(root: Path, limit: int) -> List[Path]:
     exist under *root*, but will fall back to the entire tree when necessary.
     """
 
-    candidates: List[Tuple[float, Path]] = []
+    candidates: Dict[Path, float] = {}
 
     search_roots: List[Path] = []
     public_root = resolve_public_root(root)
@@ -179,10 +179,12 @@ def discover_recent_json_files(root: Path, limit: int) -> List[Path]:
                 stat = path.stat()
             except OSError:
                 continue
-            candidates.append((stat.st_mtime, path))
+            recorded_mtime = candidates.get(path)
+            if recorded_mtime is None or stat.st_mtime > recorded_mtime:
+                candidates[path] = stat.st_mtime
 
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    return [path for _, path in candidates[:limit]]
+    sorted_candidates = sorted(candidates.items(), key=lambda item: item[1], reverse=True)
+    return [path for path, _ in sorted_candidates[:limit]]
 
 
 def iterate_json_files(root: Path) -> Iterator[Path]:
@@ -570,13 +572,10 @@ def build_json_summary(stats: Mapping[str, SymbolStats]) -> Dict[str, Any]:
 
 
 def write_json_summary(path: Path, summary: Mapping[str, Any]) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(summary, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-    except OSError as exc:
-        print(f"Failed to write JSON summary to {path}: {exc}", file=sys.stderr)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=2, sort_keys=True)
+        handle.write("\n")
 
 
 # ---------------------------------------------------------------------------
@@ -616,19 +615,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         root = (Path.cwd() / root).resolve()
     limit_runs: int = max(int(args.limit_runs), 1)
 
+    public_root = resolve_public_root(root)
+    logs_dir = (public_root / ENTRY_GATE_LOG_RELATIVE_DIR).resolve()
     entry_gate_files = discover_entry_gate_logs(root, limit_runs)
     fallback_files: List[Path] = []
+    if entry_gate_files:
+        print(
+            f"Processing {len(entry_gate_files)} entry gate log file(s) from {logs_dir}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"No dedicated entry gate log files found under {logs_dir}; searching recent JSON files instead.",
+            file=sys.stderr,
+        )
     if entry_gate_files:
         stats = accumulate_statistics_from_entry_gate_logs(entry_gate_files)
     else:
         fallback_files = discover_recent_json_files(root, limit_runs)
         if fallback_files:
+            print(
+                f"Analysing {len(fallback_files)} JSON file(s) discovered during fallback scan.",
+                file=sys.stderr,
+            )
             stats = accumulate_statistics(fallback_files)
         else:
             stats = {}
 
     if not entry_gate_files and not fallback_files:
-        print("No JSON files found for analysis.")
+        print("No JSON files found for analysis.", file=sys.stderr)
 
     print_human_readable_summary(stats)
 
@@ -638,7 +653,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not output_json.is_absolute():
             output_json = (Path.cwd() / output_json).resolve()
     else:
-        public_root = resolve_public_root(root)
         output_json = (public_root / ENTRY_GATE_STATS_RELATIVE_PATH).resolve()
 
     summary_payload = build_json_summary(stats)
