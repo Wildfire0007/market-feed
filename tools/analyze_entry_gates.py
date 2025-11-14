@@ -74,9 +74,8 @@ REASON_KEYS_NESTED = (
 )
 
 JSON_EXTENSIONS = {".json", ".jsonl"}
-DEFAULT_SEARCH_SUBDIRS = ("public/debug", "public")
-ENTRY_GATE_LOG_SUBDIR = Path("public/debug/entry_gates")
-DEFAULT_STATS_OUTPUT_PATH = Path("public/debug/entry_gate_stats.json")
+ENTRY_GATE_LOG_RELATIVE_DIR = Path("debug/entry_gates")
+ENTRY_GATE_STATS_RELATIVE_PATH = Path("debug/entry_gate_stats.json")
 
 
 @dataclass
@@ -111,10 +110,29 @@ class SymbolStats:
 # Filesystem helpers
 # ---------------------------------------------------------------------------
 
+def resolve_public_root(root: Path) -> Path:
+    """Return the directory that contains public outputs."""
+
+    resolved_root = root.resolve()
+    candidate = resolved_root / "public"
+    if candidate.exists() and candidate.is_dir():
+        return candidate
+    if resolved_root.name == "public":
+        return resolved_root
+    if resolved_root.name == "debug" and (resolved_root / "entry_gates").is_dir():
+        return resolved_root.parent.resolve()
+    if resolved_root.name == "entry_gates":
+        return resolved_root.parent.parent.resolve()
+    if (resolved_root / "debug").is_dir():
+        return resolved_root
+    return resolved_root
+
+
 def discover_entry_gate_logs(root: Path, limit: int) -> List[Path]:
     """Return recent entry gate log files if the dedicated directory exists."""
 
-    logs_dir = (root / ENTRY_GATE_LOG_SUBDIR).resolve()
+    public_root = resolve_public_root(root)
+    logs_dir = (public_root / ENTRY_GATE_LOG_RELATIVE_DIR).resolve()
     candidates: List[Tuple[float, Path]] = []
     try:
         if logs_dir.exists():
@@ -145,15 +163,15 @@ def discover_recent_json_files(root: Path, limit: int) -> List[Path]:
     candidates: List[Tuple[float, Path]] = []
 
     search_roots: List[Path] = []
-    seen_roots = set()
-    for sub in DEFAULT_SEARCH_SUBDIRS:
-        candidate_root = (root / sub).resolve()
-        if candidate_root.exists() and candidate_root.is_dir():
-            if candidate_root not in seen_roots:
-                search_roots.append(candidate_root)
-                seen_roots.add(candidate_root)
-    if root.resolve() not in seen_roots:
-        search_roots.append(root.resolve())
+    public_root = resolve_public_root(root)
+    for candidate in (
+        public_root / "debug",
+        public_root,
+        root.resolve(),
+    ):
+        candidate = candidate.resolve()
+        if candidate.exists() and candidate.is_dir() and candidate not in search_roots:
+            search_roots.append(candidate)
 
     for search_root in search_roots:
         for path in iterate_json_files(search_root):
@@ -614,13 +632,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print_human_readable_summary(stats)
 
-    output_json: Path
+     output_json: Path
     if args.output_json is not None:
         output_json = args.output_json.expanduser()
         if not output_json.is_absolute():
             output_json = (Path.cwd() / output_json).resolve()
     else:
-        output_json = (root / DEFAULT_STATS_OUTPUT_PATH).resolve()
+        public_root = resolve_public_root(root)
+        output_json = (public_root / ENTRY_GATE_STATS_RELATIVE_PATH).resolve()
 
     summary_payload = build_json_summary(stats)
     write_json_summary(output_json, summary_payload)
@@ -630,7 +649,3 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
     sys.exit(main())
-
-
-      
-    
