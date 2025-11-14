@@ -10392,7 +10392,7 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     analysis_timestamp = nowiso()
     probability_percent = int(max(0, min(100, round(combined_probability * 100))))
-
+  
     gates_payload: Dict[str, Any] = {
         "mode": mode,
         "required": required_list,
@@ -11206,6 +11206,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
