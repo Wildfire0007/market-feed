@@ -1506,7 +1506,9 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
     monitor_ok = in_any_window_utc(monitor_windows, h, m)
     entry_window_ok = in_any_window_utc(entry_windows, h, m)
     weekday_ok = session_weekday_ok(asset, now_utc)
-    status_profile_name, status_profile = resolve_session_status_for_asset(asset)
+    status_profile_name, status_profile = resolve_session_status_for_asset(
+        asset, when=now_utc, weekday_ok=weekday_ok
+    )
     if not isinstance(status_profile, dict):
         status_profile = {}
     next_open_override: Optional[str] = None
@@ -11209,6 +11211,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
