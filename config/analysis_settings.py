@@ -840,15 +840,72 @@ def session_status_profile_targets_asset(
     return asset_key in assets
 
 
-def resolve_session_status_for_asset(asset: Optional[str]) -> Tuple[str, Dict[str, Any]]:
-    """Return the active session status profile metadata for ``asset``."""
+def _weekday_allows_auto_override(asset_key: str, weekday: int) -> bool:
+    """Return ``True`` when the configured weekdays include ``weekday``."""
+
+    allowed = SESSION_WEEKDAYS.get(asset_key)
+    if not allowed:
+        return False
+    if isinstance(allowed, (set, frozenset)):
+        iterable = allowed
+    elif isinstance(allowed, (list, tuple)):
+        iterable = allowed
+    else:
+        iterable = [allowed]
+    for item in iterable:
+        try:
+            if int(item) == weekday:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def resolve_session_status_for_asset(
+    asset: Optional[str], *, when: Optional[datetime] = None, weekday_ok: Optional[bool] = None
+) -> Tuple[str, Dict[str, Any]]:
+    """Return the active session status profile metadata for ``asset``.
+
+    Parameters
+    ----------
+    asset:
+        Asset symbol whose session profile should be resolved.
+    when:
+        Optional timestamp that represents the evaluation context.  This allows
+        callers (for example historical test probes) to override the
+        auto-activated weekend profile when the examined time belongs to a
+        trading day.
+    weekday_ok:
+        Optional pre-computed weekday flag.  When ``True`` we treat the
+        evaluation instant as an allowed trading day regardless of ``when``.
+    """
 
     asset_key = str(asset or "").strip().upper()
     profile_name = SESSION_STATUS_PROFILE_NAME
     if not session_status_profile_targets_asset(profile_name, asset_key):
         default_profile = dict(SESSION_STATUS_PROFILES.get("default", {}))
         return "default", default_profile
-    return profile_name, dict(SESSION_STATUS_PROFILE)
+        
+    profile = dict(SESSION_STATUS_PROFILE)
+    if profile_name != "default" and profile.get("auto_activate_weekend"):
+        should_fallback = False
+        if weekday_ok is True:
+            should_fallback = True
+        elif weekday_ok is None and when is not None:
+            try:
+                weekday = when.weekday()
+            except Exception:
+                weekday = None
+            if weekday is not None:
+                if _weekday_allows_auto_override(asset_key, weekday):
+                    should_fallback = True
+                elif not SESSION_WEEKDAYS.get(asset_key) and weekday < 5:
+                    should_fallback = True
+        if should_fallback:
+            default_profile = dict(SESSION_STATUS_PROFILES.get("default", {}))
+            return "default", default_profile
+
+    return profile_name, profile
     
 ATR_LOW_TH_DEFAULT: float = float(_get_config_value("atr_low_threshold_default"))
 ATR_LOW_TH_ASSET: Dict[str, float] = dict(_get_config_value("atr_low_threshold") or {})
