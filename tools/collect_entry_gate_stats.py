@@ -345,7 +345,7 @@ def aggregate(
     artifact_counter = 0
 
     for run in iter_repo_runs(
-    session=session,
+        session=session,
         owner=owner,
         repo=repo,
         workflow_name=workflow_name,
@@ -357,7 +357,7 @@ def aggregate(
         if run_id is None:
             continue
 
-    run_counter += 1
+        run_counter += 1
         logger.debug(
             "Processing run_id=%s run_number=%s name=%r created_at=%s",
             run_id,
