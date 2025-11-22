@@ -1,40 +1,17 @@
 #!/usr/bin/env python3
 """
-Collect entry-gate-stats artifacts from the repository.
+Collect entry-gate-stats artifacts from TD Full Pipeline (5m) runs.
 
-- A repo összes artifactját lekérdezi (legfrissebbtől a legrégebbiig),
-- kiszűri azokat, amelyek neve entry-gate-stats / entry_gate_stats,
-- csak a since_date utáni (vagy azzal egyező) created_at idejű artifactokat tartja meg,
-- letölti és kicsomagolja ezeket, majd beolvassa a bennük található JSON-okat,
+- Lekéri a repo összes completed runját (branch = main),
+- ezek közül csak a "TD Full Pipeline (5m)" nevű workflow-runokat tartja meg,
+- minden ilyen runhoz lekéri az artifactokat,
+- név alapján kiszűri az entry-gate-stats ZIP-eket,
+- kibontja belőlük az entry_gate_stats*.json fájlt,
 - és mindent egyetlen összesítő JSON-ba gyűjt.
 
-Kimenet (példa):
-
-{
-  "owner": "Wildfire0007",
-  "repo": "market-feed",
-  "workflow_name": "TD Full Pipeline (5m)",
-  "branch": "main",
-  "since_date_utc": "2025-11-14T00:00:00Z",
-  "generated_at_utc": "...",
-  "artifact_count": 7,
-  "entries": [
-    {
-      "run_id": 5968,
-      "run_number": 123,
-      "run_name": "TD Full Pipeline (5m)",
-      "run_created_at": "2025-11-22T09:55:12Z",
-      "run_conclusion": "success",
-      "run_html_url": "https://github.com/…",
-      "artifact_id": 987654321,
-      "artifact_name": "entry-gate-stats",
-      "artifact_size_in_bytes": 350,
-      "stats": { … az adott entry_gate_stats.json teljes tartalma … }
-    },
-    …
-  ]
-}
+A script csak a standard könyvtárat + requests-et használja.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -52,50 +29,56 @@ import requests
 
 GITHUB_API = "https://api.github.com"
 
+DEFAULT_SINCE_DATE = "2025-11-14"
+DEFAULT_WORKFLOW_NAME = "TD Full Pipeline (5m)"
 DEFAULT_OWNER = "Wildfire0007"
 DEFAULT_REPO = "market-feed"
 DEFAULT_BRANCH = "main"
-DEFAULT_WORKFLOW_NAME = "TD Full Pipeline (5m)"
-DEFAULT_SINCE_DATE = "2025-11-14"
-DEFAULT_MAX_ARTIFACTS = 200
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Argumentumok, logging, token
+# CLI és alap beállítások
 # ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Collect entry-gate-stats artifacts.")
-    parser.add_argument("--owner", default=DEFAULT_OWNER)
-    parser.add_argument("--repo", default=DEFAULT_REPO)
-    parser.add_argument("--branch", default=DEFAULT_BRANCH)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--owner", default=DEFAULT_OWNER, help="Repository owner")
+    parser.add_argument("--repo", default=DEFAULT_REPO, help="Repository name")
     parser.add_argument(
         "--workflow-name",
         default=DEFAULT_WORKFLOW_NAME,
-        help="Run name to filter for (e.g. 'TD Full Pipeline (5m)')",
+        help="Target workflow run name (pl. 'TD Full Pipeline (5m)')",
     )
     parser.add_argument(
         "--since-date",
         default=DEFAULT_SINCE_DATE,
-        help="Start date (UTC, YYYY-MM-DD). Artifacts older than this are ignored.",
+        help="ISO date (YYYY-MM-DD) interpreted as UTC midnight",
     )
     parser.add_argument(
-        "--max-artifacts",
+        "--branch",
+        default=DEFAULT_BRANCH,
+        help="Branch filter (pl. 'main')",
+    )
+    parser.add_argument(
+        "--max-runs",
         type=int,
-        default=DEFAULT_MAX_ARTIFACTS,
-        help="Maximum number of artifacts to download and aggregate.",
+        default=1000,
+        help="Maximum number of matching runs to process",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        help="Optional explicit output path for the aggregate JSON.",
+        help=(
+            "Optional output path. "
+            "Default: public/debug/entry_gate_stats_aggregate_since_<DATE>.json"
+        ),
     )
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="Enable debug logging.",
+        help="Enable debug logging for troubleshooting",
     )
     return parser.parse_args()
 
@@ -113,40 +96,52 @@ def load_token() -> str:
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_PAT")
     if not token:
         sys.exit(
-            "GitHub token is required. Set GITHUB_TOKEN or GITHUB_PAT in the environment."
+            "GitHub token is required. Set the GITHUB_TOKEN or GITHUB_PAT environment variable."
         )
     return token
 
 
-def parse_utc_date(value: str) -> dt.datetime:
+def parse_utc_date(date_str: str) -> dt.datetime:
     try:
-        d = dt.datetime.strptime(value, "%Y-%m-%d")
+        base_date = dt.datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError as exc:
-        raise SystemExit(f"Invalid --since-date '{value}': {exc}") from exc
-    return d.replace(tzinfo=dt.timezone.utc)
+        raise SystemExit(f"Invalid --since-date value '{date_str}': {exc}") from exc
+    return base_date.replace(tzinfo=dt.timezone.utc)
 
 
 def parse_github_timestamp(value: str) -> dt.datetime:
-    # formátum: "2025-11-22T09:55:12Z"
+    # GitHub: "2025-11-22T10:30:53Z"
     return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
         tzinfo=dt.timezone.utc
     )
 
 
-# ---------------------------------------------------------------------------
-# GitHub API helper függvények
-# ---------------------------------------------------------------------------
-
 def github_get(session: requests.Session, url: str, **kwargs) -> requests.Response:
     try:
-        resp = session.get(url, timeout=30, **kwargs)
+        response = session.get(url, timeout=30, **kwargs)
     except requests.RequestException as exc:
         raise RuntimeError(f"GitHub API request failed for {url}: {exc}") from exc
-    if resp.status_code >= 400:
+    if response.status_code >= 400:
         raise RuntimeError(
-            f"GitHub API request failed ({resp.status_code}) for {url}: {resp.text}"
+            f"GitHub API request failed ({response.status_code}) for {url}: {response.text}"
         )
-    return resp
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Run-listázás repó szinten
+# ---------------------------------------------------------------------------
+
+def workflow_name_matches(run_name: str, target: str) -> bool:
+    """Laza, de determinisztikus egyezés a workflow névre."""
+    rn = (run_name or "").strip()
+    tn = (target or "").strip()
+    if not rn or not tn:
+        return False
+    # case-insensitive exact, plus fallback: target substring a run_name-ben
+    rn_cf = rn.casefold()
+    tn_cf = tn.casefold()
+    return rn_cf == tn_cf or tn_cf in rn_cf
 
 
 def iter_repo_runs(
@@ -155,17 +150,16 @@ def iter_repo_runs(
     repo: str,
     branch: str,
     since: dt.datetime,
-    max_runs: int,
     workflow_name: str,
+    max_runs: int,
 ) -> Iterable[Dict]:
     """
-    Az egész repo runjait listázza (`/actions/runs`), és szűr run-név és idő szerint.
+    Végigmegy a repó összes completed runján (branch filterrel),
+    és csak azokat yieldeli, amelyek neve egyezik a kívánt workflow névvel.
     """
     page = 1
     collected = 0
-    stop = False
-
-    while not stop and collected < max_runs:
+    while collected < max_runs:
         url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/runs"
         params = {
             "branch": branch,
@@ -173,151 +167,81 @@ def iter_repo_runs(
             "per_page": 100,
             "page": page,
         }
-        logger.debug("Requesting runs page %s with params %s", page, params)
-        resp = github_get(session, url, params=params)
-        payload = resp.json()
+        response = github_get(session, url, params=params)
+        payload = response.json()
         runs = payload.get("workflow_runs", [])
         if not runs:
-            logger.debug("No more runs on page %s, stopping.", page)
+            logger.info("No more workflow runs returned (page %s).", page)
             break
 
         for run in runs:
-            created_str = run.get("created_at")
-            if not created_str:
+            created_at_str = run.get("created_at")
+            if not created_at_str:
                 continue
             try:
-                created_at = parse_github_timestamp(created_str)
+                created_at = parse_github_timestamp(created_at_str)
             except ValueError:
-                logger.debug("Skipping run with invalid created_at: %s", created_str)
+                logger.debug("Skipping run with invalid created_at: %s", created_at_str)
                 continue
 
-            # idő szerinti vágás – ha már túl régi, vége
+            # GitHub API runok időrendben visszafelé jönnek -> ha ennél régebbi, megállhatunk.
             if created_at < since:
                 logger.info(
-                    "Run %s (%s) is older than since-date (%s), stopping pagination.",
-                    run.get("id"),
-                    created_str,
+                    "Encountered run older than since-date (%s < %s); stopping pagination.",
+                    created_at.isoformat(),
                     since.isoformat(),
                 )
-                stop = True
-                break
+                return
 
-            # csak a megadott nevű runok (TD Full Pipeline (5m))
-            if run.get("name") != workflow_name:
+            run_name = run.get("name") or ""
+            if not workflow_name_matches(run_name, workflow_name):
                 continue
 
-            yield run
             collected += 1
+            logger.debug(
+                "Matched run_id=%s run_number=%s name=%r created_at=%s",
+                run.get("id"),
+                run.get("run_number"),
+                run_name,
+                created_at_str,
+            )
+            yield run
+
             if collected >= max_runs:
                 logger.info("Reached max_runs limit (%s).", max_runs)
-                stop = True
-                break
+                return
 
         page += 1
 
+
+# ---------------------------------------------------------------------------
+# Artifactok letöltése, kibontása
+# ---------------------------------------------------------------------------
 
 def list_run_artifacts(
     session: requests.Session, owner: str, repo: str, run_id: int
 ) -> List[Dict]:
     url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts"
-    resp = github_get(session, url)
-    artifacts = resp.json().get("artifacts", [])
-    logger.debug("Run %s has %d artifacts", run_id, len(artifacts))
+    response = github_get(session, url)
+    artifacts = response.json().get("artifacts", []) or []
     return artifacts
 
 
 def find_matching_artifacts(artifacts: List[Dict]) -> List[Dict]:
+    """entry-gate-stats / entry_gate_stats névű artifactok szűrése."""
     matches: List[Dict] = []
-    for a in artifacts:
-        name = (a.get("name") or "").lower()
+    for artifact in artifacts:
+        name = (artifact.get("name") or "").lower()
+        if artifact.get("expired"):
+            # lejárt artifact – GitHub már nem engedi letölteni
+            continue
         if (
             name == "entry-gate-stats"
             or "entry-gate-stats" in name
             or "entry_gate_stats" in name
         ):
-            matches.append(a)
+            matches.append(artifact)
     return matches
-
-
-def is_entry_gate_artifact(name: str) -> bool:
-    lowered = name.lower()
-    return (
-        lowered == "entry-gate-stats"
-        or "entry-gate-stats" in lowered
-        or "entry_gate_stats" in lowered
-    )
-
-
-def iter_repo_artifacts(
-    session: requests.Session,
-    owner: str,
-    repo: str,
-    since: dt.datetime,
-    max_artifacts: int,
-) -> Iterable[Dict]:
-    page = 1
-    collected = 0
-    stop = False
-
-    while not stop and collected < max_artifacts:
-        url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/artifacts"
-        params = {"per_page": 100, "page": page}
-        logger.debug("Requesting artifacts page %s with params %s", page, params)
-        resp = github_get(session, url, params=params)
-        artifacts = resp.json().get("artifacts", [])
-
-        if not artifacts:
-            logger.debug("No more artifacts on page %s, stopping.")
-            break
-
-        for artifact in artifacts:
-            created_str = artifact.get("created_at")
-            if not created_str:
-                continue
-
-            try:
-                created_at = parse_github_timestamp(created_str)
-            except ValueError:
-                logger.debug("Skipping artifact with invalid created_at: %s", created_str)
-                continue
-
-            if created_at < since:
-                logger.info(
-                    "Artifact %s is older than since-date (%s), stopping pagination.",
-                    artifact.get("id"),
-                    since.isoformat(),
-                )
-                stop = True
-                break
-
-            name = artifact.get("name") or ""
-            if not is_entry_gate_artifact(name):
-                continue
-
-            yield artifact
-            collected += 1
-            if collected >= max_artifacts:
-                logger.info("Reached max_artifacts limit (%s).", max_artifacts)
-                stop = True
-                break
-
-        page += 1
-
-
-def fetch_workflow_run(
-    session: requests.Session, owner: str, repo: str, run_id: Optional[int]
-) -> Optional[Dict]:
-    if run_id is None:
-        return None
-
-    url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/runs/{run_id}"
-    try:
-        resp = github_get(session, url)
-    except RuntimeError as exc:
-        logger.warning("Failed to load workflow run %s: %s", run_id, exc)
-        return None
-
-    return resp.json()
 
 
 def download_artifact(
@@ -325,11 +249,9 @@ def download_artifact(
 ) -> Path:
     download_url = artifact.get("archive_download_url")
     if not download_url:
-        raise RuntimeError(f"Artifact {artifact.get('id')} has no archive_download_url")
-
+        raise RuntimeError(f"Artifact {artifact.get('name')} missing download URL")
     dest_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = dest_dir / f"artifact_{artifact['id']}.zip"
-
+    tmp_zip = dest_dir / f"artifact_{artifact['id']}.zip"
     headers = {"Accept": "application/zip"}
     try:
         with session.get(download_url, headers=headers, timeout=60, stream=True) as resp:
@@ -338,131 +260,159 @@ def download_artifact(
                     f"Failed to download artifact {artifact.get('name')} "
                     f"({resp.status_code}): {resp.text}"
                 )
-            with zip_path.open("wb") as fh:
+            with tmp_zip.open("wb") as fh:
                 for chunk in resp.iter_content(chunk_size=8192):
                     if chunk:
                         fh.write(chunk)
     except requests.RequestException as exc:
         raise RuntimeError(
-            f"Error downloading artifact {artifact.get('id')} from {download_url}: {exc}"
+            f"Failed to download artifact {artifact.get('name') or artifact.get('id')} "
+            f"from {download_url}: {exc}"
         ) from exc
+    return tmp_zip
 
-    return zip_path
 
-
-def select_json_file(extracted_dir: Path) -> Optional[Path]:
+def select_stats_json(extracted_dir: Path) -> Optional[Path]:
+    """Kiválasztja a releváns JSON-t az artifactból."""
     json_files = sorted(p for p in extracted_dir.rglob("*.json") if p.is_file())
     if not json_files:
         return None
-    # ha csak egy van, azt választjuk
-    if len(json_files) == 1:
-        return json_files[0]
-    # ha van név szerint entry_gate_stats.json, azt preferáljuk
-    for p in json_files:
-        if p.name.lower() == "entry_gate_stats.json":
-            return p
+
+    # Prefer entry_gate_stats*.json, ha van ilyen.
+    for candidate in json_files:
+        name = candidate.name.lower()
+        if "entry_gate_stats" in name:
+            return candidate
     return json_files[0]
 
 
 def extract_stats_from_artifact(zip_path: Path) -> Optional[Dict]:
+    """ZIP -> entry_gate_stats JSON payload (dict)."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_root = Path(tmpdir)
+        tmp_path = Path(tmpdir)
         try:
             with zipfile.ZipFile(zip_path) as zf:
-                zf.extractall(tmp_root)
+                zf.extractall(tmp_path)
         except zipfile.BadZipFile:
-            logger.warning("Invalid ZIP, skipping: %s", zip_path)
+            logger.warning("Skipping artifact %s due to invalid ZIP format", zip_path)
             return None
 
-        json_file = select_json_file(tmp_root)
+        json_file = select_stats_json(tmp_path)
         if not json_file:
-            logger.warning("No JSON found in artifact %s", zip_path)
+            logger.warning("No JSON files found in artifact %s", zip_path)
             return None
 
         try:
             with json_file.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
         except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Failed to parse JSON %s: %s", json_file, exc)
+            logger.warning("Failed to parse JSON file %s: %s", json_file, exc)
             return None
 
         return data
 
 
 # ---------------------------------------------------------------------------
-# Aggregálás és kimenet
+# Aggregálás
 # ---------------------------------------------------------------------------
 
-def aggregate_entry_gate_stats(
+def aggregate(
     session: requests.Session,
     owner: str,
     repo: str,
-    branch: str,
     workflow_name: str,
+    branch: str,
     since: dt.datetime,
-    max_artifacts: int,
-) -> List[Dict]:
+    max_runs: int,
+) -> Dict:
     entries: List[Dict] = []
+    run_counter = 0
+    artifact_counter = 0
 
-    for artifact in iter_repo_artifacts(
+    for run in iter_repo_runs(
         session=session,
         owner=owner,
         repo=repo,
+        branch=branch,
         since=since,
-        max_artifacts=max_artifacts,
+        workflow_name=workflow_name,
+        max_runs=max_runs,
     ):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_root = Path(tmpdir)
-            try:
-                zip_path = download_artifact(session, artifact, tmp_root)
-            except RuntimeError as exc:
-                logger.warning("%s", exc)
-                continue
-
-        stats = extract_stats_from_artifact(zip_path)
-
-        if stats is None:
+        run_id = run.get("id")
+        if run_id is None:
             continue
 
-        workflow_run = artifact.get("workflow_run") or {}
-        run_id = workflow_run.get("id")
-        run_details = fetch_workflow_run(session, owner, repo, run_id) if run_id else None
+        run_counter += 1
+        artifacts = list_run_artifacts(session, owner, repo, run_id)
+        matches = find_matching_artifacts(artifacts)
 
-        entries.append(
-            {
-                "run_id": run_details.get("id") if run_details else run_id,
-                "run_number": run_details.get("run_number") if run_details else None,
-                "run_name": run_details.get("name") if run_details else None,
-                "run_created_at": run_details.get("created_at") if run_details else None,
-                "run_updated_at": run_details.get("updated_at") if run_details else None,
-                "run_status": run_details.get("status") if run_details else None,
-                "run_conclusion": run_details.get("conclusion") if run_details else None,
-                "run_html_url": run_details.get("html_url") if run_details else None,
-                "artifact_id": artifact.get("id"),
-                "artifact_name": artifact.get("name"),
-                "artifact_size_in_bytes": artifact.get("size_in_bytes"),
-                "artifact_created_at": artifact.get("created_at"),
-                "artifact_expires_at": artifact.get("expires_at"),
-                "artifact_download_url": artifact.get("archive_download_url"),
-                "stats": stats,
-            }
-        )
+        if not matches:
+            logger.debug("No entry-gate-stats artifacts for run_id=%s", run_id)
+            continue
 
-    logger.info("Collected %d artifacts in total.", len(entries))
-    return entries
+        for artifact in matches:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_dir = Path(tmpdir)
+                try:
+                    zip_path = download_artifact(session, artifact, tmp_dir)
+                except RuntimeError as exc:
+                    logger.warning("%s", exc)
+                    continue
+
+                stats_data = extract_stats_from_artifact(zip_path)
+                if stats_data is None:
+                    continue
+
+                artifact_counter += 1
+                entries.append(
+                    {
+                        "run_id": run.get("id"),
+                        "run_number": run.get("run_number"),
+                        "run_name": run.get("name"),
+                        "status": run.get("status"),
+                        "conclusion": run.get("conclusion"),
+                        "created_at": run.get("created_at"),
+                        "updated_at": run.get("updated_at"),
+                        "html_url": run.get("html_url"),
+                        "head_sha": run.get("head_sha"),
+                        "artifact_id": artifact.get("id"),
+                        "artifact_name": artifact.get("name"),
+                        "artifact_size_in_bytes": artifact.get("size_in_bytes"),
+                        "stats": stats_data,
+                    }
+                )
+
+    entries.sort(
+        key=lambda item: (item.get("created_at") or "", item.get("artifact_id") or 0),
+        reverse=True,
+    )
+
+    summary = {
+        "owner": owner,
+        "repo": repo,
+        "workflow_name": workflow_name,
+        "branch": branch,
+        "since_date_utc": since.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_at_utc": dt.datetime.now(tz=dt.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "run_count": run_counter,
+        "artifact_count": artifact_counter,
+        "entries": entries,
+    }
+    return summary
 
 
 def build_output_path(output: Optional[Path], since: dt.datetime) -> Path:
-    if output is not None:
-        return output
     date_str = since.strftime("%Y-%m-%d")
+    if output:
+        return output
     return Path(f"public/debug/entry_gate_stats_aggregate_since_{date_str}.json")
 
 
 def main() -> None:
     args = parse_args()
     configure_logging(args.verbose)
-
     token = load_token()
     since = parse_utc_date(args.since_date)
 
@@ -476,43 +426,34 @@ def main() -> None:
     )
 
     logger.info(
-        "Collecting entry-gate-stats artifacts for %s/%s since %s (max=%s)",
-        args.owner,
-        args.repo,
+        "Collecting runs for workflow_name=%r, branch=%r, since=%s",
+        args.workflow_name,
+        args.branch,
         since.isoformat(),
-        args.max_artifacts,
     )
 
-    entries = aggregate_entry_gate_stats(
+    summary = aggregate(
         session=session,
         owner=args.owner,
         repo=args.repo,
-        branch=args.branch,
         workflow_name=args.workflow_name,
+        branch=args.branch,
         since=since,
-        max_artifacts=args.max_artifacts,
+        max_runs=args.max_runs,
     )
 
     output_path = build_output_path(args.output, since)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    summary = {
-        "owner": args.owner,
-        "repo": args.repo,
-        "workflow_name": args.workflow_name,
-        "branch": args.branch,
-        "since_date_utc": since.strftime("%Y-%m-%dT00:00:00Z"),
-        "generated_at_utc": dt.datetime.now(tz=dt.timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        ),
-        "artifact_count": len(entries),
-        "entries": entries,
-    }
-
     with output_path.open("w", encoding="utf-8") as fh:
         json.dump(summary, fh, indent=2, sort_keys=True)
 
-    logger.info("Wrote aggregate JSON to %s", output_path)
+    logger.info(
+        "Wrote aggregate stats to %s (runs=%s, artifacts=%s)",
+        output_path,
+        summary["run_count"],
+        summary["artifact_count"],
+    )
 
 
 if __name__ == "__main__":
