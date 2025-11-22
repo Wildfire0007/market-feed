@@ -4458,7 +4458,7 @@ def compute_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
     di_sum = (plus_di + minus_di).replace(0.0, np.nan)
     dx = (plus_di - minus_di).abs() / di_sum * 100.0
     adx_series = dx.ewm(span=period, adjust=False).mean()
-    return adx_series.fillna(method="bfill").dropna()
+    return adx_series.bfill().dropna()
 
 
 def latest_adx(df: pd.DataFrame, period: int = 14) -> Optional[float]:
@@ -4609,7 +4609,7 @@ def compute_vwap(df: pd.DataFrame) -> Optional[pd.Series]:
         volume = volume.astype(float).replace(0.0, np.nan)
     typical_price = price
     cumsum_price = (typical_price * volume.fillna(0.0)).cumsum()
-    cumsum_volume = volume.fillna(method="ffill").fillna(method="bfill").cumsum()
+    cumsum_volume = volume.ffill().bfill().cumsum()
     vwap_series = cumsum_price / cumsum_volume.replace(0.0, np.nan)
     return vwap_series.dropna()
 
@@ -11211,6 +11211,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
