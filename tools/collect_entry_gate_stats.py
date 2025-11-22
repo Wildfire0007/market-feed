@@ -235,24 +235,20 @@ def list_run_artifacts(
 
 
 def find_matching_artifacts(artifacts: List[Dict]) -> List[Dict]:
-    """entry-gate-stats / entry_gate_stats nevű artifactok szűrése."""
+    """entry-gate-stats nevű artifactok szűrése."""
     matches: List[Dict] = []
     for artifact in artifacts:
-        name = (artifact.get("name") or "").lower()
+        name_raw = artifact.get("name") or ""
+        name = name_raw.casefold()
         expired = artifact.get("expired", False)
         logger.debug(
             "  artifact id=%s name=%r expired=%s size=%s",
             artifact.get("id"),
-            name,
+            name_raw,
             expired,
             artifact.get("size_in_bytes"),
         )
-        # MÉG NEM szűrjük ki az expired-et, csak logoljuk:
-        if (
-            name == "entry-gate-stats"
-            or "entry-gate-stats" in name
-            or "entry_gate_stats" in name
-        ):
+        if name == "entry-gate-stats":
             matches.append(artifact)
     logger.debug("  matched %s artifacts by name", len(matches))
     return matches
@@ -287,16 +283,14 @@ def download_artifact(
     return tmp_zip
 
 
-def select_stats_json(extracted_dir: Path) -> Optional[Path]:
+def select_json_file(extracted_dir: Path) -> Optional[Path]:
     """Kiválasztja a releváns JSON-t az artifactból."""
     json_files = sorted(p for p in extracted_dir.rglob("*.json") if p.is_file())
     if not json_files:
         return None
 
-    # Prefer entry_gate_stats*.json, ha van ilyen.
     for candidate in json_files:
-        name = candidate.name.lower()
-        if "entry_gate_stats" in name:
+        if candidate.name == "entry_gate_stats.json":
             return candidate
     return json_files[0]
 
@@ -312,7 +306,7 @@ def extract_stats_from_artifact(zip_path: Path) -> Optional[Dict]:
             logger.warning("Skipping artifact %s due to invalid ZIP format", zip_path)
             return None
 
-        json_file = select_stats_json(tmp_path)
+        json_file = select_json_file(tmp_path)
         if not json_file:
             logger.warning("No JSON files found in artifact %s", zip_path)
             return None
@@ -341,8 +335,6 @@ def aggregate(
     max_runs: int,
 ) -> Dict:
     entries: List[Dict] = []
-    run_counter = 0
-    artifact_counter = 0
 
     for run in iter_repo_runs(
         session=session,
@@ -357,7 +349,6 @@ def aggregate(
         if run_id is None:
             continue
 
-        run_counter += 1
         logger.debug(
             "Processing run_id=%s run_number=%s name=%r created_at=%s",
             run_id,
@@ -388,21 +379,11 @@ def aggregate(
                 if stats_data is None:
                     continue
 
-                artifact_counter += 1
                 entries.append(
                     {
-                        "run_id": run.get("id"),
-                        "run_number": run.get("run_number"),
-                        "run_name": run.get("name"),
-                        "status": run.get("status"),
-                        "conclusion": run.get("conclusion"),
                         "created_at": run.get("created_at"),
-                        "updated_at": run.get("updated_at"),
-                        "html_url": run.get("html_url"),
-                        "head_sha": run.get("head_sha"),
-                        "artifact_id": artifact.get("id"),
                         "artifact_name": artifact.get("name"),
-                        "artifact_size_in_bytes": artifact.get("size_in_bytes"),
+                        "artifact_id": artifact.get("id"),
                         "stats": stats_data,
                     }
                 )
@@ -421,8 +402,7 @@ def aggregate(
         "generated_at_utc": dt.datetime.now(tz=dt.timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         ),
-        "run_count": run_counter,
-        "artifact_count": artifact_counter,
+        "artifact_count": len(entries),
         "entries": entries,
     }
     return summary
@@ -474,9 +454,8 @@ def main() -> None:
         json.dump(summary, fh, indent=2, sort_keys=True)
 
     logger.info(
-        "Wrote aggregate stats to %s (runs=%s, artifacts=%s)",
+        "Wrote aggregate stats to %s (artifacts=%s)",
         output_path,
-        summary["run_count"],
         summary["artifact_count"],
     )
 
