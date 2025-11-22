@@ -157,6 +157,7 @@ def fetch_run(session: requests.Session, repo_slug: str, run_id: int) -> dict:
 
 
 def download_artifact_zip(session: requests.Session, download_url: str, dest_dir: Path) -> Path:
+    logging.info("Downloading artifact archive from %s", download_url)
     response = session.get(download_url, stream=True)
     response.raise_for_status()
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -165,23 +166,37 @@ def download_artifact_zip(session: requests.Session, download_url: str, dest_dir
         for chunk in response.iter_content(chunk_size=8192):
             if chunk:
                 f.write(chunk)
+    logging.info("Artifact archive saved to %s (%s bytes)", temp_path, temp_path.stat().st_size)
     return temp_path
 
 
-def extract_stats_from_zip(zip_path: Path) -> tuple[str, dict] | tuple[None, None]:
+def extract_stats_from_zip(zip_path: Path) -> tuple[str | None, dict | None, list[str], bool]:
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
-            for name in zf.namelist():
+            namelist = zf.namelist()
+            logging.info("ZIP %s contains files: %s", zip_path, ", ".join(namelist))
+            stats_file: str | None = None
+            stats_data: dict | None = None
+            json_error = False
+            for name in namelist:
                 if Path(name).name == "entry_gate_stats.json":
-                    with zf.open(name) as stats_file:
+                    stats_file = name
+                    logging.info("Found entry_gate_stats.json at %s", name)
+                    with zf.open(name) as stats_file_handle:
                         try:
-                            return name, json.load(stats_file)
-                        except json.JSONDecodeError:
-                            logging.warning("Malformed JSON in %s", name)
-                            return None, None
+                            stats_data = json.load(stats_file_handle)
+                        except json.JSONDecodeError as exc:
+                            json_error = True
+                            logging.error(
+                                "Malformed JSON in %s within %s: %s", name, zip_path, exc
+                            )
+                    break
+            if not stats_file:
+                logging.warning("entry_gate_stats.json not found in %s", zip_path)
+            return stats_file, stats_data, namelist, json_error
     except zipfile.BadZipFile:
-        logging.warning("Invalid ZIP archive: %s", zip_path)
-    return None, None
+        logging.error("Invalid ZIP archive: %s", zip_path)
+    return None, None, [], False
 
 
 def aggregate(args: argparse.Namespace) -> dict:
@@ -198,6 +213,8 @@ def aggregate(args: argparse.Namespace) -> dict:
     repo_slug = get_repo_slug()
     
     entries = []
+    artifact_success_count = 0
+    artifact_error_count = 0
     run_count = 0
     artifact_count = 0
     if args.run_id:
@@ -273,13 +290,22 @@ def aggregate(args: argparse.Namespace) -> dict:
                 zip_path = download_artifact_zip(
                     session, download_url, Path(tmpdir)
                 )
-                stats_file, stats_data = extract_stats_from_zip(zip_path)
+                stats_file, stats_data, zip_contents, json_error = extract_stats_from_zip(
+                    zip_path
+                )
+                logging.info(
+                    "Artifact %s ZIP contents: %s",
+                    artifact.get("id"),
+                    ", ".join(zip_contents) if zip_contents else "<empty>",
+                )
                 if stats_data is None:
+                    artifact_error_count += 1
                     logging.warning(
                         "Skipping artifact %s due to missing or invalid stats file",
                         artifact.get("id"),
                     )
                     continue
+                artifact_success_count += 1
                 entries.append(
                     {
                         "run_id": run_id,
@@ -315,6 +341,8 @@ def aggregate(args: argparse.Namespace) -> dict:
         "workflow_id": args.workflow_id,
         "run_count": run_count,
         "artifact_count": artifact_count,
+        "artifact_success_count": artifact_success_count,
+        "artifact_error_count": artifact_error_count,
         "entries": entries,
     }
 
