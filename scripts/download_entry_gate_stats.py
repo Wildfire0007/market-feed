@@ -119,10 +119,21 @@ def list_artifacts(owner: str, repo: str, run_id: int, token: str) -> List[dict]
 
 
 def find_artifact(artifacts: List[dict], name: str) -> Optional[dict]:
-    name_lower = name.lower()
+    def _normalize(value: str) -> str:
+        return value.lower().replace("_", "-").replace(" ", "-")
+
+    target = _normalize(name)
+
+    # Exact normalized match
     for artifact in artifacts:
-        if artifact.get("name", "").lower() == name_lower:
+        if _normalize(artifact.get("name", "")) == target:
             return artifact
+
+    # Fallback: substring match to catch suffixes (e.g., entry-gate-stats-public)
+    for artifact in artifacts:
+        if target in _normalize(artifact.get("name", "")):
+            return artifact
+
     return None
 
 
@@ -191,10 +202,21 @@ def main():
         raise SystemExit("No workflow runs found.")
 
     downloaded: List[Path] = []
+    missing_artifacts: List[dict] = []
+
     for run in tqdm(runs, desc="Downloading artifacts"):
         artifacts = list_artifacts(owner, repo, run["id"], token)
         artifact = find_artifact(artifacts, ARTIFACT_NAME)
         if not artifact:
+            missing_artifacts.append(
+                {
+                    "run_id": run.get("id"),
+                    "run_number": run.get("run_number"),
+                    "branch": run.get("head_branch"),
+                    "created_at": run.get("created_at"),
+                    "available_artifacts": [a.get("name") for a in artifacts],
+                }
+            )
             continue
         path = download_artifact_archive(artifact, token, _format_download_path(run["id"]))
         if path:
@@ -202,6 +224,13 @@ def main():
 
     extracted = extract_entry_gate_stats(downloaded)
     write_summary(extracted, runs)
+    if missing_artifacts:
+        diagnostics_path = Path("missing_entry_gate_stats.json")
+        diagnostics_path.write_text(json.dumps(missing_artifacts, indent=2))
+        print(
+            "Saved diagnostics for runs without matching artifacts to"
+            f" {diagnostics_path}"
+        )
     print(f"Extracted {len(extracted)} JSON files into {SUMMARY_PATH}")
 
 
