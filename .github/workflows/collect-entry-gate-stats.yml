@@ -1,0 +1,39 @@
+name: Collect Entry Gate Stats Aggregate
+
+on:
+  workflow_dispatch:
+    inputs:
+      since_date:
+        description: "Collect runs since this date (UTC, YYYY-MM-DD)"
+        required: false
+        default: "2025-11-14"
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install requests
+
+      - name: Collect entry gate stats
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python tools/collect_entry_gate_stats.py --since-date "${{ github.event.inputs.since_date }}"
+
+      - name: Upload aggregated stats artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: entry-gate-stats-aggregate
+          path: public/debug/entry_gate_stats_aggregate_since_*.json
