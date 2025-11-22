@@ -67,7 +67,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--branch",
         default=DEFAULT_BRANCH,
-        help="Branch filter (pl. 'main')",
+        help=(
+            "Branch filter (pl. 'main'); use 'all' to disable branch filtering and "
+            "scan every branch"
+        ),
     )
     parser.add_argument(
         "--max-runs",
@@ -184,18 +187,22 @@ def iter_workflow_runs(
     max_runs: int,
 ) -> Iterable[Dict]:
     """
-    Lekéri a megadott workflow (azonosító alapján) completed runjait a főágról.
+    Lekéri a megadott workflow (azonosító alapján) completed runjait.
+
+    A branch paraméter értéke lehet "all" is: ilyenkor nem küldünk branch
+    filtert a GitHub API-nak, így minden ág runjai visszajönnek.
     """
     page = 1
     collected = 0
     while collected < max_runs:
         url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs"
-        params = {
-            "branch": branch,
+        params = {            
             "status": "completed",
             "per_page": 100,
             "page": page,
         }
+        if branch != "all":
+            params["branch"] = branch
         response = github_get(session, url, params=params)
         payload = response.json()
         runs = payload.get("workflow_runs", [])
@@ -359,6 +366,8 @@ def aggregate(
     max_runs: int,
 ) -> Dict:
     entries: List[Dict] = []
+    missing_artifacts_runs: List[Dict] = []
+    branches_seen: set[str] = set()
 
     for run in iter_workflow_runs(
         session=session,
@@ -373,6 +382,10 @@ def aggregate(
         if run_id is None:
             continue
 
+        run_branch = run.get("head_branch") or ""
+        if run_branch:
+            branches_seen.add(run_branch)
+            
         logger.debug(
             "Processing run_id=%s run_number=%s name=%r created_at=%s",
             run_id,
@@ -388,6 +401,15 @@ def aggregate(
 
         if not matches:
             logger.info("  -> no entry-gate-stats artifacts matched for this run")
+            missing_artifacts_runs.append(
+                {
+                    "run_id": run_id,
+                    "run_number": run.get("run_number"),
+                    "created_at": run.get("created_at"),
+                    "branch": run_branch,
+                    "available_artifacts": [a.get("name") for a in artifacts],
+                }
+            )
             continue
 
         logger.info(
@@ -412,6 +434,7 @@ def aggregate(
                 entries.append(
                     {
                         "created_at": run.get("created_at"),
+                        "run_branch": run_branch,
                         "artifact_name": artifact.get("name"),
                         "artifact_id": artifact.get("id"),
                         "stats": stats_data,
@@ -428,11 +451,13 @@ def aggregate(
         "repo": repo,
         "workflow_id": workflow_id,
         "branch": branch,
+        "branches_seen": sorted(branches_seen),
         "since_date_utc": since.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "generated_at_utc": dt.datetime.now(tz=dt.timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         ),
         "artifact_count": len(entries),
+        "runs_without_matching_artifacts": missing_artifacts_runs,
         "entries": entries,
     }
     return summary
