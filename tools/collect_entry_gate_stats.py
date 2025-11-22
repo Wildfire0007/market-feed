@@ -248,7 +248,7 @@ def find_matching_artifacts(artifacts: List[Dict]) -> List[Dict]:
             expired,
             artifact.get("size_in_bytes"),
         )
-        if name == "entry-gate-stats":
+        if "entry-gate-stats" in name or "entry_gate_stats" in name:
             matches.append(artifact)
     logger.debug("  matched %s artifacts by name", len(matches))
     return matches
