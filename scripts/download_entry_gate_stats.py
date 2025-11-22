@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
 Download all `entry-gate-stats.zip` artifacts from GitHub Actions runs for the
-"TD Full Pipeline (5m)" workflow on the main branch using Playwright and the
-GitHub API. Extracts the contained `entry_gate_stats.json` files and merges
-them into a single summary JSON.
+"TD Full Pipeline (5m)" workflow on the main branch using the GitHub API only.
+Extracts the contained `entry_gate_stats.json` files and merges them into a
+single summary JSON.
 
 Requirements:
-- playwright
 - requests
 - tqdm
 - zipfile (stdlib)
@@ -18,17 +17,14 @@ Assumptions:
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
-import re
 import subprocess
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 from zipfile import ZipFile
 
 import requests
-from playwright.async_api import BrowserContext, Page, async_playwright
 from tqdm import tqdm
 
 API_ROOT = "https://api.github.com"
@@ -109,45 +105,50 @@ def _format_download_path(run_id: int) -> Path:
     return DOWNLOAD_DIR / f"{run_id}-{ARTIFACT_NAME}{ARTIFACT_FILE_SUFFIX}"
 
 
-async def _ensure_authenticated_context(token: str):
-    playwright = await async_playwright().start()
-    browser = await playwright.chromium.launch(headless=True)
-    context = await browser.new_context(
-        accept_downloads=True,
-        extra_http_headers={
-            "Authorization": f"Bearer {token}",
-            "User-Agent": "market-feed-artifact-downloader",
-        },
-    )
-    return playwright, context
+def list_artifacts(owner: str, repo: str, run_id: int, token: str) -> List[dict]:
+    url = f"{API_ROOT}/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts"
+    artifacts: List[dict] = []
+    params: Optional[dict] = {"per_page": 100}
+    while url:
+        resp = _api_get(url, token, params=params)
+        payload = resp.json()
+        artifacts.extend(payload.get("artifacts", []))
+        url = payload.get("next") or resp.links.get("next", {}).get("url")
+        params = None
+    return artifacts
 
 
-async def download_artifact_for_run(context: BrowserContext, owner: str, repo: str, run_id: int) -> Optional[Path]:
-    download_path = _format_download_path(run_id)
-    if download_path.exists():
-        return download_path
+def find_artifact(artifacts: List[dict], name: str) -> Optional[dict]:
+    name_lower = name.lower()
+    for artifact in artifacts:
+        if artifact.get("name", "").lower() == name_lower:
+            return artifact
+    return None
 
-    url = f"https://github.com/{owner}/{repo}/actions/runs/{run_id}"
-    page: Page = await context.new_page()
-    await page.goto(url, wait_until="networkidle")
 
-    artifact_locator = page.get_by_role(
-        "link", name=re.compile(rf"^{re.escape(ARTIFACT_NAME)}", re.IGNORECASE)
-    )
-    try:
-        await artifact_locator.wait_for(timeout=10_000)
-    except Exception:
-        await page.close()
+def download_artifact_archive(artifact: dict, token: str, destination: Path) -> Optional[Path]:
+    if destination.exists():
+        return destination
+
+    download_url = artifact.get("archive_download_url")
+    if not download_url:
         return None
 
-    try:
-        async with page.expect_download() as download_info:
-            await artifact_locator.click()
-        download = await download_info.value
-        await download.save_as(str(download_path))
-        return download_path
-    finally:
-        await page.close()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/octet-stream",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    with requests.get(download_url, headers=headers, stream=True, timeout=60) as resp:
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("wb") as fp:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    fp.write(chunk)
+    return destination
 
 
 def extract_entry_gate_stats(zip_paths: Iterable[Path]) -> Dict[str, dict]:
@@ -181,7 +182,7 @@ def write_summary(data: Dict[str, dict], runs: List[dict]) -> None:
     SUMMARY_PATH.write_text(json.dumps(summary, indent=2))
 
 
-async def main():
+def main():
     token = _require_token()
     owner, repo = _detect_repo()
     workflow_id = get_workflow_id(owner, repo, token)
@@ -189,19 +190,15 @@ async def main():
     if not runs:
         raise SystemExit("No workflow runs found.")
 
-    DOWNLOAD_DIR.mkdir(exist_ok=True)
-
-    playwright, context = await _ensure_authenticated_context(token)
-
     downloaded: List[Path] = []
-    try:
-        for run in tqdm(runs, desc="Downloading artifacts"):
-            path = await download_artifact_for_run(context, owner, repo, run["id"])
-            if path:
-                downloaded.append(path)
-    finally:
-        await context.close()
-        await playwright.stop()
+    for run in tqdm(runs, desc="Downloading artifacts"):
+        artifacts = list_artifacts(owner, repo, run["id"], token)
+        artifact = find_artifact(artifacts, ARTIFACT_NAME)
+        if not artifact:
+            continue
+        path = download_artifact_archive(artifact, token, _format_download_path(run["id"]))
+        if path:
+            downloaded.append(path)
 
     extracted = extract_entry_gate_stats(downloaded)
     write_summary(extracted, runs)
@@ -209,4 +206,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
