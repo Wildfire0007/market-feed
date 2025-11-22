@@ -3,10 +3,10 @@
 Collect entry-gate-stats artifacts from TD Full Pipeline (5m) runs.
 
 - Lekéri a repo összes completed runját (branch = main),
-- ezek közül csak a "TD Full Pipeline (5m)" nevű workflow-runokat tartja meg,
+- a 195596686 azonosítójú workflow runjait tartja meg,
 - minden ilyen runhoz lekéri az artifactokat,
 - név alapján kiszűri az entry-gate-stats ZIP-eket,
-- kibontja belőlük az entry_gate_stats*.json fájlt,
+- kibontja belőlük az entry_gate_stats.json fájlt,
 - és mindent egyetlen összesítő JSON-ba gyűjt.
 
 A script csak a standard könyvtárat + requests-et használja.
@@ -30,7 +30,7 @@ import requests
 GITHUB_API = "https://api.github.com"
 
 DEFAULT_SINCE_DATE = "2025-11-14"
-DEFAULT_WORKFLOW_NAME = "TD Full Pipeline (5m)"
+DEFAULT_WORKFLOW_ID = 195596686
 DEFAULT_OWNER = "Wildfire0007"
 DEFAULT_REPO = "market-feed"
 DEFAULT_BRANCH = "main"
@@ -47,9 +47,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--owner", default=DEFAULT_OWNER, help="Repository owner")
     parser.add_argument("--repo", default=DEFAULT_REPO, help="Repository name")
     parser.add_argument(
-        "--workflow-name",
-        default=DEFAULT_WORKFLOW_NAME,
-        help="Target workflow run name (pl. 'TD Full Pipeline (5m)')",
+        "--workflow-id",
+        type=int,
+        default=DEFAULT_WORKFLOW_ID,
+        help="Workflow ID to collect artifacts from (default: 195596686)",
     )
     parser.add_argument(
         "--since-date",
@@ -132,35 +133,22 @@ def github_get(session: requests.Session, url: str, **kwargs) -> requests.Respon
 # Run-listázás repó szinten
 # ---------------------------------------------------------------------------
 
-def workflow_name_matches(run_name: str, target: str) -> bool:
-    """Laza, de determinisztikus egyezés a workflow névre."""
-    rn = (run_name or "").strip()
-    tn = (target or "").strip()
-    if not rn or not tn:
-        return False
-    # case-insensitive exact, plus fallback: target substring a run_name-ben
-    rn_cf = rn.casefold()
-    tn_cf = tn.casefold()
-    return rn_cf == tn_cf or tn_cf in rn_cf
-
-
-def iter_repo_runs(
+def iter_workflow_runs(
     session: requests.Session,
     owner: str,
     repo: str,
+    workflow_id: int,
     branch: str,
     since: dt.datetime,
-    workflow_name: str,
     max_runs: int,
 ) -> Iterable[Dict]:
     """
-    Végigmegy a repó összes completed runján (branch filterrel),
-    és csak azokat yieldeli, amelyek neve egyezik a kívánt workflow névvel.
+    Lekéri a megadott workflow (azonosító alapján) completed runjait a főágról.
     """
     page = 1
     collected = 0
     while collected < max_runs:
-        url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/runs"
+        url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs"
         params = {
             "branch": branch,
             "status": "completed",
@@ -192,17 +180,12 @@ def iter_repo_runs(
                     since.isoformat(),
                 )
                 return
-
-            run_name = run.get("name") or ""
-            if not workflow_name_matches(run_name, workflow_name):
-                continue
-
+            
             collected += 1
-            logger.debug(
-                "Matched run_id=%s run_number=%s name=%r created_at=%s",
+            logger.info(
+                "Processing run_id=%s run_number=%s created_at=%s",
                 run.get("id"),
-                run.get("run_number"),
-                run_name,
+                run.get("run_number"),            
                 created_at_str,
             )
             yield run
@@ -248,7 +231,7 @@ def find_matching_artifacts(artifacts: List[Dict]) -> List[Dict]:
             expired,
             artifact.get("size_in_bytes"),
         )
-        if "entry-gate-stats" in name or "entry_gate_stats" in name:
+        if name == "entry-gate-stats" or name == "entry_gate_stats":
             matches.append(artifact)
     logger.debug("  matched %s artifacts by name", len(matches))
     return matches
@@ -329,18 +312,18 @@ def aggregate(
     session: requests.Session,
     owner: str,
     repo: str,
-    workflow_name: str,
+    workflow_id: int,
     branch: str,
     since: dt.datetime,
     max_runs: int,
 ) -> Dict:
     entries: List[Dict] = []
 
-    for run in iter_repo_runs(
+    for run in iter_workflow_runs(
         session=session,
         owner=owner,
         repo=repo,
-        workflow_name=workflow_name,
+        workflow_id=workflow_id,
         branch=branch,
         since=since,
         max_runs=max_runs,
@@ -359,13 +342,19 @@ def aggregate(
 
         artifacts = list_run_artifacts(session, owner, repo, run_id)
         if not artifacts:
-            logger.debug("  -> no artifacts returned for this run")
+            logger.info("  -> no artifacts returned for this run")
         matches = find_matching_artifacts(artifacts)
 
         if not matches:
-            logger.debug("  -> no entry-gate-stats artifacts matched for this run")
+            logger.info("  -> no entry-gate-stats artifacts matched for this run")
             continue
 
+        logger.info(
+            "  -> %s matching entry-gate-stats artifacts found (of %s total)",
+            len(matches),
+            len(artifacts),
+        )
+        
         for artifact in matches:
             with tempfile.TemporaryDirectory() as tmpdir:
                 tmp_dir = Path(tmpdir)
@@ -396,7 +385,7 @@ def aggregate(
     summary = {
         "owner": owner,
         "repo": repo,
-        "workflow_name": workflow_name,
+        "workflow_id": workflow_id,
         "branch": branch,
         "since_date_utc": since.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "generated_at_utc": dt.datetime.now(tz=dt.timezone.utc).strftime(
@@ -431,8 +420,8 @@ def main() -> None:
     )
 
     logger.info(
-        "Collecting runs for workflow_name=%r, branch=%r, since=%s",
-        args.workflow_name,
+        "Collecting runs for workflow_id=%s, branch=%r, since=%s",
+        args.workflow_id,
         args.branch,
         since.isoformat(),
     )
@@ -441,7 +430,7 @@ def main() -> None:
         session=session,
         owner=args.owner,
         repo=args.repo,
-        workflow_name=args.workflow_name,
+        workflow_id=args.workflow_id
         branch=args.branch,
         since=since,
         max_runs=args.max_runs,
