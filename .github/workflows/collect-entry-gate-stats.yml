@@ -7,6 +7,10 @@ on:
         description: "Start date (UTC, YYYY-MM-DD)"
         required: true
         default: "2025-11-14"
+      max_artifacts:
+        description: "Maximum number of artifacts to aggregate"
+        required: false
+        default: "200"
 
 jobs:
   collect:
@@ -36,7 +40,7 @@ jobs:
         run: |
           python tools/collect_entry_gate_stats.py \
             --since-date "${{ github.event.inputs.since_date }}" \
-            --max-runs 500 \
+            --max-artifacts "${{ github.event.inputs.max_artifacts }}" \
             --verbose
 
       - name: Upload aggregate JSON
