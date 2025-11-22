@@ -3,6 +3,7 @@ import datetime as dt
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 import zipfile
@@ -57,6 +58,25 @@ def parse_args() -> argparse.Namespace:
         "--verbose",
         action="store_true",
         help="Enable verbose logging (DEBUG level)",
+    )
+    parser.add_argument(
+        "--run-id",
+        type=int,
+        help="Optional run ID to inspect directly instead of scanning a workflow.",
+    )
+    parser.add_argument(
+        "--artifact-name",
+        default="entry-gate-stats",
+        help="Artifact name to collect when not using regex filtering.",
+    )
+    parser.add_argument(
+        "--artifact-regex",
+        help="Optional regex to match artifact names.",
+    )
+    parser.add_argument(
+        "--artifact-case-insensitive",
+        action="store_true",
+        help="Perform case-insensitive artifact name matching.",
     )
     return parser.parse_args()
 
@@ -128,6 +148,14 @@ def fetch_paginated(session: requests.Session, url: str, params: dict):
         page += 1
 
 
+def fetch_run(session: requests.Session, repo_slug: str, run_id: int) -> dict:
+    url = f"{GITHUB_API}/repos/{repo_slug}/actions/runs/{run_id}"
+    logging.info("Fetching run details for run %s", run_id)
+    response = session.get(url)
+    response.raise_for_status()
+    return response.json()
+
+
 def download_artifact_zip(session: requests.Session, download_url: str, dest_dir: Path) -> Path:
     response = session.get(download_url, stream=True)
     response.raise_for_status()
@@ -168,50 +196,77 @@ def aggregate(args: argparse.Namespace) -> dict:
     session = requests.Session()
     session.headers.update(get_headers())
     repo_slug = get_repo_slug()
-
-    runs_url = f"{GITHUB_API}/repos/{repo_slug}/actions/workflows/{args.workflow_id}/runs"
-    params = {
-        "branch": "main",
-        "status": "completed",
-        "per_page": 100,
-    }
-
+    
     entries = []
     run_count = 0
     artifact_count = 0
+    if args.run_id:
+        logging.info(
+            "Inspecting single run %s (since-date filters are skipped)", args.run_id
+        )
+        runs = [fetch_run(session, repo_slug, args.run_id)]
+    else:
+        runs_url = f"{GITHUB_API}/repos/{repo_slug}/actions/workflows/{args.workflow_id}/runs"
+        params = {
+            "branch": "main",
+            "status": "completed",
+            "per_page": 100,
+        }
 
-    logging.info("Fetching workflow runs for %s since %s", repo_slug, since_iso)
-    for run in fetch_paginated(session, runs_url, params):
-        created_at = dt.datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
-        if created_at.tzinfo:
-            created_at = created_at.astimezone(dt.timezone.utc)
-        else:
-            created_at = created_at.replace(tzinfo=dt.timezone.utc)
-        if created_at < since_dt:
-            logging.info(
-                "Encountered run %s before since-date (%s), stopping pagination",
-                run.get("id"),
-                since_iso,
-            )
-            break
-        if args.max_runs and run_count >= args.max_runs:
-            logging.info("Reached max-runs limit (%s)", args.max_runs)
-            break
+        logging.info("Fetching workflow runs for %s since %s", repo_slug, since_iso)
+        runs = fetch_paginated(session, runs_url, params)
+
+    def artifact_matches(name: str) -> bool:
+        if args.artifact_regex:
+            flags = re.IGNORECASE if args.artifact_case_insensitive else 0
+            return re.search(args.artifact_regex, name, flags) is not None
+        if args.artifact_case_insensitive:
+            return name.casefold() == args.artifact_name.casefold()
+        return name == args.artifact_name
+
+    for run in runs:
+        run_id = run.get("id")
+        created_at_raw = run.get("created_at")
+        if not args.run_id:
+            created_at = dt.datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
+            if created_at.tzinfo:
+                created_at = created_at.astimezone(dt.timezone.utc)
+            else:
+                created_at = created_at.replace(tzinfo=dt.timezone.utc)
+            if created_at < since_dt:
+                logging.info(
+                    "Encountered run %s before since-date (%s), stopping pagination",
+                    run_id,
+                    since_iso,
+                )
+                break
+            if args.max_runs and run_count >= args.max_runs:
+                logging.info("Reached max-runs limit (%s)", args.max_runs)
+                break
 
         run_count += 1
-
-        run_id = run.get("id")
+        
         logging.info("Processing run %s (number %s)", run_id, run.get("run_number"))
         artifacts_url = run.get("artifacts_url") or (
             f"{GITHUB_API}/repos/{repo_slug}/actions/runs/{run_id}/artifacts"
         )
         artifact_params = {"per_page": 100}
+        run_artifact_total = 0
+        run_artifact_matched = 0
+        run_artifact_names: list[str] = []
         for artifact in fetch_paginated(session, artifacts_url, artifact_params):
-            if artifact.get("name") != "entry-gate-stats":
+            run_artifact_total += 1
+            artifact_name = artifact.get("name", "")
+            run_artifact_names.append(artifact_name)
+            if not artifact_matches(artifact_name):
                 continue
+            run_artifact_matched += 1
             artifact_count += 1
             logging.info(
-                "Downloading artifact %s for run %s", artifact.get("id"), run_id
+                "Downloading artifact %s (%s) for run %s",
+                artifact.get("id"),
+                artifact_name,
+                run_id,
             )
             download_url = artifact.get("archive_download_url")
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -232,12 +287,27 @@ def aggregate(args: argparse.Namespace) -> dict:
                         "created_at": run.get("created_at"),
                         "conclusion": run.get("conclusion"),
                         "artifact_id": artifact.get("id"),
-                        "artifact_name": artifact.get("name"),
+                        "artifact_name": artifact_name,
                         "stats_file": stats_file,
                         "stats": stats_data,
                     }
                 )
 
+        filtered_out = run_artifact_total - run_artifact_matched
+        logging.info(
+            "Run %s: %s artifacts found, %s matched filter, %s filtered out",
+            run_id,
+            run_artifact_total,
+            run_artifact_matched,
+            filtered_out,
+        )
+        if run_artifact_names:
+            logging.info(
+                "Run %s available artifact names: %s",
+                run_id,
+                ", ".join(sorted(set(run_artifact_names))),
+            )
+            
     aggregated = {
         "generated_at_utc": dt.datetime.utcnow().replace(microsecond=0).isoformat()
         + "Z",
