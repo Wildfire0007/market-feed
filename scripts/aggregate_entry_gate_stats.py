@@ -53,6 +53,11 @@ def parse_args() -> argparse.Namespace:
             " public/debug/entry_gate_stats_aggregate_since_<date>.json"
         ),
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging (DEBUG level)",
+    )
     return parser.parse_args()
 
 
@@ -99,7 +104,9 @@ def parse_iso_date(date_str: str) -> dt.datetime:
     except ValueError as exc:
         raise ValueError(f"Invalid date format for --since-date: {date_str}") from exc
     if parsed.tzinfo:
-        parsed = parsed.astimezone(dt.timezone.utc).replace(tzinfo=None)
+        parsed = parsed.astimezone(dt.timezone.utc)
+    else:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
     return parsed
 
 
@@ -107,10 +114,12 @@ def fetch_paginated(session: requests.Session, url: str, params: dict):
     page = 1
     while True:
         page_params = {**params, "page": page}
+        logging.debug("Requesting %s with params %s", url, page_params)
         response = session.get(url, params=page_params)
         response.raise_for_status()
         data = response.json()
         items = data.get("workflow_runs") or data.get("artifacts") or []
+        logging.debug("Received %s items on page %s", len(items), page)
         if not items:
             break
         yield from items
@@ -174,6 +183,10 @@ def aggregate(args: argparse.Namespace) -> dict:
     logging.info("Fetching workflow runs for %s since %s", repo_slug, since_iso)
     for run in fetch_paginated(session, runs_url, params):
         created_at = dt.datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
+        if created_at.tzinfo:
+            created_at = created_at.astimezone(dt.timezone.utc)
+        else:
+            created_at = created_at.replace(tzinfo=dt.timezone.utc)
         if created_at < since_dt:
             logging.info(
                 "Encountered run %s before since-date (%s), stopping pagination",
@@ -248,7 +261,10 @@ def aggregate(args: argparse.Namespace) -> dict:
 
 def main():
     args = parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)s: %(message)s",
+    )
     try:
         aggregate(args)
     except Exception as exc:  # noqa: BLE001
