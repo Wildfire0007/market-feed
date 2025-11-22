@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -33,7 +34,8 @@ from tqdm import tqdm
 API_ROOT = "https://api.github.com"
 WORKFLOW_NAME = "TD Full Pipeline (5m)"
 BRANCH = "main"
-ARTIFACT_NAME = "entry-gate-stats.zip"
+ARTIFACT_NAME = "entry-gate-stats"
+ARTIFACT_FILE_SUFFIX = ".zip"
 ARTIFACT_CONTENT = "entry_gate_stats.json"
 DOWNLOAD_DIR = Path("artifacts")
 SUMMARY_PATH = Path("entry_gate_stats_summary.json")
@@ -104,7 +106,7 @@ def list_runs(owner: str, repo: str, workflow_id: int, token: str) -> List[dict]
 
 
 def _format_download_path(run_id: int) -> Path:
-    return DOWNLOAD_DIR / f"{run_id}-{ARTIFACT_NAME}"
+    return DOWNLOAD_DIR / f"{run_id}-{ARTIFACT_NAME}{ARTIFACT_FILE_SUFFIX}"
 
 
 async def _ensure_authenticated_context(token: str):
@@ -129,7 +131,9 @@ async def download_artifact_for_run(context: BrowserContext, owner: str, repo: s
     page: Page = await context.new_page()
     await page.goto(url, wait_until="networkidle")
 
-    artifact_locator = page.get_by_role("link", name=ARTIFACT_NAME)
+    artifact_locator = page.get_by_role(
+        "link", name=re.compile(rf"^{re.escape(ARTIFACT_NAME)}", re.IGNORECASE)
+    )
     try:
         await artifact_locator.wait_for(timeout=10_000)
     except Exception:
