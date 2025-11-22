@@ -224,24 +224,39 @@ def list_run_artifacts(
     url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts"
     response = github_get(session, url)
     artifacts = response.json().get("artifacts", []) or []
+    logger.debug(
+        "run_id=%s: received %s artifacts: %s",
+        run_id,
+        len(artifacts),
+        [a.get("name") for a in artifacts],
+    )
     return artifacts
 
 
+
 def find_matching_artifacts(artifacts: List[Dict]) -> List[Dict]:
-    """entry-gate-stats / entry_gate_stats névű artifactok szűrése."""
+    """entry-gate-stats / entry_gate_stats nevű artifactok szűrése."""
     matches: List[Dict] = []
     for artifact in artifacts:
         name = (artifact.get("name") or "").lower()
-        if artifact.get("expired"):
-            # lejárt artifact – GitHub már nem engedi letölteni
-            continue
+        expired = artifact.get("expired", False)
+        logger.debug(
+            "  artifact id=%s name=%r expired=%s size=%s",
+            artifact.get("id"),
+            name,
+            expired,
+            artifact.get("size_in_bytes"),
+        )
+        # MÉG NEM szűrjük ki az expired-et, csak logoljuk:
         if (
             name == "entry-gate-stats"
             or "entry-gate-stats" in name
             or "entry_gate_stats" in name
         ):
             matches.append(artifact)
+    logger.debug("  matched %s artifacts by name", len(matches))
     return matches
+
 
 
 def download_artifact(
@@ -330,21 +345,36 @@ def aggregate(
     artifact_counter = 0
 
     for run in iter_repo_runs(
-        session=session,
-        owner=owner,
-        repo=repo,
-        branch=branch,
-        since=since,
-        workflow_name=workflow_name,
-        max_runs=max_runs,
-    ):
-        run_id = run.get("id")
-        if run_id is None:
-            continue
+    session=session,
+    owner=owner,
+    repo=repo,
+    workflow_name=workflow_name,
+    branch=branch,
+    since=since,
+    max_runs=max_runs,
+):
+    run_id = run.get("id")
+    if run_id is None:
+        continue
 
-        run_counter += 1
-        artifacts = list_run_artifacts(session, owner, repo, run_id)
-        matches = find_matching_artifacts(artifacts)
+    run_counter += 1
+    logger.debug(
+        "Processing run_id=%s run_number=%s name=%r created_at=%s",
+        run_id,
+        run.get("run_number"),
+        run.get("name"),
+        run.get("created_at"),
+    )
+
+    artifacts = list_run_artifacts(session, owner, repo, run_id)
+    if not artifacts:
+        logger.debug("  -> no artifacts returned for this run")
+    matches = find_matching_artifacts(artifacts)
+
+    if not matches:
+        logger.debug("  -> no entry-gate-stats artifacts matched for this run")
+        continue
+
 
         if not matches:
             logger.debug("No entry-gate-stats artifacts for run_id=%s", run_id)
