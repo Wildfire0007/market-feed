@@ -430,7 +430,7 @@ def main() -> None:
         session=session,
         owner=args.owner,
         repo=args.repo,
-        workflow_id=args.workflow_id
+        workflow_id=args.workflow_id,
         branch=args.branch,
         since=since,
         max_runs=args.max_runs,
