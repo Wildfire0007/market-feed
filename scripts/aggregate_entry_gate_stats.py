@@ -14,7 +14,7 @@ import requests
 
 GITHUB_API = "https://api.github.com"
 DEFAULT_WORKFLOW_ID = 195596686
-DEFAULT_SINCE_DATE = "2025-11-14"
+DEFAULT_SINCE_DATE = "2024-11-14"
 DEFAULT_OUTPUT_TEMPLATE = (
     "public/debug/entry_gate_stats_aggregate_since_{since}.json"
 )
@@ -127,6 +127,14 @@ def parse_iso_date(date_str: str) -> dt.datetime:
         parsed = parsed.astimezone(dt.timezone.utc)
     else:
         parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)
+    if parsed > now:
+        logging.warning(
+            "--since-date %s is in the future; clamping to current UTC date %s",
+            parsed.date().isoformat(),
+            now.date().isoformat(),
+        )
+        parsed = now.replace(hour=0, minute=0, second=0, microsecond=0)
     return parsed
 
 
