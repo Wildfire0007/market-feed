@@ -277,8 +277,7 @@ def aggregate(args: argparse.Namespace) -> dict:
             run_artifact_names.append(artifact_name)
             if not artifact_matches(artifact_name):
                 continue
-            run_artifact_matched += 1
-            artifact_count += 1
+            run_artifact_matched += 1            
             logging.info(
                 "Downloading artifact %s (%s) for run %s",
                 artifact.get("id"),
@@ -306,6 +305,7 @@ def aggregate(args: argparse.Namespace) -> dict:
                     )
                     continue
                 artifact_success_count += 1
+                artifact_count += 1
                 entries.append(
                     {
                         "run_id": run_id,
@@ -314,7 +314,7 @@ def aggregate(args: argparse.Namespace) -> dict:
                         "conclusion": run.get("conclusion"),
                         "artifact_id": artifact.get("id"),
                         "artifact_name": artifact_name,
-                        "stats_file": stats_file,
+                        "stats_file": Path(stats_file).as_posix() if stats_file else None,
                         "stats": stats_data,
                     }
                 )
