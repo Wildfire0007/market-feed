@@ -53,6 +53,13 @@ def parse_args() -> argparse.Namespace:
         help="Workflow ID to collect artifacts from (default: 195596686)",
     )
     parser.add_argument(
+        "--workflow-name",
+        help=(
+            "Workflow name to resolve to an ID (e.g. 'TD Full Pipeline (5m)'). "
+            "Overrides --workflow-id when provided."
+        ),
+    )
+    parser.add_argument(
         "--since-date",
         default=DEFAULT_SINCE_DATE,
         help="ISO date (YYYY-MM-DD) interpreted as UTC midnight",
@@ -127,6 +134,31 @@ def github_get(session: requests.Session, url: str, **kwargs) -> requests.Respon
             f"GitHub API request failed ({response.status_code}) for {url}: {response.text}"
         )
     return response
+
+
+def resolve_workflow_id(
+    session: requests.Session, owner: str, repo: str, workflow_name: str
+) -> int:
+    """Resolve a workflow name to its numeric ID using the GitHub API."""
+
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/workflows"
+    response = github_get(session, url, params={"per_page": 100})
+    workflows = response.json().get("workflows", []) or []
+
+    for workflow in workflows:
+        name = (workflow.get("name") or "").casefold()
+        if name == workflow_name.casefold():
+            workflow_id = workflow.get("id")
+            if workflow_id is None:
+                break
+            logger.info(
+                "Resolved workflow name %r to id=%s", workflow_name, workflow_id
+            )
+            return int(workflow_id)
+
+    raise SystemExit(
+        f"Workflow named {workflow_name!r} not found in {owner}/{repo}."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -419,9 +451,15 @@ def main() -> None:
         }
     )
 
+    workflow_id = (
+        resolve_workflow_id(session, args.owner, args.repo, args.workflow_name)
+        if args.workflow_name
+        else args.workflow_id
+    )
+    
     logger.info(
         "Collecting runs for workflow_id=%s, branch=%r, since=%s",
-        args.workflow_id,
+        workflow_id,
         args.branch,
         since.isoformat(),
     )
@@ -430,7 +468,7 @@ def main() -> None:
         session=session,
         owner=args.owner,
         repo=args.repo,
-        workflow_id=args.workflow_id,
+        workflow_id=workflow_id,
         branch=args.branch,
         since=since,
         max_runs=args.max_runs,
