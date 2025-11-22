@@ -29,7 +29,7 @@ import requests
 
 GITHUB_API = "https://api.github.com"
 
-DEFAULT_SINCE_DATE = "2025-11-14"
+DEFAULT_SINCE_DATE = "2024-11-14"
 DEFAULT_WORKFLOW_ID = 195596686
 DEFAULT_OWNER = "Wildfire0007"
 DEFAULT_REPO = "market-feed"
@@ -114,8 +114,17 @@ def parse_utc_date(date_str: str) -> dt.datetime:
         base_date = dt.datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError as exc:
         raise SystemExit(f"Invalid --since-date value '{date_str}': {exc}") from exc
-    return base_date.replace(tzinfo=dt.timezone.utc)
-
+    parsed = base_date.replace(tzinfo=dt.timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)
+    if parsed > now:
+        logger.warning(
+            "--since-date %s is in the future; clamping to current UTC date %s",
+            parsed.date().isoformat(),
+            now.date().isoformat(),
+        )
+        parsed = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return parsed
+    
 
 def parse_github_timestamp(value: str) -> dt.datetime:
     # GitHub: "2025-11-22T10:30:53Z"
