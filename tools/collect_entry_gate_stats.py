@@ -420,12 +420,13 @@ def aggregate_entry_gate_stats(
                 continue
 
         stats = extract_stats_from_artifact(zip_path)
-            if stats is None:
-                continue
+
+        if stats is None:
+            continue
 
         workflow_run = artifact.get("workflow_run") or {}
         run_id = workflow_run.get("id")
-        run_details = fetch_workflow_run(session, owner, repo, run_id)
+        run_details = fetch_workflow_run(session, owner, repo, run_id) if run_id else None
 
         entries.append(
             {
