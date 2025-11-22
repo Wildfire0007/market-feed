@@ -346,38 +346,33 @@ def aggregate(
 
     for run in iter_repo_runs(
     session=session,
-    owner=owner,
-    repo=repo,
-    workflow_name=workflow_name,
-    branch=branch,
-    since=since,
-    max_runs=max_runs,
-):
-    run_id = run.get("id")
-    if run_id is None:
-        continue
+        owner=owner,
+        repo=repo,
+        workflow_name=workflow_name,
+        branch=branch,
+        since=since,
+        max_runs=max_runs,
+    ):
+        run_id = run.get("id")
+        if run_id is None:
+            continue
 
     run_counter += 1
-    logger.debug(
-        "Processing run_id=%s run_number=%s name=%r created_at=%s",
-        run_id,
-        run.get("run_number"),
-        run.get("name"),
-        run.get("created_at"),
-    )
+        logger.debug(
+            "Processing run_id=%s run_number=%s name=%r created_at=%s",
+            run_id,
+            run.get("run_number"),
+            run.get("name"),
+            run.get("created_at"),
+        )
 
-    artifacts = list_run_artifacts(session, owner, repo, run_id)
-    if not artifacts:
-        logger.debug("  -> no artifacts returned for this run")
-    matches = find_matching_artifacts(artifacts)
-
-    if not matches:
-        logger.debug("  -> no entry-gate-stats artifacts matched for this run")
-        continue
-
+        artifacts = list_run_artifacts(session, owner, repo, run_id)
+        if not artifacts:
+            logger.debug("  -> no artifacts returned for this run")
+        matches = find_matching_artifacts(artifacts)
 
         if not matches:
-            logger.debug("No entry-gate-stats artifacts for run_id=%s", run_id)
+            logger.debug("  -> no entry-gate-stats artifacts matched for this run")
             continue
 
         for artifact in matches:
