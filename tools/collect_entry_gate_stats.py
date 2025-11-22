@@ -19,6 +19,7 @@ import datetime as dt
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import zipfile
@@ -31,6 +32,7 @@ GITHUB_API = "https://api.github.com"
 
 DEFAULT_SINCE_DATE = "2024-11-14"
 DEFAULT_WORKFLOW_ID = 195596686
+DEFAULT_WORKFLOW_NAME = "TD Full Pipeline (5m)"
 DEFAULT_OWNER = "Wildfire0007"
 DEFAULT_REPO = "market-feed"
 DEFAULT_BRANCH = "main"
@@ -136,11 +138,54 @@ def parse_github_timestamp(value: str) -> dt.datetime:
     )
 
 
+def log_token_metadata(session: requests.Session) -> Dict[str, Optional[str]]:
+    """Log token scopes and user for troubleshooting permission issues."""
+
+    url = f"{GITHUB_API}/user"
+    metadata: Dict[str, Optional[str]] = {
+        "login": None,
+        "scopes": None,
+        "status": None,
+    }
+    try:
+        response = session.get(url, timeout=15)
+    except requests.RequestException as exc:
+        logger.warning("Unable to query token metadata from %s: %s", url, exc)
+        return metadata
+
+    metadata["status"] = str(response.status_code)
+    scopes = response.headers.get("X-OAuth-Scopes", "")
+    metadata["scopes"] = scopes or None
+    if response.status_code == 200:
+        login = response.json().get("login")
+        metadata["login"] = login
+        logger.info(
+            "Token OK for user=%s (scopes: %s) via %s",
+            login,
+            scopes or "<none>",
+            url,
+        )
+    else:
+        logger.warning(
+            "Token metadata request returned %s; scopes header=%r; body=%s",
+            response.status_code,
+            scopes or "<missing>",
+            response.text,
+        )
+    return metadata
+
+
 def github_get(session: requests.Session, url: str, **kwargs) -> requests.Response:
     try:
         response = session.get(url, timeout=30, **kwargs)
     except requests.RequestException as exc:
         raise RuntimeError(f"GitHub API request failed for {url}: {exc}") from exc
+    logger.debug(
+        "GET %s -> %s (rate_limit_remaining=%s)",
+        response.url,
+        response.status_code,
+        response.headers.get("X-RateLimit-Remaining"),
+    )
     if response.status_code >= 400:
         raise RuntimeError(
             f"GitHub API request failed ({response.status_code}) for {url}: {response.text}"
@@ -173,6 +218,30 @@ def resolve_workflow_id(
     )
 
 
+def fetch_workflow_metadata(
+    session: requests.Session, owner: str, repo: str, workflow_id: int
+) -> Dict:
+    """Fetch metadata for the selected workflow to confirm the ID is valid."""
+
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/workflows/{workflow_id}"
+    try:
+        response = github_get(session, url)
+    except RuntimeError as exc:
+        raise SystemExit(
+            f"Failed to load workflow metadata for id={workflow_id}: {exc}"
+        ) from exc
+
+    workflow = response.json()
+    logger.info(
+        "Workflow id=%s resolved to name=%r path=%r state=%r",
+        workflow_id,
+        workflow.get("name"),
+        workflow.get("path"),
+        workflow.get("state"),
+    )
+    return workflow
+
+
 # ---------------------------------------------------------------------------
 # Run-listázás repó szinten
 # ---------------------------------------------------------------------------
@@ -196,13 +265,14 @@ def iter_workflow_runs(
     collected = 0
     while collected < max_runs:
         url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs"
-        params = {            
+        params = {
             "status": "completed",
             "per_page": 100,
             "page": page,
         }
         if branch != "all":
             params["branch"] = branch
+        logger.debug("Requesting runs page=%s params=%s", page, params)
         response = github_get(session, url, params=params)
         payload = response.json()
         runs = payload.get("workflow_runs", [])
@@ -210,6 +280,13 @@ def iter_workflow_runs(
             logger.info("No more workflow runs returned (page %s).", page)
             break
 
+        logger.debug(
+            "Page %s returned %s runs (latest created_at=%s)",
+            page,
+            len(runs),
+            runs[0].get("created_at") if runs else None,
+        )
+        
         for run in runs:
             created_at_str = run.get("created_at")
             if not created_at_str:
@@ -253,33 +330,50 @@ def list_run_artifacts(
     session: requests.Session, owner: str, repo: str, run_id: int
 ) -> List[Dict]:
     url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts"
+    logger.debug("Requesting artifacts for run_id=%s via %s", run_id, url)
     response = github_get(session, url)
     artifacts = response.json().get("artifacts", []) or []
     logger.debug(
-        "run_id=%s: received %s artifacts: %s",
+        "run_id=%s: received %s artifacts (scopes=%s): %s",
         run_id,
         len(artifacts),
+        response.headers.get("X-OAuth-Scopes"),
         [a.get("name") for a in artifacts],
     )
     return artifacts
 
 
 
+ENTRY_GATE_CANONICAL = "entrygatestats"
+
+
+def normalize_artifact_name(name: str) -> str:
+    """Normalize artifact name for matching (ignore punctuation and casing)."""
+
+    return re.sub(r"[^a-z0-9]+", "", name.casefold())
+
+
+def is_entry_gate_artifact(name: str) -> bool:
+    normalized = normalize_artifact_name(name)
+    return ENTRY_GATE_CANONICAL in normalized
+
+
 def find_matching_artifacts(artifacts: List[Dict]) -> List[Dict]:
     """entry-gate-stats nevű artifactok szűrése."""
     matches: List[Dict] = []
     for artifact in artifacts:
-        name_raw = artifact.get("name") or ""
-        name = name_raw.casefold()
+        name_raw = artifact.get("name") or ""        
         expired = artifact.get("expired", False)
+        normalized = normalize_artifact_name(name_raw)
         logger.debug(
-            "  artifact id=%s name=%r expired=%s size=%s",
+            "  artifact id=%s name=%r normalized=%r expired=%s size=%s",
             artifact.get("id"),
             name_raw,
+            normalized,
             expired,
             artifact.get("size_in_bytes"),
         )
-        if name == "entry-gate-stats" or name == "entry_gate_stats":
+        if is_entry_gate_artifact(name_raw):
             matches.append(artifact)
     logger.debug("  matched %s artifacts by name", len(matches))
     return matches
@@ -364,6 +458,8 @@ def aggregate(
     branch: str,
     since: dt.datetime,
     max_runs: int,
+    workflow_metadata: Optional[Dict] = None,
+    token_metadata: Optional[Dict] = None,
 ) -> Dict:
     entries: List[Dict] = []
     missing_artifacts_runs: List[Dict] = []
@@ -394,6 +490,8 @@ def aggregate(
             run.get("created_at"),
         )
 
+        artifacts_url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts"
+        logger.debug("Artifacts API url for run_id=%s: %s", run_id, artifacts_url)
         artifacts = list_run_artifacts(session, owner, repo, run_id)
         if not artifacts:
             logger.info("  -> no artifacts returned for this run")
@@ -407,6 +505,7 @@ def aggregate(
                     "run_number": run.get("run_number"),
                     "created_at": run.get("created_at"),
                     "branch": run_branch,
+                    "artifacts_url": artifacts_url,
                     "available_artifacts": [a.get("name") for a in artifacts],
                 }
             )
@@ -450,12 +549,19 @@ def aggregate(
         "owner": owner,
         "repo": repo,
         "workflow_id": workflow_id,
+        "workflow": {
+            "id": workflow_id,
+            "name": (workflow_metadata or {}).get("name"),
+            "path": (workflow_metadata or {}).get("path"),
+            "state": (workflow_metadata or {}).get("state"),
+        },
         "branch": branch,
         "branches_seen": sorted(branches_seen),
         "since_date_utc": since.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "generated_at_utc": dt.datetime.now(tz=dt.timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         ),
+        "token_metadata": token_metadata or {},
         "artifact_count": len(entries),
         "runs_without_matching_artifacts": missing_artifacts_runs,
         "entries": entries,
@@ -485,15 +591,30 @@ def main() -> None:
         }
     )
 
+    token_metadata = log_token_metadata(session)
+    
     workflow_id = (
         resolve_workflow_id(session, args.owner, args.repo, args.workflow_name)
         if args.workflow_name
         else args.workflow_id
     )
-    
+    workflow_metadata = fetch_workflow_metadata(
+        session, args.owner, args.repo, workflow_id
+    )
+    workflow_name = workflow_metadata.get("name")
+    expected_name = args.workflow_name or DEFAULT_WORKFLOW_NAME
+    if workflow_name and workflow_name.casefold() != expected_name.casefold():
+        logger.warning(
+            "Workflow name mismatch: expected %r but API returned %r for id=%s",
+            expected_name,
+            workflow_name,
+            workflow_id,
+        )
+        
     logger.info(
-        "Collecting runs for workflow_id=%s, branch=%r, since=%s",
+        "Collecting runs for workflow_id=%s (name=%r), branch=%r, since=%s",
         workflow_id,
+        workflow_name,
         args.branch,
         since.isoformat(),
     )
@@ -506,6 +627,8 @@ def main() -> None:
         branch=args.branch,
         since=since,
         max_runs=args.max_runs,
+        workflow_metadata=workflow_metadata,
+        token_metadata=token_metadata,
     )
 
     output_path = build_output_path(args.output, since)
