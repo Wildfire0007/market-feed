@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -191,6 +192,35 @@ def github_get(session: requests.Session, url: str, **kwargs) -> requests.Respon
             f"GitHub API request failed ({response.status_code}) for {url}: {response.text}"
         )
     return response
+
+
+def is_rate_limited_response(response: requests.Response) -> bool:
+    """Return True when GitHub signals a rate limit (especially for file downloads)."""
+
+    if response.status_code != 403:
+        return False
+
+    try:
+        payload_message = (response.json() or {}).get("message", "")
+    except ValueError:
+        payload_message = ""
+
+    return "rate limit exceeded" in payload_message.casefold()
+
+
+def compute_rate_limit_wait_seconds(response: requests.Response) -> float:
+    """Calculate how long we should wait before retrying after a rate-limit response."""
+
+    reset_header = response.headers.get("X-RateLimit-Reset")
+    if reset_header and reset_header.isdigit():
+        reset_epoch = int(reset_header)
+        now = time.time()
+        wait_seconds = max(reset_epoch - now, 0)
+        # Add a tiny buffer to avoid hitting the boundary again.
+        return min(wait_seconds + 3, 300)
+
+    # Fallback: short pause to let burst limits recover.
+    return 30
 
 
 def resolve_workflow_id(
@@ -389,22 +419,47 @@ def download_artifact(
     dest_dir.mkdir(parents=True, exist_ok=True)
     tmp_zip = dest_dir / f"artifact_{artifact['id']}.zip"
     headers = {"Accept": "application/zip"}
-    try:
-        with session.get(download_url, headers=headers, timeout=60, stream=True) as resp:
-            if resp.status_code >= 400:
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = session.get(download_url, headers=headers, timeout=60, stream=True)
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f"Failed to download artifact {artifact.get('name') or artifact.get('id')} "
+                f"from {download_url}: {exc}"
+            ) from exc
+
+        if is_rate_limited_response(resp):
+            wait_seconds = compute_rate_limit_wait_seconds(resp)
+            resp.close()
+            if attempt == max_attempts:
                 raise RuntimeError(
-                    f"Failed to download artifact {artifact.get('name')} "
-                    f"({resp.status_code}): {resp.text}"
+                    "GitHub rate limit exceeded for artifact downloads; "
+                    f"waited {wait_seconds:.0f}s but retries exhausted"
                 )
+                
+            logger.warning(
+                "GitHub download rate limit hit (artifact id=%s). Waiting %.0fs before retry.",
+                artifact.get("id"),
+                wait_seconds,
+            )
+            time.sleep(wait_seconds)
+            continue
+
+        if resp.status_code >= 400:
+            error_payload = resp.text
+            resp.close()
+            raise RuntimeError(
+                f"Failed to download artifact {artifact.get('name')} "
+                f"({resp.status_code}): {error_payload}"
+            )
+
+        with resp:
             with tmp_zip.open("wb") as fh:
                 for chunk in resp.iter_content(chunk_size=8192):
                     if chunk:
                         fh.write(chunk)
-    except requests.RequestException as exc:
-        raise RuntimeError(
-            f"Failed to download artifact {artifact.get('name') or artifact.get('id')} "
-            f"from {download_url}: {exc}"
-        ) from exc
+        break
     return tmp_zip
 
 
