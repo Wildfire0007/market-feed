@@ -107,12 +107,16 @@ def configure_logging(verbose: bool) -> None:
 
 
 def load_token() -> str:
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_PAT")
-    if not token:
-        sys.exit(
-            "GitHub token is required. Set the GITHUB_TOKEN or GITHUB_PAT environment variable."
-        )
-    return token
+    for env_name in ("GITHUB_TOKEN", "GITHUB_PAT", "ENTRY_GATE_STATS_PAT"):
+        token = os.environ.get(env_name)
+        if token:
+            logger.debug("Loaded GitHub token from %s", env_name)
+            return token
+
+    sys.exit(
+        "GitHub token is required. Set the GITHUB_TOKEN, GITHUB_PAT, or "
+        "ENTRY_GATE_STATS_PAT environment variable."
+    )
 
 
 def parse_utc_date(date_str: str) -> dt.datetime:
@@ -392,74 +396,68 @@ def find_matching_artifacts(artifacts: List[Dict]) -> List[Dict]:
     """entry-gate-stats nevű artifactok szűrése."""
     matches: List[Dict] = []
     for artifact in artifacts:
-        name_raw = artifact.get("name") or ""        
-        expired = artifact.get("expired", False)
-        normalized = normalize_artifact_name(name_raw)
+        name_raw = (artifact.get("name") or "").strip()
+        name_lower = name_raw.casefold()
+        expired = artifact.get("expired", False)        
         logger.debug(
-            "  artifact id=%s name=%r normalized=%r expired=%s size=%s",
+            "  artifact id=%s name=%r expired=%s size=%s",
             artifact.get("id"),
             name_raw,
-            normalized,
             expired,
             artifact.get("size_in_bytes"),
         )
-        if is_entry_gate_artifact(name_raw):
+        
+        if name_lower == "entry-gate-stats":
             matches.append(artifact)
+            continue
+        if "entry-gate-stats" in name_lower or "entry_gate_stats" in name_lower:
+            matches.append(artifact)
+            
     logger.debug("  matched %s artifacts by name", len(matches))
     return matches
 
 
 
 def download_artifact(
-    session: requests.Session, artifact: Dict, dest_dir: Path
+    session: requests.Session, owner: str, repo: str, artifact: Dict, dest_dir: Path
 ) -> Path:
-    download_url = artifact.get("archive_download_url")
-    if not download_url:
-        raise RuntimeError(f"Artifact {artifact.get('name')} missing download URL")
+    artifact_id = artifact.get("id")
+    if artifact_id is None:
+        raise RuntimeError("Artifact missing id; cannot download")
+
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip"
     dest_dir.mkdir(parents=True, exist_ok=True)
-    tmp_zip = dest_dir / f"artifact_{artifact['id']}.zip"
-    headers = {"Accept": "application/zip"}
-    max_attempts = 2
-    for attempt in range(1, max_attempts + 1):
-        try:
-            resp = session.get(download_url, headers=headers, timeout=60, stream=True)
-        except requests.RequestException as exc:
-            raise RuntimeError(
-                f"Failed to download artifact {artifact.get('name') or artifact.get('id')} "
-                f"from {download_url}: {exc}"
-            ) from exc
+    tmp_zip = dest_dir / f"artifact_{artifact_id}.zip"
 
-        if is_rate_limited_response(resp):
-            wait_seconds = compute_rate_limit_wait_seconds(resp)
-            resp.close()
-            if attempt == max_attempts:
-                raise RuntimeError(
-                    "GitHub rate limit exceeded for artifact downloads; "
-                    f"waited {wait_seconds:.0f}s but retries exhausted"
-                )
-                
-            logger.warning(
-                "GitHub download rate limit hit (artifact id=%s). Waiting %.0fs before retry.",
-                artifact.get("id"),
-                wait_seconds,
-            )
-            time.sleep(wait_seconds)
-            continue
+    headers = {"Accept": "application/vnd.github+json"}
+    try:
+        resp = session.get(
+            url,
+            headers=headers,
+            timeout=60,
+            allow_redirects=True,
+            stream=True,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Failed to download artifact {artifact.get('name') or artifact_id} "
+            f"from {url}: {exc}"
+        ) from exc
 
-        if resp.status_code >= 400:
-            error_payload = resp.text
-            resp.close()
-            raise RuntimeError(
-                f"Failed to download artifact {artifact.get('name')} "
-                f"({resp.status_code}): {error_payload}"
-            )
+    if resp.status_code >= 400:
+        error_payload = resp.text
+        resp.close()
+        raise RuntimeError(
+            f"Failed to download artifact {artifact.get('name')} "
+            f"({resp.status_code}) from {url}: {error_payload}"
+        )
 
-        with resp:
-            with tmp_zip.open("wb") as fh:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    if chunk:
-                        fh.write(chunk)
-        break
+    with resp:
+        with tmp_zip.open("wb") as fh:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    fh.write(chunk)
+        
     return tmp_zip
 
 
@@ -469,9 +467,13 @@ def select_json_file(extracted_dir: Path) -> Optional[Path]:
     if not json_files:
         return None
 
+    if len(json_files) == 1:
+        return json_files[0]
+        
     for candidate in json_files:
-        if candidate.name == "entry_gate_stats.json":
+        if candidate.name.casefold() == "entry_gate_stats.json":
             return candidate
+            
     return json_files[0]
 
 
@@ -517,8 +519,9 @@ def aggregate(
     token_metadata: Optional[Dict] = None,
 ) -> Dict:
     entries: List[Dict] = []
-    missing_artifacts_runs: List[Dict] = []
-    branches_seen: set[str] = set()
+    runs_without_matching_artifacts: List[Dict] = []
+    artifact_count = 0
+    runs_examined = 0
 
     for run in iter_workflow_runs(
         session=session,
@@ -529,39 +532,52 @@ def aggregate(
         since=since,
         max_runs=max_runs,
     ):
+        runs_examined += 1
         run_id = run.get("id")
         if run_id is None:
             continue
 
-        run_branch = run.get("head_branch") or ""
-        if run_branch:
-            branches_seen.add(run_branch)
-            
+        run_branch = run.get("head_branch")
+        artifacts_url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts"            
         logger.debug(
-            "Processing run_id=%s run_number=%s name=%r created_at=%s",
+            "Processing run_id=%s run_number=%s created_at=%s",
             run_id,
-            run.get("run_number"),
-            run.get("name"),
+            run.get("run_number"),            
             run.get("created_at"),
         )
 
-        artifacts_url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts"
-        logger.debug("Artifacts API url for run_id=%s: %s", run_id, artifacts_url)
-        artifacts = list_run_artifacts(session, owner, repo, run_id)
-        if not artifacts:
-            logger.info("  -> no artifacts returned for this run")
-        matches = find_matching_artifacts(artifacts)
-
-        if not matches:
-            logger.info("  -> no entry-gate-stats artifacts matched for this run")
-            missing_artifacts_runs.append(
+        try:
+            artifacts = list_run_artifacts(session, owner, repo, run_id)
+        except RuntimeError as exc:
+            logger.warning("Failed to list artifacts for run %s: %s", run_id, exc)
+            runs_without_matching_artifacts.append(
                 {
                     "run_id": run_id,
                     "run_number": run.get("run_number"),
-                    "created_at": run.get("created_at"),
                     "branch": run_branch,
+                    "created_at": run.get("created_at"),
+                    "artifacts_url": artifacts_url,
+                    "available_artifacts": [],
+                    "reason": f"artifact listing failed: {exc}",
+                }
+            )
+            continue
+            
+        if not artifacts:
+            logger.info("  -> no artifacts returned for this run")
+
+        matches = find_matching_artifacts(artifacts)
+        if not matches:
+            logger.info("  -> no entry-gate-stats artifacts matched for this run")
+            runs_without_matching_artifacts.append(
+                {
+                    "run_id": run_id,
+                    "run_number": run.get("run_number"),                    
+                    "branch": run_branch,
+                    "created_at": run.get("created_at"),
                     "artifacts_url": artifacts_url,
                     "available_artifacts": [a.get("name") for a in artifacts],
+                    "reason": "no matching entry-gate-stats artifact",
                 }
             )
             continue
@@ -571,30 +587,66 @@ def aggregate(
             len(matches),
             len(artifacts),
         )
-        
+
         for artifact in matches:
             with tempfile.TemporaryDirectory() as tmpdir:
                 tmp_dir = Path(tmpdir)
                 try:
-                    zip_path = download_artifact(session, artifact, tmp_dir)
+                    zip_path = download_artifact(
+                        session, owner, repo, artifact, tmp_dir
+                    )
                 except RuntimeError as exc:
                     logger.warning("%s", exc)
+                    runs_without_matching_artifacts.append(
+                        {
+                            "run_id": run_id,
+                            "run_number": run.get("run_number"),
+                            "branch": run_branch,
+                            "created_at": run.get("created_at"),
+                            "artifacts_url": artifacts_url,
+                            "available_artifacts": [a.get("name") for a in artifacts],
+                            "reason": f"download failed: {exc}",
+                        }
+                    )
                     continue
 
                 stats_data = extract_stats_from_artifact(zip_path)
                 if stats_data is None:
+                    runs_without_matching_artifacts.append(
+                        {
+                            "run_id": run_id,
+                            "run_number": run.get("run_number"),
+                            "branch": run_branch,
+                            "created_at": run.get("created_at"),
+                            "artifacts_url": artifacts_url,
+                            "available_artifacts": [a.get("name") for a in artifacts],
+                            "reason": "failed to parse artifact contents",
+                        }
+                    )
                     continue
 
+                artifact_count += 1
+                logger.debug(
+                    "Successfully downloaded and parsed artifact id=%s name=%r for run %s",
+                    artifact.get("id"),
+                    artifact.get("name"),
+                    run_id,
+                )
+                
                 entries.append(
                     {
-                        "created_at": run.get("created_at"),
-                        "run_branch": run_branch,
-                        "artifact_name": artifact.get("name"),
+                        "run_id": run_id,
+                        "run_number": run.get("run_number"),
+                        "branch": run_branch,
+                        "created_at": run.get("created_at"),                        
                         "artifact_id": artifact.get("id"),
+                        "artifact_name": artifact.get("name"),
                         "stats": stats_data,
                     }
                 )
 
+    logger.debug("Examined %s workflow runs", runs_examined)
+    
     entries.sort(
         key=lambda item: (item.get("created_at") or "", item.get("artifact_id") or 0),
         reverse=True,
@@ -603,23 +655,15 @@ def aggregate(
     summary = {
         "owner": owner,
         "repo": repo,
-        "workflow_id": workflow_id,
-        "workflow": {
-            "id": workflow_id,
-            "name": (workflow_metadata or {}).get("name"),
-            "path": (workflow_metadata or {}).get("path"),
-            "state": (workflow_metadata or {}).get("state"),
-        },
+        "workflow_id": workflow_id,        
         "branch": branch,
-        "branches_seen": sorted(branches_seen),
-        "since_date_utc": since.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "since_date_utc": since.isoformat().replace("+00:00", "Z"),
         "generated_at_utc": dt.datetime.now(tz=dt.timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         ),
-        "token_metadata": token_metadata or {},
-        "artifact_count": len(entries),
-        "runs_without_matching_artifacts": missing_artifacts_runs,
+        "artifact_count": artifact_count,
         "entries": entries,
+        "runs_without_matching_artifacts": runs_without_matching_artifacts,
     }
     return summary
 
