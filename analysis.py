@@ -237,6 +237,12 @@ def _entry_threshold_profile_name(asset: str) -> str:
         settings_default = settings.ENTRY_THRESHOLD_PROFILE_NAME  # type: ignore[attr-defined]
     except Exception:
         settings_default = ENTRY_THRESHOLD_PROFILE_NAME
+    # If the analysis module explicitly overrides the active profile (e.g. via
+    # monkeypatching in tests), prefer that value over any asset-specific mapping
+    # from the settings module. This keeps runtime overrides authoritative while
+    # still defaulting to the configured mapping when no override is present.
+    if analysis_default and analysis_default != settings_default:
+        return str(analysis_default)
     if not profile_name or profile_name == settings_default:
         profile_name = analysis_default
     return str(profile_name)
@@ -11211,6 +11217,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
