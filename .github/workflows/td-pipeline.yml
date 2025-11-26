@@ -2,6 +2,11 @@ name: TD Full Pipeline (5m)
 
 on:
   workflow_dispatch:
+    inputs:
+      skip_rollback_guard:
+        description: "Skip predeploy status guard (rollback mode)"
+        required: false
+        default: "false"
   schedule:
     - cron: "*/6 * * * *"   # 6 percenként (UTC)
 
@@ -197,6 +202,11 @@ jobs:
       - name: Validate public/status.json
         run: python -m json.tool public/status.json > /dev/null
         
+      - name: Enforce predeploy status health
+        env:
+          PREDEPLOY_SKIP_FOR_ROLLBACK: ${{ github.event.inputs.skip_rollback_guard || '' }}
+        run: python scripts/predeploy_guard.py --status-path public/status.json
+      
       - name: Verify analysis.py hash against origin/main
         run: |
           set -euo pipefail
