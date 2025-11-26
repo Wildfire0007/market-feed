@@ -3379,14 +3379,69 @@ def intervention_band(score: int, bands: Dict[str, List[int]]) -> str:
     return "LOW"
 
 
+def _sentiment_normalizer_rollback_enabled() -> bool:
+    raw = str(os.getenv("SENTIMENT_NORMALIZER_ROLLBACK", "0")).strip().lower()
+    return raw not in {"0", "false", "no", "off", ""}
+
+
 def _normalize_btcusd_sentiment(signal: SentimentSignal) -> float:
-    bias = (signal.bias or "").lower()
-    direction = 1.0
-    if any(flag in bias for flag in ("bear", "risk_off", "usd_bullish")):
-        direction = -1.0
-    elif any(flag in bias for flag in ("btc_bullish", "risk_on", "bull")):
+    if _sentiment_normalizer_rollback_enabled():
+        bias = (signal.bias or "").lower()
         direction = 1.0
-    return signal.score * direction
+        if any(flag in bias for flag in ("bear", "risk_off", "usd_bullish")):
+            direction = -1.0
+        elif any(flag in bias for flag in ("btc_bullish", "risk_on", "bull")):
+            direction = 1.0
+        return signal.score * direction
+
+    bias: Optional[str] = None
+    score: Optional[float] = None
+
+    if isinstance(signal, SentimentSignal):
+        bias = signal.bias
+        score = signal.score
+    elif hasattr(signal, "bias") and hasattr(signal, "score"):
+        bias = getattr(signal, "bias", None)
+        score = getattr(signal, "score", None)
+    elif isinstance(signal, (list, tuple)):
+        if len(signal) >= 2:
+            first, second = signal[0], signal[1]
+            if isinstance(first, (int, float)) and isinstance(second, str):
+                score = first
+                bias = second
+            elif isinstance(first, str) and isinstance(second, (int, float)):
+                bias = first
+                score = second
+            else:
+                try:
+                    score = float(first)
+                except Exception:
+                    score = None
+                bias = str(second) if second is not None else None
+
+    if score is None or bias is None:
+        LOGGER.warning(
+            "Érvénytelen BTCUSD sentiment típus: %s", type(signal), extra={"sentiment_type_error": True}
+        )
+        bias = "neutral"
+        score = 0.0
+
+    bias_value = (bias or "").lower()
+    direction = 0.0 if bias_value == "neutral" else 1.0
+    if any(flag in bias_value for flag in ("bear", "risk_off", "usd_bullish")):
+        direction = -1.0
+    elif any(flag in bias_value for flag in ("btc_bullish", "risk_on", "bull")):
+        direction = 1.0
+
+    try:
+        score_val = float(score)
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "Sentiment score nem konvertálható: %r", score, extra={"sentiment_type_error": True}
+        )
+        score_val = 0.0
+
+    return score_val * direction
 
 
 def _sentiment_points_btcusd(
@@ -11217,6 +11272,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
