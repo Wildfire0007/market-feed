@@ -746,6 +746,13 @@ _ANALYSIS_BASE_DIR = Path(__file__).resolve().parent
 ENTRY_GATE_LOG_DIR: Path = (
     _ANALYSIS_BASE_DIR / PUBLIC_DIR / "debug" / "entry_gates"
 ).resolve()
+ENTRY_GATE_STATS_PATH: Path = (
+    _ANALYSIS_BASE_DIR / PUBLIC_DIR / "debug" / "entry_gate_stats.json"
+).resolve()
+PROB_STACK_SNAPSHOT_FILENAME = "probability_stack_snapshot.json"
+PROB_STACK_GAP_ENV_DISABLE = "DISABLE_PROB_STACK_GAP_FALLBACK"
+PROB_STACK_GAP_STALE_MINUTES = 10
+ENTRY_GATE_EXTRA_LOGS_DISABLE = "DISABLE_ENTRY_GATE_EXTRA_LOGS"
 MACRO_DATA_DIR = Path("data") / "macro"
 MACRO_LOCKOUT_FILE = MACRO_DATA_DIR / "lockout_by_asset.json"
 
@@ -1193,6 +1200,22 @@ def log_entry_gate_decision(
         LOGGER.debug("entry_gate_log_failed", exc_info=True)
 
 
+def _append_entry_gate_stats(summary: Dict[str, Any]) -> None:
+    if os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
+        return
+    try:
+        ENTRY_GATE_STATS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        existing = load_json(str(ENTRY_GATE_STATS_PATH)) if ENTRY_GATE_STATS_PATH.exists() else {}
+        if not isinstance(existing, dict):
+            existing = {}
+        asset_key = str(summary.get("asset") or summary.get("symbol") or "UNKNOWN").upper()
+        asset_entries = existing.setdefault(asset_key, [])
+        asset_entries.append(summary)
+        save_json(str(ENTRY_GATE_STATS_PATH), existing)
+    except Exception:
+        LOGGER.debug("entry_gate_stats_append_failed", exc_info=True)
+
+
 def _log_gate_summary(asset: str, decision: Dict[str, Any]) -> None:
     """Emit a structured log line describing the gate evaluation outcome."""
 
@@ -1200,6 +1223,7 @@ def _log_gate_summary(asset: str, decision: Dict[str, Any]) -> None:
         gates = decision.get("gates") or {}
         entry_meta = decision.get("entry_thresholds") or {}
         active_meta = decision.get("active_position_meta") or {}
+        context_hu = decision.get("entry_gate_context_hu") if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE) else {}
         summary = {
             "asset": asset,
             "profile": entry_meta.get("profile"),
@@ -1215,7 +1239,13 @@ def _log_gate_summary(asset: str, decision: Dict[str, Any]) -> None:
             "spread_ok": entry_meta.get("spread_gate_ok"),
             "liquidity_ok": decision.get("momentum_liquidity_ok"),
         }
+        if isinstance(context_hu, dict):
+            summary.update(context_hu)
+        timestamp = decision.get("retrieved_at_utc")
+        if timestamp:
+            summary["timestamp"] = timestamp
         LOGGER.info("gate_summary", extra={"asset": asset, "gate_summary": summary})
+        _append_entry_gate_stats(summary)
     except Exception:
         LOGGER.debug("gate_summary_logging_failed", exc_info=True)
 
@@ -4067,6 +4097,118 @@ def ensure_probability_metadata(
     return normalised
 
 
+def _probability_stack_snapshot_path(
+    asset: str, base_dir: Optional[Path] = None
+) -> Path:
+    root = Path(base_dir or PUBLIC_DIR)
+    return (root / asset.upper() / PROB_STACK_SNAPSHOT_FILENAME).resolve()
+
+
+def _load_probability_stack_snapshot(
+    asset: str,
+    *,
+    base_dir: Optional[Path] = None,
+    now: Optional[datetime] = None,
+    stale_minutes: int = PROB_STACK_GAP_STALE_MINUTES,
+) -> Optional[Dict[str, Any]]:
+    path = _probability_stack_snapshot_path(asset, base_dir)
+    if not path.exists():
+        return None
+    payload = load_json(path)
+    if not isinstance(payload, dict):
+        return None
+    ts_raw = payload.get("retrieved_at_utc") or payload.get("timestamp")
+    ts = _parse_utc_timestamp(ts_raw) if ts_raw else None
+    if ts is None:
+        ts = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    clock = now or datetime.now(timezone.utc)
+    age_minutes = (clock - ts).total_seconds() / 60.0
+    if age_minutes > stale_minutes:
+        return None
+    payload["_snapshot_path"] = str(path)
+    payload["_snapshot_age_minutes"] = age_minutes
+    return payload
+
+
+def _store_probability_stack_snapshot(
+    asset: str,
+    metadata: Dict[str, Any],
+    *,
+    base_dir: Optional[Path] = None,
+    timestamp: Optional[datetime] = None,
+) -> None:
+    path = _probability_stack_snapshot_path(asset, base_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = dict(metadata)
+        ts_val = timestamp or datetime.now(timezone.utc)
+        if not payload.get("retrieved_at_utc"):
+            payload["retrieved_at_utc"] = ts_val.isoformat()
+        save_json(str(path), payload)
+    except Exception:
+        LOGGER.debug("probability_stack_snapshot_store_failed", exc_info=True)
+
+
+def _probability_stack_missing(metadata: Dict[str, Any]) -> bool:
+    if not metadata:
+        return True
+    status = str(metadata.get("status") or "").lower()
+    if status in {"halt", "halted", "halted_feed", "missing", "unavailable"}:
+        return True
+    return False
+
+
+def _probability_stack_saveworthy(metadata: Dict[str, Any]) -> bool:
+    if not metadata:
+        return False
+    status = str(metadata.get("status") or "").lower()
+    if status in {"data_gap", "analysis_error", "unavailable", "halt", "halted"}:
+        return False
+    return True
+
+
+def _apply_probability_stack_gap_guard(
+    asset: str,
+    metadata: Dict[str, Any],
+    *,
+    now: Optional[datetime] = None,
+    base_dir: Optional[Path] = None,
+    logger: logging.Logger = LOGGER,
+) -> Dict[str, Any]:
+    if str(asset or "").upper() != "BTCUSD":
+        return metadata
+    if os.getenv(PROB_STACK_GAP_ENV_DISABLE):
+        return metadata
+    clock = now or datetime.now(timezone.utc)
+    if _probability_stack_missing(metadata):
+        snapshot = _load_probability_stack_snapshot(
+            asset,
+            base_dir=base_dir,
+            now=clock,
+            stale_minutes=PROB_STACK_GAP_STALE_MINUTES,
+        )
+        if snapshot:
+            payload = dict(snapshot)
+            payload.pop("_snapshot_path", None)
+            payload.pop("_snapshot_age_minutes", None)
+            metadata = ensure_probability_metadata(payload)
+            metadata.setdefault("status", "stale_snapshot")
+            metadata.setdefault("gap_fallback", True)
+            metadata["snapshot_age_minutes"] = snapshot.get("_snapshot_age_minutes")
+            metadata["snapshot_path"] = snapshot.get("_snapshot_path")
+            logger.warning(
+                "prob_stack_gap",
+                extra={
+                    "asset": asset,
+                    "age_minutes": snapshot.get("_snapshot_age_minutes"),
+                    "snapshot_path": snapshot.get("_snapshot_path"),
+                },
+            )
+    if _probability_stack_saveworthy(metadata):
+        _store_probability_stack_snapshot(asset, metadata, base_dir=base_dir, timestamp=clock)
+    return metadata
+
+
 def build_data_gap_signal(
     asset: str,
     spot_price: Any,
@@ -6070,6 +6212,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     realtime_transport = str(spot_realtime.get("transport") or "http").lower() if isinstance(spot_realtime, dict) else "http"
     asset_entry_profile = _entry_threshold_profile_name(asset)
     entry_thresholds_meta: Dict[str, Any] = {"profile": asset_entry_profile}
+    entry_gate_context_hu: Dict[str, Any] = {}
     xag_overrides, usoil_overrides, eurusd_overrides = _initialize_asset_overrides(
         entry_thresholds_meta, asset
     )
@@ -6623,6 +6766,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     }
 
     guard_status = _latency_guard_status(asset, latency_guard_seconds, DATA_LATENCY_GUARD)
+    guard_blocking = True
     if guard_status:
         k1m_meta = tf_meta.setdefault("k1m", {})
         k1m_meta["latency_guard_triggered"] = True
@@ -6633,8 +6777,9 @@ def analyze(asset: str) -> Dict[str, Any]:
         guard_note = (
             f"{guard_status['feed']}: latency guard {guard_minutes} perc késés (limit {guard_limit_minutes} perc)"
         )
+        guard_blocking = str(asset).upper() != "USOIL"
         if guard_note not in latency_flags:
-            latency_flags.append(guard_note)
+            latency_flags.append(guard_note if guard_blocking else guard_note + " — figyelmeztetés")
         ts_format = "%Y-%m-%d %H:%M:%S"
         triggered_utc = analysis_now.strftime(ts_format)
         triggered_cet = analysis_now.astimezone(LOCAL_TZ).strftime(ts_format)
@@ -6642,10 +6787,12 @@ def analyze(asset: str) -> Dict[str, Any]:
         guard_meta.update({
             "triggered_utc": triggered_utc,
             "triggered_cet": triggered_cet,
+            "mode": "block_trade" if guard_blocking else "alert_only",
         })
         entry_thresholds_meta["latency_guard"] = guard_meta
-        log_payload = dict(guard_meta, action="block_trade", asset=asset)
+        log_payload = dict(guard_meta, asset=asset)
         log_payload["latency_guard"] = guard_meta
+        log_payload["action"] = guard_meta["mode"]
         LOGGER.warning("Latency guard aktiválva", extra=log_payload)
         try:
             record_latency_alert(
@@ -6656,26 +6803,27 @@ def analyze(asset: str) -> Dict[str, Any]:
             )
         except Exception as exc:  # pragma: no cover - defensive logging
             LOGGER.warning("Latency guard értesítés hibás: %s", exc)
-        guard_reasons = [
-            "Critical data latency — belépés tiltva",
-            guard_note,
-        ]
-        diag_payload = diagnostics_payload(tf_meta, source_files, latency_flags)
-        msg = build_data_gap_signal(
-            asset,
-            spot_price,
-            spot_utc,
-            spot_retrieved,
-            LEVERAGE.get(asset, 2.0),
-            guard_reasons,
-            display_spot,
-            diag_payload,
-            session_meta=session_meta,
-        )
-        if realtime_used and realtime_reason:
-            msg.setdefault("reasons", []).append(realtime_reason)
-        save_json(os.path.join(outdir, "signal.json"), msg)
-        return msg
+        if guard_blocking:
+            guard_reasons = [
+                "Critical data latency — belépés tiltva",
+                guard_note,
+            ]
+            diag_payload = diagnostics_payload(tf_meta, source_files, latency_flags)
+            msg = build_data_gap_signal(
+                asset,
+                spot_price,
+                spot_utc,
+                spot_retrieved,
+                LEVERAGE.get(asset, 2.0),
+                guard_reasons,
+                display_spot,
+                diag_payload,
+                session_meta=session_meta,
+            )
+            if realtime_used and realtime_reason:
+                msg.setdefault("reasons", []).append(realtime_reason)
+            save_json(os.path.join(outdir, "signal.json"), msg)
+            return msg
 
     diag_factory = lambda: diagnostics_payload(tf_meta, source_files, latency_flags)
 
@@ -7161,6 +7309,21 @@ def analyze(asset: str) -> Dict[str, Any]:
     if stale_timeframes.get("k1h"):
         ema21_dist_ok = False
         ema21_relation = "stale"
+
+    if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
+        fib_zone_payload = {
+            "ok": bool(fib_ok),
+            "sav": [0.618, 0.886],
+            "tures_frac": fib_tol,
+            "tures_atr": float(atr1h_tol * 0.75) if np.isfinite(atr1h_val) else None,
+        }
+        session_window_payload = SESSION_WINDOWS_UTC.get(asset, SESSION_WINDOWS_UTC.get(asset.upper(), {}))
+        entry_gate_context_hu = {
+            "bos_visszatekintes": bos_lookback,
+            "fib_zona": fib_zone_payload,
+            "session_ablak_utc": session_window_payload,
+            "p_score_profil": asset_entry_profile,
+        }
 
     bos_lookback = get_bos_lookback(asset)
     struct_retest_long = structure_break_with_retest(k5m_closed, "long", bos_lookback)
@@ -8958,6 +9121,15 @@ def analyze(asset: str) -> Dict[str, Any]:
     range_guard_label = "intraday_range_guard"
     structure_label = "structure(2of3)"
 
+    gate_extra_context = {} if os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE) else dict(entry_gate_context_hu)
+
+    def _with_gate_context(extra: Dict[str, Any]) -> Dict[str, Any]:
+        if gate_extra_context:
+            merged = dict(gate_extra_context)
+            merged.update(extra)
+            return merged
+        return extra
+
     core_required = [
         "session",
         "regime",
@@ -9004,12 +9176,12 @@ def analyze(asset: str) -> Dict[str, Any]:
         latency_seconds=latency_by_frame,
         precision_plan=None,
         timestamp=analysis_now,
-        extra={
+        extra=_with_gate_context({
             "missing": list(missing_core),
             "p_score": P,
             "p_score_min": p_score_min_local,
             "base_core_ok": bool(base_core_ok),
-        },
+        }),
     )
     if liquidity_relaxed:
         reasons.append("Likviditási kapu lazítva erős momentum miatt")
@@ -9823,10 +9995,10 @@ def analyze(asset: str) -> Dict[str, Any]:
             latency_seconds=latency_by_frame,
             precision_plan=precision_plan,
             timestamp=analysis_now,
-            extra={
+            extra=_with_gate_context({
                 "score": precision_score_val,
                 "threshold": precision_threshold_value,
-            },
+            }),
         )
         if precision_gate_label not in required_list:
             required_list.append(precision_gate_label)
@@ -9876,7 +10048,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             latency_seconds=latency_by_frame,
             precision_plan=precision_plan,
             timestamp=analysis_now,
-            extra={"blockers": precision_plan.get("order_flow_blockers")},
+            extra=_with_gate_context({"blockers": precision_plan.get("order_flow_blockers")}),
         )
         _emit_precision_gate_log(
             asset,
@@ -9888,7 +10060,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             latency_seconds=latency_by_frame,
             precision_plan=precision_plan,
             timestamp=analysis_now,
-            extra={"trigger_state": precision_trigger_state},
+            extra=_with_gate_context({"trigger_state": precision_trigger_state}),
         )
         blockers = precision_plan.get("order_flow_blockers")
         blockers_snapshot = list(blockers) if isinstance(blockers, list) else blockers
@@ -9958,10 +10130,10 @@ def analyze(asset: str) -> Dict[str, Any]:
             latency_seconds=latency_by_frame,
             precision_plan=precision_plan,
             timestamp=analysis_now,
-            extra={
+            extra=_with_gate_context({
                 "decision": decision,
                 "missing": list(missing),
-            },
+            }),
         )
 
     def _fmt_price(value: Optional[float]) -> str:
@@ -10404,6 +10576,12 @@ def analyze(asset: str) -> Dict[str, Any]:
     ml_probability_raw = ml_prediction.raw_probability
     ml_threshold = ml_prediction.threshold
     probability_metadata = ensure_probability_metadata(ml_prediction.metadata)
+    probability_metadata = _apply_probability_stack_gap_guard(
+        asset,
+        probability_metadata,
+        now=analysis_now,
+        base_dir=Path(PUBLIC_DIR),
+    )
     probability_source = probability_metadata.get("source")
     fallback_meta: Optional[Dict[str, Any]] = None
     meta_reason = probability_metadata.get("unavailable_reason")
@@ -10565,6 +10743,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     entry_thresholds_meta.setdefault("atr_threshold_effective", atr_threshold)
     entry_thresholds_meta.setdefault("p_score_min_effective", p_score_min_local)
     decision_obj["entry_thresholds"] = entry_thresholds_meta
+    if entry_gate_context_hu:
+        decision_obj["entry_gate_context_hu"] = entry_gate_context_hu
     if volatility_overlay:
         decision_obj["volatility_overlay"] = volatility_overlay
     if tick_order_flow:
@@ -11272,6 +11452,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
