@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -99,3 +100,26 @@ def test_precision_flow_missing_components_logged_for_special_assets():
     assert details["strength"] == {"actual": 0.12, "required": 0.5}
     assert details["status"] == "stale"
     assert details["stalled"] is True
+
+
+def test_gate_summary_writes_hungarian_context(tmp_path, monkeypatch):
+    monkeypatch.setattr(analysis, "ENTRY_GATE_STATS_PATH", tmp_path / "entry_gate_stats.json")
+    decision = {
+        "gates": {"mode": "ok", "missing": []},
+        "entry_thresholds": {"profile": "baseline", "atr_ratio_ok": True, "spread_gate_ok": True},
+        "probability_raw": 55,
+        "retrieved_at_utc": "2024-01-01T00:00:00Z",
+        "entry_gate_context_hu": {
+            "bos_visszatekintes": 20,
+            "fib_zona": {"ok": True},
+            "session_ablak_utc": {"session": []},
+            "p_score_profil": "baseline",
+        },
+    }
+
+    analysis._log_gate_summary("BTCUSD", decision)
+
+    payload = json.loads((tmp_path / "entry_gate_stats.json").read_text(encoding="utf-8"))
+    entry = payload["BTCUSD"][0]
+    assert entry["bos_visszatekintes"] == 20
+    assert entry["p_score_profil"] == "baseline"
