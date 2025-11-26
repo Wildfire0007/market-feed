@@ -583,7 +583,10 @@ def _archive_removed_state(removed: Dict[str, Any]) -> None:
 def _ensure_state_structure(state: Any, *, persist_archive: bool = False) -> Dict[str, Any]:
     state_dict = state if isinstance(state, dict) else {}
     meta = state_dict.get("_meta") if isinstance(state_dict, dict) else None
-    cleaned: Dict[str, Any] = {"_meta": meta if isinstance(meta, dict) else {}}
+    cleaned_meta: Dict[str, Any] = meta if isinstance(meta, dict) else {}
+    cleaned_meta.setdefault("run_id", None)
+    cleaned_meta.setdefault("last_analysis_utc", None)
+    cleaned: Dict[str, Any] = {"_meta": cleaned_meta}
     recognised: Dict[str, Dict[str, Any]] = {}
     removed: Dict[str, Any] = {}
     archived_last_sent: List[Dict[str, Any]] = []
@@ -1498,6 +1501,22 @@ def main():
     tdstatus = load_tdstatus()
     state = load_state()
     meta  = state.get("_meta", {})
+
+    analysis_summary = load(f"{PUBLIC_DIR}/analysis_summary.json") or {}
+    run_id = run_meta.get("run_id") or os.getenv("GITHUB_RUN_ID")
+    last_analysis_utc = analysis_summary.get("generated_utc") or meta.get("last_analysis_utc")
+
+    if run_id:
+        meta["run_id"] = str(run_id)
+    if last_analysis_utc:
+        meta["last_analysis_utc"] = last_analysis_utc
+
+    log_event(
+        "notify_state_meta",
+        run_id=meta.get("run_id"),
+        last_analysis_utc=meta.get("last_analysis_utc"),
+        assets=len(ASSETS),
+    )
     last_heartbeat_prev = meta.get("last_heartbeat_key")
     last_heartbeat_iso = meta.get("last_heartbeat_utc")
     asset_embeds = {}
@@ -1515,8 +1534,7 @@ def main():
     for asset in ASSETS:
         sig = load(f"{PUBLIC_DIR}/{asset}/signal.json")
         if not sig:
-            summ = load(f"{PUBLIC_DIR}/analysis_summary.json") or {}
-            sig = (summ.get("assets") or {}).get(asset)
+            sig = (analysis_summary.get("assets") or {}).get(asset)
         if not sig:
             sig = {"asset": asset, "signal": "no entry", "probability": 0}
         per_asset_sigs[asset] = sig
