@@ -24,6 +24,8 @@ SYMBOL_HISTORY_WINDOW = max(int(os.getenv("PIPELINE_SYMBOL_HISTORY_WINDOW", "20"
 WARNING_TREND_BUCKET_MINUTES = max(
     int(os.getenv("PIPELINE_WARNING_TREND_BUCKET_MINUTES", "15")), 1
 )
+RUN_ID_ENV_VARS = ("PIPELINE_RUN_ID", "GITHUB_RUN_ID")
+RUN_CAPTURED_AT_UTC = datetime.now(timezone.utc)
 
 
 def _now() -> datetime:
@@ -45,6 +47,28 @@ def _parse_iso(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _resolve_run_id() -> Optional[str]:
+    for env_var in RUN_ID_ENV_VARS:
+        value = os.getenv(env_var)
+        if value is None:
+            continue
+        stripped = str(value).strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def _current_run_metadata(now: Optional[datetime] = None) -> Dict[str, Any]:
+    captured = now or RUN_CAPTURED_AT_UTC
+    started_env = _parse_iso(os.getenv("PIPELINE_RUN_STARTED_AT_UTC"))
+    started = started_env or captured
+    return {
+        "run_id": _resolve_run_id(),
+        "started_at_utc": _to_iso(started),
+        "captured_at_utc": _to_iso(captured),
+    }
+
+
 def _load_payload(path: Optional[Path] = None) -> Dict[str, Any]:
     target = Path(path or PIPELINE_MONITOR_PATH)
     if target.exists():
@@ -57,6 +81,54 @@ def _load_payload(path: Optional[Path] = None) -> Dict[str, Any]:
             return {}
     return {}
 
+
+def _ensure_run_metadata(payload: Dict[str, Any], *, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Attach run_id and capture timestamps to the payload."""
+
+    run_section = payload.get("run") if isinstance(payload, dict) else None
+    if not isinstance(run_section, dict):
+        run_section = {}
+    meta = _current_run_metadata(now)
+    if run_section.get("run_id") is None:
+        run_section["run_id"] = meta.get("run_id")
+    run_section.setdefault("captured_at_utc", meta.get("captured_at_utc"))
+    run_section.setdefault("started_at_utc", meta.get("started_at_utc"))
+    payload["run"] = run_section
+    return payload
+
+
+def _record_execution_order(
+    payload: Dict[str, Any],
+    *,
+    analysis_started: Optional[datetime],
+    trading_completed: Optional[datetime],
+) -> None:
+    """Persist ordering metadata between trading and analysis runs."""
+
+    order_section = payload.get("execution_order") if isinstance(payload, dict) else None
+    if not isinstance(order_section, dict):
+        order_section = {}
+    if analysis_started is not None:
+        order_section["analysis_started_utc"] = _to_iso(analysis_started)
+    else:
+        order_section["analysis_started_utc"] = None
+    if trading_completed is not None:
+        order_section["trading_completed_utc"] = _to_iso(trading_completed)
+    else:
+        order_section["trading_completed_utc"] = None
+    if analysis_started is not None and trading_completed is not None:
+        order_section["analysis_after_trading"] = analysis_started >= trading_completed
+    else:
+        order_section["analysis_after_trading"] = None
+    payload["execution_order"] = order_section
+
+
+def get_run_logging_context(now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Return static logging fields describing the current pipeline run."""
+
+    meta = _current_run_metadata(now)
+    return {key: value for key, value in meta.items() if value is not None}
+    
 
 _KNOWN_SYMBOLS: Optional[set[str]] = None
 _SYMBOL_IGNORE = {
@@ -163,7 +235,7 @@ def record_trading_run(
     computed_duration = duration_seconds
     if computed_duration is None:
         computed_duration = max((completed - started).total_seconds(), 0.0)
-    payload = _load_payload(path)
+    payload = _ensure_run_metadata(_load_payload(path), now=completed)
     payload["trading"] = {
         "started_utc": _to_iso(started),
         "completed_utc": _to_iso(completed),
@@ -182,11 +254,12 @@ def record_analysis_run(
     """Persist metadata about the current analysis execution and compute lag."""
 
     started = started_at or _now()
-    payload = _load_payload(path)
+    payload = _ensure_run_metadata(_load_payload(path), now=started)
     trading_meta = payload.get("trading") if isinstance(payload, dict) else {}
     trading_completed = None
     if isinstance(trading_meta, dict):
         trading_completed = _parse_iso(trading_meta.get("completed_utc"))
+    _record_execution_order(payload, analysis_started=started, trading_completed=trading_completed)
     lag_seconds: Optional[float] = None
     if trading_completed is not None:
         lag_seconds = max((started - trading_completed).total_seconds(), 0.0)
@@ -213,7 +286,7 @@ def finalize_analysis_run(
     """Update the pipeline timing payload when the analysis stage finishes."""
 
     completed = completed_at or _now()
-    payload = _load_payload(path)
+    payload = _ensure_run_metadata(_load_payload(path), now=completed)
     analysis_meta = payload.get("analysis") if isinstance(payload, dict) else {}
     if not isinstance(analysis_meta, dict):
         analysis_meta = {}
@@ -243,6 +316,7 @@ def finalize_analysis_run(
         round(float(computed_duration), 3) if computed_duration is not None else None
     )
 
+    _record_execution_order(payload, analysis_started=started, trading_completed=trading_completed)
     payload["analysis"] = analysis_meta
     payload["updated_utc"] = _to_iso(_now())
     _save_payload(payload, path)
@@ -574,9 +648,11 @@ __all__ = [
     "PIPELINE_MONITOR_PATH",
     "PIPELINE_LOG_PATH",
     "get_pipeline_log_path",
+    "get_run_logging_context",
     "finalize_analysis_run",
     "record_ml_model_status",
     "record_analysis_run",
     "record_trading_run",
     "summarize_pipeline_warnings",
 ]
+
