@@ -58,11 +58,15 @@ except Exception:  # pragma: no cover - optional dependency
 
 try:
     from reports.pipeline_monitor import (
+        get_run_logging_context,
         record_trading_run,
         get_pipeline_log_path,
         summarize_pipeline_warnings,
     )
 except Exception:  # pragma: no cover - optional helper
+    def get_run_logging_context(*_args, **_kwargs):
+        return {}
+
     def record_trading_run(*_args, **_kwargs):
         return None
 
@@ -840,7 +844,7 @@ CLIENT_ERROR_STATUS_CODES: Set[Optional[int]] = {
 # ─────────────────────────────── Segédek ─────────────────────────────────
 
 def now_utc() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _parse_iso_utc(value: Any) -> Optional[datetime]:
@@ -1113,6 +1117,7 @@ def _write_trading_status_summary(out_dir: str) -> None:
     ensure_dir(pipeline_dir)
     payload = {
         "generated_at_utc": now_utc(),
+        "run": get_run_logging_context(),
         "assets": assets,
         "all_assets_ready": all_ready,
     }
@@ -3820,7 +3825,7 @@ def main():
         ensure_json_file_handler(
             logger,
             pipeline_log_path,
-            static_fields={"component": "trading"},
+            static_fields={"component": "trading", **(get_run_logging_context() or {})},
         )
     started_at_dt = datetime.now(timezone.utc)
     logger.info("Trading run started for %d assets", len(ASSETS))
@@ -3872,6 +3877,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
