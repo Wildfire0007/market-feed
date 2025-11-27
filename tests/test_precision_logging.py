@@ -1,12 +1,18 @@
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import analysis
+
+
+CI_ONLY = pytest.mark.skipif(not os.getenv("CI"), reason="CI-only regression guard (rollback note)")
 
 
 class ListHandler(logging.Handler):
@@ -123,3 +129,33 @@ def test_gate_summary_writes_hungarian_context(tmp_path, monkeypatch):
     entry = payload["BTCUSD"][0]
     assert entry["bos_visszatekintes"] == 20
     assert entry["p_score_profil"] == "baseline"
+
+
+@CI_ONLY
+def test_gate_summary_persists_core_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setattr(analysis, "ENTRY_GATE_STATS_PATH", tmp_path / "entry_gate_stats.json")
+    decision = {
+        "gates": {"mode": "session_closed", "missing": ["session"]},
+        "entry_thresholds": {
+            "profile": "usoil_baseline",
+            "p_score_min": 50,
+            "atr_threshold_effective": 2.5,
+            "atr_ratio_ok": False,
+            "spread_gate_ok": True,
+        },
+        "active_position_meta": {"atr5_rel": 1.1},
+        "probability_raw": 44.2,
+        "retrieved_at_utc": "2024-01-02T03:04:05Z",
+    }
+
+    analysis._log_gate_summary("USOIL", decision)
+
+    payload = json.loads((tmp_path / "entry_gate_stats.json").read_text(encoding="utf-8"))
+    entry = payload["USOIL"][0]
+    assert entry["asset"] == "USOIL"
+    assert entry["mode"] == "session_closed"
+    assert entry["atr_rel"] == 1.1
+    assert entry["atr_threshold"] == 2.5
+    assert entry["spread_ok"] is True
+    assert entry["p_score"] == 44.2
+    assert entry["p_score_min"] == 50
