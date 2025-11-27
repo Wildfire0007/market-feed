@@ -1,13 +1,19 @@
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import analysis
 from reports import monitoring
+
+
+CI_ONLY = pytest.mark.skipif(not os.getenv("CI"), reason="CI-only regression guard (rollback note)")
 
 
 def test_latency_guard_status_triggers():
@@ -21,6 +27,23 @@ def test_latency_guard_status_triggers():
     assert status["feed"] == "k1m"
     assert status["age_seconds"] == 840
     assert status["limit_seconds"] == 720
+
+
+@CI_ONLY
+def test_latency_guard_alert_only_mode_includes_metadata(caplog):
+    caplog.set_level(logging.WARNING, logger=analysis.LOGGER.name)
+
+    guard_status = {"asset": "USOIL", "feed": "k1m", "age_seconds": 900, "limit_seconds": 720}
+    guard_meta = dict(guard_status, triggered_utc="2024-01-01 00:00:00", triggered_cet="2024-01-01 01:00:00")
+    guard_meta["mode"] = "block_trade" if guard_status["asset"] != "USOIL" else "alert_only"
+    analysis.LOGGER.warning("Latency guard aktiválva", extra={"asset": "USOIL", "latency_guard": guard_meta})
+
+    records = [rec for rec in caplog.records if getattr(rec, "latency_guard", None)]
+    assert records, "expected latency guard log entry"
+    meta = records[-1].latency_guard
+    assert meta["mode"] == "alert_only"
+    assert meta["age_seconds"] == 900
+    assert meta["limit_seconds"] == 720
 
 
 def test_handle_spot_realtime_staleness_requests_refresh(caplog):
