@@ -11,9 +11,17 @@ import argparse
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict
 
+# Ensure repository root is importable when executed from the scripts directory
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _SCRIPTS_DIR.parent
+
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+    
 from logging_utils import ensure_json_stream_handler
 
 LOGGER = logging.getLogger("market_feed.predeploy")
