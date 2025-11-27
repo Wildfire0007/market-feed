@@ -3473,6 +3473,13 @@ def _normalize_btcusd_sentiment(signal: SentimentSignal) -> float:
         )
         score_val = 0.0
 
+    # When the bias is bullish, treat the score as an absolute magnitude to avoid
+    # double-negating tuples where the score is already negative. Bearish biases
+    # keep the original sign behaviour so that negative scores flip to positive
+    # and positive scores flip to negative, matching legacy expectations.
+    if direction > 0 and score_val < 0:
+        score_val = abs(score_val)
+
     return score_val * direction
 
 
@@ -11528,6 +11535,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
