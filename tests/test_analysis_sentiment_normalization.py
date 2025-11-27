@@ -3,6 +3,8 @@ import os
 import unittest
 from collections import namedtuple
 
+import pytest
+
 import analysis
 from news_feed import SentimentSignal
 
@@ -11,6 +13,17 @@ class SentimentNormalizationTests(unittest.TestCase):
     def tearDown(self) -> None:
         os.environ.pop("SENTIMENT_NORMALIZER_ROLLBACK", None)
 
+    @pytest.mark.skipif(not os.getenv("CI"), reason="CI-only regression guard (rollback note)")
+    def test_tuple_inputs_normalize_score_and_bias_positions(self) -> None:
+        score_first = (-0.6, "btc_bullish")
+        bias_first = ("bearish", 0.8)
+
+        normalized_score_first = analysis._normalize_btcusd_sentiment(score_first)  # type: ignore[arg-type]
+        normalized_bias_first = analysis._normalize_btcusd_sentiment(bias_first)  # type: ignore[arg-type]
+
+        self.assertAlmostEqual(normalized_score_first, 0.6)
+        self.assertAlmostEqual(normalized_bias_first, -0.8)
+        
     def test_accepts_tuple_and_namedtuple_inputs(self) -> None:
         raw_tuple = (-0.4, "bearish")
         named = namedtuple("NamedSignal", ["score", "bias"])(0.7, "btc_bullish")
