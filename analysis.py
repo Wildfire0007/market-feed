@@ -6782,6 +6782,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         guard_blocking = str(asset).upper() != "USOIL"
         if guard_note not in latency_flags:
             latency_flags.append(guard_note if guard_blocking else guard_note + " — figyelmeztetés")
+        if not guard_blocking:
+            critical_note = "Critical data latency — belépés tiltva"
+            if critical_note not in latency_flags:
+                latency_flags.append(critical_note)
         ts_format = "%Y-%m-%d %H:%M:%S"
         triggered_utc = analysis_now.strftime(ts_format)
         triggered_cet = analysis_now.astimezone(LOCAL_TZ).strftime(ts_format)
@@ -7312,6 +7316,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         ema21_dist_ok = False
         ema21_relation = "stale"
 
+    bos_lookback = get_bos_lookback(asset)
+
     if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
         fib_zone_payload = {
             "ok": bool(fib_ok),
@@ -7326,8 +7332,6 @@ def analyze(asset: str) -> Dict[str, Any]:
             "session_ablak_utc": session_window_payload,
             "p_score_profil": asset_entry_profile,
         }
-
-    bos_lookback = get_bos_lookback(asset)
     struct_retest_long = structure_break_with_retest(k5m_closed, "long", bos_lookback)
     struct_retest_short = structure_break_with_retest(k5m_closed, "short", bos_lookback)
     if stale_timeframes.get("k5m"):
@@ -11455,6 +11459,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
