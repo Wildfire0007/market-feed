@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -8,6 +9,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import analysis
+
+CI_ONLY = pytest.mark.skipif(not os.getenv("CI"), reason="CI-only regression guard (rollback note)")
 
 
 def test_probability_stack_gap_guard_uses_recent_snapshot(tmp_path, caplog):
@@ -47,3 +50,28 @@ def test_probability_stack_gap_guard_respects_disable_env(monkeypatch, tmp_path)
     )
 
     assert result == {}
+
+
+@CI_ONLY
+def test_probability_stack_gap_guard_marks_snapshot_fallback(tmp_path):
+    base_dir = tmp_path / "public"
+    snapshot_dir = base_dir / "BTCUSD"
+    snapshot_dir.mkdir(parents=True)
+    payload = {
+        "retrieved_at_utc": datetime.now(timezone.utc).isoformat(),
+        "detail": "stale_gap_snapshot",
+    }
+    snapshot_path = snapshot_dir / analysis.PROB_STACK_SNAPSHOT_FILENAME
+    snapshot_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = analysis._apply_probability_stack_gap_guard(
+        "BTCUSD",
+        {},
+        now=datetime.now(timezone.utc),
+        base_dir=base_dir,
+    )
+
+    assert result.get("status") == "stale_snapshot"
+    assert result.get("gap_fallback") is True
+    assert result.get("snapshot_path") == str(snapshot_path)
+    assert isinstance(result.get("snapshot_age_minutes"), float)
