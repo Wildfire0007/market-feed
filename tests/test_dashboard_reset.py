@@ -1,7 +1,10 @@
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -14,6 +17,9 @@ from scripts.reset_dashboard_state import (
     reset_notify_state_file,
     reset_status_file,
 )
+
+
+CI_ONLY = pytest.mark.skipif(not os.getenv("CI"), reason="CI-only regression guard (rollback note)")
 
 
 def _iso(dt: datetime) -> str:
@@ -185,3 +191,24 @@ def test_reset_notify_state_file_resets_structure(tmp_path: Path) -> None:
         entry = data[asset]
         assert entry["last"] == "no entry"
         assert entry["count"] == 0
+
+
+@CI_ONLY
+def test_reset_status_file_detects_existing_reset(tmp_path: Path) -> None:
+    status_path = tmp_path / "status.json"
+    existing = {
+        "ok": False,
+        "status": RESET_STATUS,
+        "generated_utc": _iso(datetime(2025, 1, 1, tzinfo=timezone.utc)),
+        "assets": {},
+        "notes": [],
+    }
+    status_path.write_text(json.dumps(existing), encoding="utf-8")
+
+    now = datetime(2025, 1, 5, 8, 30, tzinfo=timezone.utc)
+    result = reset_status_file(path=status_path, now=now, dry_run=False, backup_dir=None, reason="daily cleanup")
+
+    assert result.changed is False
+    assert result.backup_path is None
+    persisted = json.loads(status_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == RESET_STATUS
