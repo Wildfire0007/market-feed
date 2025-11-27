@@ -86,6 +86,7 @@ try:
         get_pipeline_log_path,
         DEFAULT_MAX_LAG_SECONDS as PIPELINE_MAX_LAG_SECONDS,
         record_ml_model_status,
+        get_run_logging_context,
     )
 except Exception:  # pragma: no cover - optional helper
     record_analysis_run = None
@@ -93,6 +94,7 @@ except Exception:  # pragma: no cover - optional helper
     get_pipeline_log_path = None
     PIPELINE_MAX_LAG_SECONDS = None
     record_ml_model_status = None
+    get_run_logging_context = lambda *a, **k: {}
 
 import pandas as pd
 import numpy as np
@@ -11111,7 +11113,7 @@ def main():
         ensure_json_file_handler(
             LOGGER,
             pipeline_log_path,
-            static_fields={"component": "analysis"},
+            static_fields={"component": "analysis", **(get_run_logging_context() or {})},
         )
 
     pipeline_payload = None
@@ -11172,6 +11174,7 @@ def main():
         "troubleshooting": list(REFRESH_TIPS),
     }
     run_context = summary.setdefault("run_context", {})
+    run_context.update({k: v for k, v in (get_run_logging_context() or {}).items() if v is not None})
     current_weekday = datetime.now(timezone.utc).weekday()
     run_context["weekday"] = current_weekday
     if current_weekday >= 5:
@@ -11452,6 +11455,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
