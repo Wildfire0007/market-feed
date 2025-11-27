@@ -4378,6 +4378,70 @@ def save_json(path: str, obj: Any) -> None:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
+def build_status_snapshot(summary: Dict[str, Any], public_dir: Path) -> Dict[str, Any]:
+    """Persist a simplified ``status.json`` derived from the analysis summary."""
+
+    assets = summary.get("assets")
+    if not isinstance(assets, dict) or not assets:
+        raise ValueError("analysis summary contains no assets")
+
+    notes = summary.get("notes") if isinstance(summary.get("notes"), list) else []
+    summary_ok = summary.get("ok") if isinstance(summary.get("ok"), bool) else None
+    asset_health: list[bool] = []
+    status_assets: Dict[str, Dict[str, Any]] = {}
+
+    for asset, payload in assets.items():
+        if not isinstance(payload, dict):
+            continue
+
+        asset_ok = payload.get("ok")
+        if isinstance(asset_ok, bool):
+            asset_health.append(asset_ok)
+
+        probability_stack = payload.get("probability_stack")
+        latency_seconds = None
+        expected_latency = None
+        if isinstance(probability_stack, dict):
+            latency_seconds = probability_stack.get("latest_latency_seconds") or probability_stack.get(
+                "latency_seconds"
+            )
+            expected_latency = probability_stack.get("expected_latency_seconds")
+
+        asset_notes = payload.get("notes") if isinstance(payload.get("notes"), list) else []
+
+        status_assets[asset] = {
+            "ok": asset_ok is not False,
+            "signal": payload.get("signal") or payload.get("decision") or payload.get("state") or "no entry",
+        }
+
+        if latency_seconds is not None:
+            status_assets[asset]["latency_seconds"] = latency_seconds
+        if expected_latency is not None:
+            status_assets[asset]["expected_latency_seconds"] = expected_latency
+        if asset_notes:
+            status_assets[asset]["notes"] = asset_notes
+
+    if not status_assets:
+        raise ValueError("analysis summary assets missing")
+
+    if summary_ok is None and asset_health:
+        summary_ok = all(asset_health)
+
+    overall_ok = bool(summary_ok)
+
+    status_payload = {
+        "ok": overall_ok,
+        "status": "ok" if overall_ok else "error",
+        "generated_utc": summary.get("generated_utc") or nowiso(),
+        "td_base": "https://api.twelvedata.com",
+        "assets": status_assets,
+        "notes": notes,
+    }
+
+    save_json(Path(public_dir) / "status.json", status_payload)
+    return status_payload
+
+
 def detect_analysis_revision() -> Optional[Dict[str, Any]]:
     """Return git metadata for the analysis build, if available."""
 
@@ -11436,6 +11500,11 @@ def main():
     except Exception:
         pass
 
+    try:
+        build_status_snapshot(summary, Path(PUBLIC_DIR))
+    except Exception as exc:
+        LOGGER.warning("Failed to persist status snapshot: %s", exc)
+
     reports_env = os.getenv("REPORTS_DIR")
     if reports_env:
         reports_dir = Path(reports_env)
@@ -11459,6 +11528,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
