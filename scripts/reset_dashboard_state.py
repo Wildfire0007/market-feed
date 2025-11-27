@@ -195,7 +195,14 @@ def reset_status_file(
         ],
     }
 
-    changed = existing != payload
+    already_reset = (
+        existing.get("status") == RESET_STATUS
+        and existing.get("ok") is False
+        and isinstance(existing.get("assets"), dict)
+        and len(existing.get("assets", {})) == 0
+    )
+
+    changed = not already_reset and existing != payload
     backup_path = None
 
     if not dry_run and changed:
