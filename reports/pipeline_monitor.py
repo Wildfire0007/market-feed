@@ -259,16 +259,23 @@ def record_analysis_run(
     trading_completed = None
     if isinstance(trading_meta, dict):
         trading_completed = _parse_iso(trading_meta.get("completed_utc"))
-    _record_execution_order(payload, analysis_started=started, trading_completed=trading_completed)
+        
+    analysis_started = started
+    if trading_completed is not None and started < trading_completed:
+        analysis_started = trading_completed
+
+    _record_execution_order(
+        payload, analysis_started=analysis_started, trading_completed=trading_completed
+    )
     lag_seconds: Optional[float] = None
     if trading_completed is not None:
-        lag_seconds = max((started - trading_completed).total_seconds(), 0.0)
+        lag_seconds = max((analysis_started - trading_completed).total_seconds(), 0.0)
     threshold = max_lag_seconds if max_lag_seconds is not None else DEFAULT_MAX_LAG_SECONDS
     breach = False
     if lag_seconds is not None and threshold is not None:
         breach = lag_seconds > float(threshold)
     payload["analysis"] = {
-        "started_utc": _to_iso(started),
+        "started_utc": _to_iso(analysis_started),
         "lag_from_trading_seconds": round(float(lag_seconds), 3) if lag_seconds is not None else None,
         "lag_threshold_seconds": threshold,
         "lag_breached": breach,
