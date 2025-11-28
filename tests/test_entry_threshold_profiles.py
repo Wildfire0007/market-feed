@@ -205,7 +205,7 @@ def test_profile_specific_helpers(monkeypatch):
     assert baseline.get_spread_max_atr_pct("NVDA") == pytest.approx(0.36)
     assert baseline.get_spread_max_atr_pct("BTCUSD") == pytest.approx(0.57)
     assert baseline.get_spread_max_atr_pct("XAGUSD") == pytest.approx(0.37)
-    assert baseline.get_fib_tolerance("GOLD_CFD") == pytest.approx(0.003)
+    assert baseline.get_fib_tolerance("GOLD_CFD") == pytest.approx(0.0035)
     assert baseline.get_fib_tolerance("NVDA") == pytest.approx(0.0045)
     assert baseline.get_fib_tolerance("EURUSD") == pytest.approx(0.006)
     assert baseline.get_fib_tolerance("USOIL") == pytest.approx(0.003)
@@ -234,7 +234,7 @@ def test_profile_specific_helpers(monkeypatch):
     relaxed = _reload_settings(monkeypatch, profile="relaxed")
     assert relaxed.get_spread_max_atr_pct("GOLD_CFD") == pytest.approx(0.33)
     assert relaxed.get_bos_lookback(None) == 28
-    assert relaxed.get_fib_tolerance("GOLD_CFD") == pytest.approx(0.003)
+    assert relaxed.get_fib_tolerance("GOLD_CFD") == pytest.approx(0.0035)
     assert relaxed.get_fib_tolerance("NVDA") == pytest.approx(0.0045)
 
     _reload_settings(monkeypatch)
