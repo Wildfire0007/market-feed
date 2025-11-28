@@ -1187,34 +1187,56 @@ def now_utctime_hm() -> Tuple[int,int]:
     return t.hour, t.minute
 
 
+def _entry_gate_log_payload(
+    symbol: str,
+    bar_time: Optional[datetime],
+    reasons: Sequence[str],
+    gate: str = "entry_gate",
+) -> Dict[str, Any]:
+    ts = bar_time
+    if ts is None:
+        ts = datetime.now(timezone.utc)
+    elif ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    else:
+        ts = ts.astimezone(timezone.utc)
+    bud_ts = ts.astimezone(LOCAL_TZ)
+
+    normalized: List[str] = []
+    for reason in reasons:
+        if reason is None:
+            continue
+        reason_text = str(reason).strip()
+        if reason_text:
+            normalized.append(reason_text)
+    unique_reasons = list(dict.fromkeys(normalized))
+    result = "rejected" if unique_reasons else "accepted"
+
+    return {
+        "symbol": symbol,
+        "asset": str(symbol).upper(),
+        "gate": gate,
+        "timestamp": ts.isoformat(),
+        "utc_ts": ts.isoformat(),
+        "bud_ts": bud_ts.isoformat(),
+        "reasons": unique_reasons,
+        "reason": unique_reasons[0] if unique_reasons else None,
+        "result": result,
+    }
+
+
 def log_entry_gate_decision(
     symbol: str,
     bar_time: Optional[datetime],
     reasons: Sequence[str],
+    gate: str = "entry_gate",
 ) -> None:
     """Append a JSONL entry describing the gate outcome for a candidate."""
 
     try:
         ENTRY_GATE_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        ts = bar_time
-        if ts is None:
-            ts = datetime.now(timezone.utc)
-        elif ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        else:
-            ts = ts.astimezone(timezone.utc)
-        normalized: List[str] = []
-        for reason in reasons:
-            if reason is None:
-                continue
-            reason_text = str(reason).strip()
-            if reason_text:
-                normalized.append(reason_text)
-        payload = {
-            "symbol": symbol,
-            "timestamp": ts.isoformat(),
-            "reasons": list(dict.fromkeys(normalized)),
-        }
+        payload = _entry_gate_log_payload(symbol, bar_time, reasons, gate=gate)
+        ts = _parse_utc_timestamp(payload.get("timestamp")) or datetime.now(timezone.utc)
         log_path = ENTRY_GATE_LOG_DIR / f"entry_gates_{ts.date().isoformat()}.jsonl"
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, sort_keys=True))
@@ -1235,8 +1257,64 @@ def _append_entry_gate_stats(summary: Dict[str, Any]) -> None:
         asset_entries = existing.setdefault(asset_key, [])
         asset_entries.append(summary)
         save_json(str(ENTRY_GATE_STATS_PATH), existing)
+        _render_entry_gate_chart(existing)
     except Exception:
         LOGGER.debug("entry_gate_stats_append_failed", exc_info=True)
+
+
+def _render_entry_gate_chart(stats: Dict[str, Any]) -> None:
+    """Render a lightweight HTML bar chart for entry gate rejections."""
+
+    try:
+        target_dir = ENTRY_GATE_LOG_DIR
+        target_dir.mkdir(parents=True, exist_ok=True)
+        html_path = target_dir / "index.html"
+        rows: List[str] = []
+        for asset, entries in sorted(stats.items()):
+            if not isinstance(entries, list):
+                continue
+            reason_counts: Dict[str, int] = {}
+            for item in entries:
+                if not isinstance(item, dict):
+                    continue
+                for reason in item.get("missing") or item.get("precision_hiany") or []:
+                    reason_text = str(reason)
+                    reason_counts[reason_text] = reason_counts.get(reason_text, 0) + 1
+            total = sum(reason_counts.values()) or 1
+            for reason, count in sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0])):
+                pct = (count / total) * 100.0
+                rows.append(
+                    f"<div class='row'><span class='asset'>{asset}</span>"
+                    f"<span class='reason'>{reason}</span>"
+                    f"<span class='bar'><span style='width:{pct:.1f}%'></span></span>"
+                    f"<span class='count'>{count}</span></div>"
+                )
+        content = "\n".join(rows) if rows else "<p>Nincs gate elutasítási adat.</p>"
+        html = f"""
+<!doctype html>
+<html lang='hu'>
+<head>
+  <meta charset='utf-8'>
+  <title>Entry gate statisztika</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 1.5rem; }}
+    .row {{ display: grid; grid-template-columns: 90px 1fr 260px 60px; gap: 10px; align-items: center; }}
+    .asset {{ font-weight: bold; }}
+    .reason {{ color: #333; }}
+    .bar {{ background:#f2f2f2; border-radius:4px; height:10px; position: relative; }}
+    .bar span {{ background:#c0392b; display:block; height:10px; border-radius:4px; }}
+    .count {{ text-align:right; font-variant-numeric: tabular-nums; }}
+  </style>
+</head>
+<body>
+  <h2>Entry gate elutasítások (összesített)</h2>
+  {content}
+</body>
+</html>
+"""
+        html_path.write_text(html, encoding="utf-8")
+    except Exception:
+        LOGGER.debug("entry_gate_chart_render_failed", exc_info=True)
 
 
 def _log_gate_summary(asset: str, decision: Dict[str, Any]) -> None:
@@ -11709,6 +11787,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
