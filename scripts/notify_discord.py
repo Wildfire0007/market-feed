@@ -60,6 +60,8 @@ DEFAULT_ASSET_STATE: Dict[str, Any] = {
     "cooldown_until": None,
 }
 
+ENTRY_GATE_STATS_PATH = _REPO_ROOT / PUBLIC_DIR / "debug" / "entry_gate_stats.json"
+
 # ---- Active position helper config ----
 TDSTATUS_PATH = f"{PUBLIC_DIR}/tdstatus.json"
 EIA_OVERRIDES_PATH = f"{PUBLIC_DIR}/USOIL/eia_schedule_overrides.json"
@@ -113,6 +115,37 @@ def int_env(name: str, default: int) -> int:
             file=sys.stderr,
         )
         return default
+
+
+def build_entry_gate_summary_embed() -> Optional[Dict[str, Any]]:
+    """Return a compact embed with top entry gate elutasítási okok."""
+
+    try:
+        if not ENTRY_GATE_STATS_PATH.exists():
+            return None
+        payload = json.loads(ENTRY_GATE_STATS_PATH.read_text(encoding="utf-8"))
+        reason_counts: Dict[str, int] = {}
+        for entries in payload.values():
+            if not isinstance(entries, list):
+                continue
+            for item in entries:
+                if not isinstance(item, dict):
+                    continue
+                for reason in item.get("missing") or item.get("precision_hiany") or []:
+                    txt = str(reason)
+                    reason_counts[txt] = reason_counts.get(txt, 0) + 1
+        if not reason_counts:
+            return None
+        top = sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+        lines = [f"• {reason}: {count}x" for reason, count in top]
+        return {
+            "title": "Entry gate toplista (24h)",
+            "description": "\n".join(lines),
+            "color": 0xC0392B,
+        }
+    except Exception:
+        LOGGER.debug("entry_gate_summary_embed_failed", exc_info=True)
+        return None
 
 
 COOLDOWN_MIN   = int_env("DISCORD_COOLDOWN_MIN", 10)  # perc; 0 = off
@@ -1675,6 +1708,9 @@ def main():
     ordered_embeds = [asset_embeds[a] for a in ASSETS if a in asset_embeds]
     ordered_embeds.extend(watcher_embeds)
     ordered_embeds.extend(heartbeat_snapshots)
+    gate_embed = build_entry_gate_summary_embed()
+    if gate_embed:
+        ordered_embeds.append(gate_embed)
 
     if not ordered_embeds:
         print("Discord notify: nothing to send.")
