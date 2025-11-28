@@ -4445,16 +4445,6 @@ def _apply_probability_stack_gap_guard(
         return metadata
     clock = now or datetime.now(timezone.utc)
     feature_snapshot_ok = _ml_feature_snapshot_present(asset, base_dir=base_dir)
-    if not feature_snapshot_ok:
-        metadata = ensure_probability_metadata(metadata)
-        metadata.setdefault("source", "fallback")
-        metadata.setdefault("status", "fallback")
-        metadata.setdefault("fallback", {})
-        metadata.setdefault("unavailable_reason", "feature_snapshot_missing")
-        if isinstance(metadata.get("fallback"), dict):
-            metadata["fallback"].setdefault("reason", "feature_snapshot_missing")
-            metadata["fallback"].setdefault("action", "no_entry")
-            metadata["fallback"].setdefault("detail", "BTCUSD feature snapshot missing")
     if _probability_stack_missing(metadata):
         export_snapshot = _load_probability_stack_export(
             asset,
@@ -4503,6 +4493,17 @@ def _apply_probability_stack_gap_guard(
                     "snapshot_path": snapshot.get("_snapshot_path"),
                 },
             )
+    if _probability_stack_missing(metadata) and not feature_snapshot_ok:
+        metadata = ensure_probability_metadata(metadata)
+        metadata.setdefault("source", "fallback")
+        metadata.setdefault("status", "fallback")
+        metadata.setdefault("fallback", {})
+        metadata.setdefault("unavailable_reason", "feature_snapshot_missing")
+        if isinstance(metadata.get("fallback"), dict):
+            metadata["fallback"].setdefault("reason", "feature_snapshot_missing")
+            metadata["fallback"].setdefault("action", "no_entry")
+            metadata["fallback"].setdefault("detail", "BTCUSD feature snapshot missing")
+
     if _probability_stack_saveworthy(metadata):
         _store_probability_stack_snapshot(asset, metadata, base_dir=base_dir, timestamp=clock)
     return metadata
@@ -11939,6 +11940,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
