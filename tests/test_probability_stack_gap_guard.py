@@ -40,6 +40,33 @@ def test_probability_stack_gap_guard_uses_recent_snapshot(tmp_path, caplog):
     assert any(record.message == "prob_stack_gap" for record in caplog.records)
 
 
+def test_probability_stack_gap_guard_uses_export_file(tmp_path, caplog):
+    base_dir = tmp_path / "public"
+    export_dir = base_dir / "BTCUSD"
+    export_dir.mkdir(parents=True)
+    fresh_ts = datetime.now(timezone.utc) - timedelta(minutes=3)
+    export_payload = {
+        "source": "sklearn",
+        "status": "enabled",
+        "detail": "from_export",
+        "retrieved_at_utc": fresh_ts.isoformat(),
+    }
+    export_path = export_dir / analysis.PROB_STACK_EXPORT_FILENAME
+    export_path.write_text(json.dumps(export_payload), encoding="utf-8")
+
+    caplog.set_level("WARNING", logger=analysis.LOGGER.name)
+    result = analysis._apply_probability_stack_gap_guard(
+        "BTCUSD",
+        {},
+        now=datetime.now(timezone.utc),
+        base_dir=base_dir,
+    )
+
+    assert result.get("gap_fallback") is True
+    assert result.get("detail") == "from_export"
+    assert any(record.message == "prob_stack_gap" for record in caplog.records)
+
+
 def test_probability_stack_gap_guard_respects_disable_env(monkeypatch, tmp_path):
     monkeypatch.setenv(analysis.PROB_STACK_GAP_ENV_DISABLE, "1")
     result = analysis._apply_probability_stack_gap_guard(
