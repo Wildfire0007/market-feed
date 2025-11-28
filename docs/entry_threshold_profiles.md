@@ -17,11 +17,13 @@ vonatkozik. Az aktív profilt két módon lehet megadni:
 1. `active_entry_threshold_profile` mező a konfigurációban.
 2. `ENTRY_THRESHOLD_PROFILE` környezeti változó futásidőben.
 
-Az alap `baseline` profil 60-as P-score küszöböt és 1.0-s ATR szorzót használ.
-Nyugodtabb piaci környezetre a `relaxed` profil 58-as küszöbre vált, míg a
-mostantól alapértelmezetten aktivált `suppressed` profil agresszíven csökkenti
-az elvárt P-score-t (EURUSD: 32, BTCUSD: 25 stb.), és 0.95-ös ATR szorzót
-alkalmaz, hogy a rendkívül alacsony momentum mellett is legyen esély belépőre.
+A 2025-ös beállítás szerint a `baseline` profil 40–42 pontos P-score minimumot
+és 0.85-ös ATR szorzót tartalmaz eszköz-specifikus override-okkal. A
+"nyugodt" piacokra finomhangolt `relaxed` profil további ~10–15%-os enyhítést
+ad (pl. BTCUSD 38 pont, USOIL 0.68 ATR-szorzó), és **ez az aktív alapértelmezés**
+az intranapi likviditás növelésére. A `suppressed` profil továbbra is defensív,
+mert magasabb P-score-t és 1.05–1.07-es ATR szorzót használ, így a magas
+volatilitású vagy bizonytalan helyzetekben gyorsan aktiválható.
 
 ## Gyors állapotlekérdezés
 
@@ -49,15 +51,16 @@ riportban vagy debug logban is.
    ```bash
    pytest tests/test_entry_threshold_profiles.py::test_baseline_profile_configuration
    ```
-   A teszt azt ellenőrzi, hogy a baseline profil 60-as P-score-t és 1.0-s ATR
-   szorzót használ, és hogy a helper visszaadja a teljes profil leírást.
+   A teszt azt ellenőrzi, hogy a baseline profil 40–42 pontos P-score-t és
+    0.85-ös ATR szorzót használ (asset override-okkal), és hogy a helper
+    visszaadja a teljes profil leírást.
 
 2. **Relaxed profil** – futtasd:
    ```bash
    pytest tests/test_entry_threshold_profiles.py::test_relaxed_profile_override
    ```
-   A teszt a `ENTRY_THRESHOLD_PROFILE=relaxed` környezeti váltással 55-ös
-   P-score-t és 0.9-es USOIL ATR szorzót vár.
+   A teszt a `ENTRY_THRESHOLD_PROFILE=relaxed` környezeti váltással 38 pontos
+    BTCUSD/EURUSD P-score-t és 0.68-as USOIL ATR szorzót vár.
 
 3. **Manuális ellenőrzés** – állítsd be a kívánt profilt, futtasd az
    `analysis.py` pipeline-t, majd a generált `signal.json` fájlban a
