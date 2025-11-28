@@ -627,7 +627,8 @@ def _market_closed_skip_reason(asset_key: str, cfg: Dict[str, Any]) -> Optional[
 
 
 def _status_profile_for_asset(asset: str) -> Tuple[str, Dict[str, Any]]:
-    name, profile = _resolve_session_status_for_asset(asset)
+    now_dt = datetime.now(timezone.utc)
+    name, profile = _resolve_session_status_for_asset(asset, when=now_dt)
     if not isinstance(profile, dict):
         profile = {}
     return name, dict(profile)
@@ -3911,6 +3912,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
