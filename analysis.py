@@ -117,7 +117,7 @@ BTC_ATR_PCT_TOD = {  # percentilis minimum a nap adott szakaszára
 }
 
 # P-score / RR / TP / SL / no-chase per profile
-BTC_P_SCORE_MIN = {"baseline": 48, "relaxed": 46, "suppressed": 46}
+BTC_P_SCORE_MIN = {"baseline": 48, "relaxed": 46, "suppressed": 44}
 BTC_RR_MIN_TREND = {"baseline": 1.60, "relaxed": 1.55, "suppressed": 1.45}
 BTC_RR_MIN_RANGE = {"baseline": 1.60, "relaxed": 1.50, "suppressed": 1.40}
 
@@ -714,6 +714,21 @@ def get_precision_score_threshold(asset: str) -> float:
         else:
             if np.isfinite(val) and val > 0:
                 return val
+    asset_key = str(asset or "").upper()
+    profile_name = _entry_threshold_profile_name(asset_key)
+    profile_overrides = PRECISION_SCORE_PROFILE_OVERRIDES.get(asset_key)
+    if isinstance(profile_overrides, dict):
+        try:
+            profile_value = profile_overrides.get(profile_name)
+        except Exception:
+            profile_value = None
+        if profile_value is not None:
+            try:
+                val = float(profile_value)
+            except (TypeError, ValueError):
+                val = None
+            if val is not None and np.isfinite(val) and val > 0:
+                return val
     return float(PRECISION_SCORE_THRESHOLD_DEFAULT)
 
 
@@ -752,8 +767,13 @@ ENTRY_GATE_STATS_PATH: Path = (
     _ANALYSIS_BASE_DIR / PUBLIC_DIR / "debug" / "entry_gate_stats.json"
 ).resolve()
 PROB_STACK_SNAPSHOT_FILENAME = "probability_stack_snapshot.json"
+PROB_STACK_EXPORT_FILENAME = "probability_stack.json"
 PROB_STACK_GAP_ENV_DISABLE = "DISABLE_PROB_STACK_GAP_FALLBACK"
 PROB_STACK_GAP_STALE_MINUTES = 10
+LATENCY_GUARD_PROFILE_LIMIT_SECONDS: Dict[str, int] = {"suppressed": 420}
+PRECISION_SCORE_PROFILE_OVERRIDES: Dict[str, Dict[str, float]] = {
+    "NVDA": {"suppressed": 52.0},
+}
 ENTRY_GATE_EXTRA_LOGS_DISABLE = "DISABLE_ENTRY_GATE_EXTRA_LOGS"
 MACRO_DATA_DIR = Path("data") / "macro"
 MACRO_LOCKOUT_FILE = MACRO_DATA_DIR / "lockout_by_asset.json"
@@ -972,6 +992,7 @@ REFRESH_TIPS = (
     "A dashboard stabilizáló (2 azonos jel + 10 perc cooldown) lassíthatja a kártya frissítését — lazítsd, ha realtime kell."
 )
 LATENCY_PROFILE_FILENAME = "latency_profile.json"
+LATENCY_GUARD_STATE_FILENAME = "latency_guard_state.json"
 ORDER_FLOW_LOOKBACK_MIN = 120
 ORDER_FLOW_IMBALANCE_TH = 0.6
 ORDER_FLOW_PRESSURE_TH = 0.7
@@ -1241,6 +1262,15 @@ def _log_gate_summary(asset: str, decision: Dict[str, Any]) -> None:
             "spread_ok": entry_meta.get("spread_gate_ok"),
             "liquidity_ok": decision.get("momentum_liquidity_ok"),
         }
+        summary["atr_kuszob_hatasos"] = entry_meta.get("atr_threshold_effective")
+        guard_meta = entry_meta.get("latency_guard") or {}
+        summary["kesleltetesi_vedo_kor_mp"] = guard_meta.get("age_seconds")
+        summary["kesleltetesi_vedo_limit_mp"] = guard_meta.get("limit_seconds")
+        precision_missing = [
+            item for item in summary["missing"] if isinstance(item, str) and "precision" in item.lower()
+        ]
+        if precision_missing:
+            summary["precision_hiany"] = precision_missing
         if isinstance(context_hu, dict):
             summary.update(context_hu)
         timestamp = decision.get("retrieved_at_utc")
@@ -3791,16 +3821,25 @@ def _latency_guard_status(
     asset: str,
     latency_seconds: Dict[str, Optional[int]],
     guard_config: Dict[str, Dict[str, Any]],
+    *,
+    profile: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     asset_key = str(asset or "").upper()
     cfg = guard_config.get(asset_key) or guard_config.get("DEFAULT")
+    profile_limit = None
+    if profile:
+        profile_limit = LATENCY_GUARD_PROFILE_LIMIT_SECONDS.get(profile)
     if not isinstance(cfg, dict):
-        return None
+        cfg = {}
     limit_raw = cfg.get("latency_k1m_sec_max")
+    if limit_raw is None and profile_limit is not None:
+        limit_raw = profile_limit
     try:
         limit = int(limit_raw)
     except (TypeError, ValueError):
         return None
+    if profile_limit is not None and limit < int(profile_limit):
+        limit = int(profile_limit)
     if limit <= 0:
         return None
     age_raw = latency_seconds.get("k1m")
@@ -3818,6 +3857,40 @@ def _latency_guard_status(
             "limit_seconds": limit,
         }
     return None
+
+
+def _log_latency_guard_recovery(
+    asset: str,
+    outdir: str,
+    latency_guard_state: Optional[Dict[str, Any]],
+    analysis_now: datetime,
+    profile: Optional[str],
+    entry_thresholds_meta: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(latency_guard_state, dict) or not latency_guard_state.get("active"):
+        return None
+    ts_format = "%Y-%m-%d %H:%M:%S"
+    recovered_utc = analysis_now.strftime(ts_format)
+    recovered_cet = analysis_now.astimezone(LOCAL_TZ).strftime(ts_format)
+    recovery_payload = {
+        "asset": asset,
+        "feed": latency_guard_state.get("feed", "k1m"),
+        "recovered_utc": recovered_utc,
+        "recovered_cet": recovered_cet,
+        "previous_triggered_utc": latency_guard_state.get("triggered_utc"),
+        "previous_triggered_cet": latency_guard_state.get("triggered_cet"),
+        "limit_seconds": latency_guard_state.get("limit_seconds"),
+        "profile": profile,
+    }
+    if isinstance(entry_thresholds_meta, dict):
+        entry_thresholds_meta["latency_guard_recovery"] = recovery_payload
+    LOGGER.info("Latency guard feloldva", extra=recovery_payload)
+    new_state = dict(latency_guard_state)
+    new_state["active"] = False
+    new_state["recovered_utc"] = recovered_utc
+    new_state["recovered_cet"] = recovered_cet
+    save_latency_guard_state(outdir, new_state)
+    return recovery_payload
 
 
 def _normalize_blockers(blockers: Any) -> List[str]:
@@ -4113,6 +4186,11 @@ def _probability_stack_snapshot_path(
     return (root / asset.upper() / PROB_STACK_SNAPSHOT_FILENAME).resolve()
 
 
+def _probability_stack_export_path(asset: str, base_dir: Optional[Path] = None) -> Path:
+    root = Path(base_dir or PUBLIC_DIR)
+    return (root / asset.upper() / PROB_STACK_EXPORT_FILENAME).resolve()
+
+
 def _load_probability_stack_snapshot(
     asset: str,
     *,
@@ -4139,6 +4217,33 @@ def _load_probability_stack_snapshot(
     return payload
 
 
+def _load_probability_stack_export(
+    asset: str,
+    *,
+    base_dir: Optional[Path] = None,
+    now: Optional[datetime] = None,
+    stale_minutes: int = PROB_STACK_GAP_STALE_MINUTES,
+) -> Optional[Dict[str, Any]]:
+    path = _probability_stack_export_path(asset, base_dir)
+    if not path.exists():
+        return None
+    payload = load_json(path)
+    if not isinstance(payload, dict):
+        return None
+    ts_raw = payload.get("retrieved_at_utc") or payload.get("timestamp")
+    ts = _parse_utc_timestamp(ts_raw) if ts_raw else None
+    if ts is None:
+        ts = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    clock = now or datetime.now(timezone.utc)
+    age_minutes = (clock - ts).total_seconds() / 60.0
+    if age_minutes > stale_minutes:
+        return None
+    payload["_snapshot_path"] = str(path)
+    payload["_snapshot_age_minutes"] = age_minutes
+    payload.setdefault("status", payload.get("status") or "snapshot")
+    return payload
+
+
 def _store_probability_stack_snapshot(
     asset: str,
     metadata: Dict[str, Any],
@@ -4154,6 +4259,8 @@ def _store_probability_stack_snapshot(
         if not payload.get("retrieved_at_utc"):
             payload["retrieved_at_utc"] = ts_val.isoformat()
         save_json(str(path), payload)
+        export_path = _probability_stack_export_path(asset, base_dir)
+        save_json(str(export_path), payload)
     except Exception:
         LOGGER.debug("probability_stack_snapshot_store_failed", exc_info=True)
 
@@ -4189,6 +4296,30 @@ def _apply_probability_stack_gap_guard(
     if os.getenv(PROB_STACK_GAP_ENV_DISABLE):
         return metadata
     clock = now or datetime.now(timezone.utc)
+    if _probability_stack_missing(metadata):
+        export_snapshot = _load_probability_stack_export(
+            asset,
+            base_dir=base_dir,
+            now=clock,
+            stale_minutes=PROB_STACK_GAP_STALE_MINUTES,
+        )
+        if export_snapshot:
+            payload = dict(export_snapshot)
+            payload.pop("_snapshot_path", None)
+            payload.pop("_snapshot_age_minutes", None)
+            metadata = ensure_probability_metadata(payload)
+            metadata.setdefault("status", "stale_snapshot")
+            metadata.setdefault("gap_fallback", True)
+            metadata["snapshot_age_minutes"] = export_snapshot.get("_snapshot_age_minutes")
+            metadata["snapshot_path"] = export_snapshot.get("_snapshot_path")
+            logger.warning(
+                "prob_stack_gap",
+                extra={
+                    "asset": asset,
+                    "age_minutes": export_snapshot.get("_snapshot_age_minutes"),
+                    "snapshot_path": export_snapshot.get("_snapshot_path"),
+                },
+            )
     if _probability_stack_missing(metadata):
         snapshot = _load_probability_stack_snapshot(
             asset,
@@ -4531,6 +4662,9 @@ def detect_analysis_revision() -> Optional[Dict[str, Any]]:
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         status = []
 
+    if os.getenv("CI"):
+        status = []
+
     relevant_changes = []
     for line in status:
         entry = line.strip()
@@ -4544,8 +4678,10 @@ def detect_analysis_revision() -> Optional[Dict[str, Any]]:
             continue
         relevant_changes.append(entry)
 
-    if relevant_changes:
+    if relevant_changes and not os.getenv("CI"):
         metadata["dirty"] = True
+    elif os.getenv("CI"):
+        metadata["dirty"] = False
 
     return metadata
 
@@ -4575,6 +4711,19 @@ def update_latency_profile(outdir: str, latency_seconds: Optional[int]) -> None:
     ema_delay = (1 - alpha) * ema_delay + alpha * float(latency_seconds)
     payload = {"ema_delay": ema_delay, "alpha": alpha, "samples": int(data.get("samples", 0)) + 1}
     save_json(profile_path, payload)
+
+
+def load_latency_guard_state(outdir: str) -> Dict[str, Any]:
+    path = os.path.join(outdir, LATENCY_GUARD_STATE_FILENAME)
+    data = load_json(path) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_latency_guard_state(outdir: str, state: Dict[str, Any]) -> None:
+    try:
+        save_json(os.path.join(outdir, LATENCY_GUARD_STATE_FILENAME), state)
+    except Exception:
+        LOGGER.debug("latency_guard_state_save_failed", exc_info=True)
 
 _EMPTY_KLINE_COLUMNS = ["open", "high", "low", "close", "volume"]
 
@@ -6253,6 +6402,7 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     # 1) Bemenetek
     latency_profile = load_latency_profile(outdir)
+    latency_guard_state = load_latency_guard_state(outdir)
     avg_delay: float = float(latency_profile.get("ema_delay", 0.0) or 0.0)
     spot = load_json(os.path.join(outdir, "spot.json")) or {}
     spot_realtime = load_json(os.path.join(outdir, "spot_realtime.json")) or {}
@@ -6404,6 +6554,14 @@ def analyze(asset: str) -> Dict[str, Any]:
         if refresh_state:
             entry_thresholds_meta["spot_realtime_refresh"] = refresh_state
     session_ok_flag, session_meta = session_state(asset, now=now)
+    LOGGER.info(
+        "Session/entry profil",
+        extra={
+            "asset": asset,
+            "session_profil": session_meta.get("status_profile") if isinstance(session_meta, dict) else None,
+            "entry_kuszob_profil": asset_entry_profile,
+        },
+    )
     if asset == "BTCUSD":
         news_lockout_active = False
         news_reason = None
@@ -6838,7 +6996,12 @@ def analyze(asset: str) -> Dict[str, Any]:
         "klines_4h.json": tf_meta["k4h"].get("source_mtime_utc"),
     }
 
-    guard_status = _latency_guard_status(asset, latency_guard_seconds, DATA_LATENCY_GUARD)
+    guard_status = _latency_guard_status(
+        asset,
+        latency_guard_seconds,
+        DATA_LATENCY_GUARD,
+        profile=asset_entry_profile,
+    )
     guard_blocking = True
     if guard_status:
         k1m_meta = tf_meta.setdefault("k1m", {})
@@ -6865,12 +7028,14 @@ def analyze(asset: str) -> Dict[str, Any]:
             "triggered_utc": triggered_utc,
             "triggered_cet": triggered_cet,
             "mode": "block_trade" if guard_blocking else "alert_only",
+            "profile": asset_entry_profile,
         })
         entry_thresholds_meta["latency_guard"] = guard_meta
         log_payload = dict(guard_meta, asset=asset)
         log_payload["latency_guard"] = guard_meta
         log_payload["action"] = guard_meta["mode"]
         LOGGER.warning("Latency guard aktiválva", extra=log_payload)
+        save_latency_guard_state(outdir, dict(guard_meta, active=True))
         try:
             record_latency_alert(
                 asset,
@@ -6901,6 +7066,15 @@ def analyze(asset: str) -> Dict[str, Any]:
                 msg.setdefault("reasons", []).append(realtime_reason)
             save_json(os.path.join(outdir, "signal.json"), msg)
             return msg
+    else:
+        _log_latency_guard_recovery(
+            asset,
+            outdir,
+            latency_guard_state,
+            analysis_now,
+            asset_entry_profile,
+            entry_thresholds_meta,
+        )
 
     diag_factory = lambda: diagnostics_payload(tf_meta, source_files, latency_flags)
 
@@ -11535,6 +11709,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
