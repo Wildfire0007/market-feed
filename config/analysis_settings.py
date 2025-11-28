@@ -695,9 +695,27 @@ def _load_asset_entry_profile_map() -> Dict[str, str]:
     return mapping
     
 _ENV_PROFILE = os.getenv("ENTRY_THRESHOLD_PROFILE")
+_ENV_ACTIVE_PROFILE = os.getenv("ACTIVE_ENTRY_PROFILE")
 _CFG_ACTIVE_PROFILE = _get_config_value("active_entry_threshold_profile")
+_CFG_WEEKDAY_PROFILE = _get_config_value("weekday_entry_threshold_profile")
+
+def _weekday_profile_candidate() -> Optional[str]:
+    try:
+        candidate = str(_CFG_WEEKDAY_PROFILE)
+    except Exception:
+        return None
+    if not candidate:
+        return None
+    now = _now_utc()
+    if now.weekday() < 5:
+        return candidate
+    return None
+
+
 _ACTIVE_PROFILE_NAME = (
-    _ENV_PROFILE
+    _ENV_ACTIVE_PROFILE
+    or _ENV_PROFILE
+    or _weekday_profile_candidate()
     or (_CFG_ACTIVE_PROFILE if isinstance(_CFG_ACTIVE_PROFILE, str) else None)
     or _DEFAULT_ENTRY_PROFILE_NAME
 )
