@@ -15,7 +15,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from datetime import time as dtime
 from functools import lru_cache
 from pathlib import Path
@@ -757,6 +757,7 @@ LOGGER = logging.getLogger(__name__)
 # szolgáltatja, így új eszköz felvételekor elegendő azt módosítani.
 
 MARKET_TIMEZONE = ZoneInfo("Europe/Berlin")
+RULE_TIMEZONES: Dict[str, ZoneInfo] = {"EURUSD": ZoneInfo("America/New_York")}
 
 PUBLIC_DIR = "public"
 _ANALYSIS_BASE_DIR = Path(__file__).resolve().parent
@@ -1569,6 +1570,30 @@ def minute_in_interval(minute: int, start: int, end: int) -> bool:
     return minute >= start or minute < end
 
 
+def _convert_rule_minute_to_utc(
+    minute: int, rule_date: date, source_tz: Optional[ZoneInfo]
+) -> int:
+    """Return the UTC minute-of-day for a local trading rule timestamp.
+
+    Some session rules (e.g., FX Sunday open) are defined in a market's local
+    timezone such as America/New_York to track DST transitions. Convert those
+    minutes to UTC for the given rule_date. If conversion fails or no source
+    timezone is provided, fall back to the original minute value.
+    """
+
+    if source_tz is None:
+        return minute
+
+    try:
+        local_dt = datetime.combine(
+            rule_date, dtime(minute // 60, minute % 60, tzinfo=source_tz)
+        )
+        utc_dt = local_dt.astimezone(timezone.utc)
+        return utc_dt.hour * 60 + utc_dt.minute
+    except Exception:
+        return minute
+
+
 def format_utc_minute(minute: int) -> str:
     minute = max(0, min(23 * 60 + 59, minute))
     return f"{minute // 60:02d}:{minute % 60:02d}"
@@ -1669,7 +1694,16 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
     break_window: Optional[Tuple[int, int]] = None
 
     rules = SESSION_TIME_RULES.get(asset, {})
-    sunday_open = rules.get("sunday_open_minute")
+    rule_tz = RULE_TIMEZONES.get(asset)
+    rule_date = now_utc.date()
+
+    sunday_open_raw = rules.get("sunday_open_minute")
+    try:
+        sunday_open = int(sunday_open_raw) if sunday_open_raw is not None else None
+    except (TypeError, ValueError):
+        sunday_open = None
+    if sunday_open is not None:
+        sunday_open = _convert_rule_minute_to_utc(sunday_open, rule_date, rule_tz)
     if sunday_open is not None and now_utc.weekday() == 6 and minute_of_day < sunday_open:
         monitor_ok = False
         entry_window_ok = False
@@ -1677,8 +1711,19 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
         special_reason = "sunday_open_pending"
         special_note = f"Piac zárva (vasárnapi nyitás {format_utc_minute(sunday_open)} UTC után)"
 
+    daily_breaks_raw = rules.get("daily_breaks") or []
+    daily_breaks: List[Tuple[int, int]] = []
+    for start, end in daily_breaks_raw:
+        try:
+            start_m = int(start)
+            end_m = int(end)
+        except (TypeError, ValueError):
+            continue
+        start_m = _convert_rule_minute_to_utc(start_m, rule_date, rule_tz)
+        end_m = _convert_rule_minute_to_utc(end_m, rule_date, rule_tz)
+        daily_breaks.append((start_m, end_m))
+
     if special_status is None:
-        daily_breaks = rules.get("daily_breaks") or []
         for start, end in daily_breaks:
             if minute_in_interval(minute_of_day, start, end):
                 monitor_ok = False
@@ -1692,7 +1737,13 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
                 special_note = f"Piac zárva (napi karbantartás {start_s}–{end_s} UTC)"
                 break
 
-    friday_close = rules.get("friday_close_minute")
+    friday_close_raw = rules.get("friday_close_minute")
+    try:
+        friday_close = int(friday_close_raw) if friday_close_raw is not None else None
+    except (TypeError, ValueError):
+        friday_close = None
+    if friday_close is not None:
+        friday_close = _convert_rule_minute_to_utc(friday_close, rule_date, None)
     if friday_close is not None and now_utc.weekday() == 4 and minute_of_day >= friday_close:
         monitor_ok = False
         entry_window_ok = False
@@ -11787,6 +11838,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
