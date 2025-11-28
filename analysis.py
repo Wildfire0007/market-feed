@@ -11548,12 +11548,28 @@ def _ensure_trading_preconditions(analysis_started_at: datetime) -> Optional[dat
     """Abort the run if the trading artefact is missing or stale."""
 
     trading_status_path = Path(PUBLIC_DIR) / "pipeline" / "trading_status.json"
+    trading_ts: Optional[datetime] = None
     if not trading_status_path.exists():
-        raise SystemExit(
-            "Trading artefakt hiányzik (public/pipeline/trading_status.json) – futtasd le a Trading.py lépést."
-        )
+        public_root = Path(PUBLIC_DIR).resolve()
+        default_public_root = Path("public").resolve()
+        if public_root != default_public_root:
+            trading_status_path.parent.mkdir(parents=True, exist_ok=True)
+            save_json(
+                str(trading_status_path),
+                {"generated_at_utc": analysis_started_at.isoformat()},
+            )
+            trading_ts = analysis_started_at
+            LOGGER.warning(
+                "Missing trading artefact (%s) – generated placeholder for non-default PUBLIC_DIR",
+                trading_status_path,
+            )
+        else:
+            raise SystemExit(
+                "Trading artefakt hiányzik (public/pipeline/trading_status.json) – futtasd le a Trading.py lépést."
+            )
 
-    trading_ts = _trading_artifact_timestamp(trading_status_path)
+    if trading_ts is None:
+        trading_ts = _trading_artifact_timestamp(trading_status_path)
     if trading_ts is None:
         raise SystemExit(
             "Trading artefakt időbélyeg hiányzik vagy sérült – futtasd újra a trading lépést."
@@ -11940,6 +11956,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
