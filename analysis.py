@@ -11479,6 +11479,61 @@ def _analyze_asset_guard(asset: str) -> Tuple[str, Dict[str, Any]]:
     return asset, result
 
 
+def _trading_artifact_timestamp(path: Path) -> Optional[datetime]:
+    try:
+        payload = load_json(str(path))
+    except Exception as exc:  # pragma: no cover - defensive guard
+        LOGGER.warning("Nem sikerült beolvasni a trading artefaktot (%s): %s", path, exc)
+        payload = None
+
+    if isinstance(payload, dict):
+        for key in ("generated_at_utc", "updated_at_utc", "completed_utc"):
+            ts = _parse_utc_timestamp(payload.get(key))
+            if ts:
+                return ts
+
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+    except OSError:
+        return None
+
+
+def _ensure_trading_preconditions(analysis_started_at: datetime) -> Optional[datetime]:
+    """Abort the run if the trading artefact is missing or stale."""
+
+    trading_status_path = Path(PUBLIC_DIR) / "pipeline" / "trading_status.json"
+    if not trading_status_path.exists():
+        raise SystemExit(
+            "Trading artefakt hiányzik (public/pipeline/trading_status.json) – futtasd le a Trading.py lépést."
+        )
+
+    trading_ts = _trading_artifact_timestamp(trading_status_path)
+    if trading_ts is None:
+        raise SystemExit(
+            "Trading artefakt időbélyeg hiányzik vagy sérült – futtasd újra a trading lépést."
+        )
+
+    now_safe = analysis_started_at
+    if trading_ts > now_safe:
+        raise SystemExit(
+            "Trading időbélyeg későbbi, mint az analysis start – ellenőrizd a pipeline sorrendet."
+        )
+
+    age_seconds = (now_safe - trading_ts).total_seconds()
+    try:
+        lag_budget = float(PIPELINE_MAX_LAG_SECONDS) if PIPELINE_MAX_LAG_SECONDS is not None else None
+    except (TypeError, ValueError):
+        lag_budget = None
+
+    if lag_budget is not None and age_seconds > lag_budget:
+        raise SystemExit(
+            "Trading artefakt túl régi (%ds) – futtasd le újra a Trading.py lépést." % int(age_seconds)
+        )
+
+    LOGGER.info("Trading artefakt időbélyeg: %s (késés %.1fs)", trading_ts.isoformat(), age_seconds)
+    return trading_ts
+
+
 def main():
     analysis_started_at = datetime.now(timezone.utc)
     pipeline_log_path = None
@@ -11498,6 +11553,7 @@ def main():
     analysis_delay_seconds: Optional[float] = None
     lag_threshold = PIPELINE_MAX_LAG_SECONDS
     lag_breached = False
+    _ensure_trading_preconditions(analysis_started_at)
     if record_analysis_run:
         try:
             pipeline_payload, analysis_delay_seconds, lag_threshold, lag_breached = record_analysis_run(
@@ -11838,6 +11894,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
