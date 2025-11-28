@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 
@@ -25,3 +26,33 @@ def test_latency_guard_status_accepts_string_latency():
     assert status["asset"] == "XAGUSD"
     assert status["age_seconds"] == 601
     assert status["limit_seconds"] == 600
+
+
+def test_latency_guard_recovery_logs_and_resets(tmp_path, caplog):
+    outdir = tmp_path / "BTCUSD"
+    outdir.mkdir(parents=True)
+    guard_state = {
+        "active": True,
+        "feed": "k1m",
+        "triggered_utc": "2024-01-01 00:00:00",
+        "triggered_cet": "2024-01-01 01:00:00",
+        "limit_seconds": 300,
+    }
+    analysis.save_latency_guard_state(str(outdir), guard_state)
+    entry_meta: dict = {}
+
+    caplog.set_level("INFO", logger=analysis.LOGGER.name)
+    recovery = analysis._log_latency_guard_recovery(
+        "BTCUSD",
+        str(outdir),
+        guard_state,
+        datetime(2024, 1, 1, 2, 0, tzinfo=timezone.utc),
+        "suppressed",
+        entry_meta,
+    )
+
+    assert recovery is not None
+    assert entry_meta.get("latency_guard_recovery", {}).get("profile") == "suppressed"
+    saved_state = analysis.load_latency_guard_state(str(outdir))
+    assert saved_state.get("active") is False
+    assert any(record.message == "Latency guard feloldva" for record in caplog.records)
