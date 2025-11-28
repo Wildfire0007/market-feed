@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Scheduled cleanup helpers for monitoring JSON snapshots."""
+"""Scheduled cleanup helpers for monitoring JSON snapshots.
+
+The cron entry for this script is intended exclusively for monitoring hygiene
+(resetting dashboard caches) and must not be treated as a production readiness
+signal.
+"""
 
 from __future__ import annotations
 
@@ -27,7 +32,7 @@ from scripts.notify_discord import (
 
 PUBLIC_DIR = Path(os.getenv("PUBLIC_DIR", "public"))
 STATUS_PATH = PUBLIC_DIR / "status.json"
-DEFAULT_STATUS_MESSAGE = "scheduled monitoring reset"
+DEFAULT_STATUS_MESSAGE = "monitoring cron reset (non-production)"
 DEFAULT_BACKUP_DIR = PUBLIC_DIR / "monitoring" / "reset_backups"
 RESET_STATUS = "reset"
 
