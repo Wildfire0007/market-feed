@@ -38,6 +38,7 @@ Környezeti változók:
 import os, json, time, math, logging
 import threading
 from datetime import datetime, timezone, time as dt_time
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Optional, List, Tuple, Callable, Set
 
@@ -242,6 +243,10 @@ SERIES_FETCH_PLAN = [
     ("klines_1h", "1h"),
     ("klines_4h", "4h"),
 ]
+
+_SERIES_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
+_SERIES_REPLAY_DIR = Path(os.getenv("TD_SERIES_REPLAY_DIR", "")).expanduser()
+_SERIES_REPLAY_ENABLED = _SERIES_REPLAY_DIR.exists()
 
 
 class AdaptiveRateLimiter:
@@ -2232,6 +2237,25 @@ def _maybe_use_secondary_series(
 def td_time_series(symbol: str, interval: str, outputsize: int = 500,
                    exchange: Optional[str] = None, order: str = "desc") -> Dict[str, Any]:
     """Hibatűrő time_series (hiba esetén ok:false + üres values)."""
+
+    cache_key = (symbol, interval)
+    if cache_key in _SERIES_CACHE:
+        return _SERIES_CACHE[cache_key]
+
+    if _SERIES_REPLAY_ENABLED:
+        replay_path = _SERIES_REPLAY_DIR / f"{symbol}_{interval}.json"
+        try:
+            if replay_path.exists():
+                payload = load_json(str(replay_path)) or {}
+                payload.setdefault("source", "replay")
+                payload.setdefault("ok", bool(payload.get("raw")))
+                payload.setdefault("interval", interval)
+                payload.setdefault("used_symbol", symbol)
+                payload.setdefault("retrieved_at_utc", now_utc())
+                _SERIES_CACHE[cache_key] = payload
+                return payload
+        except Exception:
+            LOGGER.debug("replay_series_load_failed", exc_info=True)
     params = {
         "symbol": symbol,
         "interval": interval,
@@ -2263,7 +2287,7 @@ def td_time_series(symbol: str, interval: str, outputsize: int = 500,
             if parsed:
                 latency = (datetime.now(timezone.utc) - parsed).total_seconds()
                 latency_seconds = max(0.0, latency)
-        return {
+        payload = {
             "used_symbol": symbol,
             "asset": symbol,
             "interval": interval,
@@ -2274,8 +2298,10 @@ def td_time_series(symbol: str, interval: str, outputsize: int = 500,
             "latency_seconds": latency_seconds,
             "raw": j if ok else {"values": []},
         }
+        _SERIES_CACHE[cache_key] = payload
+        return payload
     except TDError as exc:
-        return {
+        payload = {
             "used_symbol": symbol,
             "asset": symbol,
             "interval": interval,
@@ -2287,8 +2313,10 @@ def td_time_series(symbol: str, interval: str, outputsize: int = 500,
             "error_throttled": exc.throttled,
             "raw": {"values": []},
         }
+        _SERIES_CACHE[cache_key] = payload
+        return payload
     except Exception as e:
-        return {
+        payload = {
             "used_symbol": symbol,
             "asset": symbol,
             "interval": interval,
@@ -2298,7 +2326,9 @@ def td_time_series(symbol: str, interval: str, outputsize: int = 500,
             "error": str(e),
             "raw": {"values": []},
         }
-
+        _SERIES_CACHE[cache_key] = payload
+        return payload
+      
 def td_quote(symbol: str, exchange: Optional[str] = None) -> Dict[str, Any]:
     params = {"symbol": symbol, "timezone": "UTC"}
     if exchange:
@@ -3551,7 +3581,11 @@ def closes_from_ts(payload: Dict[str, Any]) -> List[Optional[float]]:
         out: List[Optional[float]] = []
         for row in vals:
             try:
-                out.append(float(row["close"]))
+                value = float(row["close"])
+                if value != value or math.isinf(value):
+                    out.append(None)
+                else:
+                    out.append(value)
             except Exception:
                 out.append(None)
         return out
@@ -3877,6 +3911,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
