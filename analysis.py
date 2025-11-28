@@ -772,6 +772,7 @@ PROB_STACK_EXPORT_FILENAME = "probability_stack.json"
 PROB_STACK_GAP_ENV_DISABLE = "DISABLE_PROB_STACK_GAP_FALLBACK"
 PROB_STACK_GAP_STALE_MINUTES = 10
 LATENCY_GUARD_PROFILE_LIMIT_SECONDS: Dict[str, int] = {"suppressed": 420}
+ML_FEATURE_SNAPSHOT_DIRNAME = "ml_features"
 PRECISION_SCORE_PROFILE_OVERRIDES: Dict[str, Dict[str, float]] = {
     "NVDA": {"suppressed": 52.0},
 }
@@ -4226,6 +4227,13 @@ def _handle_spot_realtime_staleness(
             f"Realtime spot frissítés szükséges — {age_seconds} másodperces késés",
             metadata=payload,
         )
+        k1m_payload = dict(payload, feed="k1m")
+        notifier(
+            asset,
+            "k1m",
+            "1m gyertya frissítés szükséges a realtime spot késése miatt",
+            metadata=k1m_payload,
+        )
         result["notified"] = True
         result["refresh_requested"] = True
         result.setdefault("retry_after_seconds", 60)
@@ -4306,6 +4314,17 @@ def ensure_probability_metadata(
         normalised["source"] = default_source
 
     return normalised
+
+
+def _ml_feature_snapshot_present(asset: str, base_dir: Optional[Path] = None) -> bool:
+    asset_root = Path(base_dir or PUBLIC_DIR) / str(asset or "").upper()
+    feature_dir = asset_root / ML_FEATURE_SNAPSHOT_DIRNAME
+    if not feature_dir.exists() or not feature_dir.is_dir():
+        return False
+    try:
+        return any(feature_dir.iterdir())
+    except OSError:
+        return False
 
 
 def _probability_stack_snapshot_path(
@@ -4425,6 +4444,17 @@ def _apply_probability_stack_gap_guard(
     if os.getenv(PROB_STACK_GAP_ENV_DISABLE):
         return metadata
     clock = now or datetime.now(timezone.utc)
+    feature_snapshot_ok = _ml_feature_snapshot_present(asset, base_dir=base_dir)
+    if not feature_snapshot_ok:
+        metadata = ensure_probability_metadata(metadata)
+        metadata.setdefault("source", "fallback")
+        metadata.setdefault("status", "fallback")
+        metadata.setdefault("fallback", {})
+        metadata.setdefault("unavailable_reason", "feature_snapshot_missing")
+        if isinstance(metadata.get("fallback"), dict):
+            metadata["fallback"].setdefault("reason", "feature_snapshot_missing")
+            metadata["fallback"].setdefault("action", "no_entry")
+            metadata["fallback"].setdefault("detail", "BTCUSD feature snapshot missing")
     if _probability_stack_missing(metadata):
         export_snapshot = _load_probability_stack_export(
             asset,
@@ -10974,6 +11004,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             "model_missing": "ML fallback: modell hiányzik — heurisztikus pontozás aktív",
             "sklearn_missing": "ML fallback: scikit-learn hiányzik — heurisztikus pontozás aktív",
             "model_type_mismatch": "ML fallback: modell típus inkompatibilis",
+            "feature_snapshot_missing": "ML fallback: hiányzó feature snapshot",
         }
         if isinstance(fallback_reason, str):
             reason_text = reason_map.get(
@@ -10984,6 +11015,20 @@ def analyze(asset: str) -> Dict[str, Any]:
             reason_text = "ML fallback aktív"
         if reason_text not in reasons:
             reasons.append(reason_text)
+
+    ml_gap_reasons = {"feature_snapshot_missing", "model_missing"}
+    if asset.upper() == "BTCUSD" and (
+        probability_metadata.get("unavailable_reason") in ml_gap_reasons
+        or (fallback_meta and fallback_meta.get("reason") in ml_gap_reasons)
+    ):
+        gap_reason = "ML modell / feature snapshot hiányzik — belépés tiltva"
+        if gap_reason not in reasons:
+            reasons.insert(0, gap_reason)
+        if "ml_probability" not in missing:
+            missing.append("ml_probability")
+        decision = "no entry"
+        entry = sl = tp1 = tp2 = rr = None
+        execution_playbook = []
 
     combined_probability = P / 100.0
     if ml_probability is not None:
@@ -11894,6 +11939,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
