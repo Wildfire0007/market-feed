@@ -1606,7 +1606,8 @@ def format_local_range(start_dt: datetime, end_dt: datetime) -> List[str]:
 
 
 def convert_windows_to_local(
-    windows: Optional[List[Tuple[int, int, int, int]]]
+    windows: Optional[List[Tuple[int, int, int, int]]],
+    tz: ZoneInfo = MARKET_TIMEZONE,
 ) -> Optional[List[List[str]]]:
     if not windows:
         return None
@@ -1617,20 +1618,22 @@ def convert_windows_to_local(
         end_dt = datetime.combine(today_utc, dtime(eh, em, tzinfo=timezone.utc))
         if end_dt <= start_dt:
             end_dt += timedelta(days=1)
-        start_local = start_dt.astimezone(MARKET_TIMEZONE)
-        end_local = end_dt.astimezone(MARKET_TIMEZONE)
+        start_local = start_dt.astimezone(tz)
+        end_local = end_dt.astimezone(tz)
         result.append(format_local_range(start_local, end_local))
     return result
 
 
-def convert_minutes_to_local_range(start: int, end: int) -> List[str]:
+def convert_minutes_to_local_range(
+    start: int, end: int, tz: ZoneInfo = MARKET_TIMEZONE
+) -> List[str]:
     today_utc = datetime.now(timezone.utc).date()
     start_dt = datetime.combine(today_utc, dtime(start // 60, start % 60, tzinfo=timezone.utc))
     end_dt = datetime.combine(today_utc, dtime(end // 60, end % 60, tzinfo=timezone.utc))
     if end_dt <= start_dt:
         end_dt += timedelta(days=1)
-    start_local = start_dt.astimezone(MARKET_TIMEZONE)
-    end_local = end_dt.astimezone(MARKET_TIMEZONE)
+    start_local = start_dt.astimezone(tz)
+    end_local = end_dt.astimezone(tz)
     return format_local_range(start_local, end_local)
 
 
@@ -1674,6 +1677,7 @@ def next_session_open(asset: str, now: Optional[datetime] = None) -> Optional[da
 def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dict[str, Any]]:
     now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     h, m = now_utc.hour, now_utc.minute
+    now_budapest = now_utc.astimezone(BUDAPEST_TIMEZONE)
     minute_of_day = h * 60 + m
     entry_windows, monitor_windows = session_windows_utc(asset)
     monitor_ok = in_any_window_utc(monitor_windows, h, m)
@@ -1706,13 +1710,21 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
         sunday_open = None
     if sunday_open is not None:
         sunday_open = _convert_rule_minute_to_utc(sunday_open, rule_date, rule_tz)
+    sunday_open_local: Optional[List[str]] = None
+    if sunday_open is not None:
+        sunday_open_local = convert_minutes_to_local_range(
+            sunday_open, (sunday_open + 1) % (24 * 60), tz=BUDAPEST_TIMEZONE
+        )
     if sunday_open is not None and now_utc.weekday() == 6 and minute_of_day < sunday_open:
         monitor_ok = False
         entry_window_ok = False
         special_status = "closed_out_of_hours"
         special_reason = "sunday_open_pending"
-        special_note = f"Piac zárva (vasárnapi nyitás {format_utc_minute(sunday_open)} UTC után)"
-
+        special_note = (
+            "Piac zárva (vasárnapi nyitás "
+            f"{format_utc_minute(sunday_open)} UTC / {sunday_open_local[0]} Budapest után)"
+        )
+      
     daily_breaks_raw = rules.get("daily_breaks") or []
     daily_breaks: List[Tuple[int, int]] = []
     for start, end in daily_breaks_raw:
@@ -1808,17 +1820,27 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
         "within_monitor_window": monitor_ok,
         "weekday_ok": weekday_ok,
         "now_utc": now_utc.isoformat(),
+        "now_budapest": now_budapest.isoformat(),
         "windows_utc": entry_windows,
     }
     if monitor_windows and monitor_windows != entry_windows:
         info["monitor_windows_utc"] = monitor_windows
     info["time_zone"] = "Europe/Berlin"
+    info["time_zone_budapest"] = "Europe/Budapest"
     entry_local = convert_windows_to_local(entry_windows)
     if entry_local:
         info["windows_local_cet"] = entry_local
+    entry_local_budapest = convert_windows_to_local(entry_windows, tz=BUDAPEST_TIMEZONE)
+    if entry_local_budapest:
+        info["windows_local_budapest"] = entry_local_budapest
     monitor_local = convert_windows_to_local(monitor_windows)
     if monitor_local and monitor_windows != entry_windows:
         info["monitor_windows_local_cet"] = monitor_local
+    monitor_local_budapest = convert_windows_to_local(
+        monitor_windows, tz=BUDAPEST_TIMEZONE
+    )
+    if monitor_local_budapest and monitor_windows != entry_windows:
+        info["monitor_windows_local_budapest"] = monitor_local_budapest
     allowed = SESSION_WEEKDAYS.get(asset)
     if allowed:
         info["allowed_weekdays"] = list(allowed)
@@ -1871,8 +1893,14 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
     if break_window:
         info["daily_break_window_utc"] = [format_utc_minute(break_window[0]), format_utc_minute(break_window[1])]
         info["daily_break_window_cet"] = convert_minutes_to_local_range(*break_window)
+        info["daily_break_window_budapest"] = convert_minutes_to_local_range(
+            *break_window, tz=BUDAPEST_TIMEZONE
+        )
     if special_reason:
         info["special_closure_reason"] = special_reason
+    if sunday_open is not None:
+        info["sunday_open_utc"] = format_utc_minute(sunday_open)
+        info["sunday_open_budapest"] = sunday_open_local[0] if sunday_open_local else None
     info["status"] = status
     info["status_note"] = status_note
     if profile_notes:
@@ -11957,6 +11985,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
