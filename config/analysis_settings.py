@@ -728,6 +728,17 @@ if _ACTIVE_PROFILE_NAME not in ENTRY_THRESHOLD_PROFILES:
     _ACTIVE_PROFILE_NAME = _DEFAULT_ENTRY_PROFILE_NAME
 
 ENTRY_THRESHOLD_PROFILE_NAME: str = _ACTIVE_PROFILE_NAME
+
+
+def _env_flag_enabled(flag_name: Optional[str], *, default: bool = False) -> bool:
+    """Return whether an environment flag is enabled."""
+
+    if not flag_name:
+        return default
+    raw = os.getenv(str(flag_name))
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "off", "no"}    
 _ACTIVE_PROFILE = ENTRY_THRESHOLD_PROFILES[ENTRY_THRESHOLD_PROFILE_NAME]
 _P_SCORE_PROFILE = _ACTIVE_PROFILE.get("p_score_min", {})
 _ATR_MULT_PROFILE = _ACTIVE_PROFILE.get("atr_threshold_multiplier", {})
@@ -1092,7 +1103,24 @@ for key, value in _RAW_LATENCY_GUARD.items():
 INTERVENTION_WATCH_DEFAULT: Dict[str, Any] = dict(_get_config_value("intervention_watch_default") or {})
 SESSION_WEEKDAYS: Dict[str, Any] = dict(_get_config_value("session_weekdays") or {})
 SESSION_TIME_RULES: Dict[str, Dict[str, Any]] = load_config()["session_time_rules"]
-ATR_PERCENTILE_TOD: Dict[str, Any] = dict(_get_config_value("atr_percentile_min_by_tod") or {})
+_ATR_PERCENTILE_PROFILES: Dict[str, Any] = dict(
+    _get_config_value("atr_percentile_min_by_tod_profiles") or {}
+)
+
+
+def _resolve_atr_percentiles() -> Dict[str, Any]:
+    if _ATR_PERCENTILE_PROFILES:
+        profile_cfg = dict(
+            _ATR_PERCENTILE_PROFILES.get(ENTRY_THRESHOLD_PROFILE_NAME) or {}
+        )
+        if not profile_cfg:
+            profile_cfg = dict(_ATR_PERCENTILE_PROFILES.get("baseline") or {})
+        if profile_cfg:
+            return profile_cfg
+    return dict(_get_config_value("atr_percentile_min_by_tod") or {})
+
+
+ATR_PERCENTILE_TOD: Dict[str, Any] = _resolve_atr_percentiles()
 P_SCORE_TIME_BONUS: Dict[str, Any] = dict(_get_config_value("p_score_time_bonus") or {})
 ADX_RR_BANDS: Dict[str, Any] = dict(_get_config_value("adx_rr_bands") or {})
 ASSET_CLASS_MAP: Dict[str, str] = {
@@ -1121,6 +1149,11 @@ _SPREAD_MAX_ATR_PCT_PROFILES = _normalize_profiled_numeric_map(
 )
 _FIB_TOLERANCE_PROFILES = _normalize_fib_tolerance_profiles(
     _get_config_value("fib_tolerance_profiles")
+)
+_FIB_RELAX_FLAG: Optional[str] = _get_config_value("fib_relax_env_flag")
+_FIB_RELAX_DEFAULT: bool = bool(_get_config_value("fib_relax_default_enabled"))
+FIB_RELAX_ENABLED: bool = _env_flag_enabled(
+    _FIB_RELAX_FLAG or "RELAX_FIB", default=_FIB_RELAX_DEFAULT
 )
 _MAX_RISK_PCT_PROFILES = _normalize_profiled_numeric_map(
     _get_config_value("max_risk_pct_profiles"), float, 1.5
@@ -1359,7 +1392,10 @@ def get_fib_tolerance(asset: str, profile: Optional[str] = None) -> float:
     """Return the Fib tolerance fraction for the profile/asset combination."""
 
     profile_name = profile or ENTRY_THRESHOLD_PROFILE_NAME
-    profile_cfg = _FIB_TOLERANCE_PROFILES.get(profile_name) or {}
+    fib_profile = profile_name
+    if profile_name == "relaxed" and not FIB_RELAX_ENABLED:
+        fib_profile = "baseline"
+    profile_cfg = _FIB_TOLERANCE_PROFILES.get(fib_profile) or {}
     overrides = profile_cfg.get("by_asset", {})
     asset_key = str(asset or "").upper()
     value = overrides.get(asset_key)
