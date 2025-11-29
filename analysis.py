@@ -8,6 +8,7 @@ Kimenet:
   public/analysis.html            — egyszerű HTML kivonat
 """
 
+import csv
 import json
 import logging
 import os
@@ -143,6 +144,7 @@ _PRECISION_RUNTIME: Dict[str, Dict[str, Any]] = {}
 
 # Precision pipeline alsó határ (ne blokkoljon túl korán)
 BTC_PRECISION_MIN = {"baseline": 52, "relaxed": 50, "suppressed": 48}
+BTC_PRECISION_SOFT_DELTA = 2.0
 
 
 def btc_precision_state(profile: str, asset: str, score: float, trigger_ready: bool) -> str:
@@ -150,8 +152,11 @@ def btc_precision_state(profile: str, asset: str, score: float, trigger_ready: b
         return "none"
     profile_key = profile if profile in BTC_PRECISION_MIN else "baseline"
     threshold = BTC_PRECISION_MIN.get(profile_key, BTC_PRECISION_MIN["baseline"])
+    soft_block_threshold = threshold - BTC_PRECISION_SOFT_DELTA
     if score >= threshold:
         return "precision_arming" if trigger_ready else "precision_ready"
+    if score >= soft_block_threshold and trigger_ready:
+        return "precision_soft_block"
     return "none"  # ne blokkoljon önmagában
 
 # --- Elemzendő eszközök ---
@@ -1320,6 +1325,34 @@ def _render_entry_gate_chart(stats: Dict[str, Any]) -> None:
         LOGGER.debug("entry_gate_chart_render_failed", exc_info=True)
 
 
+def _gate_timestamp_fields(timestamp: Optional[datetime]) -> Dict[str, str]:
+    ts_ref = timestamp or datetime.now(timezone.utc)
+    if ts_ref.tzinfo is None:
+        ts_ref = ts_ref.replace(tzinfo=timezone.utc)
+    ts_utc = ts_ref.astimezone(timezone.utc)
+    ts_fmt = "%Y-%m-%d %H:%M:%S"
+    return {
+        "timestamp_utc": ts_utc.strftime(ts_fmt),
+        "timestamp_bud": ts_utc.astimezone(LOCAL_TZ).strftime(ts_fmt),
+    }
+
+
+def _precision_ready_elapsed_seconds(
+    ready_since: Optional[datetime], now_runtime: Optional[datetime] = None
+) -> Optional[float]:
+    """Return elapsed seconds a precision ready állapot kezdete óta."""
+
+    if ready_since is None:
+        return None
+    if not isinstance(ready_since, datetime):
+        return None
+    now = (now_runtime or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    try:
+        return (now - ready_since).total_seconds()
+    except Exception:
+        return None
+
+
 def _log_gate_summary(asset: str, decision: Dict[str, Any]) -> None:
     """Emit a structured log line describing the gate evaluation outcome."""
 
@@ -1328,6 +1361,7 @@ def _log_gate_summary(asset: str, decision: Dict[str, Any]) -> None:
         entry_meta = decision.get("entry_thresholds") or {}
         active_meta = decision.get("active_position_meta") or {}
         context_hu = decision.get("entry_gate_context_hu") if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE) else {}
+        ts_fields = _gate_timestamp_fields(parse_utc_timestamp(decision.get("retrieved_at_utc")))
         summary = {
             "asset": asset,
             "profile": entry_meta.get("profile"),
@@ -1342,8 +1376,15 @@ def _log_gate_summary(asset: str, decision: Dict[str, Any]) -> None:
             "atr_ok": entry_meta.get("atr_ratio_ok"),
             "spread_ok": entry_meta.get("spread_gate_ok"),
             "liquidity_ok": decision.get("momentum_liquidity_ok"),
+            "rr_min_core": entry_meta.get("rr_min_core"),
+            "rr_min_momentum": entry_meta.get("rr_min_momentum"),
+            **ts_fields,
         }
         summary["atr_kuszob_hatasos"] = entry_meta.get("atr_threshold_effective")
+        risk_meta = entry_meta.get("risk_guard") or {}
+        summary["risk_max_pct"] = risk_meta.get("max_risk_pct")
+        summary["risk_spread_ok"] = risk_meta.get("spread_gate_ok")
+        summary["cost_model"] = risk_meta.get("cost_model")
         guard_meta = entry_meta.get("latency_guard") or {}
         summary["kesleltetesi_vedo_kor_mp"] = guard_meta.get("age_seconds")
         summary["kesleltetesi_vedo_limit_mp"] = guard_meta.get("limit_seconds")
@@ -1354,13 +1395,68 @@ def _log_gate_summary(asset: str, decision: Dict[str, Any]) -> None:
             summary["precision_hiany"] = precision_missing
         if isinstance(context_hu, dict):
             summary.update(context_hu)
-        timestamp = decision.get("retrieved_at_utc")
-        if timestamp:
-            summary["timestamp"] = timestamp
         LOGGER.info("gate_summary", extra={"asset": asset, "gate_summary": summary})
         _append_entry_gate_stats(summary)
     except Exception:
         LOGGER.debug("gate_summary_logging_failed", exc_info=True)
+
+
+def _build_entry_count_summary(
+    asset_results: Dict[str, Any], window_days: int = 14
+) -> Dict[str, Any]:
+    """Aggregate buy/sell jeleket nap/eszkoz bontásban az utolsó ablakra."""
+
+    counts_by_day: Dict[str, Dict[str, int]] = {}
+    now_utc = datetime.now(timezone.utc)
+    cutoff = now_utc - timedelta(days=window_days)
+    journal_path = Path(PUBLIC_DIR) / "journal" / "trade_journal.csv"
+
+    def _bump(day_key: str, asset_key: str) -> None:
+        asset_bucket = counts_by_day.setdefault(day_key, {})
+        asset_bucket[asset_key] = asset_bucket.get(asset_key, 0) + 1
+
+    if journal_path.exists():
+        try:
+            with journal_path.open("r", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    signal = (row.get("signal") or "").strip().lower()
+                    if signal not in {"buy", "sell"}:
+                        continue
+                    ts = parse_utc_timestamp(row.get("analysis_timestamp"))
+                    if ts is None:
+                        continue
+                    if ts < cutoff:
+                        continue
+                    day_key = ts.astimezone(timezone.utc).date().isoformat()
+                    asset_key = (row.get("asset") or "").strip().upper()
+                    if not asset_key:
+                        continue
+                    _bump(day_key, asset_key)
+        except Exception:
+            LOGGER.debug("entry_count_aggregation_failed", exc_info=True)
+
+    for asset_key, payload in asset_results.items():
+        if not isinstance(payload, dict):
+            continue
+        signal = (payload.get("signal") or payload.get("decision") or "").strip().lower()
+        if signal not in {"buy", "sell"}:
+            continue
+        ts = parse_utc_timestamp(payload.get("retrieved_at_utc")) or now_utc
+        day_key = ts.astimezone(timezone.utc).date().isoformat()
+        _bump(day_key, asset_key.upper())
+
+    totals: Dict[str, int] = {}
+    for _, assets in counts_by_day.items():
+        for asset_key, count in assets.items():
+            totals[asset_key] = totals.get(asset_key, 0) + count
+
+    return {
+        "generated_utc": nowiso(),
+        "window_days": window_days,
+        "by_day_asset": counts_by_day,
+        "by_asset_total": totals,
+    }
 
 
 def _btc_time_of_day_bucket(minute: int) -> str:
@@ -1698,6 +1794,7 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
     special_reason: Optional[str] = None
     break_active = False
     break_window: Optional[Tuple[int, int]] = None
+    news_lockout = False
 
     rules = SESSION_TIME_RULES.get(asset, {})
     rule_tz = RULE_TIMEZONES.get(asset)
@@ -1750,6 +1847,17 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
                 end_s = format_utc_minute(end)
                 special_note = f"Piac zárva (napi karbantartás {start_s}–{end_s} UTC)"
                 break
+
+    if (
+        special_status is None
+        and entry_window_ok
+        and monitor_windows
+        and not monitor_ok
+    ):
+        news_lockout = True
+        special_status = "news_lockout"
+        special_reason = "monitor_window"
+        special_note = "Piac zárva (hír/monitor ablakon kívül)"
 
     friday_close_raw = rules.get("friday_close_minute")
     try:
@@ -1901,6 +2009,14 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
     if sunday_open is not None:
         info["sunday_open_utc"] = format_utc_minute(sunday_open)
         info["sunday_open_budapest"] = sunday_open_local[0] if sunday_open_local else None
+    if news_lockout:
+        info["news_lockout"] = True
+    next_open_calculated = next_session_open(asset, now_utc)
+    if next_open_calculated:
+        info["next_session_open_utc"] = next_open_calculated.isoformat()
+        info["next_session_open_budapest"] = next_open_calculated.astimezone(
+            BUDAPEST_TIMEZONE
+        ).isoformat()
     info["status"] = status
     info["status_note"] = status_note
     if profile_notes:
@@ -1910,10 +2026,8 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
                 notes_bucket.append(note)
     if next_open_override:
         info["next_open_utc"] = next_open_override
-    elif not entry_open:
-        nxt = next_session_open(asset, now_utc)
-        if nxt:
-            info["next_open_utc"] = nxt.isoformat()
+    elif next_open_calculated:
+        info["next_open_utc"] = next_open_calculated.isoformat()
     return entry_open, info
 
 def session_ok(asset: str) -> bool:
@@ -2461,6 +2575,14 @@ def build_action_plan(
         )
         risk_cap = get_max_risk_pct(asset)
         add_note(f"Maximális számla kockázat: {risk_cap:.1f}%.")
+        try:
+            entry_thresholds_meta.setdefault("risk_guard", risk_guard_meta)[
+                "risk_pct_estimate"
+            ] = float(risk_pct)
+        except Exception:
+            entry_thresholds_meta.setdefault("risk_guard", {})[
+                "risk_pct_estimate"
+            ] = float(risk_pct)
 
     if momentum_trailing_plan:
         activation = momentum_trailing_plan.get("activation_rr")
@@ -2630,6 +2752,7 @@ def build_action_plan(
 
     precision_direction = (precision_plan or {}).get("direction")
     precision_trigger_state = str((precision_plan or {}).get("trigger_state") or "")
+    precision_profile_for_state: Optional[str] = None
     precision_state = "none"
     if precision_plan:
         score_value = safe_float(precision_plan.get("score")) or 0.0
@@ -2645,8 +2768,9 @@ def build_action_plan(
                 profile_for_precision = _btc_active_profile()
         elif btc_profile_name:
             profile_for_precision = btc_profile_name
+        precision_profile_for_state = profile_for_precision or "baseline"
         precision_state = btc_precision_state(
-            profile_for_precision or "baseline",
+            precision_profile_for_state,
             asset,
             score_value,
             trigger_ready_flag,
@@ -2656,18 +2780,19 @@ def build_action_plan(
     now_runtime = datetime.now(timezone.utc)
     runtime_bucket = _PRECISION_RUNTIME.setdefault(asset, {})
     ready_since = runtime_bucket.get("ready_since")
+    arming_since = runtime_bucket.get("arming_since")
     if not isinstance(ready_since, datetime):
         ready_since = None
+    if not isinstance(arming_since, datetime):
+        arming_since = None
     precision_timeout_triggered = False
     timeout_minutes = 10
-    if (
-        runtime_bucket.get("last_state") == "precision_ready"
-        and ready_since is not None
-    ):
-        try:
-            elapsed = (now_runtime - ready_since).total_seconds()
-        except Exception:
-            elapsed = None
+    runtime_bucket["events"] = int(runtime_bucket.get("events", 0)) + 1
+    runtime_bucket.setdefault("hits_ready", 0)
+    runtime_bucket.setdefault("hits_arming", 0)
+    runtime_bucket.setdefault("hits_soft_block", 0)
+    if runtime_bucket.get("last_state") == "precision_ready":
+        elapsed = _precision_ready_elapsed_seconds(ready_since, now_runtime)
         if elapsed is not None and elapsed > timeout_minutes * 60:
             precision_timeout_triggered = True
             if precision_state == "precision_ready":
@@ -2676,11 +2801,56 @@ def build_action_plan(
         if runtime_bucket.get("last_state") != "precision_ready":
             runtime_bucket["ready_since"] = now_runtime
         runtime_bucket["last_state"] = "precision_ready"
+        runtime_bucket["hits_ready"] = int(runtime_bucket.get("hits_ready", 0)) + 1
+        runtime_bucket.pop("arming_since", None)
+    elif precision_state == "precision_arming":
+        if runtime_bucket.get("last_state") != "precision_arming":
+            runtime_bucket["arming_since"] = now_runtime
+        runtime_bucket["last_state"] = "precision_arming"
+        runtime_bucket["hits_arming"] = int(runtime_bucket.get("hits_arming", 0)) + 1
+        runtime_bucket.pop("ready_since", None)
     else:
         runtime_bucket["last_state"] = precision_state
         runtime_bucket.pop("ready_since", None)
+        runtime_bucket.pop("arming_since", None)
+        if precision_state == "precision_soft_block":
+            runtime_bucket["hits_soft_block"] = int(runtime_bucket.get("hits_soft_block", 0)) + 1
     if precision_timeout_triggered and isinstance(entry_thresholds, dict):
         entry_thresholds["precision_timeout"] = {"minutes": timeout_minutes}
+    precision_gate_snapshot = entry_thresholds_meta.get("precision_gate_state")
+    if isinstance(precision_gate_snapshot, dict):
+        precision_gate_snapshot["precision_state"] = precision_state
+        precision_gate_snapshot["precision_soft_block"] = precision_state == "precision_soft_block"
+        precision_gate_snapshot["precision_profile"] = precision_profile_for_state
+        precision_gate_snapshot["btc_precision_threshold"] = BTC_PRECISION_MIN.get(
+            precision_profile_for_state or "baseline",
+            BTC_PRECISION_MIN.get("baseline"),
+        )
+        counters = runtime_bucket if isinstance(runtime_bucket, dict) else {}
+        ready_ts_fields = _gate_timestamp_fields(ready_since) if ready_since else {}
+        arming_ts_fields = _gate_timestamp_fields(arming_since) if arming_since else {}
+        precision_gate_snapshot.update(
+            {
+                "precision_ready_since": ready_ts_fields or None,
+                "precision_arming_since": arming_ts_fields or None,
+                "precision_events": counters.get("events"),
+                "precision_hits_ready": counters.get("hits_ready"),
+                "precision_hits_arming": counters.get("hits_arming"),
+                "precision_hits_soft_block": counters.get("hits_soft_block"),
+            }
+        )
+        _log_precision_gate_summary(
+            asset,
+            precision_gate_snapshot,
+            precision_gate_snapshot.get("flow_blockers"),
+        )
+        if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
+            entry_gate_context_hu["precision_kapu"] = {
+                **precision_gate_snapshot,
+                **_gate_timestamp_fields(analysis_now),
+            }
+            gate_extra_context.update(entry_gate_context_hu)
+
     if precision_state in {"precision_ready", "precision_arming"} and precision_plan:
         label = "Precision trigger előkészítés"
         if precision_state == "precision_arming":
@@ -4134,6 +4304,7 @@ def _emit_precision_gate_log(
         or order_flow.get("status"),
         "timestamp_utc": now_utc.strftime(ts_format),
         "timestamp_cet": now_utc.astimezone(LOCAL_TZ).strftime(ts_format),
+        "timestamp_bud": now_utc.astimezone(LOCAL_TZ).strftime(ts_format),
     }
     if trigger_state is not None:
         payload["precision_trigger_state"] = trigger_state
@@ -7623,6 +7794,42 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     entry_thresholds_meta["atr_threshold_effective"] = atr_threshold
     entry_thresholds_meta["spread_gate_ok"] = spread_gate_ok
+    cost_model = settings.ASSET_COST_MODEL.get(asset) or settings.DEFAULT_COST_MODEL
+    risk_cap_pct = get_max_risk_pct(asset)
+    risk_guard_meta = {
+        "profile": asset_entry_profile,
+        "max_risk_pct": float(risk_cap_pct) if risk_cap_pct is not None else None,
+        "spread_gate_ok": bool(spread_gate_ok),
+        "allowed": bool(spread_gate_ok),
+        "cost_model": cost_model,
+    }
+    entry_thresholds_meta["risk_guard"] = risk_guard_meta
+    if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
+        entry_gate_context_hu.update(
+            {
+                "atr_kapu": {
+                    "ok": bool(atr_ok),
+                    "rel_atr": float(rel_atr) if rel_atr is not None else None,
+                    "threshold": float(atr_threshold) if atr_threshold is not None else None,
+                    "abs_ok": bool(atr_abs_ok),
+                    "overlay_ok": bool(atr_overlay_gate),
+                    "btc_atr_gate": bool(btc_atr_gate_passed),
+                    **_gate_timestamp_fields(analysis_now),
+                },
+                "spread_kapu": {
+                    "ok": bool(spread_gate_ok),
+                    "spread_ratio_atr": float(spread_ratio) if spread_ratio is not None else None,
+                    "spread_limit_atr": float(spread_limit) if spread_limit is not None else None,
+                    **_gate_timestamp_fields(analysis_now),
+                },
+                "kockazat_guard": {
+                    "max_risk_pct": risk_guard_meta.get("max_risk_pct"),
+                    "engedi": bool(spread_gate_ok),
+                    "cost_model": cost_model,
+                    **_gate_timestamp_fields(analysis_now),
+                },
+            }
+        )
     momentum_vol_ratio = volume_ratio(k5m_closed, MOMENTUM_VOLUME_RECENT, MOMENTUM_VOLUME_BASE)
     dynamic_tp_profile = compute_dynamic_tp_profile(
         asset,
@@ -7722,6 +7929,28 @@ def analyze(asset: str) -> Dict[str, Any]:
         tol_frac=fib_tol
     )
     entry_thresholds_meta["fib_tolerance_fraction"] = float(fib_tol)
+    if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
+        profil_context = {
+            "profil_kuszobok": {
+                "profil": asset_entry_profile,
+                "p_score_min": float(p_score_min_local)
+                if p_score_min_local is not None
+                else None,
+                "p_score_min_base": float(p_score_min_base)
+                if p_score_min_base is not None
+                else None,
+                "atr_kuszob_rel": float(atr_threshold)
+                if atr_threshold is not None
+                else None,
+                "atr_abs_min": float(atr_abs_min) if atr_abs_min is not None else None,
+                "fib_tures_frac": float(fib_tol),
+                "fib_tures_atr": float(atr1h_tol * 0.75)
+                if np.isfinite(atr1h_val)
+                else None,
+                **_gate_timestamp_fields(analysis_now),
+            }
+        }
+        entry_gate_context_hu.update(profil_context)
 
     # 6/b) Kiegészítő likviditás kontextus (1h EMA21 közelség + szerkezeti retest)
     ema21_1h = float(ema(k1h_closed["close"], 21).iloc[-1]) if not k1h_closed.empty else float("nan")
@@ -7760,12 +7989,14 @@ def analyze(asset: str) -> Dict[str, Any]:
             "tures_atr": float(atr1h_tol * 0.75) if np.isfinite(atr1h_val) else None,
         }
         session_window_payload = SESSION_WINDOWS_UTC.get(asset, SESSION_WINDOWS_UTC.get(asset.upper(), {}))
-        entry_gate_context_hu = {
-            "bos_visszatekintes": bos_lookback,
-            "fib_zona": fib_zone_payload,
-            "session_ablak_utc": session_window_payload,
-            "p_score_profil": asset_entry_profile,
-        }
+        entry_gate_context_hu.update(
+            {
+                "bos_visszatekintes": bos_lookback,
+                "fib_zona": {**fib_zone_payload, **_gate_timestamp_fields(analysis_now)},
+                "session_ablak_utc": session_window_payload,
+                "p_score_profil": asset_entry_profile,
+            }
+        )
     struct_retest_long = structure_break_with_retest(k5m_closed, "long", bos_lookback)
     struct_retest_short = structure_break_with_retest(k5m_closed, "short", bos_lookback)
     if stale_timeframes.get("k5m"):
@@ -8894,6 +9125,12 @@ def analyze(asset: str) -> Dict[str, Any]:
     if structure_components.get("ofi") and ofi_zscore is not None:
         structure_notes.append(f"OFI z-score {ofi_zscore:.2f} támogatja az irányt")
     structure_gate = sum(1 for flag in structure_components.values() if flag) >= 2
+    if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
+        entry_gate_context_hu["structure_kapu"] = {
+            "ok": bool(structure_gate),
+            "komponensek": {k: bool(v) for k, v in structure_components.items()},
+            **_gate_timestamp_fields(analysis_now),
+        }
     if asset == "BTCUSD" and btc_momentum_override_active and not structure_gate:
         if structure_components.get("bos") and structure_components.get("ofi"):
             structure_gate = True
@@ -9558,10 +9795,43 @@ def analyze(asset: str) -> Dict[str, Any]:
     mom_tp2_mult = dynamic_tp_profile["momentum"]["tp2"]
     momentum_rr_min = max(momentum_rr_min, dynamic_tp_profile["momentum"]["rr"])
 
+    rr_gate_meta: Dict[str, Any] = {
+        "core_rr_min_base": core_rr_min,
+        "momentum_rr_min_base": momentum_rr_min,
+    }
+    low_vol_relax = False
+    try:
+        if settings.RR_RELAX_ENABLED and atr_threshold is not None and not np.isnan(rel_atr):
+            low_vol_relax = float(rel_atr) < float(atr_threshold) * settings.RR_RELAX_ATR_RATIO_TRIGGER
+    except Exception:
+        low_vol_relax = False
+    if settings.RR_RELAX_ENABLED and low_vol_relax:
+        relaxed_core = min(core_rr_min, settings.RR_RELAX_RANGE_CORE)
+        relaxed_momentum = min(momentum_rr_min, settings.RR_RELAX_RANGE_MOMENTUM)
+        if relaxed_core < core_rr_min or relaxed_momentum < momentum_rr_min:
+            rr_gate_meta["relaxed"] = True
+            rr_gate_meta["relax_reason"] = "alacsony vol / range momentum"
+            core_rr_min = relaxed_core
+            momentum_rr_min = relaxed_momentum
+    rr_gate_meta["core_rr_min"] = core_rr_min
+    rr_gate_meta["momentum_rr_min"] = momentum_rr_min
+    entry_thresholds_meta["rr_min_core"] = core_rr_min
+    entry_thresholds_meta["rr_min_momentum"] = momentum_rr_min
+    entry_thresholds_meta["rr_meta"] = rr_gate_meta
+
     range_guard_label = "intraday_range_guard"
     structure_label = "structure(2of3)"
 
     gate_extra_context = {} if os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE) else dict(entry_gate_context_hu)
+    if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
+        entry_gate_context_hu["rr_kapuk"] = {
+            "core_rr_min": float(rr_gate_meta.get("core_rr_min")) if rr_gate_meta.get("core_rr_min") is not None else None,
+            "momentum_rr_min": float(rr_gate_meta.get("momentum_rr_min")) if rr_gate_meta.get("momentum_rr_min") is not None else None,
+            "relaxalt": bool(rr_gate_meta.get("relaxed")),
+            "indok": rr_gate_meta.get("relax_reason"),
+            **_gate_timestamp_fields(analysis_now),
+        }
+        gate_extra_context.update(entry_gate_context_hu)
 
     def _with_gate_context(extra: Dict[str, Any]) -> Dict[str, Any]:
         if gate_extra_context:
@@ -9629,6 +9899,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     # --- Momentum feltételek (override) — kriptókra (zárt 5m-ből) ---
     momentum_used = False
     mom_dir: Optional[str] = None
+    mom_atr_ok: Optional[bool] = None
+    momentum_trigger_ok: Optional[bool] = None
     mom_required = [
         "session",
         "regime",
@@ -9724,6 +9996,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             ):
                 mom_dir = "buy" if direction == "long" else "sell"
                 mom_trigger_desc = "EMA9×21 momentum cross"
+                momentum_trigger_ok = True
                 missing_mom = [item for item in missing_mom if item not in {"liquidity", "ofi"}]
                 if funding_dir_filter and (
                     (funding_dir_filter == "long" and mom_dir != "buy")
@@ -9784,6 +10057,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 ):
                     mom_dir = "buy" if direction == "long" else "sell"
                     mom_trigger_desc = "EMA9×21 momentum cross"
+                    momentum_trigger_ok = True
                     missing_mom = []
                     if funding_dir_filter and ((funding_dir_filter == "long" and mom_dir != "buy") or (funding_dir_filter == "short" and mom_dir != "sell")):
                         mom_dir = None
@@ -9794,7 +10068,27 @@ def analyze(asset: str) -> Dict[str, Any]:
                     if not cross_flag:
                         missing_mom.append("momentum_trigger")
                     if not momentum_liquidity_ok:
-                        missing_mom.append("liquidity")     
+                        missing_mom.append("liquidity")
+
+    if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
+        momentum_context: Dict[str, Any] = {
+            "momentum_ok": bool(mom_dir),
+            "momentum_direction": mom_dir,
+            "momentum_reason": mom_trigger_desc
+            or ("missing:" + ",".join(sorted(dict.fromkeys(missing_mom))) if missing_mom else ""),
+            "momentum_missing": list(dict.fromkeys(missing_mom)),
+            "momentum_regime_ok": bool(regime_ok),
+            "momentum_structure_ok": bool(structure_gate),
+            "momentum_atr_ok": mom_atr_ok if mom_atr_ok is not None else False,
+            "momentum_liquidity_ok": bool(momentum_liquidity_ok),
+            "momentum_trigger_ok": bool(momentum_trigger_ok),
+            "momentum_ofi_z": safe_float(ofi_zscore),
+            **_gate_timestamp_fields(analysis_now),
+        }
+        if asset in {"NVDA", "USOIL", "XAGUSD", "GOLD_CFD"}:
+            momentum_context["momentum_asset_class"] = "energy_equity" if asset in {"USOIL"} else "equity_metal"
+        entry_gate_context_hu["momentum_kapu"] = momentum_context
+        gate_extra_context.update(entry_gate_context_hu)   
                
     # 8) Döntés + szintek (RR/TP matek) — core vagy momentum
     decision = "no entry"
@@ -10488,7 +10782,13 @@ def analyze(asset: str) -> Dict[str, Any]:
             latency_seconds=latency_by_frame,
             precision_plan=precision_plan,
             timestamp=analysis_now,
-            extra=_with_gate_context({"blockers": precision_plan.get("order_flow_blockers")}),
+            extra=_with_gate_context(
+                {
+                    "blockers": precision_plan.get("order_flow_blockers"),
+                    "precision_profile": precision_profile_for_state,
+                    "precision_threshold": precision_threshold_value,
+                }
+            ),
         )
         _emit_precision_gate_log(
             asset,
@@ -10500,7 +10800,13 @@ def analyze(asset: str) -> Dict[str, Any]:
             latency_seconds=latency_by_frame,
             precision_plan=precision_plan,
             timestamp=analysis_now,
-            extra=_with_gate_context({"trigger_state": precision_trigger_state}),
+            extra=_with_gate_context(
+                {
+                    "trigger_state": precision_trigger_state,
+                    "precision_profile": precision_profile_for_state,
+                    "precision_threshold": precision_threshold_value,
+                }
+            ),
         )
         blockers = precision_plan.get("order_flow_blockers")
         blockers_snapshot = list(blockers) if isinstance(blockers, list) else blockers
@@ -10512,13 +10818,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             "trigger_ready": precision_trigger_ready,
             "trigger_state": precision_trigger_state,
             "flow_blockers": blockers_snapshot,
+            "profile": precision_profile_for_state,
         }
         entry_thresholds_meta["precision_gate_state"] = precision_gate_snapshot
-        _log_precision_gate_summary(
-            asset,
-            precision_gate_snapshot,
-            blockers_snapshot,
-        )
 
     if precision_plan:
         if not precision_ready_for_entry:
@@ -10573,6 +10875,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             extra=_with_gate_context({
                 "decision": decision,
                 "missing": list(missing),
+                "precision_profile": precision_profile_for_state,
+                "precision_threshold": precision_threshold_value,
+                "precision_state": precision_state,
             }),
         )
 
@@ -11916,6 +12221,8 @@ def main():
                 }
                 if alert_payload not in summary["sentiment_alerts"]:
                     summary["sentiment_alerts"].append(alert_payload)
+
+    summary["entry_counts"] = _build_entry_count_summary(asset_results)
     save_json(os.path.join(PUBLIC_DIR, "analysis_summary.json"), summary)
 
     analysis_completed_at = datetime.now(timezone.utc)
@@ -11985,6 +12292,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
