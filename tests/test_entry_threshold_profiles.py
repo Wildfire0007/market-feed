@@ -212,8 +212,8 @@ def test_profile_specific_helpers(monkeypatch):
     assert baseline.get_fib_tolerance("XAGUSD") == pytest.approx(0.003)
     assert baseline.get_atr_abs_min("EURUSD") == pytest.approx(0.0009)
     assert baseline.get_atr_abs_min("GOLD_CFD") == pytest.approx(0.36)
-    assert baseline.get_atr_abs_min("USOIL") == pytest.approx(0.24)
-    assert baseline.get_atr_abs_min("NVDA") == pytest.approx(1.35)
+    assert baseline.get_atr_abs_min("USOIL") == pytest.approx(0.18)
+    assert baseline.get_atr_abs_min("NVDA") == pytest.approx(1.0)
     assert baseline.get_atr_abs_min("BTCUSD") == pytest.approx(75.0)
     assert baseline.get_atr_abs_min("XAGUSD") == pytest.approx(0.5)
     assert baseline.get_max_risk_pct("NVDA") == pytest.approx(1.3)
@@ -226,16 +226,16 @@ def test_profile_specific_helpers(monkeypatch):
     assert suppressed.get_spread_max_atr_pct("NVDA") == pytest.approx(0.4)
     assert suppressed.get_spread_max_atr_pct("USOIL") == pytest.approx(0.45)
     assert suppressed.get_fib_tolerance("BTCUSD") == pytest.approx(0.006)
-    assert suppressed.get_fib_tolerance("GOLD_CFD") == pytest.approx(0.003)
-    assert suppressed.get_fib_tolerance("NVDA") == pytest.approx(0.005)
-    assert suppressed.get_max_risk_pct("BTCUSD") == pytest.approx(1.2)
+    assert suppressed.get_fib_tolerance("GOLD_CFD") == pytest.approx(0.004)
+    assert suppressed.get_fib_tolerance("NVDA") == pytest.approx(0.0055)
+    assert suppressed.get_max_risk_pct("BTCUSD") == pytest.approx(1.35)
     assert suppressed.get_bos_lookback("BTCUSD") == 24
 
     relaxed = _reload_settings(monkeypatch, profile="relaxed")
     assert relaxed.get_spread_max_atr_pct("GOLD_CFD") == pytest.approx(0.33)
     assert relaxed.get_bos_lookback(None) == 28
-    assert relaxed.get_fib_tolerance("GOLD_CFD") == pytest.approx(0.0035)
-    assert relaxed.get_fib_tolerance("NVDA") == pytest.approx(0.0045)
+    assert relaxed.get_fib_tolerance("GOLD_CFD") == pytest.approx(0.009)
+    assert relaxed.get_fib_tolerance("NVDA") == pytest.approx(0.009)
 
     _reload_settings(monkeypatch)
 
@@ -276,6 +276,15 @@ def test_entry_profile_routing_helpers(monkeypatch, tmp_path):
 
     _reload_settings(monkeypatch)
 
+
+def test_rr_relax_configuration(monkeypatch):
+    settings = _reload_settings(monkeypatch, profile="suppressed")
+
+    assert settings.RR_RELAX_ENABLED is False
+    assert settings.RR_RELAX_RANGE_MOMENTUM == pytest.approx(1.35)
+    assert settings.RR_RELAX_RANGE_CORE == pytest.approx(1.5)
+    assert settings.RR_RELAX_ATR_RATIO_TRIGGER == pytest.approx(0.92)
+    
 def test_risk_template_helpers(monkeypatch):
     settings = _reload_settings(monkeypatch, profile="baseline")
     assert settings.get_tp_min_pct_value("EURUSD") == pytest.approx(0.0018)
