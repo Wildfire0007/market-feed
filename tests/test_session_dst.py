@@ -42,8 +42,9 @@ def test_eurusd_sunday_open_around_eu_dst(monkeypatch):
     entry_open_before, info_before = analysis.session_state("EURUSD", now=before)
     assert entry_open_before is False
     assert info_before["status"].startswith("closed")
+    assert info_before.get("next_session_open_utc") is not None
 
-    after = datetime(2024, 3, 31, 21, 10, tzinfo=timezone.utc)
+    after = datetime(2024, 4, 1, 6, 10, tzinfo=timezone.utc)
     entry_open_after, info_after = analysis.session_state("EURUSD", now=after)
     assert entry_open_after is True
     assert info_after["status"] == "open"
