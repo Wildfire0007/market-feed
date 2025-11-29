@@ -757,6 +757,7 @@ LOGGER = logging.getLogger(__name__)
 # szolgáltatja, így új eszköz felvételekor elegendő azt módosítani.
 
 MARKET_TIMEZONE = ZoneInfo("Europe/Berlin")
+BUDAPEST_TIMEZONE = ZoneInfo("Europe/Budapest")
 RULE_TIMEZONES: Dict[str, ZoneInfo] = {"EURUSD": ZoneInfo("America/New_York")}
 
 PUBLIC_DIR = "public"
@@ -11956,6 +11957,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
