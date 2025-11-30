@@ -1155,6 +1155,14 @@ _FIB_RELAX_DEFAULT: bool = bool(_get_config_value("fib_relax_default_enabled"))
 FIB_RELAX_ENABLED: bool = _env_flag_enabled(
     _FIB_RELAX_FLAG or "RELAX_FIB", default=_FIB_RELAX_DEFAULT
 )
+_RR_RELAX_CONFIG: Dict[str, Any] = dict(_get_config_value("rr_relax_settings") or {})
+RR_RELAX_ENABLED: bool = _env_flag_enabled(
+    str(_RR_RELAX_CONFIG.get("env_flag") or "RR_RELAX").strip() or None,
+    default=bool(_RR_RELAX_CONFIG.get("enabled", False)),
+)
+RR_RELAX_RANGE_MOMENTUM: float = float(_RR_RELAX_CONFIG.get("range_momentum", 1.35))
+RR_RELAX_RANGE_CORE: float = float(_RR_RELAX_CONFIG.get("range_core", 1.5))
+RR_RELAX_ATR_RATIO_TRIGGER: float = float(_RR_RELAX_CONFIG.get("atr_ratio_trigger", 0.92))
 _MAX_RISK_PCT_PROFILES = _normalize_profiled_numeric_map(
     _get_config_value("max_risk_pct_profiles"), float, 1.5
 )
