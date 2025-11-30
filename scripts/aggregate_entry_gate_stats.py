@@ -18,6 +18,7 @@ DEFAULT_SINCE_DATE = "2024-11-14"
 DEFAULT_OUTPUT_TEMPLATE = (
     "public/debug/entry_gate_stats_aggregate_since_{since}.json"
 )
+REQUEST_TIMEOUT = 30
 
 
 def parse_args() -> argparse.Namespace:
@@ -143,7 +144,7 @@ def fetch_paginated(session: requests.Session, url: str, params: dict):
     while True:
         page_params = {**params, "page": page}
         logging.debug("Requesting %s with params %s", url, page_params)
-        response = session.get(url, params=page_params)
+        response = session.get(url, params=page_params, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         data = response.json()
         items = data.get("workflow_runs") or data.get("artifacts") or []
@@ -159,14 +160,14 @@ def fetch_paginated(session: requests.Session, url: str, params: dict):
 def fetch_run(session: requests.Session, repo_slug: str, run_id: int) -> dict:
     url = f"{GITHUB_API}/repos/{repo_slug}/actions/runs/{run_id}"
     logging.info("Fetching run details for run %s", run_id)
-    response = session.get(url)
+    response = session.get(url, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json()
 
 
 def download_artifact_zip(session: requests.Session, download_url: str, dest_dir: Path) -> Path:
     logging.info("Downloading artifact archive from %s", download_url)
-    response = session.get(download_url, stream=True)
+    response = session.get(download_url, stream=True, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     dest_dir.mkdir(parents=True, exist_ok=True)
     temp_path = dest_dir / "artifact.zip"
