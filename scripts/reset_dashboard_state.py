@@ -86,6 +86,8 @@ def reset_anchor_state_file(
     """Prune or clear ``_active_anchor.json`` entries."""
 
     anchor_path = Path(path or ANCHOR_STATE_PATH)
+    raw_anchor = _load_json(anchor_path)
+    raw_count = len(raw_anchor) if isinstance(raw_anchor, dict) else 0
     existing = load_anchor_state(str(anchor_path))
     before = len(existing)
 
@@ -98,7 +100,8 @@ def reset_anchor_state_file(
 
     after = len(candidate)
     removed = max(before - after, 0)
-    changed = candidate != existing
+    stale_keys_removed = raw_count > before and before == after == 0
+    changed = candidate != existing or stale_keys_removed
     backup_path = None
 
     if not dry_run and changed:
@@ -188,8 +191,7 @@ def reset_status_file(
     payload: Dict[str, Any] = {
         "ok": False,
         "status": RESET_STATUS,
-        "generated_utc": timestamp,
-        "td_base": existing.get("td_base"),
+        "generated_utc": timestamp,        
         "assets": {},
         "notes": [
             {
