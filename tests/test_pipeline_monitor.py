@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
+import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(Path(__file__).resolve().parent.parent))
+
+from freezegun import freeze_time
 
 from reports import pipeline_monitor
 
@@ -148,3 +152,65 @@ def test_summarize_pipeline_warnings_handles_json_logs(tmp_path):
     trend_series = summary["warning_trend"]["series"]
     assert trend_series
     assert trend_series[-1]["client_errors"] == 1
+
+
+def test_finalize_analysis_records_artifact_hashes(tmp_path, monkeypatch):
+    monitor_path = tmp_path / "pipeline.json"
+    artifact_a = tmp_path / "status.json"
+    artifact_a.write_text("ok")
+    monkeypatch.setenv("PIPELINE_ARTIFACTS", str(artifact_a))
+
+    pipeline_monitor.record_analysis_run(
+        started_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        path=monitor_path,
+    )
+    payload = pipeline_monitor.finalize_analysis_run(
+        completed_at=datetime(2024, 1, 1, 0, 10, tzinfo=timezone.utc),
+        path=monitor_path,
+    )
+
+    hashes = payload.get("artifacts", {}).get("hashes", {})
+    digest = hashlib.sha256(b"ok").hexdigest()
+    assert hashes[str(artifact_a)]["sha256"] == digest
+    assert hashes[str(artifact_a)]["size"] == 2
+
+
+def test_compute_run_timing_deltas_handles_missing_sections():
+    payload = {
+        "run": {"started_at_utc": "2024-01-01T00:00:00Z", "captured_at_utc": "2024-01-01T00:01:00Z"},
+        "trading": {"started_utc": "2024-01-01T00:00:00Z", "completed_utc": "2024-01-01T00:05:00Z"},
+    }
+
+    deltas = pipeline_monitor.compute_run_timing_deltas(
+        payload, now=datetime(2024, 1, 1, 0, 6, tzinfo=timezone.utc)
+    )
+
+    assert deltas["trading_duration_seconds"] == 300.0
+    assert deltas["analysis_duration_seconds"] is None
+    assert deltas["analysis_age_seconds"] is None
+    assert deltas["trading_to_analysis_gap_seconds"] is None
+    assert deltas["run_capture_offset_seconds"] == 60.0
+
+
+@freeze_time("2024-01-01 00:00:00", tz_offset=0)
+def test_pipeline_monitor_logs_invalid_timestamps(tmp_path, caplog):
+    monitor_path = tmp_path / "pipeline.json"
+    monitor_path.write_text(
+        json.dumps(
+            {
+                "updated_utc": "bad-ts",
+                "trading": {"started_utc": "2024-01-01T00:00:00Z", "completed_utc": "n/a"},
+            }
+        )
+    )
+
+    caplog.set_level(logging.ERROR)
+    pipeline_monitor.record_trading_run(
+        started_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        completed_at=datetime(2024, 1, 1, 0, 5, tzinfo=timezone.utc),
+        path=monitor_path,
+    )
+
+    assert any("Érvénytelen időbélyeg" in record.getMessage() for record in caplog.records)
+    payload = json.loads(monitor_path.read_text())
+    assert payload["trading"]["completed_utc"] == "2024-01-01T00:05:00Z"
