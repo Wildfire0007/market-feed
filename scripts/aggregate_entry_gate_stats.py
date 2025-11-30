@@ -2,14 +2,14 @@ import argparse
 import datetime as dt
 import json
 import logging
-import os
 import re
-import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
 
 import requests
+
+from github_utils import build_api_headers, detect_repo_slug, load_github_token
 
 
 GITHUB_API = "https://api.github.com"
@@ -80,43 +80,6 @@ def parse_args() -> argparse.Namespace:
         help="Perform case-insensitive artifact name matching.",
     )
     return parser.parse_args()
-
-
-def get_repo_slug() -> str:
-    try:
-        url = (
-            subprocess.check_output(
-                ["git", "config", "--get", "remote.origin.url"],
-                text=True,
-            )
-            .strip()
-        )
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError("Unable to determine git remote origin URL") from exc
-
-    if url.startswith("git@"):
-        _, path = url.split(":", 1)
-        repo_part = path
-    elif url.startswith("https://") or url.startswith("http://"):
-        repo_part = url.split("//", 1)[-1]
-        if "/" in repo_part:
-            repo_part = repo_part.split("/", 1)[1]
-    else:
-        raise RuntimeError(f"Unsupported remote URL format: {url}")
-
-    if repo_part.endswith(".git"):
-        repo_part = repo_part[:-4]
-    if repo_part.count("/") != 1:
-        raise RuntimeError(f"Unable to parse owner/repo from URL: {url}")
-
-    return repo_part
-
-
-def get_headers() -> dict:
-    token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
-    if not token:
-        raise RuntimeError("GITHUB_TOKEN (or GH_TOKEN) environment variable is required")
-    return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
 
 
 def parse_iso_date(date_str: str) -> dt.datetime:
@@ -217,9 +180,10 @@ def aggregate(args: argparse.Namespace) -> dict:
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    token = load_github_token()
     session = requests.Session()
-    session.headers.update(get_headers())
-    repo_slug = get_repo_slug()
+    session.headers.update(build_api_headers(token))
+    repo_slug = detect_repo_slug()
     
     entries = []
     artifact_success_count = 0
