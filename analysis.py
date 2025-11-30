@@ -2172,10 +2172,16 @@ def build_action_plan(
     intraday_profile: Optional[Dict[str, Any]],
     btc_profile: Optional[str] = None,
     entry_thresholds: Optional[Dict[str, Any]] = None,
+    entry_thresholds_meta: Optional[Dict[str, Any]] = None,
+    entry_gate_context_hu: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     session_meta = session_meta or {}
     execution_playbook = execution_playbook or []
     intraday_profile = intraday_profile or {}
+    entry_thresholds_meta = entry_thresholds_meta or {}
+    entry_gate_context_hu = entry_gate_context_hu or {}
+    analysis_now = datetime.now(timezone.utc)
+    gate_extra_context: Dict[str, Any] = {}
     btc_profile_name = btc_profile if isinstance(btc_profile, str) else None
     blockers_raw = [str(item) for item in (missing or []) if item]
     blockers: List[str] = []
@@ -6796,6 +6802,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     asset_entry_profile = _entry_threshold_profile_name(asset)
     entry_thresholds_meta: Dict[str, Any] = {"profile": asset_entry_profile}
     entry_gate_context_hu: Dict[str, Any] = {}
+    p_score_min_base = get_p_score_min(asset)
+    p_score_min_local = p_score_min_base
     xag_overrides, usoil_overrides, eurusd_overrides = _initialize_asset_overrides(
         entry_thresholds_meta, asset
     )
@@ -10690,6 +10698,12 @@ def analyze(asset: str) -> Dict[str, Any]:
         precision_plan.setdefault("score_threshold", precision_threshold_value)
         precision_plan.setdefault("ready_timeout_minutes", precision_timeouts.get("ready"))
         precision_plan.setdefault("arming_timeout_minutes", precision_timeouts.get("arming"))
+        precision_profile_for_state = precision_plan.get("profile") or precision_plan.get(
+            "profile_name"
+        )
+        if not precision_profile_for_state:
+            precision_profile_for_state = asset_entry_profile
+        precision_state = str(precision_plan.get("state") or "none")
         try:
             precision_score_val = float(precision_plan.get("score") or 0.0)
         except (TypeError, ValueError):
@@ -11616,6 +11630,8 @@ def analyze(asset: str) -> Dict[str, Any]:
             else (_btc_active_profile() if asset == "BTCUSD" else None)
         ),
         entry_thresholds=decision_obj.get("entry_thresholds"),
+        entry_thresholds_meta=entry_thresholds_meta,
+        entry_gate_context_hu=entry_gate_context_hu,
     )
     if action_plan:
         decision_obj["action_plan"] = action_plan
@@ -12292,6 +12308,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
