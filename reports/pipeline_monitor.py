@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections import defaultdict, deque
+import hashlib
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import re
@@ -18,6 +20,11 @@ PIPELINE_MONITOR_PATH = Path(
 PIPELINE_LOG_PATH = Path(
     os.getenv("PIPELINE_MONITOR_LOG", str(MONITOR_DIR / "pipeline.log"))
 )
+DEFAULT_ARTIFACTS = (
+    PUBLIC_DIR / "analysis_summary.json",
+    PUBLIC_DIR / "status.json",
+    MONITOR_DIR / "pipeline_timing.json",
+)
 DEFAULT_MAX_LAG_SECONDS = int(os.getenv("PIPELINE_MAX_LAG_SECONDS", "240"))
 ML_MODEL_REMINDER_DAYS = int(os.getenv("ML_MODEL_REMINDER_DAYS", "7"))
 SYMBOL_HISTORY_WINDOW = max(int(os.getenv("PIPELINE_SYMBOL_HISTORY_WINDOW", "20")), 0)
@@ -26,6 +33,7 @@ WARNING_TREND_BUCKET_MINUTES = max(
 )
 RUN_ID_ENV_VARS = ("PIPELINE_RUN_ID", "GITHUB_RUN_ID")
 RUN_CAPTURED_AT_UTC = datetime.now(timezone.utc)
+LOGGER = logging.getLogger("market_feed.pipeline_monitor")
 
 
 def _now() -> datetime:
@@ -42,10 +50,87 @@ def _parse_iso(value: Optional[str]) -> Optional[datetime]:
     try:
         if value.endswith("Z"):
             value = value[:-1] + "+00:00"
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        else:
+            parsed = parsed.astimezone(timezone.utc)
+        return parsed
     except Exception:
         return None
 
+
+def _normalize_section_timestamps(
+    section: Dict[str, Any],
+    *,
+    keys: Iterable[str],
+    section_label: str,
+    errors: List[str],
+) -> None:
+    for key in keys:
+        raw_value = section.get(key)
+        if raw_value is None:
+            continue
+        parsed = _parse_iso(raw_value) if isinstance(raw_value, str) else None
+        if parsed is None:
+            section.pop(key, None)
+            errors.append(f"{section_label}.{key}")
+            continue
+        section[key] = _to_iso(parsed)
+
+
+def _validate_timestamp_payload(
+    payload: Dict[str, Any], *, path: Optional[Path] = None
+) -> Dict[str, Any]:
+    errors: List[str] = []
+    run_section = payload.get("run") if isinstance(payload, dict) else None
+    if isinstance(run_section, dict):
+        _normalize_section_timestamps(
+            run_section,
+            keys=("captured_at_utc", "started_at_utc"),
+            section_label="run",
+            errors=errors,
+        )
+
+    trading_section = payload.get("trading") if isinstance(payload, dict) else None
+    if isinstance(trading_section, dict):
+        _normalize_section_timestamps(
+            trading_section,
+            keys=("started_utc", "completed_utc"),
+            section_label="trading",
+            errors=errors,
+        )
+
+    analysis_section = payload.get("analysis") if isinstance(payload, dict) else None
+    if isinstance(analysis_section, dict):
+        _normalize_section_timestamps(
+            analysis_section,
+            keys=("started_utc", "completed_utc", "updated_utc"),
+            section_label="analysis",
+            errors=errors,
+        )
+
+    if isinstance(payload, dict):
+        _normalize_section_timestamps(
+            payload,
+            keys=("updated_utc",),
+            section_label="payload",
+            errors=errors,
+        )
+
+    if errors:
+        LOGGER.error(
+            "Érvénytelen időbélyeg",
+            extra={"mezok": sorted(errors), "forras": str(path or PIPELINE_MONITOR_PATH)},
+        )
+    return payload
+
+
+def load_pipeline_payload(path: Optional[Path] = None) -> Dict[str, Any]:
+    """Load and normalize the pipeline monitor payload (best effort)."""
+
+    return _validate_timestamp_payload(_load_payload(path), path=path)
+    
 
 def _resolve_run_id() -> Optional[str]:
     for env_var in RUN_ID_ENV_VARS:
@@ -97,6 +182,42 @@ def _ensure_run_metadata(payload: Dict[str, Any], *, now: Optional[datetime] = N
     return payload
 
 
+def _artifact_paths_from_env() -> List[Path]:
+    raw = os.getenv("PIPELINE_ARTIFACTS")
+    if raw:
+        candidates = []
+        for entry in raw.split(","):
+            cleaned = entry.strip()
+            if cleaned:
+                candidates.append(Path(cleaned))
+        if candidates:
+            return candidates
+    return list(DEFAULT_ARTIFACTS)
+
+
+def _hash_file(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(8192), b""):
+                digest.update(chunk)
+        stat = path.stat()
+        return {"sha256": digest.hexdigest(), "size": stat.st_size}
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+
+
+def collect_artifact_hashes(paths: Optional[Iterable[Path]] = None) -> Dict[str, Any]:
+    """Return a mapping of artefact path to hash/size metadata."""
+
+    target_paths = list(paths) if paths is not None else _artifact_paths_from_env()
+    hashes: Dict[str, Any] = {}
+    for path in target_paths:
+        meta = _hash_file(path)
+        hashes[str(Path(path))] = meta
+    return hashes
+    
+
 def _record_execution_order(
     payload: Dict[str, Any],
     *,
@@ -122,6 +243,38 @@ def _record_execution_order(
         order_section["analysis_after_trading"] = None
     payload["execution_order"] = order_section
 
+
+def compute_run_timing_deltas(
+    payload: Dict[str, Any], *, now: Optional[datetime] = None
+) -> Dict[str, Optional[float]]:
+    """Compute basic timestamp differences for pipeline stages."""
+
+    current = now or _now()
+
+    def _diff(start: Optional[datetime], end: Optional[datetime]) -> Optional[float]:
+        if start is None or end is None:
+            return None
+        return round(float((end - start).total_seconds()), 3)
+
+    run_section = payload.get("run") if isinstance(payload, dict) else {}
+    trading_section = payload.get("trading") if isinstance(payload, dict) else {}
+    analysis_section = payload.get("analysis") if isinstance(payload, dict) else {}
+
+    trading_started = _parse_iso(trading_section.get("started_utc")) if isinstance(trading_section, dict) else None
+    trading_completed = _parse_iso(trading_section.get("completed_utc")) if isinstance(trading_section, dict) else None
+    analysis_started = _parse_iso(analysis_section.get("started_utc")) if isinstance(analysis_section, dict) else None
+    analysis_completed = _parse_iso(analysis_section.get("completed_utc")) if isinstance(analysis_section, dict) else None
+    run_started = _parse_iso(run_section.get("started_at_utc")) if isinstance(run_section, dict) else None
+    captured = _parse_iso(run_section.get("captured_at_utc")) if isinstance(run_section, dict) else None
+
+    return {
+        "trading_duration_seconds": _diff(trading_started, trading_completed),
+        "analysis_duration_seconds": _diff(analysis_started, analysis_completed),
+        "trading_to_analysis_gap_seconds": _diff(trading_completed, analysis_started),
+        "analysis_age_seconds": _diff(analysis_completed, current),
+        "run_capture_offset_seconds": _diff(run_started, captured),
+    }
+    
 
 def get_run_logging_context(now: Optional[datetime] = None) -> Dict[str, Any]:
     """Return static logging fields describing the current pipeline run."""
@@ -235,7 +388,9 @@ def record_trading_run(
     computed_duration = duration_seconds
     if computed_duration is None:
         computed_duration = max((completed - started).total_seconds(), 0.0)
-    payload = _ensure_run_metadata(_load_payload(path), now=completed)
+    payload = _ensure_run_metadata(
+        _validate_timestamp_payload(_load_payload(path), path=path), now=completed
+    )
     payload["trading"] = {
         "started_utc": _to_iso(started),
         "completed_utc": _to_iso(completed),
@@ -254,7 +409,9 @@ def record_analysis_run(
     """Persist metadata about the current analysis execution and compute lag."""
 
     started = started_at or _now()
-    payload = _ensure_run_metadata(_load_payload(path), now=started)
+    payload = _ensure_run_metadata(
+        _validate_timestamp_payload(_load_payload(path), path=path), now=started
+    )
     trading_meta = payload.get("trading") if isinstance(payload, dict) else {}
     trading_completed = None
     if isinstance(trading_meta, dict):
@@ -293,7 +450,9 @@ def finalize_analysis_run(
     """Update the pipeline timing payload when the analysis stage finishes."""
 
     completed = completed_at or _now()
-    payload = _ensure_run_metadata(_load_payload(path), now=completed)
+    payload = _ensure_run_metadata(
+        _validate_timestamp_payload(_load_payload(path), path=path), now=completed
+    )
     analysis_meta = payload.get("analysis") if isinstance(payload, dict) else {}
     if not isinstance(analysis_meta, dict):
         analysis_meta = {}
@@ -326,7 +485,19 @@ def finalize_analysis_run(
     _record_execution_order(payload, analysis_started=started, trading_completed=trading_completed)
     payload["analysis"] = analysis_meta
     payload["updated_utc"] = _to_iso(_now())
-    _save_payload(payload, path)
+    payload["artifacts"] = {
+        "hashes": collect_artifact_hashes(),
+        "updated_utc": _to_iso(_now()),
+    }
+    written_path = _save_payload(payload, path)
+    written_key = str(Path(written_path))
+    artifacts = payload.get("artifacts", {})
+    hashes = artifacts.get("hashes") if isinstance(artifacts, dict) else None
+    if isinstance(hashes, dict) and written_key in hashes:
+        hashes[written_key] = _hash_file(Path(written_path))
+        artifacts["hashes"] = hashes
+        payload["artifacts"] = artifacts
+        _save_payload(payload, path)
     return payload
 
 
@@ -654,8 +825,11 @@ __all__ = [
     "ML_MODEL_REMINDER_DAYS",
     "PIPELINE_MONITOR_PATH",
     "PIPELINE_LOG_PATH",
+    "collect_artifact_hashes",
+    "compute_run_timing_deltas",
     "get_pipeline_log_path",
     "get_run_logging_context",
+    "load_pipeline_payload",
     "finalize_analysis_run",
     "record_ml_model_status",
     "record_analysis_run",
