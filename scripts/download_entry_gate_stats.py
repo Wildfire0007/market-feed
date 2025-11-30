@@ -18,14 +18,14 @@ Assumptions:
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 from zipfile import ZipFile
 
 import requests
 from tqdm import tqdm
+
+from github_utils import build_api_headers, detect_repo, load_github_token
 
 API_ROOT = "https://api.github.com"
 WORKFLOW_NAME = "TD Full Pipeline (5m)"
@@ -37,43 +37,9 @@ DOWNLOAD_DIR = Path("artifacts")
 SUMMARY_PATH = Path("entry_gate_stats_summary.json")
 
 
-def _require_token() -> str:
-    token = os.environ.get("GITHUB_TOKEN")
-    if not token:
-        raise SystemExit("GITHUB_TOKEN environment variable is required.")
-    return token
-
-
-def _detect_repo() -> tuple[str, str]:
-    try:
-        url = (
-            subprocess.check_output(
-                ["git", "config", "--get", "remote.origin.url"],
-                text=True,
-            )
-            .strip()
-            .rstrip(".git")
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        raise SystemExit("Unable to detect Git repository origin.") from exc
-
-    if url.startswith("git@"):
-        path = url.split(":", 1)[-1]
-    elif url.startswith("https://") or url.startswith("http://"):
-        path = url.split("github.com/")[-1]
-    else:
-        raise SystemExit(f"Unrecognized remote URL format: {url}")
-
-    owner, repo = path.split("/", 1)
-    return owner, repo
-
-
 def _api_get(url: str, token: str, params: Optional[dict] = None) -> requests.Response:
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
+    headers = build_api_headers(token)
+    headers["X-GitHub-Api-Version"] = "2022-11-28"
     resp = requests.get(url, headers=headers, params=params, timeout=30)
     resp.raise_for_status()
     return resp
@@ -194,8 +160,8 @@ def write_summary(data: Dict[str, dict], runs: List[dict]) -> None:
 
 
 def main():
-    token = _require_token()
-    owner, repo = _detect_repo()
+    token = load_github_token()
+    owner, repo = detect_repo()
     workflow_id = get_workflow_id(owner, repo, token)
     runs = list_runs(owner, repo, workflow_id, token)
     if not runs:
