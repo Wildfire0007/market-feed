@@ -42,6 +42,10 @@ if str(_REPO_ROOT) not in sys.path:
 from active_anchor import load_anchor_state, touch_anchor
 from config.analysis_settings import ASSETS as CONFIG_ASSETS
 from logging_utils import ensure_json_stream_handler
+from reports.pipeline_monitor import (
+    compute_run_timing_deltas,
+    load_pipeline_payload,
+)
 
 LOGGER = logging.getLogger("market_feed.notify")
 ensure_json_stream_handler(LOGGER, static_fields={"component": "notify"})
@@ -61,6 +65,7 @@ DEFAULT_ASSET_STATE: Dict[str, Any] = {
 }
 
 ENTRY_GATE_STATS_PATH = _REPO_ROOT / PUBLIC_DIR / "debug" / "entry_gate_stats.json"
+PIPELINE_MONITOR_PATH = _REPO_ROOT / PUBLIC_DIR / "monitoring" / "pipeline_timing.json"
 
 # ---- Active position helper config ----
 TDSTATUS_PATH = f"{PUBLIC_DIR}/tdstatus.json"
@@ -147,6 +152,92 @@ def build_entry_gate_summary_embed() -> Optional[Dict[str, Any]]:
         LOGGER.debug("entry_gate_summary_embed_failed", exc_info=True)
         return None
 
+
+def _format_seconds(value: Optional[float]) -> str:
+    if value is None:
+        return "n/a"
+    minutes = value / 60.0
+    if minutes >= 1:
+        return f"{minutes:.1f}p"
+    return f"{value:.0f} mp"
+
+
+def build_pipeline_diag_embed(
+    payload: Optional[Dict[str, Any]] = None,
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[Dict[str, Any]]:
+    """Összefoglaló a pipeline időbélyeg-diffjeiről és artefakt-hashekről."""
+
+    try:
+        data = payload or load_pipeline_payload(PIPELINE_MONITOR_PATH)
+    except Exception:
+        LOGGER.debug("pipeline_diag_load_failed", exc_info=True)
+        return None
+
+    if not data:
+        return None
+
+    deltas = compute_run_timing_deltas(data, now=now)
+    run_section = data.get("run") if isinstance(data, dict) else {}
+    artifacts = data.get("artifacts") if isinstance(data, dict) else {}
+    hashes = artifacts.get("hashes") if isinstance(artifacts, dict) else {}
+
+    lines = []
+    run_id = run_section.get("run_id") if isinstance(run_section, dict) else None
+    if run_id:
+        lines.append(f"run_id: `{run_id}`")
+    if deltas.get("trading_duration_seconds") is not None:
+        lines.append(
+            f"Trading időtartam: {_format_seconds(deltas['trading_duration_seconds'])}"
+        )
+    if deltas.get("trading_to_analysis_gap_seconds") is not None:
+        lines.append(
+            "Trading→analysis késés: "
+            f"{_format_seconds(deltas['trading_to_analysis_gap_seconds'])}"
+        )
+    if deltas.get("analysis_duration_seconds") is not None:
+        lines.append(
+            f"Analysis futásidő: {_format_seconds(deltas['analysis_duration_seconds'])}"
+        )
+    if deltas.get("analysis_age_seconds") is not None:
+        lines.append(
+            f"Utolsó analysis kora: {_format_seconds(deltas['analysis_age_seconds'])}"
+        )
+    if deltas.get("run_capture_offset_seconds") is not None:
+        lines.append(
+            "Run start-capture eltérés: "
+            f"{_format_seconds(deltas['run_capture_offset_seconds'])}"
+        )
+
+    if not lines and not hashes:
+        return None
+
+    fields: List[Dict[str, Any]] = []
+    if hashes:
+        ordered = list(hashes.items())[:5]
+        hash_lines = []
+        for path_str, meta in ordered:
+            name = Path(path_str).name
+            if not meta:
+                hash_lines.append(f"{name}: hiányzik")
+                continue
+            digest = meta.get("sha256") or ""
+            size = meta.get("size")
+            short = digest[:8] if digest else "n/a"
+            if size is None:
+                hash_lines.append(f"{name}: {short}")
+            else:
+                hash_lines.append(f"{name}: {short} ({size} B)")
+        fields.append({"name": "Artefakt-hash", "value": "\n".join(hash_lines), "inline": False})
+
+    return {
+        "title": "Pipeline diagnosztika",
+        "description": "\n".join(lines),
+        "color": 0x4F6BED,
+        "fields": fields,
+    }
+  
 
 COOLDOWN_MIN   = int_env("DISCORD_COOLDOWN_MIN", 10)  # perc; 0 = off
 MOMENTUM_COOLDOWN_MIN = int_env("DISCORD_COOLDOWN_MOMENTUM_MIN", 8)
@@ -1712,6 +1803,10 @@ def main():
     if gate_embed:
         ordered_embeds.append(gate_embed)
 
+    pipeline_embed = build_pipeline_diag_embed(now=now_dt)
+    if pipeline_embed:
+        ordered_embeds.append(pipeline_embed)
+  
     if not ordered_embeds:
         print("Discord notify: nothing to send.")
         return
