@@ -773,6 +773,9 @@ ENTRY_GATE_LOG_DIR: Path = (
 ENTRY_GATE_STATS_PATH: Path = (
     _ANALYSIS_BASE_DIR / PUBLIC_DIR / "debug" / "entry_gate_stats.json"
 ).resolve()
+ENTRY_GATE_GAP_LOG_PATH: Path = (
+    _ANALYSIS_BASE_DIR / PUBLIC_DIR / "debug" / "entry_gate_gap_log.jsonl"
+).resolve()
 PROB_STACK_SNAPSHOT_FILENAME = "probability_stack_snapshot.json"
 PROB_STACK_EXPORT_FILENAME = "probability_stack.json"
 PROB_STACK_GAP_ENV_DISABLE = "DISABLE_PROB_STACK_GAP_FALLBACK"
@@ -1096,6 +1099,14 @@ def parse_utc_timestamp(value: Any) -> Optional[datetime]:
     return None
 
 
+def normalize_generated_utc(value: Any, *, field: str) -> str:
+    parsed = parse_utc_timestamp(value)
+    if parsed is None:
+        LOGGER.error("Érvénytelen időbélyeg", extra={"mezo": field, "ertek": value})
+        parsed = datetime.now(timezone.utc)
+    return to_utc_iso(parsed)
+
+
 def _should_use_realtime_spot(
     rt_price: Optional[Any],
     rt_ts: Optional[datetime],
@@ -1270,6 +1281,21 @@ def _append_entry_gate_stats(summary: Dict[str, Any]) -> None:
         LOGGER.debug("entry_gate_stats_append_failed", exc_info=True)
 
 
+def _append_gate_gap_log(entries: Sequence[Dict[str, Any]]) -> None:
+    if os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
+        return
+    if not entries:
+        return
+    try:
+        ENTRY_GATE_GAP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with ENTRY_GATE_GAP_LOG_PATH.open("a", encoding="utf-8") as handle:
+            for entry in entries:
+                handle.write(json.dumps(entry, ensure_ascii=False, sort_keys=True))
+                handle.write("\n")
+    except Exception:
+        LOGGER.debug("entry_gate_gap_log_failed", exc_info=True)
+
+
 def _render_entry_gate_chart(stats: Dict[str, Any]) -> None:
     """Render a lightweight HTML bar chart for entry gate rejections."""
 
@@ -1397,6 +1423,68 @@ def _log_gate_summary(asset: str, decision: Dict[str, Any]) -> None:
             summary.update(context_hu)
         LOGGER.info("gate_summary", extra={"asset": asset, "gate_summary": summary})
         _append_entry_gate_stats(summary)
+        gap_records: List[Dict[str, Any]] = []
+        profile = summary.get("profile")
+        timestamp_utc = ts_fields.get("timestamp_utc")
+
+        def _add_gap_record(
+            kapu: str,
+            value: Optional[Any],
+            threshold: Optional[Any],
+            ok: Optional[bool] = None,
+        ) -> None:
+            try:
+                numeric_value = float(value) if value is not None else None
+            except (TypeError, ValueError):
+                numeric_value = None
+            try:
+                numeric_threshold = float(threshold) if threshold is not None else None
+            except (TypeError, ValueError):
+                numeric_threshold = None
+            gap = None
+            if (
+                numeric_value is not None
+                and numeric_threshold is not None
+                and not (np.isnan(numeric_value) or np.isnan(numeric_threshold))
+            ):
+                gap = numeric_value - numeric_threshold
+            gap_records.append(
+                {
+                    "asset": asset,
+                    "kapu": kapu,
+                    "profil": profile,
+                    "érték": numeric_value,
+                    "küszöb": numeric_threshold,
+                    "rés": gap,
+                    "ok": bool(ok) if ok is not None else None,
+                    "timestamp_utc": timestamp_utc,
+                }
+            )
+
+        _add_gap_record("p_score", summary.get("p_score"), summary.get("p_score_min"), None)
+        if isinstance(context_hu, dict):
+            atr_ctx = context_hu.get("atr_kapu") or {}
+            _add_gap_record(
+                "atr",
+                atr_ctx.get("rel_atr"),
+                atr_ctx.get("threshold"),
+                atr_ctx.get("ok"),
+            )
+            spread_ctx = context_hu.get("spread_kapu") or {}
+            _add_gap_record(
+                "spread",
+                spread_ctx.get("spread_ratio_atr"),
+                spread_ctx.get("spread_limit_atr"),
+                spread_ctx.get("ok"),
+            )
+            momentum_ctx = context_hu.get("momentum_kapu") or {}
+            _add_gap_record(
+                "momentum",
+                momentum_ctx.get("momentum_score"),
+                momentum_ctx.get("threshold"),
+                momentum_ctx.get("ok"),
+            )
+        _append_gate_gap_log([entry for entry in gap_records if entry])
     except Exception:
         LOGGER.debug("gate_summary_logging_failed", exc_info=True)
 
@@ -4883,7 +4971,18 @@ def save_json(path: str, obj: Any) -> None:
 
 
 def build_status_snapshot(summary: Dict[str, Any], public_dir: Path) -> Dict[str, Any]:
-    """Persist a simplified ``status.json`` derived from the analysis summary."""
+    """Persist a simplified ``status.json`` derived from the analysis summary.
+
+    Struktúra (kimeneti mezők):
+    - ok: bool
+    - status: "ok" vagy "error"
+    - generated_utc: ISO 8601 UTC
+    - assets: {ASSET: {ok, signal, (latency_seconds), (expected_latency_seconds), (notes)}}
+    - notes: opcionális reset/hiba üzenetek listája
+
+    Tudatosan nem írunk fel nem használt mezőket (pl. ``td_base``), hogy a
+    monitoring JSON kompakt és zajmentes maradjon.
+    """
 
     assets = summary.get("assets")
     if not isinstance(assets, dict) or not assets:
@@ -4933,13 +5032,24 @@ def build_status_snapshot(summary: Dict[str, Any], public_dir: Path) -> Dict[str
 
     overall_ok = bool(summary_ok)
 
+    generated_utc = normalize_generated_utc(
+        summary.get("generated_utc"), field="summary.generated_utc"
+    )
+    normalized_notes = []
+    for idx, note in enumerate(notes):
+        if isinstance(note, dict) and "reset_utc" in note:
+            note = dict(note)
+            note["reset_utc"] = normalize_generated_utc(
+                note.get("reset_utc"), field=f"notes[{idx}].reset_utc"
+            )
+        normalized_notes.append(note)
+
     status_payload = {
         "ok": overall_ok,
         "status": "ok" if overall_ok else "error",
-        "generated_utc": summary.get("generated_utc") or nowiso(),
-        "td_base": "https://api.twelvedata.com",
+        "generated_utc": generated_utc,
         "assets": status_assets,
-        "notes": notes,
+        "notes": normalized_notes,
     }
 
     save_json(Path(public_dir) / "status.json", status_payload)
@@ -12308,6 +12418,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
