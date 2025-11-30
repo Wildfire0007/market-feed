@@ -130,24 +130,53 @@ def build_entry_gate_summary_embed() -> Optional[Dict[str, Any]]:
             return None
         payload = json.loads(ENTRY_GATE_STATS_PATH.read_text(encoding="utf-8"))
         reason_counts: Dict[str, int] = {}
-        for entries in payload.values():
+        asset_lines: List[Tuple[int, str]] = []
+
+        for asset, entries in sorted(payload.items()):
             if not isinstance(entries, list):
                 continue
+              
+            asset_reason_counts: Dict[str, int] = {}
+            reject_count = 0
             for item in entries:
                 if not isinstance(item, dict):
                     continue
-                for reason in item.get("missing") or item.get("precision_hiany") or []:
+                reasons = item.get("missing") or item.get("precision_hiany") or []
+                if reasons:
+                    reject_count += 1
+                for reason in reasons:
                     txt = str(reason)
                     reason_counts[txt] = reason_counts.get(txt, 0) + 1
+                    asset_reason_counts[txt] = asset_reason_counts.get(txt, 0) + 1
+
+            if reject_count:
+                top_reasons = sorted(asset_reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:2]
+                reason_summary = ", ".join(f"{reason} {count}x" for reason, count in top_reasons)
+                asset_lines.append((reject_count, f"• {asset}: {reject_count}x blokkolva ({reason_summary})"))
+              
         if not reason_counts:
             return None
+          
         top = sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
         lines = [f"• {reason}: {count}x" for reason, count in top]
-        return {
+      
+        asset_lines.sort(key=lambda item: (-item[0], item[1]))
+        asset_field: Optional[Dict[str, Any]] = None
+        if asset_lines:
+            asset_field = {
+                "name": "Érintett instrumentumok",
+                "value": "\n".join(line for _, line in asset_lines[:6]),
+                "inline": False,
+            }
+
+        embed: Dict[str, Any] = {
             "title": "Entry gate toplista (24h)",
             "description": "\n".join(lines),
             "color": 0xC0392B,
         }
+        if asset_field:
+            embed["fields"] = [asset_field]
+        return embed
     except Exception:
         LOGGER.debug("entry_gate_summary_embed_failed", exc_info=True)
         return None
