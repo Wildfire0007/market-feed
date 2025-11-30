@@ -1,16 +1,10 @@
-diff --git a/scripts/dump_model_summary.py b/scripts/dump_model_summary.py
-new file mode 100755
-index 0000000000000000000000000000000000000000..cb6223595905eb19b0ab1e7dcb289eb567689d62
---- /dev/null
- b/scripts/dump_model_summary.py
-@@ -0,0 1,165 @@
 #!/usr/bin/env python3
 """Emit a JSON summary for trained gradient boosting models.
 
 The live pipeline stores gradient boosting classifiers as Joblib pickles under
 ``public/models`` so they can be updated without changing the application
-runtime.  These pickles are binary blobs which are inconvenient to review in
-code reviews.  This helper loads the model and serialises its public metadata to
+runtime. These pickles are binary blobs which are inconvenient to review in
+code reviews. This helper loads the model and serialises its public metadata to
 JSON so humans can quickly inspect the hyper-parameters and feature importances
 without having to unpickle the artefact manually.
 
@@ -162,7 +156,7 @@ def main() -> None:
 
     payload = json.dumps(summary, indent=args.indent, sort_keys=True)
     if args.output:
-        args.output.write_text(payload  "\n", encoding="utf-8")
+        args.output.write_text(payload + "\n", encoding="utf-8")
     else:
         print(payload)
 
