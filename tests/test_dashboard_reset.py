@@ -65,6 +65,24 @@ def test_reset_anchor_state_file_prunes_old_entries(tmp_path: Path) -> None:
     assert list(persisted.keys()) == ["EURUSD"]
 
 
+def test_reset_anchor_state_file_clears_stale_metadata(tmp_path: Path) -> None:
+    anchor_path = tmp_path / "_active_anchor.json"
+    anchor_path.write_text(
+        json.dumps({"_meta": {"foo": "bar"}}, ensure_ascii=False), encoding="utf-8"
+    )
+
+    result = reset_anchor_state_file(
+        max_age_hours=24,
+        path=anchor_path,
+        now=datetime(2025, 1, 15, 12, tzinfo=timezone.utc),
+        dry_run=False,
+        backup_dir=tmp_path / "backups",
+    )
+
+    assert result.changed is True
+    assert load_anchor_state(str(anchor_path)) == {}
+    
+
 def test_reset_anchor_state_file_dry_run_leaves_file_untouched(tmp_path: Path) -> None:
     anchor_path = tmp_path / "_active_anchor.json"
     now = datetime(2025, 1, 15, tzinfo=timezone.utc)
@@ -122,8 +140,7 @@ def test_reset_status_file_writes_reset_snapshot(tmp_path: Path) -> None:
         json.dumps(
             {
                 "ok": True,
-                "generated_utc": "2025-01-01T00:00:00Z",
-                "td_base": "https://api.example.com",
+                "generated_utc": "2025-01-01T00:00:00Z",                
                 "assets": {"BTCUSD": {"ok": True}},
                 "notes": [],
             }
@@ -152,6 +169,7 @@ def test_reset_status_file_writes_reset_snapshot(tmp_path: Path) -> None:
     assert data["assets"] == {}
     assert data["notes"][0]["message"] == "daily cleanup"
     assert data["notes"][0]["reset_utc"] == _iso(now)
+    assert "td_base" not in data
 
 
 def test_reset_notify_state_file_resets_structure(tmp_path: Path) -> None:
