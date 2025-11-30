@@ -26,10 +26,24 @@ def test_default_profile_configuration(monkeypatch):
 
     default_name = settings.ENTRY_THRESHOLD_PROFILE_NAME
     profile = settings.describe_entry_threshold_profile()
+    assert default_name == "relaxed"
     assert profile["name"] == default_name
     assert profile == settings.describe_entry_threshold_profile(default_name)
     assert default_name in settings.list_entry_threshold_profiles()
 
+    assert profile["p_score_min"]["default"] == pytest.approx(35.0)
+    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(38.0)
+    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(38.0)
+    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(38.0)
+    assert profile["p_score_min"]["by_asset"]["NVDA"] == pytest.approx(36.0)
+    assert profile["p_score_min"]["by_asset"]["USOIL"] == pytest.approx(39.0)
+    assert profile["p_score_min"]["by_asset"]["XAGUSD"] == pytest.approx(39.0)
+
+    assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.75)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.68)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["GOLD_CFD"] == pytest.approx(0.81)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.68)
+    
     baseline = settings.describe_entry_threshold_profile("baseline")
     assert baseline["p_score_min"]["default"] == pytest.approx(40.0)
     assert baseline["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(40.0)
@@ -228,7 +242,7 @@ def test_profile_specific_helpers(monkeypatch):
     assert suppressed.get_fib_tolerance("BTCUSD") == pytest.approx(0.006)
     assert suppressed.get_fib_tolerance("GOLD_CFD") == pytest.approx(0.004)
     assert suppressed.get_fib_tolerance("NVDA") == pytest.approx(0.0055)
-    assert suppressed.get_max_risk_pct("BTCUSD") == pytest.approx(1.35)
+    assert suppressed.get_max_risk_pct("BTCUSD") == pytest.approx(1.2)
     assert suppressed.get_bos_lookback("BTCUSD") == 24
 
     relaxed = _reload_settings(monkeypatch, profile="relaxed")
