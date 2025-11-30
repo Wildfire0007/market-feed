@@ -110,6 +110,7 @@ def test_precision_flow_missing_components_logged_for_special_assets():
 
 def test_gate_summary_writes_hungarian_context(tmp_path, monkeypatch):
     monkeypatch.setattr(analysis, "ENTRY_GATE_STATS_PATH", tmp_path / "entry_gate_stats.json")
+    monkeypatch.setattr(analysis, "ENTRY_GATE_GAP_LOG_PATH", tmp_path / "entry_gate_gap_log.jsonl")
     decision = {
         "gates": {"mode": "ok", "missing": []},
         "entry_thresholds": {"profile": "baseline", "atr_ratio_ok": True, "spread_gate_ok": True},
@@ -120,6 +121,12 @@ def test_gate_summary_writes_hungarian_context(tmp_path, monkeypatch):
             "fib_zona": {"ok": True},
             "session_ablak_utc": {"session": []},
             "p_score_profil": "baseline",
+            "atr_kapu": {"rel_atr": 0.8, "threshold": 1.0, "ok": False},
+            "spread_kapu": {
+                "spread_ratio_atr": 0.12,
+                "spread_limit_atr": 0.25,
+                "ok": True,
+            },
         },
     }
 
@@ -129,6 +136,14 @@ def test_gate_summary_writes_hungarian_context(tmp_path, monkeypatch):
     entry = payload["BTCUSD"][0]
     assert entry["bos_visszatekintes"] == 20
     assert entry["p_score_profil"] == "baseline"
+
+    gap_lines = (tmp_path / "entry_gate_gap_log.jsonl").read_text(encoding="utf-8").splitlines()
+    assert gap_lines, "Az entry_gate_gap_log.jsonl nem jött létre"
+    gaps = [json.loads(line) for line in gap_lines]
+    atr_gap = next(item for item in gaps if item["kapu"] == "atr")
+    assert atr_gap["küszöb"] == 1.0
+    assert atr_gap["érték"] == 0.8
+    assert atr_gap["rés"] == 0.8 - 1.0
 
 
 @CI_ONLY
