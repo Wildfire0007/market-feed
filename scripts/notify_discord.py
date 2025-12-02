@@ -1514,6 +1514,50 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     missing_list = ((sig.get("gates") or {}).get("missing") or [])
     core_bos_pending = (mode == "core") and ("bos5m" in missing_list)
 
+    entry_thresholds = sig.get("entry_thresholds") if isinstance(sig, dict) else {}
+    dynamic_lines: List[str] = []
+    if isinstance(entry_thresholds, dict):
+        atr_soft_meta = entry_thresholds.get("atr_soft_gate") or {}
+        atr_soft_used = bool(entry_thresholds.get("atr_soft_gate_used"))
+        atr_soft_mode = str(atr_soft_meta.get("mode") or "").lower()
+        if atr_soft_used or atr_soft_mode == "soft_pass":
+            atr_penalty = safe_float(atr_soft_meta.get("penalty")) or 0.0
+            atr_missing = safe_float(atr_soft_meta.get("diff_ratio"))
+            tolerance = safe_float(atr_soft_meta.get("tolerance_pct"))
+            miss_txt = f"hiány {format_percentage(atr_missing)}" if atr_missing is not None else "toleranciás belépés"
+            tol_txt = f" (tolerancia {format_percentage(tolerance)})" if tolerance is not None else ""
+            pen_txt = f" −{atr_penalty:.1f}P" if atr_penalty else ""
+            dynamic_lines.append(f"ATR Soft Gate: {miss_txt}{tol_txt}{pen_txt}")
+
+        latency_meta = entry_thresholds.get("latency_relaxation") or {}
+        latency_mode = str(latency_meta.get("mode") or "").lower()
+        if latency_mode == "penalized":
+            age_min = None
+            try:
+                age_min = int((latency_meta.get("age_seconds") or 0) // 60)
+            except Exception:
+                age_min = None
+            profile = latency_meta.get("profile")
+            latency_penalty = safe_float(latency_meta.get("penalty")) or 0.0
+            age_txt = f"≈{age_min} perc" if age_min is not None else "késleltetés"
+            profile_txt = f"{profile} profil" if profile else "relaxált guard"
+            pen_txt = f" −{latency_penalty:.1f}P" if latency_penalty else ""
+            dynamic_lines.append(f"Lazított latency guard ({profile_txt}) — {age_txt}{pen_txt}")
+
+        score_meta = entry_thresholds.get("dynamic_score_engine") or {}
+        regime_meta = score_meta.get("regime_penalty") if isinstance(score_meta, dict) else None
+        vol_meta = score_meta.get("volatility_bonus") if isinstance(score_meta, dict) else None
+        if isinstance(regime_meta, dict) and regime_meta.get("points"):
+            points = safe_float(regime_meta.get("points")) or 0.0
+            label = (regime_meta.get("label") or "").upper()
+            sign = "−" if points < 0 else "+"
+            dynamic_lines.append(f"Regime {label}: {sign}{abs(points):.1f}P")
+        if isinstance(vol_meta, dict) and vol_meta.get("points"):
+            points = safe_float(vol_meta.get("points")) or 0.0
+            z_val = safe_float(vol_meta.get("volatility_z"))
+            z_txt = f" z={z_val:.2f}" if z_val is not None else ""
+            dynamic_lines.append(f"Volatilitás bónusz +{points:.1f}P{z_txt}")
+          
     price, utc = spot_from_sig_or_file(asset, sig)
     spot_s = fmt_num(price)
     utc_s  = utc or "-"
@@ -1529,6 +1573,9 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
         f"{status_bold} • P={p}% • mód: `{mode}`",
         f"Spot: `{spot_s}` • UTC: `{utc_s}`",
     ]
+
+  if dynamic_lines:
+        lines.append("⚙️ Dinamikus: " + " | ".join(dynamic_lines))
 
     if closed:
         lines.append(f"🔒 {closed_note or 'Piac zárva (market closed)'}")
