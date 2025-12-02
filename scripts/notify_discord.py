@@ -1516,6 +1516,9 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
 
     entry_thresholds = sig.get("entry_thresholds") if isinstance(sig, dict) else {}
     dynamic_lines: List[str] = []
+    setup_classification: Optional[str] = None
+    setup_score: Optional[float] = None
+    setup_issues: List[str] = []
     if isinstance(entry_thresholds, dict):
         atr_soft_meta = entry_thresholds.get("atr_soft_gate") or {}
         atr_soft_used = bool(entry_thresholds.get("atr_soft_gate_used"))
@@ -1528,6 +1531,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
             tol_txt = f" (tolerancia {format_percentage(tolerance)})" if tolerance is not None else ""
             pen_txt = f" −{atr_penalty:.1f}P" if atr_penalty else ""
             dynamic_lines.append(f"ATR Soft Gate: {miss_txt}{tol_txt}{pen_txt}")
+            setup_issues.append("ATR hiány/lazítás")
 
         latency_meta = entry_thresholds.get("latency_relaxation") or {}
         latency_mode = str(latency_meta.get("mode") or "").lower()
@@ -1543,8 +1547,10 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
             profile_txt = f"{profile} profil" if profile else "relaxált guard"
             pen_txt = f" −{latency_penalty:.1f}P" if latency_penalty else ""
             dynamic_lines.append(f"Lazított latency guard ({profile_txt}) — {age_txt}{pen_txt}")
+            setup_issues.append("késleltetett adat")
 
         score_meta = entry_thresholds.get("dynamic_score_engine") or {}
+        setup_score = safe_float(score_meta.get("final_score"))
         regime_meta = score_meta.get("regime_penalty") if isinstance(score_meta, dict) else None
         vol_meta = score_meta.get("volatility_bonus") if isinstance(score_meta, dict) else None
         if isinstance(regime_meta, dict) and regime_meta.get("points"):
@@ -1552,6 +1558,8 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
             label = (regime_meta.get("label") or "").upper()
             sign = "−" if points < 0 else "+"
             dynamic_lines.append(f"Regime {label}: {sign}{abs(points):.1f}P")
+            if points < 0:
+                setup_issues.append(f"regime {label}")
         if isinstance(vol_meta, dict) and vol_meta.get("points"):
             points = safe_float(vol_meta.get("points")) or 0.0
             z_val = safe_float(vol_meta.get("volatility_z"))
@@ -1573,6 +1581,25 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
         f"{status_bold} • P={p}% • mód: `{mode}`",
         f"Spot: `{spot_s}` • UTC: `{utc_s}`",
     ]
+
+    setup_score = setup_score if setup_score is not None else safe_float(p_raw)
+    if dec in ("BUY", "SELL") and setup_score is not None:
+        if setup_score >= 60 and not setup_issues:
+            setup_classification = "🅰️ A Setup (Prémium) — Teljes pozícióméret, agresszív menedzsment."
+        elif setup_score >= 30:
+            issue_txt = ", ".join(setup_issues) if setup_issues else "legalább egy feltétel gyenge vagy hiányzik"
+            setup_classification = (
+                "🅱️ B Setup (Standard) — Fél pozícióméret, szigorúbb Stop Loss. "
+                f"Gyenge/hiányzó: {issue_txt}."
+            )
+        elif setup_score >= 25:
+            setup_classification = (
+                "🅲 C Setup (Speculatív) — Negyed méret vagy manuális megerősítés. "
+                "Csak erős triggerrel (sweep/hír/divergencia) vállald."
+            )
+
+    if setup_classification:
+        dynamic_lines.insert(0, setup_classification)
 
     if dynamic_lines:
         lines.append("⚙️ Dinamikus: " + " | ".join(dynamic_lines))
