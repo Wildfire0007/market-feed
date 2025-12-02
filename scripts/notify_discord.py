@@ -1601,8 +1601,27 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     if setup_classification:
         dynamic_lines.insert(0, setup_classification)
 
+    no_entry_reason = None
+    if dec not in ("BUY", "SELL") and setup_classification:
+        missing_names = []
+        for gate in missing_list:
+            gate_s = str(gate or "").strip()
+            if not gate_s:
+                continue
+            gate_s = gate_s.replace("_", " ")
+            gate_s = gate_s.replace("bos", "BOS")
+            missing_names.append(gate_s)
+        if missing_names:
+            missing_txt = ", ".join(missing_names)
+            no_entry_reason = f"⏳ Nincs belépési trigger — hiányzik: {missing_txt}."
+        else:
+            no_entry_reason = "⏳ Nincs aktív belépő — várj BUY/SELL jelzésre."
+          
     if dynamic_lines:
         lines.append("⚙️ Dinamikus: " + " | ".join(dynamic_lines))
+
+    if no_entry_reason:
+        lines.append(no_entry_reason)
 
     if closed:
         lines.append(f"🔒 {closed_note or 'Piac zárva (market closed)'}")
