@@ -1655,9 +1655,9 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     if isinstance(sig, dict):
         raw_note = sig.get("position_management")
         if not raw_note:
-            reasons = sig.get("reasons")
-            if isinstance(reasons, list):
-                for reason in reasons:
+            pm_reasons = sig.get("reasons")
+            if isinstance(pm_reasons, list):
+                for reason in pm_reasons:
                     if isinstance(reason, str) and reason.strip().lower().startswith("pozíciómenedzsment"):
                         raw_note = reason
                         break
