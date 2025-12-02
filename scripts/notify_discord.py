@@ -1686,7 +1686,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
 
     # Hiányzó feltételek — ha vannak, mindig mutatjuk
     miss = missing_from_sig(sig)
-    if miss:
+    if miss and not (no_entry_reason and "hiányzik" in no_entry_reason.lower()):
         lines.append(f"Hiányzó: *{miss}*")
 
     # cím + szín
