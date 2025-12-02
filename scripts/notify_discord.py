@@ -1583,7 +1583,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     ]
 
     setup_score = setup_score if setup_score is not None else safe_float(p_raw)
-    if dec in ("BUY", "SELL") and setup_score is not None:
+    if setup_score is not None:
         if setup_score >= 60 and not setup_issues:
             setup_classification = "🅰️ A Setup (Prémium) — Teljes pozícióméret, agresszív menedzsment."
         elif setup_score >= 30:
