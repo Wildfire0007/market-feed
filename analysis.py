@@ -4565,9 +4565,6 @@ def should_enforce_stale_frame(asset: str,
             return False
         if not meta.get("within_entry_window") and not meta.get("within_window"):
             return False
-    relaxed = RELAXED_STALE_FRAMES.get(asset_key)
-    if relaxed and frame in relaxed:
-        return False
     return True
 
 
@@ -7619,7 +7616,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         except Exception as exc:  # pragma: no cover - defensive logging
             LOGGER.warning("Latency guard értesítés hibás: %s", exc)
         guard_reasons = [
-            "Data Stale — belépés tiltva",
+            "Critical data latency — belépés tiltva",
             guard_note,
         ]
         diag_payload = diagnostics_payload(tf_meta, source_files, latency_flags)
@@ -12559,6 +12556,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
