@@ -28,6 +28,11 @@ LOCAL_TZ = ZoneInfo("Europe/Budapest")
 from logging_utils import ensure_json_file_handler
 
 from config import analysis_settings as settings
+from dynamic_logic import (
+    DynamicScoreEngine,
+    VolatilityManager,
+    apply_latency_relaxation,
+)
 
 from active_anchor import load_anchor_state, record_anchor, update_anchor_metrics
 from ml_model import (
@@ -6498,6 +6503,54 @@ def ema_slope_ok(
     return (rel >= th), rel, slope_signed
 
 
+class RegimeClassifier:
+    def __init__(
+        self,
+        adx_period: int = 14,
+        ema_period: int = EMA_SLOPE_PERIOD,
+        ema_lookback: int = EMA_SLOPE_LOOKBACK,
+        ema_threshold: float = EMA_SLOPE_TH,
+        adx_trend_threshold: float = ADX_TREND_MIN,
+        adx_range_threshold: float = ADX_RANGE_MAX,
+    ) -> None:
+        self.adx_period = adx_period
+        self.ema_period = ema_period
+        self.ema_lookback = ema_lookback
+        self.ema_threshold = ema_threshold
+        self.adx_trend_threshold = adx_trend_threshold
+        self.adx_range_threshold = adx_range_threshold
+
+    def classify(self, k5m: pd.DataFrame, k1h: pd.DataFrame) -> Dict[str, Any]:
+        """Return regime label + raw metrics based on 5m ADX and 1h EMA slope."""
+
+        if k5m is None or k1h is None or k5m.empty or k1h.empty:
+            return {"label": "CHOPPY", "adx": None, "ema_slope": None, "ema_slope_signed": None}
+
+        adx_value = latest_adx(k5m, period=self.adx_period)
+        slope_ok, slope_abs, slope_signed = ema_slope_ok(
+            k1h,
+            period=self.ema_period,
+            lookback=self.ema_lookback,
+            th=self.ema_threshold,
+        )
+
+        label = "CHOPPY"
+        if adx_value is not None and np.isfinite(adx_value):
+            if adx_value >= self.adx_trend_threshold and slope_abs >= self.ema_threshold:
+                label = "TRENDING"
+            elif adx_value < self.adx_range_threshold:
+                label = "RANGING"
+            elif slope_ok:
+                label = "CHOPPY"
+
+        return {
+            "label": label,
+            "adx": None if adx_value is None else float(adx_value),
+            "ema_slope": float(slope_abs) if slope_abs is not None else None,
+            "ema_slope_signed": float(slope_signed) if slope_signed is not None else None,
+        }
+
+
 def compute_dynamic_tp_profile(
     asset: str,
     atr_series: pd.Series,
@@ -6912,6 +6965,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     asset_entry_profile = _entry_threshold_profile_name(asset)
     entry_thresholds_meta: Dict[str, Any] = {"profile": asset_entry_profile}
     entry_gate_context_hu: Dict[str, Any] = {}
+    dynamic_logic_cfg = settings.DYNAMIC_LOGIC if isinstance(settings.DYNAMIC_LOGIC, dict) else {}
     p_score_min_base = get_p_score_min(asset)
     p_score_min_local = p_score_min_base
     xag_overrides, usoil_overrides, eurusd_overrides = _initialize_asset_overrides(
@@ -7480,7 +7534,53 @@ def analyze(asset: str) -> Dict[str, Any]:
         DATA_LATENCY_GUARD,
         profile=asset_entry_profile,
     )
-    guard_blocking = True
+    latency_penalty = 0.0
+    latency_relax_meta: Optional[Dict[str, Any]] = None
+    latency_relax_cfg = (
+        dynamic_logic_cfg.get("latency_relaxation") if isinstance(dynamic_logic_cfg, dict) else {}
+    )
+
+    def _safe_float(value: Any) -> Optional[float]:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    strict_limit_seconds: Optional[float] = None
+    if isinstance(latency_relax_cfg, dict):
+        profiles_cfg = latency_relax_cfg.get("profiles")
+        strict_profile = profiles_cfg.get("strict") if isinstance(profiles_cfg, dict) else None
+        strict_limit_seconds = _safe_float(strict_profile.get("limit")) if strict_profile else None
+
+    latency_penalty, latency_relax_meta, guard_status = apply_latency_relaxation(
+        asset,
+        guard_status,
+        latency_relax_cfg,
+        profile=asset_entry_profile,
+        latency_seconds=latency_guard_seconds.get("k1m"),
+        strict_limit_seconds=strict_limit_seconds,
+    )
+    if latency_relax_meta:
+        entry_thresholds_meta["latency_relaxation"] = latency_relax_meta
+        if latency_relax_meta.get("mode") == "penalized":
+            try:
+                age_minutes = int((latency_relax_meta.get("age_seconds") or 0) // 60)
+            except Exception:
+                age_minutes = None
+            relax_note = "Latency guard lazítva"
+            if latency_relax_meta.get("profile"):
+                relax_note += f" ({latency_relax_meta['profile']})"
+            if age_minutes is not None:
+                relax_note += f" — {age_minutes} perc késés"
+            if latency_penalty:
+                relax_note += f" ({-latency_penalty:+.1f})"
+            latency_flags.append(relax_note)
+            reasons.append(
+                "Relaxed latency guard: belépés engedélyezve kiterjesztett késleltetéssel"
+                + (f" (−{latency_penalty:.1f} P-score)" if latency_penalty else "")
+            )
+            entry_thresholds_meta["latency_relaxation_used"] = True
+
     if guard_status:
         k1m_meta = tf_meta.setdefault("k1m", {})
         k1m_meta["latency_guard_triggered"] = True
@@ -7491,13 +7591,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         guard_note = (
             f"{guard_status['feed']}: latency guard {guard_minutes} perc késés (limit {guard_limit_minutes} perc)"
         )
-        guard_blocking = str(asset).upper() != "USOIL"
         if guard_note not in latency_flags:
-            latency_flags.append(guard_note if guard_blocking else guard_note + " — figyelmeztetés")
-        if not guard_blocking:
-            critical_note = "Critical data latency — belépés tiltva"
-            if critical_note not in latency_flags:
-                latency_flags.append(critical_note)
+            latency_flags.append(guard_note)
         ts_format = "%Y-%m-%d %H:%M:%S"
         triggered_utc = analysis_now.strftime(ts_format)
         triggered_cet = analysis_now.astimezone(LOCAL_TZ).strftime(ts_format)
@@ -7505,7 +7600,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         guard_meta.update({
             "triggered_utc": triggered_utc,
             "triggered_cet": triggered_cet,
-            "mode": "block_trade" if guard_blocking else "alert_only",
+            "mode": "block_trade",
             "profile": asset_entry_profile,
         })
         entry_thresholds_meta["latency_guard"] = guard_meta
@@ -7523,27 +7618,26 @@ def analyze(asset: str) -> Dict[str, Any]:
             )
         except Exception as exc:  # pragma: no cover - defensive logging
             LOGGER.warning("Latency guard értesítés hibás: %s", exc)
-        if guard_blocking:
-            guard_reasons = [
-                "Critical data latency — belépés tiltva",
-                guard_note,
-            ]
-            diag_payload = diagnostics_payload(tf_meta, source_files, latency_flags)
-            msg = build_data_gap_signal(
-                asset,
-                spot_price,
-                spot_utc,
-                spot_retrieved,
-                LEVERAGE.get(asset, 2.0),
-                guard_reasons,
-                display_spot,
-                diag_payload,
-                session_meta=session_meta,
-            )
-            if realtime_used and realtime_reason:
-                msg.setdefault("reasons", []).append(realtime_reason)
-            save_json(os.path.join(outdir, "signal.json"), msg)
-            return msg
+        guard_reasons = [
+            "Data Stale — belépés tiltva",
+            guard_note,
+        ]
+        diag_payload = diagnostics_payload(tf_meta, source_files, latency_flags)
+        msg = build_data_gap_signal(
+            asset,
+            spot_price,
+            spot_utc,
+            spot_retrieved,
+            LEVERAGE.get(asset, 2.0),
+            guard_reasons,
+            display_spot,
+            diag_payload,
+            session_meta=session_meta,
+        )
+        if realtime_used and realtime_reason:
+            msg.setdefault("reasons", []).append(realtime_reason)
+        save_json(os.path.join(outdir, "signal.json"), msg)
+        return msg
     else:
         _log_latency_guard_recovery(
             asset,
@@ -7680,14 +7774,19 @@ def analyze(asset: str) -> Dict[str, Any]:
         if bias4h != bias1h or bias1h not in {"long", "short"}:
             trend_bias = "neutral"
 
-    # 2/b Rezsim (EMA21 meredekség 1h)
-    regime_ok, regime_val, regime_slope_signed = ema_slope_ok(
-        k1h_closed,
-        EMA_SLOPE_PERIOD,
-        EMA_SLOPE_LOOKBACK,
-        EMA_SLOPE_TH_ASSET.get(asset, EMA_SLOPE_TH_DEFAULT),
-    )
     slope_threshold = EMA_SLOPE_TH_ASSET.get(asset, EMA_SLOPE_TH_DEFAULT)
+    adx_trend_threshold = ADX_TREND_MIN
+    if asset == "BTCUSD":
+        adx_trend_threshold = max(float(adx_trend_threshold), BTC_ADX_TREND_MIN)
+    classifier = RegimeClassifier(
+        ema_threshold=slope_threshold,
+        adx_trend_threshold=adx_trend_threshold,
+        adx_range_threshold=ADX_RANGE_MAX,
+    )
+    regime_snapshot = classifier.classify(k5m_closed, k1h_closed)
+    regime_val = float(regime_snapshot.get("ema_slope") or 0.0)
+    regime_slope_signed = float(regime_snapshot.get("ema_slope_signed") or 0.0)
+    regime_ok = regime_val >= slope_threshold
     slope_sign_ok = True
     desired_bias = trend_bias if trend_bias in {"long", "short"} else bias1h
     if stale_timeframes.get("k1h"):
@@ -7719,25 +7818,20 @@ def analyze(asset: str) -> Dict[str, Any]:
     atr_series_5 = atr(k5m_closed, period=atr_period)
     atr5 = atr_series_5.iloc[-1]
     rel_atr = float(atr5 / price_for_calc) if (atr5 and price_for_calc) else float("nan")
-    adx_value = latest_adx(k5m_closed)
+    adx_value = regime_snapshot.get("adx")
     if adx_value is not None and not np.isfinite(adx_value):
         adx_value = None
     entry_thresholds_meta["adx_value"] = adx_value
-    adx_regime = "unknown"
-    adx_trend_threshold = ADX_TREND_MIN
-    if asset == "BTCUSD":
-        adx_trend_threshold = max(float(adx_trend_threshold), BTC_ADX_TREND_MIN)
     try:
         entry_thresholds_meta["adx_trend_threshold"] = float(adx_trend_threshold)
     except (TypeError, ValueError):
         entry_thresholds_meta["adx_trend_threshold"] = None
-    if adx_value is not None:
-        if adx_trend_threshold and adx_value >= adx_trend_threshold:
-            adx_regime = "trend"
-        elif adx_value < ADX_RANGE_MAX:
-            adx_regime = "range"
-        else:
-            adx_regime = "balanced"
+    regime_label = str(regime_snapshot.get("label") or "").lower()
+    adx_regime = "balanced"
+    if regime_label == "trending":
+        adx_regime = "trend"
+    elif regime_label == "ranging":
+        adx_regime = "range"
     entry_thresholds_meta["adx_regime_initial"] = adx_regime
     if asset == "BTCUSD":
         btc_profile_active = btc_profile_name or _btc_active_profile()
@@ -7876,18 +7970,33 @@ def analyze(asset: str) -> Dict[str, Any]:
                 spread_gate_ok = False
     else:
         entry_thresholds_meta["spread_ratio"] = spread_ratio
-    atr_abs_min = get_atr_abs_min(asset)
-    atr_abs_ok = True
-    if atr_abs_min is not None:
-        try:
-            atr_abs_ok = float(atr5) >= atr_abs_min
-        except Exception:
-            atr_abs_ok = False
-    base_ratio_ok = not (np.isnan(rel_atr) or rel_atr < atr_threshold)
+    atr_soft_penalty = 0.0
+    atr_soft_meta: Dict[str, Any] = {}
+    atr_soft_cfg: Dict[str, Any] = {}
+    if isinstance(dynamic_logic_cfg, dict):
+        soft_gates_cfg = dynamic_logic_cfg.get("soft_gates")
+        if isinstance(soft_gates_cfg, dict):
+            atr_soft_cfg = soft_gates_cfg.get("atr") if isinstance(soft_gates_cfg.get("atr"), dict) else {}
+    volatility_manager = VolatilityManager(atr_soft_cfg)
+    atr_gate_result = volatility_manager.evaluate(rel_atr, atr_threshold)
+    base_ratio_ok = bool(atr_gate_result.get("ok"))
+    atr_soft_penalty = float(atr_gate_result.get("penalty") or 0.0)
+    atr_soft_meta = atr_gate_result.get("meta") or {}
+    if atr_gate_result.get("warning"):
+        atr_soft_meta["warning"] = atr_gate_result["warning"]
+    if atr_soft_meta:
+        entry_thresholds_meta["atr_soft_gate"] = atr_soft_meta
+    if atr_soft_meta.get("mode") == "soft_pass":
+        soft_gate_reason = "ATR Soft Gate: belépés engedélyezve toleranciával"
+        if atr_soft_penalty:
+            soft_gate_reason += f" (−{atr_soft_penalty:.1f} P-score)"
+        reasons.append(soft_gate_reason)
+        entry_thresholds_meta["atr_soft_gate_used"] = True
+
     atr_ratio_ok = base_ratio_ok
     if asset == "BTCUSD":
         if atr_ratio_threshold_value in (None, "null"):
-            atr_ratio_ok = True
+            atr_ratio_ok = base_ratio_ok
         elif isinstance(atr_ratio_threshold_value, (int, float)):
             try:
                 rel_atr_value = float(rel_atr)
@@ -7899,6 +8008,15 @@ def analyze(asset: str) -> Dict[str, Any]:
             atr_ratio_ok = atr_ratio_ok and base_ratio_ok
         else:
             atr_ratio_ok = base_ratio_ok
+
+    atr_abs_min = get_atr_abs_min(asset)
+    atr_abs_ok = True
+    if atr_abs_min is not None:
+        try:
+            atr_abs_ok = float(atr5) >= atr_abs_min
+        except Exception:
+            atr_abs_ok = False
+
     atr_ok = bool(atr_ratio_ok and atr_abs_ok)
     entry_thresholds_meta["atr_ratio_ok"] = bool(atr_ratio_ok)
     if not spread_gate_ok:
@@ -8471,8 +8589,6 @@ def analyze(asset: str) -> Dict[str, Any]:
         P += P_SCORE_OFI_BONUS
         reasons.append(f"OFI megerősítés (+{P_SCORE_OFI_BONUS:.1f})")
 
-    P = max(0.0, min(100.0, P))
-
     atr_ratio = 0.0
     if not np.isnan(rel_atr) and atr_threshold > 0:
         atr_ratio = rel_atr / atr_threshold
@@ -8764,6 +8880,31 @@ def analyze(asset: str) -> Dict[str, Any]:
         )
 
     P = max(0.0, min(100.0, P))
+
+    base_p_score = P
+
+    dynamic_score_engine = DynamicScoreEngine(
+        dynamic_logic_cfg if isinstance(dynamic_logic_cfg, dict) else {}
+    )
+    volatility_score_data = {
+        "volatility_z": overlay_ratio,
+        "regime": overlay_regime,
+    }
+    P, dynamic_score_notes, dynamic_score_meta = dynamic_score_engine.score(
+        base_p_score,
+        regime_snapshot,
+        volatility_score_data,
+        atr_soft_gate_penalty=atr_soft_penalty,
+        latency_penalty=latency_penalty,
+    )
+
+    # Sanity clamp to ensure persisted P-score remains in [0, 100].
+    P = max(0.0, min(100.0, P))
+
+    if dynamic_score_notes:
+        reasons.extend(dynamic_score_notes)
+    if dynamic_score_meta:
+        entry_thresholds_meta["dynamic_score_engine"] = dynamic_score_meta
 
     range_guard_ok = True
     range_guard_reason: Optional[str] = None
@@ -12418,6 +12559,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
