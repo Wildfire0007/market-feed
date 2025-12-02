@@ -7752,6 +7752,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     if display_spot is None and price_for_calc is not None and np.isfinite(price_for_calc):
         display_spot = price_for_calc
 
+    reasons: List[str] = []
+
     # 2) Bias 4H→1H (zárt 1h/4h)
     raw_bias4h = bias_from_emas(k4h_closed)
     raw_bias1h = bias_from_emas(k1h_closed)
@@ -12556,6 +12558,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
