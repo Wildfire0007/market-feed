@@ -1511,6 +1511,12 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     entry = sig.get("entry"); sl = sig.get("sl"); t1 = sig.get("tp1"); t2 = sig.get("tp2")
     rr = sig.get("rr")
     mode = gates_mode(sig)
+    mode_pretty = {
+        "analysis_error": "analysis hiba",
+        "data_gap": "adat hiány",
+        "unavailable": "adat nem elérhető",
+    }
+    display_mode = mode_pretty.get(mode, mode)
     missing_list = ((sig.get("gates") or {}).get("missing") or [])
     core_bos_pending = (mode == "core") and ("bos5m" in missing_list)
 
@@ -1578,7 +1584,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     status_bold  = f"{status_emoji} **{dec}**"
 
     lines = [
-        f"{status_bold} • P={p}% • mód: `{mode}`",
+        f"{status_bold} • P={p}% • mód: `{display_mode}`",
         f"Spot: `{spot_s}` • UTC: `{utc_s}`",
     ]
 
@@ -1602,7 +1608,24 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
         dynamic_lines.insert(0, setup_classification)
 
     no_entry_reason = None
-    if dec not in ("BUY", "SELL") and setup_classification:
+    if mode == "analysis_error":
+        reason_detail = None
+        reasons = sig.get("reasons") if isinstance(sig, dict) else None
+        if isinstance(reasons, list):
+            for reason in reasons:
+                if isinstance(reason, str) and reason.strip():
+                    reason_detail = reason.strip()
+                    break
+        diagnostics = sig.get("diagnostics") if isinstance(sig, dict) else None
+        diag_msg = None
+        if isinstance(diagnostics, dict):
+            diag_err = diagnostics.get("error")
+            if isinstance(diag_err, dict):
+                diag_msg = diag_err.get("message")
+        detail = reason_detail or diag_msg
+        note_suffix = f" — {detail}" if detail else ""
+        no_entry_reason = f"⚠️ Analysis hiba{note_suffix}."
+    if dec not in ("BUY", "SELL") and setup_classification and not no_entry_reason:
         missing_names = []
         for gate in missing_list:
             gate_s = str(gate or "").strip()
