@@ -1574,7 +1574,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
         f"Spot: `{spot_s}` • UTC: `{utc_s}`",
     ]
 
-  if dynamic_lines:
+    if dynamic_lines:
         lines.append("⚙️ Dinamikus: " + " | ".join(dynamic_lines))
 
     if closed:
