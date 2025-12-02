@@ -244,6 +244,44 @@ def _normalize_session_status_profiles(raw_map: Any) -> Dict[str, Dict[str, Any]
     return profiles
 
 
+def _normalize_dynamic_logic(raw: Any) -> Dict[str, Any]:
+    default_cfg: Dict[str, Any] = {
+        "enabled": False,
+        "p_score": {},
+        "soft_gates": {
+            "atr": {"enabled": False, "tolerance_pct": 0.15, "penalty_max": 6.0}
+        },
+        "latency_relaxation": {
+            "profiles": {"strict": {"limit": None, "penalty": 0}},
+            "asset_map": {"default": "strict"},
+        },
+    }
+
+    if not isinstance(raw, dict):
+        return default_cfg
+
+    cfg: Dict[str, Any] = {"enabled": bool(raw.get("enabled"))}
+    for key in ("p_score", "soft_gates", "latency_relaxation"):
+        if isinstance(raw.get(key), dict):
+            cfg[key] = dict(raw[key])
+    # Guarantee baseline strict profiles even when the config omits them to
+    # preserve backwards compatibility with older JSON files.
+    latency_cfg = cfg.setdefault("latency_relaxation", {})
+    if isinstance(latency_cfg, dict):
+        profiles = latency_cfg.setdefault("profiles", {})
+        if isinstance(profiles, dict):
+            profiles.setdefault("strict", {"limit": None, "penalty": 0})
+        latency_cfg.setdefault("asset_map", {}).setdefault("default", "strict")
+    soft_cfg = cfg.setdefault("soft_gates", {})
+    if isinstance(soft_cfg, dict):
+        atr_cfg = soft_cfg.setdefault("atr", {}) if isinstance(soft_cfg.get("atr"), dict) else soft_cfg.setdefault("atr", {})
+        atr_cfg.setdefault("enabled", False)
+        atr_cfg.setdefault("tolerance_pct", 0.15)
+        atr_cfg.setdefault("penalty_max", 6.0)
+    cfg.setdefault("p_score", {})
+    return cfg
+
+
 def _normalize_entry_profile(name: str, raw_profile: Any) -> Dict[str, Dict[str, float]]:
     if not isinstance(raw_profile, dict):
         LOGGER.warning(
@@ -647,6 +685,9 @@ if _ASSET_FILTER_ENV:
             if asset.upper() in _asset_filter
         ]
 LEVERAGE: Dict[str, float] = load_config()["leverage"]
+DYNAMIC_LOGIC: Dict[str, Any] = _normalize_dynamic_logic(
+    _get_config_value("dynamic_logic")
+)
 _ENTRY_THRESHOLD_PROFILES_RAW: Dict[str, Any] = dict(
     _get_config_value("entry_threshold_profiles") or {}
 )
