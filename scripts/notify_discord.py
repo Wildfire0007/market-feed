@@ -1557,6 +1557,8 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
 
         score_meta = entry_thresholds.get("dynamic_score_engine") or {}
         setup_score = safe_float(score_meta.get("final_score"))
+        if setup_score is None:
+            setup_score = safe_float(score_meta.get("base_score"))
         regime_meta = score_meta.get("regime_penalty") if isinstance(score_meta, dict) else None
         vol_meta = score_meta.get("volatility_bonus") if isinstance(score_meta, dict) else None
         if isinstance(regime_meta, dict) and regime_meta.get("points"):
@@ -1602,6 +1604,10 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
             setup_classification = (
                 "🅲 C Setup (Speculatív) — Negyed méret vagy manuális megerősítés. "
                 "Csak erős triggerrel (sweep/hír/divergencia) vállald."
+            )
+        else:
+            setup_classification = (
+                "❌ Setup túl gyenge — P-score <25. Csak figyelés, belépő nem ajánlott."
             )
 
     if setup_classification:
