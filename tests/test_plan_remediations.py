@@ -37,7 +37,7 @@ def test_fib_tolerance_relaxed_metals_profile(monkeypatch):
     settings.reload_config()
     refreshed = importlib.reload(settings)
     tol = refreshed.get_fib_tolerance("GOLD_CFD")
-    assert tol == pytest.approx(0.009)
+    assert tol == pytest.approx(0.05)
     settings.reload_config()
 
 
