@@ -34,17 +34,28 @@ def _run_step(label: str, cmd: Sequence[str], optional: bool = False) -> int:
     return int(result.returncode)
 
 
+def _first_env(*names: str) -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value is None:
+            continue
+        cleaned = str(value).strip()
+        if cleaned:
+            return cleaned
+    return ""
+
+
 def _news_available(force: bool) -> bool:
     if force:
         return True
-    api_key = os.getenv("NEWSAPI_KEY", "").strip()
+    api_key = _first_env("NEWSAPI_KEY")
     return bool(api_key)
 
 
 def _trading_available(force: bool) -> bool:
     if force:
         return True
-    api_key = os.getenv("TWELVEDATA_API_KEY", "").strip()
+    api_key = _first_env("TWELVEDATA_API_KEY", "TD_API_KEY")
     return bool(api_key)
 
 
@@ -165,7 +176,7 @@ def main(argv: List[str] | None = None) -> int:
             _run_step("Trading", [python, "Trading.py"])
         else:
             print(
-                "⚠️  Skipping Trading step (TWELVEDATA_API_KEY not configured)",
+                "⚠️  Skipping Trading step (TWELVEDATA_API_KEY/TD_API_KEY not configured)",
                 file=sys.stderr,
             )
 
