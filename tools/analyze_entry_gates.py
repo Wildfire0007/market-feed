@@ -149,7 +149,7 @@ def discover_entry_gate_logs(root: Path, limit: int) -> List[Path]:
     except OSError:
         return []
 
-    candidates.sort(key=lambda item: item[0], reverse=True)
+    candidates.sort(key=lambda item: (item[0], item[1].name), reverse=True)
     return [path for _, path in candidates[:limit]]
 
   
@@ -208,7 +208,10 @@ def os_walk(root: Path) -> Iterator[Tuple[str, List[str], List[str]]]:
 
     from os import walk
 
-    yield from walk(root)
+    for current_root, dirnames, filenames in walk(root):
+        dirnames.sort()
+        filenames.sort()
+        yield current_root, dirnames, filenames
 
 
 # ---------------------------------------------------------------------------
