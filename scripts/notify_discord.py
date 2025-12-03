@@ -358,11 +358,11 @@ EMOJI = {
     "NVDA": "🤖",    
 }
 COLOR = {
-    "BUY":   0x2ecc71,  # zöld
-    "SELL":  0x2ecc71,  # zöld
-    "NO":    0xe74c3c,  # piros
-    "WAIT":  0xf1c40f,  # sárga
-    "FLIP":  0x3498db,  # kék
+    "BUY":   0x2ecc71,  # zöld (csak tényleges Buy/Sell döntésnél)
+    "SELL":  0x2ecc71,  # zöld (csak tényleges Buy/Sell döntésnél)
+    "NO":    0xe74c3c,  # piros (invalidate)
+    "WAIT":  0xf7dc6f,  # citromsárga (várakozás/stabilizálás)
+    "FLIP":  0xe67e22,  # narancssárga (flip)
     "INFO":  0x95a5a6,  # semleges
 }
 
@@ -419,6 +419,42 @@ def to_utc_iso(dt):
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def update_asset_send_state(
+    st: Dict[str, Any],
+    *,
+    decision: str,
+    now: datetime,
+    cooldown_minutes: int = 0,
+    mode: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Frissíti az eszköz értesítési állapotát küldéskor.
+
+    A ``last_sent``, ``last_sent_decision`` és ``cooldown_until`` mezőket
+    UTC-ben állítja be, determinisztikus, másodpercre kerekített időbélyegekkel.
+
+    Rollback értelmezés: ha a friss állapotírás problémát okoz, a visszaállítás
+    azt jelenti, hogy a küldési ágakban nem hívjuk meg ezt a függvényt, így a
+    ``_notify_state.json`` érintetlen marad. Erre azért van szükség, mert
+    hibás timestamp vagy döntés mentése torzíthatja a cooldown-logikát és
+    a következő értesítések sorrendjét; írás letiltásával a korábbi stabil
+    állapot konzerválható a hiba kivizsgálásáig.
+    """
+
+    now_iso = to_utc_iso(now)
+    st = dict(st) if st is not None else _default_asset_state()
+    st["last_sent"] = now_iso
+    st["last_sent_decision"] = decision
+    st["last_sent_mode"] = mode
+    st["last_sent_known"] = True
+
+    if cooldown_minutes and cooldown_minutes > 0:
+        st["cooldown_until"] = to_utc_iso(now + timedelta(minutes=cooldown_minutes))
+    else:
+        st["cooldown_until"] = None
+
+    return st
 
 
 def load(path):
@@ -1039,25 +1075,41 @@ def card_color(dec: str, is_stable: bool, kind: str, setup_grade: Optional[str] 
         return COLOR["FLIP"]
     if kind == "invalidate":
         return COLOR["NO"]
-    if dec in ("BUY", "SELL") and is_stable:
-        return COLOR["BUY"]
-    return COLOR["NO"]
+    if dec in ("BUY", "SELL"):
+        return COLOR["BUY"] if is_stable else COLOR["WAIT"]
+    return COLOR["WAIT"]
 
 
 def colorize_setup_text(text: str, setup_grade: Optional[str]) -> str:
-    """Változat az ABC setupok betűszínének kiemelésére (zöld/sárga/szürke)."""
+    """ABC setup jelölés egységes betűtípussal, színkódolt emojival."""
 
-    ansi_colors = {
-        "A": "32",  # zöld
-        "B": "33",  # sárga
-        "C": "90",  # szürke
+    emoji_prefix = {
+        "A": "🟢",  # zöld
+        "B": "🟡",  # citromsárga
+        "C": "⚪️",  # szürke/semleges
     }
-    if setup_grade not in ansi_colors:
-        return text
+    prefix = emoji_prefix.get(setup_grade)
+    return f"{prefix} {text}" if prefix else text
 
-    color_code = ansi_colors[setup_grade]
-    return f"```ansi\n\u001b[{color_code}m{text}\u001b[0m\n```"
 
+def resolve_setup_direction(sig: dict, decision: str) -> Optional[str]:
+    """Próbálja meg kideríteni a long/short irányt a jelből vagy a precíziós tervből."""
+
+    if decision in {"BUY", "SELL"}:
+        return decision
+
+    direction_sources = []
+    precision_plan = (sig or {}).get("precision_plan") or {}
+    direction_sources.append(precision_plan.get("direction"))
+    direction_sources.append((precision_plan.get("context") or {}).get("direction"))
+
+    for cand in direction_sources:
+        if isinstance(cand, str) and cand.strip():
+            upper = cand.strip().upper()
+            if upper in {"BUY", "SELL", "LONG", "SHORT"}:
+                return "BUY" if upper in {"BUY", "LONG"} else "SELL"
+    return None
+  
 def slope_status_icon(slope: Optional[float], threshold: float, side: str) -> str:
     if slope is None:
         return "⚠️"
@@ -1542,7 +1594,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     setup_grade: Optional[str] = None
     setup_score: Optional[float] = None
     setup_issues: List[str] = []
-    setup_direction = dec if dec in ("BUY", "SELL") else None
+    setup_direction = resolve_setup_direction(sig, dec)
     if isinstance(entry_thresholds, dict):
         atr_soft_meta = entry_thresholds.get("atr_soft_gate") or {}
         atr_soft_used = bool(entry_thresholds.get("atr_soft_gate_used"))
@@ -1922,22 +1974,22 @@ def main():
                 cooldown_minutes = COOLDOWN_MIN
                 if COOLDOWN_MIN > 0 and mode_current == "momentum":
                     cooldown_minutes = MOMENTUM_COOLDOWN_MIN
-                if cooldown_minutes > 0:
-                    st["cooldown_until"] = datetime.fromtimestamp(
-                        now_ep + cooldown_minutes*60, tz=timezone.utc
-                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
-                else:
-                    st["cooldown_until"] = None
-                st["last_sent"] = now_iso
-                st["last_sent_decision"] = eff
-                st["last_sent_mode"] = mode_current
-                st["last_sent_known"] = True
+                st = update_asset_send_state(
+                    st,
+                    decision=eff,
+                    now=datetime.fromtimestamp(now_ep, tz=timezone.utc),
+                    cooldown_minutes=cooldown_minutes,
+                    mode=mode_current,
+                )
                 mark_heartbeat(meta, bud_key, now_iso)
             elif send_kind == "invalidate":
-                st["last_sent"] = now_iso
-                st["last_sent_decision"] = "no entry"
-                st["last_sent_mode"] = None
-                st["last_sent_known"] = True
+                st = update_asset_send_state(
+                    st,
+                    decision="no entry",
+                    now=datetime.fromtimestamp(now_ep, tz=timezone.utc),
+                    cooldown_minutes=0,
+                    mode=None,
+                )
                 mark_heartbeat(meta, bud_key, now_iso)
 
         state[asset] = st
