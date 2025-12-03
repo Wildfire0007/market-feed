@@ -1034,10 +1034,18 @@ def market_closed_info(sig: dict) -> Tuple[bool, str]:
 
 # ------------- embed-renderek -------------
 
-def card_color(dec: str, is_stable: bool, kind: str) -> int:
+def card_color(dec: str, is_stable: bool, kind: str, setup_grade: Optional[str] = None) -> int:
     if kind == "flip":
         return COLOR["FLIP"]
     if kind == "invalidate":
+        return COLOR["NO"]
+    if setup_grade == "A":
+        return COLOR["BUY"]
+    if setup_grade == "B":
+        return COLOR["WAIT"]
+    if setup_grade == "C":
+        return COLOR["INFO"]
+    if setup_grade:
         return COLOR["NO"]
     if dec in ("BUY","SELL"):
         return COLOR["BUY"] if is_stable else COLOR["WAIT"]
@@ -1523,6 +1531,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     entry_thresholds = sig.get("entry_thresholds") if isinstance(sig, dict) else {}
     dynamic_lines: List[str] = []
     setup_classification: Optional[str] = None
+    setup_grade: Optional[str] = None
     setup_score: Optional[float] = None
     setup_issues: List[str] = []
     if isinstance(entry_thresholds, dict):
@@ -1577,43 +1586,65 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     price, utc = spot_from_sig_or_file(asset, sig)
     spot_s = fmt_num(price)
     utc_s  = utc or "-"
-
-    # státusz
-    if core_bos_pending and dec in ("BUY","SELL"):
-        status_emoji = "🟡"
-    else:
-        status_emoji = "🟢" if dec in ("BUY","SELL") else "🔴"
-    status_bold  = f"{status_emoji} **{dec}**"
-
-    lines = [
-        f"{status_bold} • P={p}% • mód: `{display_mode}`",
-        f"Spot: `{spot_s}` • UTC: `{utc_s}`",
-    ]
-
+    
     setup_score = setup_score if setup_score is not None else safe_float(p_raw)
     if setup_score is not None:
         if setup_score >= 60 and not setup_issues:
+            setup_grade = "A"
             setup_classification = "🅰️ A Setup (Prémium) — Teljes pozícióméret, agresszív menedzsment."
         elif setup_score >= 30:
+            setup_grade = "B"
             issue_txt = ", ".join(setup_issues) if setup_issues else "legalább egy feltétel gyenge vagy hiányzik"
             setup_classification = (
                 "🅱️ B Setup (Standard) — Fél pozícióméret, szigorúbb Stop Loss. "
                 f"Gyenge/hiányzó: {issue_txt}."
             )
         elif setup_score >= 25:
+            setup_grade = "C"
             setup_classification = (
                 "🅲 C Setup (Speculatív) — Negyed méret vagy manuális megerősítés. "
                 "Csak erős triggerrel (sweep/hír/divergencia) vállald."
             )
         else:
+            setup_grade = "X"
             setup_classification = (
                 "❌ Setup túl gyenge — P-score <25. Csak figyelés, belépő nem ajánlott."
             )
 
+      # státusz
+    status_emoji = "🔴"
+    if setup_grade == "A":
+        status_emoji = "🟢"
+    elif setup_grade == "B":
+        status_emoji = "🟡"
+    elif setup_grade == "C":
+        status_emoji = "🟠"
+    elif setup_grade:
+        status_emoji = "🔴"
+    elif core_bos_pending and dec in ("BUY","SELL"):
+        status_emoji = "🟡"
+    elif dec in ("BUY","SELL"):
+        status_emoji = "🟢"
+
+    base_label = dec.title() if dec else ""
+    if base_label in ("Buy", "Sell") and setup_grade:
+        status_label = f"{base_label} (Grade {setup_grade})"
+    elif setup_grade:
+        status_label = f"{setup_grade} Setup"
+    else:
+        status_label = base_label or dec
+    status_bold  = f"{status_emoji} **{status_label}**"
+
+    lines = [
+        f"{status_bold} • P={p}% • mód: `{display_mode}`",
+        f"Spot: `{spot_s}` • UTC: `{utc_s}`",
+    ]
+  
     if setup_classification:
         dynamic_lines.insert(0, setup_classification)
 
     no_entry_reason = None
+    missing_note = None
     if mode == "analysis_error":
         reason_detail = None
         reasons = sig.get("reasons") if isinstance(sig, dict) else None
@@ -1631,26 +1662,28 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
         detail = reason_detail or diag_msg
         note_suffix = f" — {detail}" if detail else ""
         no_entry_reason = f"⚠️ Analysis hiba{note_suffix}."
-    if dec not in ("BUY", "SELL") and setup_classification and not no_entry_reason:
-        missing_names = []
-        for gate in missing_list:
-            gate_s = str(gate or "").strip()
-            if not gate_s:
-                continue
-            gate_s = gate_s.replace("_", " ")
-            gate_s = gate_s.replace("bos", "BOS")
-            missing_names.append(gate_s)
-        if missing_names:
-            missing_txt = ", ".join(missing_names)
-            no_entry_reason = f"⏳ Nincs belépési trigger — hiányzik: {missing_txt}."
-        else:
-            no_entry_reason = "⏳ Nincs aktív belépő — várj BUY/SELL jelzésre."
+    missing_names = []
+    for gate in missing_list:
+        gate_s = str(gate or "").strip()
+        if not gate_s:
+            continue
+        gate_s = gate_s.replace("_", " ")
+        gate_s = gate_s.replace("bos", "BOS")
+        missing_names.append(gate_s)
+
+    if missing_names:
+        missing_txt = ", ".join(missing_names)
+        missing_note = f"⏳ Nincs belépési trigger — hiányzik: {missing_txt}."
+      
           
     if dynamic_lines:
         lines.append("⚙️ Dinamikus: " + " | ".join(dynamic_lines))
 
     if no_entry_reason:
         lines.append(no_entry_reason)
+
+    if missing_note and missing_note not in lines:
+        lines.append(missing_note)
 
     if closed:
         lines.append(f"🔒 {closed_note or 'Piac zárva (market closed)'}")
@@ -1686,7 +1719,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
 
     # Hiányzó feltételek — ha vannak, mindig mutatjuk
     miss = missing_from_sig(sig)
-    if miss and not (no_entry_reason and "hiányzik" in no_entry_reason.lower()):
+    if miss and not (no_entry_reason and "hiányzik" in no_entry_reason.lower()) and not missing_note:
         lines.append(f"Hiányzó: *{miss}*")
 
     # cím + szín
@@ -1699,7 +1732,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     elif kind == "heartbeat":
         title += " • ℹ️ Állapot"
 
-    color = card_color(dec, is_stable, kind)
+    color = card_color(dec, is_stable, kind, setup_grade)
 
     return {
         "title": title,
