@@ -118,7 +118,28 @@ def _env_flag(name: str) -> Optional[bool]:
     return None
 
 OUT_DIR  = os.getenv("OUT_DIR", "public")
-API_KEY_RAW = os.getenv("TWELVEDATA_API_KEY", "")
+
+
+def _env_first(*names: str) -> str:
+    """Return the first non-empty environment variable value.
+
+    Some deployment environments changed the Twelve Data secret name from
+    ``TWELVEDATA_API_KEY`` to ``TD_API_KEY``.  Instead of hard failing with a
+    missing-key error (and producing no data), look for the alternative names
+    as a fallback to keep the trading job running.
+    """
+
+    for name in names:
+        raw = os.getenv(name)
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        if value:
+            return value
+    return ""
+
+
+API_KEY_RAW = _env_first("TWELVEDATA_API_KEY", "TD_API_KEY")
 API_KEY  = API_KEY_RAW.strip() if API_KEY_RAW else ""
 TD_BASE  = "https://api.twelvedata.com"
 TD_PAUSE = float(os.getenv("TD_PAUSE", "0.15"))
@@ -3934,6 +3955,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
