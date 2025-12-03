@@ -731,6 +731,10 @@ _REQUEST_ADAPTER = HTTPAdapter(
 )
 _REQUEST_SESSION.mount("https://", _REQUEST_ADAPTER)
 _REQUEST_SESSION.mount("http://", _REQUEST_ADAPTER)
+# Proxy-k kikapcsolása: a Twelve Data hívások egyes hálózatokban 403-as
+# proxy hibát kaptak (miközben böngészőből közvetlenül működtek), ezért
+# a requests Session ne vegye át az esetleges HTTP(S)_PROXY változókat.
+_REQUEST_SESSION.trust_env = False
 _REQUEST_SESSION.headers.update({"User-Agent": "market-feed/td-only/1.0"})
 _ORIGINAL_REQUESTS_GET = requests.get
 ANCHOR_LOCK = threading.Lock()
@@ -3911,6 +3915,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
