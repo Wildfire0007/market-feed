@@ -39,7 +39,7 @@ import os, json, time, math, logging
 import threading
 from datetime import datetime, timezone, time as dt_time
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Optional, List, Tuple, Callable, Set
 
 import requests
@@ -534,25 +534,12 @@ if _ASSET_FILTER_ENV:
         ASSETS = filtered_assets
 
 
-def _ordered_asset_items() -> List[Tuple[str, Dict[str, Any]]]:
-    return sorted(ASSETS.items(), key=lambda item: item[0])
-
-
-def _determine_worker_count(asset_count: int) -> int:
-    ci_env = os.getenv("CI", "").strip().lower()
-    ci_deterministic = ci_env in {"1", "true", "yes", "on"}
-    if ci_deterministic:
-        ci_workers = max(1, min(2, _env_int("TD_CI_MAX_WORKERS", 1)))
-        return min(asset_count, ci_workers)
-    return max(1, min(asset_count, TD_MAX_WORKERS))
-
-
 def _normalize_symbol_token(symbol: str) -> str:
     return symbol.replace("/", "").replace(":", "").replace("-", "").strip().upper()
 
 
 _ASSET_SYMBOL_INDEX: Dict[str, str] = {}
-for _asset_key, _cfg in _ordered_asset_items():
+for _asset_key, _cfg in ASSETS.items():
     if not isinstance(_cfg, dict):
         continue
     if isinstance(_asset_key, str) and _asset_key:
@@ -864,15 +851,6 @@ CLIENT_ERROR_STATUS_CODES: Set[Optional[int]] = {
 
 def now_utc() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def normalize_dt_utc(dt: datetime) -> datetime:
-    """Ensure minden belső időbélyeg timezone.utc-re normalizált."""
-
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
 
 def _parse_iso_utc(value: Any) -> Optional[datetime]:
     if not value:
@@ -3883,19 +3861,18 @@ def main():
             pipeline_log_path,
             static_fields={"component": "trading", **(get_run_logging_context() or {})},
         )
-    started_at_dt = normalize_dt_utc(datetime.now(timezone.utc))
-    ordered_assets = _ordered_asset_items()
-    logger.info("Trading run started for %d assets", len(ordered_assets))
-    workers = _determine_worker_count(len(ordered_assets))
-    if workers == 1:
-        for asset, cfg in ordered_assets:
-            _process_asset_guard(asset, cfg)
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            for _ in executor.map(lambda pair: _process_asset_guard(*pair), ordered_assets):
-                pass
+    started_at_dt = datetime.now(timezone.utc)
+    logger.info("Trading run started for %d assets", len(ASSETS))
+    workers = max(1, min(len(ASSETS), TD_MAX_WORKERS))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(_process_asset_guard, asset, cfg): asset
+            for asset, cfg in ASSETS.items()
+        }
+        for future in as_completed(futures):
+            future.result()
     wait_for_realtime_background()
-    completed_at_dt = normalize_dt_utc(datetime.now(timezone.utc))
+    completed_at_dt = datetime.now(timezone.utc)
     duration_seconds = max((completed_at_dt - started_at_dt).total_seconds(), 0.0)
     logger.info("Trading run completed in %.1f seconds", duration_seconds)
     try:
@@ -3934,6 +3911,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
