@@ -22,9 +22,12 @@ INTERVALS = ["5min", "1h", "4h"]
 
 API_BASE = "https://api.twelvedata.com"
 
-API_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
+API_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip() or os.getenv("TD_API_KEY", "").strip()
 if not API_KEY:
-    print("ERROR: TWELVEDATA_API_KEY nincs beállítva a környezetben.", file=sys.stderr)
+    print(
+        "ERROR: TWELVEDATA_API_KEY vagy TD_API_KEY nincs beállítva a környezetben.",
+        file=sys.stderr,
+    )
     sys.exit(0)  # ne bukjon el a pipeline
 
 def td_get(endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:
