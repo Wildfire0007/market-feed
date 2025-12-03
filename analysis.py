@@ -1826,6 +1826,111 @@ def convert_minutes_to_local_range(
     return format_local_range(start_local, end_local)
 
 
+def validate_session_windows_dst(now_utc: Optional[datetime] = None) -> Dict[str, Any]:
+    """DST-érzékeny session window validáció az aktuális napra."""
+
+    now_utc = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    today_utc = now_utc.date()
+    issues: List[Dict[str, Any]] = []
+    validated = 0
+
+    for asset, rules in SESSION_TIME_RULES.items():
+        rule_tz = RULE_TIMEZONES.get(asset)
+        for label, raw_value in (
+            ("sunday_open_minute", rules.get("sunday_open_minute")),
+            ("daily_breaks", rules.get("daily_breaks")),
+        ):
+            if raw_value is None:
+                continue
+            if label == "daily_breaks":
+                for idx, (start, end) in enumerate(raw_value or []):
+                    try:
+                        start_conv = _convert_rule_minute_to_utc(int(start), today_utc, rule_tz)
+                        end_conv = _convert_rule_minute_to_utc(int(end), today_utc, rule_tz)
+                    except Exception as exc:  # pragma: no cover - defensive guard
+                        issues.append(
+                            {
+                                "asset": asset,
+                                "rule": "daily_break",
+                                "index": idx,
+                                "error": str(exc),
+                            }
+                        )
+                        LOGGER.warning(
+                            "DST konverziós hiba a napi szünet szabálynál",
+                            extra={"asset": asset, "index": idx, "hiba": str(exc)},
+                        )
+                        continue
+                    for minute in (start_conv, end_conv):
+                        if minute < 0 or minute >= 24 * 60:
+                            issues.append(
+                                {
+                                    "asset": asset,
+                                    "rule": "daily_break",
+                                    "index": idx,
+                                    "minute": minute,
+                                }
+                            )
+                            LOGGER.warning(
+                                "DST-normalizált napi szünet percen kívül esik",
+                                extra={"asset": asset, "index": idx, "perc": minute},
+                            )
+                continue
+
+            try:
+                converted = _convert_rule_minute_to_utc(int(raw_value), today_utc, rule_tz)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                issues.append(
+                    {
+                        "asset": asset,
+                        "rule": label,
+                        "error": str(exc),
+                    }
+                )
+                LOGGER.warning(
+                    "DST konverziós hiba a session szabálynál",
+                    extra={"asset": asset, "szabaly": label, "hiba": str(exc)},
+                )
+                continue
+
+            if converted < 0 or converted >= 24 * 60:
+                issues.append({"asset": asset, "rule": label, "minute": converted})
+                LOGGER.warning(
+                    "DST-normalizált perc érvénytelen tartományban",
+                    extra={"asset": asset, "szabaly": label, "perc": converted},
+                )
+
+    for asset, cfg in SESSION_WINDOWS_UTC.items():
+        entry_windows, monitor_windows = session_windows_utc(asset)
+        for label, windows in (("entry", entry_windows), ("monitor", monitor_windows)):
+            if not windows:
+                continue
+            for idx, (sh, sm, eh, em) in enumerate(windows):
+                validated += 1
+                try:
+                    start_dt = datetime.combine(today_utc, dtime(sh, sm, tzinfo=timezone.utc))
+                    end_dt = datetime.combine(today_utc, dtime(eh, em, tzinfo=timezone.utc))
+                    if end_dt <= start_dt:
+                        end_dt += timedelta(days=1)
+                    _ = start_dt.astimezone(BUDAPEST_TIMEZONE)
+                    _ = end_dt.astimezone(BUDAPEST_TIMEZONE)
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    issues.append(
+                        {
+                            "asset": asset,
+                            "window": label,
+                            "index": idx,
+                            "error": str(exc),
+                        }
+                    )
+                    LOGGER.warning(
+                        "DST-érzékeny session ablak konverzió hiba",
+                        extra={"asset": asset, "window": label, "index": idx, "hiba": str(exc)},
+                    )
+
+    return {"checked": validated, "issues": issues, "timestamp": to_utc_iso(now_utc)}
+
+
 def session_weekday_ok(asset: str, now: Optional[datetime] = None) -> bool:
     if now is None:
         now = datetime.now(timezone.utc)
@@ -5058,6 +5163,45 @@ def build_status_snapshot(summary: Dict[str, Any], public_dir: Path) -> Dict[str
     return status_payload
 
 
+def refresh_status_snapshot(public_dir: Path, *, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Rebuild ``public/status.json`` with a fresh UTC bélyeg minden futás elején."""
+
+    status_path = Path(public_dir) / "status.json"
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    existing_raw: Dict[str, Any] = {}
+    if status_path.exists():
+        try:
+            existing_raw = json.loads(status_path.read_text(encoding="utf-8"))
+        except Exception:
+            existing_raw = {}
+
+    notes_raw = existing_raw.get("notes") if isinstance(existing_raw, dict) else []
+    normalized_notes: List[Any] = []
+    if isinstance(notes_raw, list):
+        for idx, note in enumerate(notes_raw):
+            if isinstance(note, dict) and "reset_utc" in note:
+                note = dict(note)
+                note["reset_utc"] = normalize_generated_utc(
+                    note.get("reset_utc"), field=f"status.notes[{idx}].reset_utc"
+                )
+            normalized_notes.append(note)
+
+    ok_value = existing_raw.get("ok") if isinstance(existing_raw, dict) else None
+    status_value = existing_raw.get("status") if isinstance(existing_raw, dict) else None
+    assets_value = existing_raw.get("assets") if isinstance(existing_raw, dict) else None
+
+    payload = {
+        "ok": bool(ok_value) if isinstance(ok_value, bool) else False,
+        "status": status_value if isinstance(status_value, str) else "reset",
+        "generated_utc": to_utc_iso(now_utc),
+        "assets": assets_value if isinstance(assets_value, dict) else {},
+        "notes": normalized_notes,
+    }
+
+    save_json(status_path, payload)
+    return payload
+
+
 def detect_analysis_revision() -> Optional[Dict[str, Any]]:
     """Return git metadata for the analysis build, if available."""
 
@@ -6469,6 +6613,38 @@ def fib_zone_ok(move_hi, move_lo, price_now,
     in_long  = min(z1_long,  z2_long ) - tol <= price_now <= max(z1_long,  z2_long ) + tol
     in_short = min(z1_short, z2_short) - tol <= price_now <= max(z1_short, z2_short) + tol
     return in_long or in_short
+
+
+def fib_distance_from_zone(
+    move_hi: Optional[float],
+    move_lo: Optional[float],
+    price_now: Optional[float],
+    low: float = 0.618,
+    high: float = 0.886,
+    tol_abs: float = 0.0,
+    tol_frac: float = 0.02,
+) -> Optional[float]:
+    """Legkisebb távolság a 0.618–0.886 fib zónától (toleranciával)."""
+
+    try:
+        if move_hi is None or move_lo is None or price_now is None:
+            return None
+        length = move_hi - move_lo
+        if length == 0:
+            return None
+        z1_long = move_lo + low * length
+        z2_long = move_lo + high * length
+        z1_short = move_hi - high * length
+        z2_short = move_hi - low * length
+        tol = max(float(tol_abs), abs(length) * float(tol_frac))
+        levels = [z1_long, z2_long, z1_short, z2_short]
+        distances = [abs(price_now - level) for level in levels]
+        if not distances:
+            return None
+        min_gap = min(distances) - tol
+        return float(max(min_gap, 0.0))
+    except Exception:
+        return None
 
 def bias_from_emas(df: pd.DataFrame) -> str:
     if df.empty: return "neutral"
@@ -8162,6 +8338,15 @@ def analyze(asset: str) -> Dict[str, Any]:
         low=0.618, high=0.886,
         tol_abs=atr1h_tol * 0.75,   # SZÉLESÍTVE: ±0.75×ATR(1h)
         tol_frac=fib_tol
+    )
+    fib_distance = fib_distance_from_zone(
+        move_hi,
+        move_lo,
+        price_for_calc,
+        low=0.618,
+        high=0.886,
+        tol_abs=atr1h_tol * 0.75,
+        tol_frac=fib_tol,
     )
     entry_thresholds_meta["fib_tolerance_fraction"] = float(fib_tol)
     if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
@@ -11658,6 +11843,35 @@ def analyze(asset: str) -> Dict[str, Any]:
     missing = list(dict.fromkeys(missing))
     log_entry_gate_decision(asset, last5_closed_ts, missing)
 
+    reason_text = reasons[0] if reasons else "ok"
+    session_status_label: Optional[str] = None
+    if session_meta:
+        session_status_label = session_meta.get("status")
+        if session_status_label is None and isinstance(session_meta.get("entry_open"), bool):
+            session_status_label = "nyitva" if session_meta.get("entry_open") else "zarva"
+    atr_for_log: Optional[float] = entry_thresholds_meta.get("btc_atr_value_usd")
+    if atr_for_log is None:
+        atr_for_log = entry_thresholds_meta.get("atr_threshold_effective")
+    try:
+        atr_for_log = float(atr_for_log) if atr_for_log is not None else None
+        if atr_for_log is not None and not np.isfinite(atr_for_log):
+            atr_for_log = None
+    except (TypeError, ValueError):
+        atr_for_log = None
+
+    LOGGER.info(
+        "kapu_dontes",
+        extra={
+            "gate": "entry_gate",
+            "asset": asset,
+            "reason": reason_text,
+            "p_score": float(P) if P is not None else None,
+            "atr": atr_for_log,
+            "fib_distance": fib_distance,
+            "session_status": session_status_label,
+        },
+    )
+
     analysis_timestamp = nowiso()
     probability_percent = int(max(0, min(100, round(combined_probability * 100))))
   
@@ -12215,6 +12429,18 @@ def main():
     analysis_delay_seconds: Optional[float] = None
     lag_threshold = PIPELINE_MAX_LAG_SECONDS
     lag_breached = False
+    refresh_status_snapshot(Path(PUBLIC_DIR), now=analysis_started_at)
+    try:
+        validation = validate_session_windows_dst(now_utc=analysis_started_at)
+        LOGGER.info(
+            "Session ablak DST validáció kész",
+            extra={
+                "ellenorzott": validation.get("checked"),
+                "hibak": len(validation.get("issues", [])),
+            },
+        )
+    except Exception as exc:  # pragma: no cover - defensive guard
+        LOGGER.warning("Session ablak validáció nem sikerült", extra={"hiba": str(exc)})
     _ensure_trading_preconditions(analysis_started_at)
     if record_analysis_run:
         try:
@@ -12558,6 +12784,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
