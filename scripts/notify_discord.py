@@ -1039,17 +1039,24 @@ def card_color(dec: str, is_stable: bool, kind: str, setup_grade: Optional[str] 
         return COLOR["FLIP"]
     if kind == "invalidate":
         return COLOR["NO"]
-    if setup_grade == "A":
+    if dec in ("BUY", "SELL") and is_stable:
         return COLOR["BUY"]
-    if setup_grade == "B":
-        return COLOR["WAIT"]
-    if setup_grade == "C":
-        return COLOR["INFO"]
-    if setup_grade:
-        return COLOR["NO"]
-    if dec in ("BUY","SELL"):
-        return COLOR["BUY"] if is_stable else COLOR["WAIT"]
     return COLOR["NO"]
+
+
+def colorize_setup_text(text: str, setup_grade: Optional[str]) -> str:
+    """Változat az ABC setupok betűszínének kiemelésére (zöld/sárga/szürke)."""
+
+    ansi_colors = {
+        "A": "32",  # zöld
+        "B": "33",  # sárga
+        "C": "90",  # szürke
+    }
+    if setup_grade not in ansi_colors:
+        return text
+
+    color_code = ansi_colors[setup_grade]
+    return f"```ansi\n\u001b[{color_code}m{text}\u001b[0m\n```"
 
 def slope_status_icon(slope: Optional[float], threshold: float, side: str) -> str:
     if slope is None:
@@ -1531,9 +1538,11 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     entry_thresholds = sig.get("entry_thresholds") if isinstance(sig, dict) else {}
     dynamic_lines: List[str] = []
     setup_classification: Optional[str] = None
+    setup_classification_line: Optional[str] = None
     setup_grade: Optional[str] = None
     setup_score: Optional[float] = None
     setup_issues: List[str] = []
+    setup_direction = dec if dec in ("BUY", "SELL") else None
     if isinstance(entry_thresholds, dict):
         atr_soft_meta = entry_thresholds.get("atr_soft_gate") or {}
         atr_soft_used = bool(entry_thresholds.get("atr_soft_gate_used"))
@@ -1611,20 +1620,18 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
                 "❌ Setup túl gyenge — P-score <25. Csak figyelés, belépő nem ajánlott."
             )
 
-      # státusz
+    if setup_classification:
+      direction_txt = (setup_direction or "n/a").upper()
+      setup_with_direction = f"{setup_classification} — Irány: {direction_txt}"
+      setup_classification_line = colorize_setup_text(setup_with_direction, setup_grade)
+
+    # státusz
     status_emoji = "🔴"
-    if setup_grade == "A":
-        status_emoji = "🟢"
-    elif setup_grade == "B":
-        status_emoji = "🟡"
-    elif setup_grade == "C":
-        status_emoji = "🟠"
-    elif setup_grade:
-        status_emoji = "🔴"
-    elif core_bos_pending and dec in ("BUY","SELL"):
-        status_emoji = "🟡"
-    elif dec in ("BUY","SELL"):
-        status_emoji = "🟢"
+    if dec in ("BUY", "SELL"):
+        if core_bos_pending or not is_stable:
+            status_emoji = "🟡"
+        else:
+            status_emoji = "🟢"
 
     base_label = dec.title() if dec else ""
     if base_label in ("Buy", "Sell") and setup_grade:
@@ -1640,8 +1647,8 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
         f"Spot: `{spot_s}` • UTC: `{utc_s}`",
     ]
   
-    if setup_classification:
-        dynamic_lines.insert(0, setup_classification)
+    if setup_classification_line:
+        lines.append(setup_classification_line)
 
     no_entry_reason = None
     missing_note = None
