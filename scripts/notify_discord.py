@@ -1650,18 +1650,18 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     if setup_score is not None:
         if setup_score >= 60 and not setup_issues:
             setup_grade = "A"
-            setup_classification = "🅰️ A Setup (Prémium) — Teljes pozícióméret, agresszív menedzsment."
+            setup_classification = "A Setup (Prémium) — Teljes pozícióméret, agresszív menedzsment."
         elif setup_score >= 30:
             setup_grade = "B"
             issue_txt = ", ".join(setup_issues) if setup_issues else "legalább egy feltétel gyenge vagy hiányzik"
             setup_classification = (
-                "🅱️ B Setup (Standard) — Fél pozícióméret, szigorúbb Stop Loss. "
+                "B Setup (Standard) — Fél pozícióméret, szigorúbb Stop Loss. "
                 f"Gyenge/hiányzó: {issue_txt}."
             )
         elif setup_score >= 25:
             setup_grade = "C"
             setup_classification = (
-                "🅲 C Setup (Speculatív) — Negyed méret vagy manuális megerősítés. "
+                "C Setup (Speculatív) — Negyed méret vagy manuális megerősítés. "
                 "Csak erős triggerrel (sweep/hír/divergencia) vállald."
             )
         else:
