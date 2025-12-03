@@ -26,6 +26,7 @@ ENV:
 """
 
 import os, json, sys, logging, requests
+from dataclasses import dataclass
 from copy import deepcopy
 from pathlib import Path
 import numpy as np
@@ -120,6 +121,9 @@ def int_env(name: str, default: int) -> int:
             file=sys.stderr,
         )
         return default
+
+
+FEED_LATENCY_MAX_MINUTES = int_env("DISCORD_FEED_LATENCY_MAX_MINUTES", 120)
 
 
 def build_entry_gate_summary_embed() -> Optional[Dict[str, Any]]:
@@ -465,10 +469,114 @@ def load(path):
         return None
 
 
+@dataclass
+class FeedLatency:
+    seconds: Optional[int]
+    source: Optional[str]
+    issues: List[str]
+
+    @property
+    def minutes(self) -> Optional[int]:
+        if self.seconds is None:
+            return None
+        return max(0, self.seconds // 60)
+
+
+def _extract_timestamp(candidate: Dict[str, Any], keys: Iterable[str]) -> Optional[datetime]:
+    for key in keys:
+        ts = parse_utc(candidate.get(key)) if isinstance(candidate, dict) else None
+        if ts:
+            return ts
+    return None
+
+
+def compute_feed_latency(
+    asset: str,
+    *,
+    public_dir: str = PUBLIC_DIR,
+    now: Optional[datetime] = None,
+) -> FeedLatency:
+    """Best-effort feed-latency a spot + kline artefaktumok alapján."""
+
+    now = now or datetime.now(timezone.utc)
+    base_dir = Path(public_dir) / asset
+    best_ts: Optional[datetime] = None
+    best_source: Optional[str] = None
+    issues: List[str] = []
+
+    def consider(path: Path, label: str, keys: Iterable[str]) -> None:
+        nonlocal best_ts, best_source
+        if not path.exists():
+            issues.append(f"{label}: missing")
+            return
+        payload = load(str(path))
+        if not isinstance(payload, dict):
+            issues.append(f"{label}: invalid")
+            return
+        ts = _extract_timestamp(payload, keys)
+        if ts is None:
+            issues.append(f"{label}: no timestamp")
+            return
+        if best_ts is None or ts > best_ts:
+            best_ts = ts
+            best_source = label
+
+    consider(base_dir / "spot.json", "spot", ("utc", "retrieved_at_utc"))
+    consider(base_dir / "spot_realtime.json", "spot_realtime", ("utc", "retrieved_at_utc"))
+
+    for frame in ("1m", "5m", "1h", "4h"):
+        consider(
+            base_dir / f"klines_{frame}_meta.json",
+            f"kline_{frame}",
+            ("latest_utc", "retrieved_at_utc"),
+        )
+
+    latency_seconds: Optional[int] = None
+    if best_ts is not None:
+        latency_seconds = max(0, int((now - best_ts).total_seconds()))
+
+    return FeedLatency(latency_seconds, best_source, issues)
+
+
 def normalize_asset_key(asset: str) -> str:
     if not asset:
         return ""
     return str(asset).upper().strip()
+
+
+def apply_feed_latency_guard(
+    sig: dict,
+    latency: FeedLatency,
+    limit_minutes: int,
+) -> Tuple[dict, Optional[str]]:
+    guard_seconds = max(int(limit_minutes), 0) * 60
+    too_old = guard_seconds > 0 and latency.seconds is not None and latency.seconds > guard_seconds
+    missing_data = latency.seconds is None
+    reason: Optional[str] = None
+
+    if too_old or missing_data:
+        sig = dict(sig or {})
+        gates = dict(sig.get("gates") or {})
+        gates["mode"] = "data_gap"
+        sig["gates"] = gates
+        sig["signal"] = "no entry"
+        sig["probability"] = 0
+
+        if latency.seconds is None:
+            reason = "feed latency nem mérhető (timestamp hiányzik) — mód: data_gap"
+        else:
+            delay_min = max(1, latency.seconds // 60)
+            reason = (
+                f"feed késés {delay_min} perc (limit {limit_minutes} perc) — mód: data_gap"
+            )
+
+        reasons_field = sig.get("reasons") if isinstance(sig.get("reasons"), list) else []
+        reasons: List[str] = list(reasons_field) if isinstance(reasons_field, list) else []
+        if reason not in reasons:
+            reasons.append(reason)
+        sig["reasons"] = reasons
+
+    return sig, reason
 
 
 def extract_tdstatus_meta(candidate: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1560,7 +1668,16 @@ class ActivePositionWatcher:
             embeds.append(deepcopy(card))
         return embeds
 
-def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "normal", prev_decision: str = None, tdstatus: Optional[Dict[str, Dict[str, Any]]] = None):
+def build_embed_for_asset(
+    asset: str,
+    sig: dict,
+    is_stable: bool,
+    kind: str = "normal",
+    prev_decision: str = None,
+    tdstatus: Optional[Dict[str, Dict[str, Any]]] = None,
+    feed_latency: Optional[FeedLatency] = None,
+    feed_latency_reason: Optional[str] = None,
+):
     """
     kind: "normal" | "invalidate" | "flip" | "heartbeat"
     """
@@ -1698,6 +1815,17 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
         f"{status_bold} • P={p}% • mód: `{display_mode}`",
         f"Spot: `{spot_s}` • UTC: `{utc_s}`",
     ]
+
+    if feed_latency:
+        if feed_latency_reason:
+            lines.append(f"⛔ Feed késés: {feed_latency_reason}")
+        elif feed_latency.seconds is not None:
+            delay_min = feed_latency.minutes or 0
+            source = feed_latency.source or "n/a"
+            lines.append(f"ℹ️ Feed latency: {delay_min} perc (forrás: {source})")
+        elif feed_latency.issues:
+            issues_txt = "; ".join(sorted(set(feed_latency.issues)))
+            lines.append(f"ℹ️ Feed latency: n/a ({issues_txt})")
   
     if setup_classification_line:
         lines.append(setup_classification_line)
@@ -1896,6 +2024,7 @@ def main():
 
     per_asset_sigs = {}
     per_asset_is_stable = {}
+    feed_latency_meta: Dict[str, Tuple[FeedLatency, Optional[str]]] = {}
     watcher_embeds: List[Dict[str, Any]] = []
 
     for asset in ASSETS:
@@ -1904,6 +2033,11 @@ def main():
             sig = (analysis_summary.get("assets") or {}).get(asset)
         if not sig:
             sig = {"asset": asset, "signal": "no entry", "probability": 0}
+        feed_latency = compute_feed_latency(asset, public_dir=PUBLIC_DIR, now=now_dt)
+        sig, feed_latency_reason = apply_feed_latency_guard(
+            sig, feed_latency, FEED_LATENCY_MAX_MINUTES
+        )
+        feed_latency_meta[asset] = (feed_latency, feed_latency_reason)
         per_asset_sigs[asset] = sig
 
         # --- stabilitás számítása ---
@@ -1961,6 +2095,7 @@ def main():
                 send_kind = "invalidate"
 
         # --- embed + állapot frissítés ---
+        latency_info, latency_reason = feed_latency_meta.get(asset, (None, None))
         if send_kind:
             asset_embeds[asset] = build_embed_for_asset(
                 asset,
@@ -1969,6 +2104,8 @@ def main():
                 kind=send_kind,
                 prev_decision=prev_sent_decision,
                 tdstatus=tdstatus,
+                feed_latency=latency_info,
+                feed_latency_reason=latency_reason,
             )
             if send_kind in ("normal","flip"):
                 cooldown_minutes = COOLDOWN_MIN
@@ -2019,6 +2156,7 @@ def main():
         for asset in ASSETS:
             sig = per_asset_sigs.get(asset) or {"asset": asset, "signal": "no entry", "probability": 0}
             is_stable = per_asset_is_stable.get(asset, True)
+            latency_info, latency_reason = feed_latency_meta.get(asset, (None, None))
             if asset not in asset_embeds:
                 asset_embeds[asset] = build_embed_for_asset(
                     asset,
@@ -2026,6 +2164,8 @@ def main():
                     is_stable=is_stable,
                     kind="heartbeat",
                     tdstatus=tdstatus,
+                    feed_latency=latency_info,
+                    feed_latency_reason=latency_reason,
                 )
                 heartbeat_added = True
 
