@@ -1097,6 +1097,31 @@ def parse_utc_timestamp(value: Any) -> Optional[datetime]:
         return None
     if isinstance(ts, pd.Timestamp):
         return ts.to_pydatetime()
+
+
+def _apply_latency_guard_adjustment(
+    latency_seconds: Optional[int],
+    retrieved_iso: Optional[str],
+    *,
+    now: datetime,
+) -> Tuple[Optional[int], Optional[int], Optional[datetime], Optional[int]]:
+    """Return guarded latency and helpers based on retrieval timestamp.
+
+    The guard compensates for the time elapsed since data retrieval so that a
+    recently refreshed feed with stale last-candle timestamps does not cause
+    unnecessary data-gap gating.
+    """
+
+    guard_latency = latency_seconds
+    guard_adjustment: Optional[int] = None
+    retrieved_ts = parse_utc_timestamp(retrieved_iso) if retrieved_iso else None
+
+    if guard_latency is not None and retrieved_ts:
+        guard_adjustment = int(max((now - retrieved_ts).total_seconds(), 0.0))
+        guard_latency = max(0, guard_latency - guard_adjustment)
+
+    effective_latency = guard_latency if guard_latency is not None else latency_seconds
+    return guard_latency, guard_adjustment, retrieved_ts, effective_latency
     if isinstance(ts, datetime):
         if ts.tzinfo is None:
             return ts.replace(tzinfo=timezone.utc)
@@ -7602,18 +7627,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         latency_sec: Optional[int] = None
         if last_closed:
             latency_sec = int((now - last_closed).total_seconds())
-            expected = expected_delays.get(key, 0)
-            if expected and latency_sec > expected + 240:
-                latency_flags.append(f"{key}: utolsó zárt gyertya {latency_sec//60} perc késésben van")
-            tol = TF_STALE_TOLERANCE.get(key, 0)
-            if expected and tol and latency_sec > expected + tol:
-                stale_timeframes[key] = True
-                delay_min = latency_sec // 60
-                flag_msg = f"{key}: jelzés korlátozva {delay_min} perc késés miatt"
-                if flag_msg not in latency_flags:
-                    latency_flags.append(flag_msg)
         latency_by_frame[key] = latency_sec
-        guard_latency = latency_sec
+
         retrieved_iso = None
         if isinstance(meta_info, dict):
             retrieved_iso = (
@@ -7621,13 +7636,25 @@ def analyze(asset: str) -> Dict[str, Any]:
                 or meta_info.get("retrieved_at")
                 or meta_info.get("retrieved")
             )
-        guard_adjustment: Optional[int] = None
-        retrieved_ts = parse_utc_timestamp(retrieved_iso) if retrieved_iso else None
-        if guard_latency is not None and retrieved_ts:
-            adjustment = int(max((now - retrieved_ts).total_seconds(), 0.0))
-            guard_adjustment = adjustment
-            guard_latency = max(0, guard_latency - adjustment)
+
+        guard_latency, guard_adjustment, retrieved_ts, effective_latency = _apply_latency_guard_adjustment(
+            latency_sec, retrieved_iso, now=now
+        )
         latency_guard_seconds[key] = guard_latency
+
+        expected = expected_delays.get(key, 0)
+        if expected and effective_latency is not None and effective_latency > expected + 240:
+            latency_flags.append(
+                f"{key}: utolsó zárt gyertya {effective_latency//60} perc késésben van"
+            )
+        tol = TF_STALE_TOLERANCE.get(key, 0)
+        if expected and tol and effective_latency is not None and effective_latency > expected + tol:
+            stale_timeframes[key] = True
+            delay_min = effective_latency // 60
+            flag_msg = f"{key}: jelzés korlátozva {delay_min} perc késés miatt"
+            if flag_msg not in latency_flags:
+                latency_flags.append(flag_msg)
+
         tf_meta[key] = {
             "last_raw_utc": to_utc_iso(last_raw) if last_raw else None,
             "last_closed_utc": to_utc_iso(last_closed) if last_closed else None,
@@ -7649,6 +7676,8 @@ def analyze(asset: str) -> Dict[str, Any]:
             tf_meta[key]["latency_guard_seconds"] = guard_latency
         if guard_adjustment is not None:
             tf_meta[key]["latency_guard_adjustment_seconds"] = guard_adjustment
+        if effective_latency is not None:
+            tf_meta[key]["effective_latency_seconds"] = effective_latency
         if meta_info.get("fallback_previous_payload"):
             tf_meta[key]["fallback_previous_payload"] = True
         fallback_reason = meta_info.get("fallback_reason")
@@ -12784,6 +12813,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
