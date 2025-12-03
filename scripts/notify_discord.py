@@ -1070,12 +1070,12 @@ def market_closed_info(sig: dict) -> Tuple[bool, str]:
 
 def card_color(dec: str, is_stable: bool, kind: str, setup_grade: Optional[str] = None) -> int:
     if kind == "flip":
-        return COLOR["FLIP"]
+        return COLOR["WAIT"]
     if kind == "invalidate":
         return COLOR["NO"]
     if dec in ("BUY", "SELL"):
-        return COLOR["BUY"] if is_stable else COLOR["WAIT"]
-    return COLOR["WAIT"]
+        return COLOR["BUY"] if is_stable else COLOR["NO"]
+    return COLOR["NO"]
 
 
 def colorize_setup_text(text: str, setup_grade: Optional[str]) -> str:
