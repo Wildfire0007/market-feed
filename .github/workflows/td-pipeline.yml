@@ -140,9 +140,34 @@ jobs:
               raise SystemExit("ML probability stack not sourced from scikit-learn")
           PY
 
+      - name: Generate entry gate statistics (analysis stage)
+        if: ${{ always() }}
+        run: |
+          mkdir -p public/debug
+          python tools/analyze_entry_gates.py \
+            --root . \
+            --limit-runs 40 \
+            --output-json public/debug/entry_gate_stats.json
+
+      - name: Ensure entry gate statistics exist
+        if: ${{ always() }}
+        run: |
+          mkdir -p public/debug
+          if [ ! -f public/debug/entry_gate_stats.json ]; then
+            echo '{}' > public/debug/entry_gate_stats.json
+          fi
+          
       - name: Generate latency monitoring snapshot
         run: |
           python scripts/check_latency_sources.py --output public/monitoring/data_latency.json --pretty
+
+      - name: Upload entry gate statistics (analysis stage)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: analysis-entry-gate-stats
+          path: public/debug/entry_gate_stats.json
+          if-no-files-found: error
           
       - name: Upload analysis outputs
         uses: actions/upload-artifact@v4
@@ -297,6 +322,13 @@ jobs:
         with:
           name: analysis-public
           path: public
+
+      - name: Validate entry gate statistics presence
+        run: |
+          if [ ! -f public/debug/entry_gate_stats.json ]; then
+            echo "entry_gate_stats.json hiányzik az analysis artifactból" >&2
+            exit 1
+          fi
           
       - name: Setup Python
         uses: actions/setup-python@v5
