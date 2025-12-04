@@ -358,12 +358,11 @@ EMOJI = {
     "NVDA": "🤖",    
 }
 COLOR = {
-    "BUY":   0x2ecc71,  # zöld (csak tényleges Buy/Sell döntésnél)
-    "SELL":  0x2ecc71,  # zöld (csak tényleges Buy/Sell döntésnél)
-    "NO":    0xe74c3c,  # piros (invalidate)
-    "WAIT":  0xf7dc6f,  # citromsárga (várakozás/stabilizálás)
-    "FLIP":  0xe67e22,  # narancssárga (flip)
-    "INFO":  0x95a5a6,  # semleges
+    "LONG":  0x2ecc71,  # zöld — LONG
+    "SHORT": 0xe74c3c,  # piros — SHORT
+    "MANAGE": 0xf1c40f,  # sárga — menedzsment
+    "WAIT":  0x95a5a6,  # szürke/kék — pihenő
+    "INFO":  0x4F6BED,  # semleges info
 }
 
 # ---------------- util ----------------
@@ -378,6 +377,37 @@ def bud_hh_key(dt=None) -> str:
 def bud_time_str(dt=None) -> str:
     dt = dt or bud_now()
     return dt.strftime("%Y-%m-%d %H:%M ") + (dt.tzname() or "CET")
+
+
+def draw_progress_bar(value, min_val=0, max_val=100, length=10):
+    """
+    ASCII progress bar generálása a P-score vizualizálásához.
+    Pl: [■■■■■■■□□□] 70%
+    """
+    try:
+        val = float(value)
+        pct = (val - min_val) / (max_val - min_val)
+        pct = max(0.0, min(1.0, pct))
+        filled = int(round(length * pct))
+        # ■ karakter a teli, □ az üres részre
+        bar = "■" * filled + "□" * (length - filled)
+        return bar
+    except:
+        return "□" * length
+
+
+def format_price(val, asset):
+    """Eszköz-specifikus árformázás."""
+    if val is None:
+        return "n/a"
+    try:
+        fval = float(val)
+        # Kripto és JPY párok esetén kevesebb tizedes, egyébként 4-5
+        if "JPY" in asset or "BTC" in asset or "NVDA" in asset or "USOIL" in asset:
+            return f"{fval:,.2f}"
+        return f"{fval:,.5f}"
+    except:
+        return str(val)
 
 def utcnow_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1068,14 +1098,8 @@ def market_closed_info(sig: dict) -> Tuple[bool, str]:
 
 # ------------- embed-renderek -------------
 
-def card_color(dec: str, is_stable: bool, kind: str, setup_grade: Optional[str] = None) -> int:
-    if kind == "flip":
-        return COLOR["WAIT"]
-    if kind == "invalidate":
-        return COLOR["NO"]
-    if dec in ("BUY", "SELL"):
-        return COLOR["BUY"] if is_stable else COLOR["NO"]
-    return COLOR["NO"]
+def card_color(status: str) -> int:
+    return COLOR.get(status.upper(), COLOR["WAIT"])
 
 
 def colorize_setup_text(text: str, setup_grade: Optional[str]) -> str:
@@ -1643,7 +1667,6 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
             dynamic_lines.append(f"Volatilitás bónusz +{points:.1f}P{z_txt}")
           
     price, utc = spot_from_sig_or_file(asset, sig)
-    spot_s = fmt_num(price)
     utc_s  = utc or "-"
     
     setup_score = setup_score if setup_score is not None else safe_float(p_raw)
@@ -1671,9 +1694,9 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
             )
 
     if setup_classification:
-      direction_txt = (setup_direction or "n/a").upper()
-      setup_with_direction = f"{setup_classification} — Irány: {direction_txt}"
-      setup_classification_line = colorize_setup_text(setup_with_direction, setup_grade)
+        direction_txt = (setup_direction or "n/a").upper()
+        setup_with_direction = f"{setup_classification} — Irány: {direction_txt}"
+        setup_classification_line = colorize_setup_text(setup_with_direction, setup_grade)
 
     # státusz
     status_emoji = "🔴"
@@ -1692,10 +1715,11 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
         status_label = base_label or dec
     status_bold  = f"{status_emoji} **{status_label}**"
 
-    lines = [
-        f"{status_bold} • P={p}% • mód: `{display_mode}`",
-        f"Spot: `{spot_s}` • UTC: `{utc_s}`",
-    ] 
+    lines = [f"{status_bold} • P={p}% • mód: `{display_mode}`"]
+    if price is not None:
+        lines.append(f"Spot: `{format_price(price, asset)}` • UTC: `{utc_s}`")
+    else:
+        lines.append(f"UTC: `{utc_s}`") 
     if setup_classification_line:
         lines.append(setup_classification_line)
 
@@ -1763,11 +1787,9 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     if position_note:
         if not any(line.strip() == position_note for line in lines):
             lines.append(f"🧭 {position_note}")
-    # RR/TP/SL sor (ha minden adat megvan)
-    if dec in ("BUY", "SELL") and all(v is not None for v in (entry, sl, t1, t2, rr)):
-        lines.append(f"@ `{fmt_num(entry)}` • SL `{fmt_num(sl)}` • TP1 `{fmt_num(t1)}` • TP2 `{fmt_num(t2)}` • RR≈`{rr}`")
+    
     # Stabilizálás információ
-    if dec in ("BUY","SELL") and kind in ("normal","heartbeat"):
+    if dec in ("BUY", "SELL") and kind in ("normal", "heartbeat"):
         if core_bos_pending:
             lines.append("⏳ Állapot: *stabilizálás alatt (5m BOS megerősítésre várunk)*")
         elif not is_stable:
@@ -1778,23 +1800,80 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     if miss and not (no_entry_reason and "hiányzik" in no_entry_reason.lower()) and not missing_note:
         lines.append(f"Hiányzó: *{miss}*")
 
-    # cím + szín
-    title = f"{emoji} **{asset}**"
-    if kind == "invalidate":
-        title += " • ❌ Invalidate"
-    elif kind == "flip":
-        arrow = "→"
-        title += f" • 🔁 Flip ({(prev_decision or '').upper()} {arrow} {dec})"
+    def classify_status(decision: str, event_kind: str, has_position: bool) -> Tuple[str, str]:
+        if event_kind == "invalidate":
+            return "WAIT", "⚪"
+        if event_kind == "flip":
+            return "WAIT", "⚪"
+        if has_position:
+            return "MANAGE", "🟡"
+        if decision == "BUY":
+            return "LONG", "🟢"
+        if decision == "SELL":
+            return "SHORT", "🔴"
+        return "WAIT", "⚪"
+
+    status_label, status_icon = classify_status(dec, kind, bool(position_note))
+    stability_txt = "Stabil" if is_stable else "Stabilizálás"
+    direction_txt = setup_direction or dec or "-"
+    header_parts = [f"{status_icon} {status_label}", f"Mód: {display_mode or '-'}", f"Irány: {direction_txt}", stability_txt]
+    desc_lines = [" • ".join(header_parts)]
+
+    if setup_classification_line:
+        desc_lines.append(setup_classification_line)
+
+    # RR/TP/SL sor
+    plan_parts: List[str] = []
+    if entry is not None:
+        plan_parts.append(f"Entry `{format_price(entry, asset)}`")
+    if sl is not None:
+        plan_parts.append(f"SL `{format_price(sl, asset)}`")
+    if t1 is not None:
+        plan_parts.append(f"TP1 `{format_price(t1, asset)}`")
+    if t2 is not None:
+        plan_parts.append(f"TP2 `{format_price(t2, asset)}`")
+    if rr is not None:
+        plan_parts.append(f"RR≈`{rr}`")
+
+    pscore_val = setup_score if setup_score is not None else safe_float(p)
+    progress_line = None
+    if pscore_val is not None:
+        progress_line = f"{draw_progress_bar(pscore_val, 0, 100, 12)} {pscore_val:.0f}%"
+
+    price_line = None
+    if price is not None:
+        price_line = f"Spot: `{format_price(price, asset)}` ({utc_s})"
+
+    if closed:
+        desc_lines.append(f"🔒 {closed_note or 'Piac zárva (market closed)'}")
+    elif monitor_open and entry_open is False:
+        desc_lines.append("🌙 Entry ablak zárva — csak pozíció menedzsment, új belépő tiltva.")
+
+    notes_value = "\n".join(lines) if lines else "Nincs kiemelt megjegyzés."
+    fields: List[Dict[str, Any]] = []
+    if progress_line:
+        fields.append({"name": "P-score", "value": progress_line, "inline": True})
+    if price_line:
+        fields.append({"name": "Spot ár", "value": price_line, "inline": True})
+    if plan_parts:
+        fields.append({"name": "Trade terv", "value": " • ".join(plan_parts), "inline": False})
+    if notes_value:
+        fields.append({"name": "Részletek", "value": notes_value, "inline": False})
+
+    title = f"{emoji} {asset} — {status_icon} {status_label}"
+    if kind == "flip":
+        title += f" • Flip {(prev_decision or '-').upper()} → {dec}"
     elif kind == "heartbeat":
-        title += " • ℹ️ Állapot"
+        title += " • Állapot"
 
-    color = card_color(dec, is_stable, kind, setup_grade)
-
-    return {
+    embed: Dict[str, Any] = {
         "title": title,
-        "description": "\n".join(lines),
-        "color": color,
+        "description": "\n".join(desc_lines),
+        "color": card_color(status_label),
     }
+    if fields:
+        embed["fields"] = fields
+    return embed
 
 # ---------------- főlogika ----------------
 
