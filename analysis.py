@@ -12188,6 +12188,18 @@ def _analyze_asset_guard(asset: str) -> Tuple[str, Dict[str, Any]]:
         except Exception:  # pragma: no cover - ensure pipeline resiliency
             LOGGER.exception("Failed to persist analysis error placeholder for %s", asset)
         return asset, failure_result
+
+    # Biztonsági háló: minden jelzés tartalmazzon valószínűségi metadatát.
+    if isinstance(result, dict):
+        prob_meta = ensure_probability_metadata(result.get("probability_stack"))
+        if prob_meta != result.get("probability_stack"):
+            LOGGER.warning(
+                "probability_stack_missing",
+                extra={"asset": asset, "reason": "missing_or_null"},
+            )
+        result["probability_stack"] = prob_meta
+        result.setdefault("probability_model_source", prob_meta.get("source"))
+
     return asset, result
 
 
@@ -12309,7 +12321,7 @@ def main():
                         analysis_delay_seconds,
                     )
 
-    heartbeat_path = Path(PUBLIC_DIR) / "system_heartbeat.json"
+    hheartbeat_path = Path(PUBLIC_DIR) / "system_heartbeat.json"
     heartbeat_ts = _load_heartbeat_timestamp(heartbeat_path)
     heartbeat_age = None
     if heartbeat_ts:
@@ -12668,6 +12680,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
