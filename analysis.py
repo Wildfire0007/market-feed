@@ -12203,6 +12203,48 @@ def _analyze_asset_guard(asset: str) -> Tuple[str, Dict[str, Any]]:
     return asset, result
 
 
+def _backfill_signal_probability_metadata(
+    asset: str, base_dir: Optional[Path] = None
+) -> None:
+    """Ensure persisted signal files always contain probability metadata.
+
+    A védőháló akkor is pótolja a hiányzó `probability_stack` blokkot, ha
+    valamilyen korábbi pipeline futásból maradt meg a jelzés JSON, vagy a
+    korábbi elemzés egy része kihagyta a mezőt. A visszatöltés nem módosít
+    más kulcsokat, csak beállítja az alapértelmezett forrást és a
+    ``probability_model_source`` mezőt, hogy a verifikáció sikerüljön.
+    """
+
+    signal_path = Path(base_dir or PUBLIC_DIR) / asset.upper() / "signal.json"
+    if not signal_path.exists():
+        return
+
+    try:
+        payload = load_json(signal_path)
+    except Exception as exc:  # pragma: no cover - defensív visszatöltés
+        LOGGER.warning("signal_backfill_load_failed", extra={"asset": asset, "err": str(exc)})
+        return
+
+    if not isinstance(payload, dict):
+        return
+
+    prob_meta = ensure_probability_metadata(payload.get("probability_stack"))
+    changed = prob_meta != payload.get("probability_stack")
+    if changed:
+        LOGGER.warning(
+            "signal_probability_stack_missing",
+            extra={"asset": asset, "action": "backfilled"},
+        )
+    payload["probability_stack"] = prob_meta
+
+    if prob_meta.get("source") and not payload.get("probability_model_source"):
+        payload["probability_model_source"] = prob_meta.get("source")
+        changed = True
+
+    if changed:
+        save_json(signal_path, payload)
+
+
 def _trading_artifact_timestamp(path: Path) -> Optional[datetime]:
     try:
         payload = load_json(str(path))
@@ -12615,6 +12657,9 @@ def main():
                 if alert_payload not in summary["sentiment_alerts"]:
                     summary["sentiment_alerts"].append(alert_payload)
 
+    for asset in ASSETS:
+        _backfill_signal_probability_metadata(asset, base_dir=Path(PUBLIC_DIR))
+
     summary["entry_counts"] = _build_entry_count_summary(asset_results)
     save_json(os.path.join(PUBLIC_DIR, "analysis_summary.json"), summary)
 
@@ -12685,6 +12730,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
