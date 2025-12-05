@@ -5170,6 +5170,24 @@ def load_json(path: str) -> Optional[Any]:
         return None
 
 
+def _load_heartbeat_timestamp(path: Path) -> Optional[datetime]:
+    try:
+        payload = load_json(str(path)) or {}
+    except Exception:
+        payload = {}
+    ts_raw = None
+    if isinstance(payload, dict):
+        ts_raw = payload.get("last_update_utc") or payload.get("timestamp")
+    ts = parse_utc_timestamp(ts_raw) if ts_raw else None
+    if ts:
+        return ts
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    return datetime.fromtimestamp(mtime, timezone.utc)
+
+
 def load_latency_profile(outdir: str) -> Dict[str, Any]:
     profile_path = os.path.join(outdir, LATENCY_PROFILE_FILENAME)
     data = load_json(profile_path) or {}
@@ -6973,6 +6991,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     btc_atr_floor_ratio: Optional[float] = None
     btc_atr_floor_passed = False
     now = datetime.now(timezone.utc)
+    asset_leverage = LEVERAGE.get(asset, 1.0)
     spot_max_age = int(SPOT_MAX_AGE_SECONDS.get(asset, SPOT_MAX_AGE_SECONDS["default"]))
     if spot:
         spot_price = spot.get("price") if spot.get("price") is not None else spot.get("price_usd")
@@ -6982,6 +7001,30 @@ def analyze(asset: str) -> Dict[str, Any]:
             spot_price_reference = float(spot_price) if spot_price is not None else None
         except (TypeError, ValueError):
             spot_price_reference = None
+
+    spot_ts = parse_utc_timestamp(spot.get("retrieved_at_utc") or spot.get("retrieved") or spot.get("utc")) if isinstance(spot, dict) else None
+    spot_latency: Optional[float] = None
+    if spot_ts:
+        spot_latency = (now - spot_ts).total_seconds()
+    freshness_limit = 60 if asset.upper() in {"BTCUSD", "ETHUSD", "ETHUSDT", "BTCUSDT"} else 120
+    if spot_latency is not None and spot_latency > freshness_limit:
+        reason = f"Data Stale (Lat: {int(spot_latency)} sec)"
+        diagnostics = {
+            "freshness_guard": {
+                "latency_seconds": spot_latency,
+                "limit_seconds": freshness_limit,
+            }
+        }
+        return build_data_gap_signal(
+            asset,
+            spot_price_reference,
+            spot_utc,
+            spot_retrieved,
+            asset_leverage,
+            [reason],
+            display_spot,
+            diagnostics,
+        )
 
     rt_price = None
     rt_utc = None
@@ -7816,6 +7859,30 @@ def analyze(asset: str) -> Dict[str, Any]:
     atr_series_5 = atr(k5m_closed, period=atr_period)
     atr5 = atr_series_5.iloc[-1]
     rel_atr = float(atr5 / price_for_calc) if (atr5 and price_for_calc) else float("nan")
+    bid = safe_float(spot.get("bid")) if isinstance(spot, dict) else None
+    ask = safe_float(spot.get("ask")) if isinstance(spot, dict) else None
+    spread_abs = (float(ask) - float(bid)) if (ask is not None and bid is not None) else None
+    if spread_abs is not None and atr5 is not None and np.isfinite(float(atr5)) and float(atr5) > 0:
+        spread_ratio = spread_abs / float(atr5)
+        if spread_ratio > 0.2:
+            reason = f"High Spread ({spread_ratio * 100:.1f}% of ATR)"
+            diagnostics = {
+                "spread_guard": {
+                    "spread": spread_abs,
+                    "atr5": float(atr5),
+                    "spread_ratio": spread_ratio,
+                }
+            }
+            return build_data_gap_signal(
+                asset,
+                spot_price_reference,
+                spot_utc,
+                spot_retrieved,
+                asset_leverage,
+                [reason],
+                display_spot,
+                diagnostics,
+            )
     adx_value = regime_snapshot.get("adx")
     if adx_value is not None and not np.isfinite(adx_value):
         adx_value = None
@@ -12242,6 +12309,15 @@ def main():
                         analysis_delay_seconds,
                     )
 
+    heartbeat_path = Path(PUBLIC_DIR) / "system_heartbeat.json"
+    heartbeat_ts = _load_heartbeat_timestamp(heartbeat_path)
+    heartbeat_age = None
+    if heartbeat_ts:
+        heartbeat_age = (analysis_started_at - heartbeat_ts).total_seconds()
+    if heartbeat_age is None or heartbeat_age > 60:
+        LOGGER.critical("CRITICAL: Data Pipeline Stalled")
+        raise SystemExit("Data pipeline heartbeat missing or stale")
+
     asset_count = len(ASSETS)
     LOGGER.info("Starting analysis run for %d assets", asset_count)
     missing_models = {}
@@ -12557,6 +12633,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
