@@ -106,6 +106,243 @@ ACTIVE_WATCHER_CONFIG = {
     },
 }
 
+# ---- Mobil-optimalizált kártyák segédfüggvényei ----
+HB_TZ = timezone.utc  # Alapértelmezés, ha nincs pytz
+try:
+    HB_TZ = ZoneInfo("Europe/Budapest")
+except Exception:
+    pass
+
+ASSET_EMOJIS = {
+    "EURUSD": "💶",
+    "USDJPY": "💴",
+    "GBPUSD": "💷",
+    "BTCUSD": "🚀",
+    "ETHUSD": "💎",
+    "GOLD_CFD": "🥇",
+    "XAUUSD": "🥇",
+    "XAGUSD": "🥈",
+    "USOIL": "🛢️",
+    "WTI": "🛢️",
+    "NVDA": "🤖",
+    "TSLA": "🚗",
+    "SPX500": "📈",
+    "NAS100": "💻",
+}
+
+COLORS = {
+    "LONG": 0x2ECC71,
+    "SHORT": 0xE74C3C,
+    "WAIT": 0xF1C40F,
+    "NO": 0x95A5A6,
+    "FLIP": 0xE67E22,
+    "A": 0x2ECC71,
+    "B": 0xF39C12,
+    "C": 0xBDC3C7,
+}
+
+
+def _get_emoji(asset: str) -> str:
+    return ASSET_EMOJIS.get((asset or "").upper(), "📉")
+
+
+def draw_progress_bar(value: float, length: int = 10) -> str:
+    """ASCII sáv: [■■■■■■■□□□]"""
+
+    try:
+        pct = max(0.0, min(1.0, float(value) / 100.0))
+        filled = int(round(length * pct))
+        return "■" * filled + "□" * (length - filled)
+    except Exception:
+        return "□" * length
+
+
+def format_price(val: Any, asset: str) -> str:
+    """Eszköz-specifikus árformázás"""
+
+    if val is None:
+        return "n/a"
+    try:
+        fval = float(val)
+        upper_asset = (asset or "").upper()
+        if any(x in upper_asset for x in ("JPY", "NVDA", "USOIL", "GOLD")):
+            return f"{fval:,.2f}"
+        if "BTC" in upper_asset:
+            return f"{fval:,.0f}"
+        return f"{fval:,.4f}"
+    except Exception:
+        return str(val)
+
+
+def translate_reasons(missing_list: List[str]) -> str:
+    """Technikai kulcsok magyarra fordítása"""
+
+    map_dict = {
+        "atr": "Alacsony volatilitás (ATR)",
+        "atr_gate": "ATR küszöb alatt",
+        "spread": "Túl magas spread",
+        "spread_gate": "Magas spread",
+        "bias": "Trend (Bias) semleges/ellentétes",
+        "regime": "Piaci rezsim hiba",
+        "choppy": "Oldalazás (Choppy)",
+        "session": "Piac zárva",
+        "liquidity": "Likviditás hiány (Fib/Sweep)",
+        "p_score": "Alacsony P-score",
+        "structure": "Struktúra hiba",
+        "intervention_watch": "Beavatkozási figyelés",
+        "no_chase": "Túl késő (No Chase)",
+    }
+
+    clean_reasons: List[str] = []
+    seen = set()
+    for missing in missing_list:
+        key = str(missing or "").strip()
+        if not key:
+            continue
+        if "rr_" in key:
+            txt = "Gyenge RR arány"
+        elif "tp_" in key:
+            txt = "Kicsi profit potenciál"
+        else:
+            txt = map_dict.get(key, key)
+
+        if txt not in seen:
+            clean_reasons.append(txt)
+            seen.add(txt)
+
+    return ", ".join(clean_reasons)
+
+
+def classify_setup(p_score: float, gates: Dict[str, Any], decision: str) -> Dict[str, Any]:
+    """Felhasználói szabály alapú A/B/C setup besorolás."""
+
+    missing = gates.get("missing", []) if isinstance(gates, dict) else []
+    mode = (gates or {}).get("mode", "core") if isinstance(gates, dict) else "core"
+
+    is_active_signal = (decision or "").upper() in {"BUY", "SELL"}
+
+    if p_score >= 80 and is_active_signal:
+        return {
+            "grade": "A",
+            "title": "A Setup (Prémium)",
+            "action": "Teljes méret, agresszív menedzsment.",
+            "color": COLORS["A"],
+        }
+
+    soft_blockers = ["atr", "bias", "regime", "choppy"]
+    is_soft_blocked = bool(missing) and all(m in soft_blockers for m in missing)
+
+    if p_score >= 30:
+        if is_active_signal:
+            return {
+                "grade": "B",
+                "title": "B Setup (Standard)",
+                "action": "Fél pozícióméret, szigorúbb Stop Loss.",
+                "color": COLORS["B"],
+            }
+        if is_soft_blocked:
+            return {
+                "grade": "B",
+                "title": "B Setup (Sikertelen)",
+                "action": "Fél pozíció (ha manuálisan belépsz).",
+                "color": COLORS["B"],
+            }
+
+    if p_score >= 25:
+        return {
+            "grade": "C",
+            "title": "C Setup (Spekulatív)",
+            "action": "Negyed méret, vagy csak megerősítésre.",
+            "color": COLORS["C"],
+        }
+
+    return {
+        "grade": "-",
+        "title": "Nincs Setup",
+        "action": "Kivárás.",
+        "color": COLORS["NO"],
+    }
+
+
+def build_mobile_embed_for_asset(
+    asset: str,
+    state: Dict[str, Any],
+    signal_data: Dict[str, Any],
+    decision: str,
+    mode: str,
+    is_stable: bool,
+    is_flip: bool,
+    is_invalidate: bool,
+) -> Dict[str, Any]:
+    """Mobil-optimalizált kereskedési kártya."""
+
+    session = (signal_data or {}).get("session_info", {})
+    if not session.get("open", True):
+        reason = session.get("market_closed_reason") or "Hétvége"
+        next_open = session.get("next_open_utc", "Ismeretlen")
+        return {
+            "title": f"🔴 {asset} - PIAC ZÁRVA",
+            "description": f"Ok: {reason}\nNyitás: {next_open}",
+            "color": 0x2C3E50,
+        }
+
+    p_score = signal_data.get("probability_raw", 0) if isinstance(signal_data, dict) else 0
+    spot = (signal_data.get("spot") or {}).get("price") if isinstance(signal_data, dict) else None
+    ts_raw = signal_data.get("retrieved_at_utc") if isinstance(signal_data, dict) else None
+
+    try:
+        dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+        local_time = dt.astimezone(HB_TZ).strftime("%H:%M")
+    except Exception:
+        local_time = "--:--"
+
+    setup_info = classify_setup(float(p_score or 0), (signal_data or {}).get("gates", {}), decision)
+
+    status_text = "NINCS BELÉPŐ"
+    color = COLORS["NO"]
+
+    decision_upper = (decision or "").upper()
+    if decision_upper == "BUY":
+        status_text = "LONG"
+        color = COLORS["LONG"]
+    elif decision_upper == "SELL":
+        status_text = "SHORT"
+        color = COLORS["SHORT"]
+
+    if is_flip:
+        status_text = "FORDULAT (FLIP)"
+        color = COLORS["FLIP"]
+    if not is_stable and decision_upper in {"BUY", "SELL"}:
+        status_text = "VÁRAKOZÁS (Stabilizálás...)"
+        color = COLORS["WAIT"]
+
+    mode_hu = "Bázis" if "core" in str(mode).lower() else "Lendület"
+
+    title = f"{_get_emoji(asset)} {asset}"
+    line_2 = f"**{status_text}** • Mód: {mode_hu}"
+    p_bar = draw_progress_bar(p_score)
+    line_3 = f"`{p_bar}` **{int(p_score)}%**"
+    line_4 = f"Spot: **{format_price(spot, asset)}** • 🕒 {local_time}"
+
+    grade_icon = "🟢" if setup_info["grade"] == "A" else "🟡" if setup_info["grade"] == "B" else "⚪"
+    line_5 = f"{grade_icon} **{setup_info['title']}**\n└ {setup_info['action']}"
+
+    line_6 = ""
+    if status_text == "NINCS BELÉPŐ":
+        gates = signal_data.get("gates", {}) if isinstance(signal_data, dict) else {}
+        missing = gates.get("missing", []) if isinstance(gates, dict) else []
+        if missing:
+            reasons_hu = translate_reasons(missing)
+            line_6 = f"\n⛔ **Nincs belépés:** {reasons_hu}"
+
+    description = f"{line_2}\n{line_3}\n{line_4}\n\n{line_5}{line_6}"
+
+    return {
+        "title": title,
+        "description": description,
+        "color": color if status_text != "NINCS BELÉPŐ" else setup_info["color"],
+    }
+  
 # ---- Debounce / stabilitás / cooldown ----
 STATE_PATH = f"{PUBLIC_DIR}/_notify_state.json"
 STABILITY_RUNS = 2
