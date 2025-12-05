@@ -324,31 +324,33 @@ def build_mobile_embed_for_asset(
 
     mode_hu = "Bázis" if "core" in str(mode).lower() else "Lendület"
 
-    title = f"{_get_emoji(asset)} {asset}"
-    line_2 = f"{status_icon} **{status_text}** • Mód: {mode_hu}"
+    title = f"{_get_emoji(asset)} {asset}"  # csak eszköz azonosító a push értesítés vágásának elkerülésére
+
+    line_status = f"{status_icon} **{status_text}** • Mód: {mode_hu}"
     p_bar = draw_progress_bar(p_score)
-    line_3 = f"`{p_bar}` **{int(p_score)}%**"
-    line_4 = f"Spot: **{format_price(spot, asset)}** • 🕒 {local_time}"
+    line_score = f"📊 `{p_bar}` {int(p_score)}%"
+    line_price = f"💵 {format_price(spot, asset)} • 🕒 {local_time}"
 
     grade_icon = "🟢" if setup_info["grade"] == "A" else "🟡" if setup_info["grade"] == "B" else "⚪"
-    line_5 = f"{grade_icon} **{setup_info['title']}**\n└ {setup_info['action']}"
+    line_setup = f"🎯 {grade_icon} **{setup_info['title']}** — {setup_info['action']}"
 
-    line_6 = ""
+    line_block = ""
     if status_text == "NINCS BELÉPŐ":
         gates = signal_data.get("gates", {}) if isinstance(signal_data, dict) else {}
         missing = gates.get("missing", []) if isinstance(gates, dict) else []
         if missing:
             reasons_hu = translate_reasons(missing)
-            line_6 = f"\n⛔ **Nincs belépés:** {reasons_hu}"
+            line_block = f"\n⛔ **Blokkolók:** {reasons_hu}"
 
-    description = f"{line_2}\n{line_3}\n{line_4}\n\n{line_5}{line_6}"
+    description = "\n".join(
+        [line_status, line_score, line_price, "", line_setup + line_block]
+    )
 
     return {
         "title": title,
         "description": description,
         "color": color if status_text != "NINCS BELÉPŐ" else setup_info["color"],
     }
-
   
 # ---- Debounce / stabilitás / cooldown ----
 STATE_PATH = f"{PUBLIC_DIR}/_notify_state.json"
