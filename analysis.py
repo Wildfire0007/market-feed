@@ -12314,9 +12314,44 @@ def main():
     heartbeat_age = None
     if heartbeat_ts:
         heartbeat_age = (analysis_started_at - heartbeat_ts).total_seconds()
+
+    # Fallback: use pipeline monitor timestamps when heartbeat artefact is missing
+    # (e.g., downstream analysis triggered from a published trading artifact).
+    fallback_ts = None
+    fallback_age = None
+    staleness_limit = float(lag_threshold or PIPELINE_MAX_LAG_SECONDS or 300)
     if heartbeat_age is None or heartbeat_age > 60:
+        candidates: List[datetime] = []
+        if isinstance(pipeline_payload, dict):
+            candidates.append(parse_utc_timestamp(pipeline_payload.get("updated_utc")))
+            trading_meta = pipeline_payload.get("trading") if isinstance(pipeline_payload.get("trading"), dict) else {}
+            candidates.append(parse_utc_timestamp(trading_meta.get("completed_utc")))
+        fallback_ts = max([c for c in candidates if c is not None], default=None)
+        if fallback_ts:
+            fallback_age = (analysis_started_at - fallback_ts).total_seconds()
+
+    effective_age = heartbeat_age
+    age_source = "heartbeat"
+    if heartbeat_age is None or heartbeat_age > 60:
+        if fallback_age is not None:
+            effective_age = fallback_age
+            age_source = "pipeline_monitor"
+
+    if effective_age is None:
+        LOGGER.warning(
+            "Heartbeat timestamp unavailable; proceeding without stall enforcement (limit %.1fs)",
+            staleness_limit,
+        )
+    elif effective_age > staleness_limit:
         LOGGER.critical("CRITICAL: Data Pipeline Stalled")
         raise SystemExit("Data pipeline heartbeat missing or stale")
+    elif age_source != "heartbeat":
+        LOGGER.warning(
+            "Heartbeat missing or stale; using %s timestamp (age %.1fs, limit %.1fs)",
+            age_source,
+            effective_age,
+            staleness_limit,
+        )
 
     asset_count = len(ASSETS)
     LOGGER.info("Starting analysis run for %d assets", asset_count)
@@ -12633,6 +12668,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
