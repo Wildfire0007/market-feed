@@ -886,12 +886,25 @@ def _parse_iso_utc(value: Any) -> Optional[datetime]:
 def ensure_dir(p: str) -> None:
     os.makedirs(p, exist_ok=True)
 
+
+def update_system_heartbeat(out_dir: str) -> None:
+    heartbeat_path = Path(out_dir) / "system_heartbeat.json"
+    payload = {
+        "last_update_utc": now_utc(),
+        "status": "running",
+    }
+    save_json(str(heartbeat_path), payload)
+
+
 def save_json(path: str, obj: Dict[str, Any]) -> None:
-    ensure_dir(os.path.dirname(path))
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    target = Path(path)
+    ensure_dir(str(target.parent))
+    tmp_path = target.with_suffix(target.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, separators=(",", ":"))
-    os.replace(tmp, path)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, target)
 
 
 def _should_preserve_cache(paths: List[str], payload: Dict[str, Any]) -> bool:
@@ -3913,8 +3926,14 @@ def main():
     except Exception as exc:
         logger.warning("Failed to summarize pipeline warnings: %s", exc)
 
+    try:
+        update_system_heartbeat(OUT_DIR)
+    except Exception as exc:
+        logger.warning("Failed to update system heartbeat: %s", exc)
+
 if __name__ == "__main__":
     main()
+
 
 
 
