@@ -358,11 +358,12 @@ EMOJI = {
     "NVDA": "🤖",    
 }
 COLOR = {
-    "LONG":  0x2ecc71,  # zöld — LONG
-    "SHORT": 0xe74c3c,  # piros — SHORT
-    "MANAGE": 0xf1c40f,  # sárga — menedzsment
-    "WAIT":  0x95a5a6,  # szürke/kék — pihenő
-    "INFO":  0x4F6BED,  # semleges info
+    "BUY":   0x2ecc71,  # zöld (csak tényleges Buy/Sell döntésnél)
+    "SELL":  0x2ecc71,  # zöld (csak tényleges Buy/Sell döntésnél)
+    "NO":    0xe74c3c,  # piros (invalidate)
+    "WAIT":  0xf7dc6f,  # citromsárga (várakozás/stabilizálás)
+    "FLIP":  0xe67e22,  # narancssárga (flip)
+    "INFO":  0x95a5a6,  # semleges
 }
 
 # ---------------- util ----------------
@@ -377,37 +378,6 @@ def bud_hh_key(dt=None) -> str:
 def bud_time_str(dt=None) -> str:
     dt = dt or bud_now()
     return dt.strftime("%Y-%m-%d %H:%M ") + (dt.tzname() or "CET")
-
-
-def draw_progress_bar(value, min_val=0, max_val=100, length=10):
-    """
-    ASCII progress bar generálása a P-score vizualizálásához.
-    Pl: [■■■■■■■□□□] 70%
-    """
-    try:
-        val = float(value)
-        pct = (val - min_val) / (max_val - min_val)
-        pct = max(0.0, min(1.0, pct))
-        filled = int(round(length * pct))
-        # ■ karakter a teli, □ az üres részre
-        bar = "■" * filled + "□" * (length - filled)
-        return bar
-    except:
-        return "□" * length
-
-
-def format_price(val, asset):
-    """Eszköz-specifikus árformázás."""
-    if val is None:
-        return "n/a"
-    try:
-        fval = float(val)
-        # Kripto és JPY párok esetén kevesebb tizedes, egyébként 4-5
-        if "JPY" in asset or "BTC" in asset or "NVDA" in asset or "USOIL" in asset:
-            return f"{fval:,.2f}"
-        return f"{fval:,.5f}"
-    except:
-        return str(val)
 
 def utcnow_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -441,94 +411,6 @@ def parse_utc(value):
             except Exception:
                 return None
     return None
-
-
-def create_dashboard_embed(asset: str, signal_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Új dashboard-stílusú embed létrehozása egy eszközhöz."""
-
-    decision = (signal_data.get("signal") or "no entry").upper()
-    p_score = signal_data.get("probability", 0) or 0
-    spot = signal_data.get("spot") or {}
-    spot_price = spot.get("price")
-
-    if decision == "BUY":
-        color = 0x2ecc71  # Élénk Zöld
-        icon = "🟢"
-        title_text = f"LONG SETUP: {asset}"
-    elif decision == "SELL":
-        color = 0xe74c3c  # Élénk Piros
-        icon = "🔴"
-        title_text = f"SHORT SETUP: {asset}"
-    else:
-        active_meta = signal_data.get("active_position_meta") or {}
-        if active_meta.get("has_open_position"):
-            color = 0xf1c40f  # Sárga (Figyelem)
-            icon = "⚠️"
-            title_text = f"POZÍCIÓ MENEDZSMENT: {asset}"
-        else:
-            color = 0x34495e  # Sötétszürke/Kék (Wait)
-            icon = "⏸️"
-            title_text = f"WAIT / SCANNING: {asset}"
-
-    embed: Dict[str, Any] = {
-        "title": f"{icon} {title_text}",
-        "color": color,
-        "fields": [],
-    }
-
-    p_bar = draw_progress_bar(p_score)
-    formatted_spot = format_price(spot_price, asset)
-
-    description = (
-        f"💰 **Ár:** `{formatted_spot}`\n"
-        f"📊 **Score:** `{p_bar}` **{p_score}%**"
-    )
-    embed["description"] = description
-
-    if decision in {"BUY", "SELL"}:
-        entry = format_price(signal_data.get("entry"), asset)
-        sl = format_price(signal_data.get("sl"), asset)
-        tp1 = format_price(signal_data.get("tp1"), asset)
-        tp2 = format_price(signal_data.get("tp2"), asset)
-        rr = signal_data.get("rr", "?")
-
-        plan_block = (
-            f"```yaml\n"
-            f"ENTRY : {entry}\n"
-            f"STOP  : {sl}\n"
-            f"TP1   : {tp1} (Risk Free)\n"
-            f"TP2   : {tp2} (Target)\n"
-            f"R/R   : 1:{rr}\n"
-            f"```"
-        )
-        embed["fields"].append({
-            "name": "🎯 KERESKEDÉSI TERV",
-            "value": plan_block,
-            "inline": False,
-        })
-
-    reasons = signal_data.get("reasons") or []
-    if reasons:
-        clean_reasons = [r for r in reasons if r and "missing:" not in r]
-        formatted_reasons = "\n".join([f"• {r}" for r in clean_reasons])
-        if not formatted_reasons:
-            formatted_reasons = "Nincs specifikus setup adat."
-
-        embed["fields"].append({
-            "name": "📋 SETUP & LOGIKA",
-            "value": f"```\n{formatted_reasons}\n```",
-            "inline": False,
-        })
-
-    latency = (signal_data.get("diagnostics") or {}).get("latency", 0)
-    profile = (signal_data.get("gates") or {}).get("mode", "standard")
-    timestamp = datetime.now().strftime("%H:%M:%S")
-
-    embed["footer"] = {
-        "text": f"🕒 {timestamp} • Késés: {latency}s • Profil: {profile} • v2.1",
-    }
-
-    return embed
 
 
 def to_utc_iso(dt):
@@ -1186,8 +1068,14 @@ def market_closed_info(sig: dict) -> Tuple[bool, str]:
 
 # ------------- embed-renderek -------------
 
-def card_color(status: str) -> int:
-    return COLOR.get(status.upper(), COLOR["WAIT"])
+def card_color(dec: str, is_stable: bool, kind: str, setup_grade: Optional[str] = None) -> int:
+    if kind == "flip":
+        return COLOR["WAIT"]
+    if kind == "invalidate":
+        return COLOR["NO"]
+    if dec in ("BUY", "SELL"):
+        return COLOR["BUY"] if is_stable else COLOR["NO"]
+    return COLOR["NO"]
 
 
 def colorize_setup_text(text: str, setup_grade: Optional[str]) -> str:
@@ -1674,35 +1562,239 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     """
     kind: "normal" | "invalidate" | "flip" | "heartbeat"
     """
-    
-    decision = decision_of(sig).upper()
-    probability = sig.get("probability", 0)
+    emoji = EMOJI.get(asset, "📊")
+    closed, closed_note = market_closed_info(sig)
+    dec_effective = decision_of(sig).upper()
+    dec = dec_effective if dec_effective in ("BUY", "SELL") else "NO ENTRY"
 
-    signal_data = {
-        "signal": decision,
-        "probability": probability,
-        "spot": sig.get("spot") or {},
-        "active_position_meta": sig.get("active_position_meta") or {},
-        "entry": sig.get("entry"),
-        "sl": sig.get("sl"),
-        "tp1": sig.get("tp1"),
-        "tp2": sig.get("tp2"),
-        "rr": sig.get("rr"),
-        "reasons": sig.get("reasons") or [],
-        "diagnostics": sig.get("diagnostics") or {},
-        "gates": sig.get("gates") or {},
+    session_info = (sig or {}).get("session_info") or {}
+    entry_open = session_info.get("entry_open")
+    monitor_open = session_info.get("open")
+
+    p_raw = int(sig.get("probability", 0) or 0)
+    p = 0 if closed else p_raw
+    entry = sig.get("entry"); sl = sig.get("sl"); t1 = sig.get("tp1"); t2 = sig.get("tp2")
+    rr = sig.get("rr")
+    mode = gates_mode(sig)
+    mode_pretty = {
+        "analysis_error": "analysis hiba",
+        "data_gap": "adat hiány",
+        "unavailable": "adat nem elérhető",
     }
+    display_mode = mode_pretty.get(mode, mode)
+    missing_list = ((sig.get("gates") or {}).get("missing") or [])
+    core_bos_pending = (mode == "core") and ("bos5m" in missing_list)
 
-    embed = create_dashboard_embed(asset, signal_data)
+    entry_thresholds = sig.get("entry_thresholds") if isinstance(sig, dict) else {}
+    dynamic_lines: List[str] = []
+    setup_classification: Optional[str] = None
+    setup_classification_line: Optional[str] = None
+    setup_grade: Optional[str] = None
+    setup_score: Optional[float] = None
+    setup_issues: List[str] = []
+    setup_direction = resolve_setup_direction(sig, dec)
+    if isinstance(entry_thresholds, dict):
+        atr_soft_meta = entry_thresholds.get("atr_soft_gate") or {}
+        atr_soft_used = bool(entry_thresholds.get("atr_soft_gate_used"))
+        atr_soft_mode = str(atr_soft_meta.get("mode") or "").lower()
+        if atr_soft_used or atr_soft_mode == "soft_pass":
+            atr_penalty = safe_float(atr_soft_meta.get("penalty")) or 0.0
+            atr_missing = safe_float(atr_soft_meta.get("diff_ratio"))
+            tolerance = safe_float(atr_soft_meta.get("tolerance_pct"))
+            miss_txt = f"hiány {format_percentage(atr_missing)}" if atr_missing is not None else "toleranciás belépés"
+            tol_txt = f" (tolerancia {format_percentage(tolerance)})" if tolerance is not None else ""
+            pen_txt = f" −{atr_penalty:.1f}P" if atr_penalty else ""
+            dynamic_lines.append(f"ATR Soft Gate: {miss_txt}{tol_txt}{pen_txt}")
+            setup_issues.append("ATR hiány/lazítás")
 
-    if kind == "flip" and prev_decision:
-        embed["title"] += f" • Flip {(prev_decision or '-').upper()} → {decision}"
-    elif kind == "invalidate":
-        embed["title"] += " • Invalidate"
-    elif kind == "heartbeat":
-        embed["title"] += " • Állapot"
+        latency_meta = entry_thresholds.get("latency_relaxation") or {}
+        latency_mode = str(latency_meta.get("mode") or "").lower()
+        if latency_mode == "penalized":
+            age_min = None
+            try:
+                age_min = int((latency_meta.get("age_seconds") or 0) // 60)
+            except Exception:
+                age_min = None
+            profile = latency_meta.get("profile")
+            latency_penalty = safe_float(latency_meta.get("penalty")) or 0.0
+            age_txt = f"≈{age_min} perc" if age_min is not None else "késleltetés"
+            profile_txt = f"{profile} profil" if profile else "relaxált guard"
+            pen_txt = f" −{latency_penalty:.1f}P" if latency_penalty else ""
+            dynamic_lines.append(f"Lazított latency guard ({profile_txt}) — {age_txt}{pen_txt}")
+            setup_issues.append("késleltetett adat")
+
+        score_meta = entry_thresholds.get("dynamic_score_engine") or {}
+        setup_score = safe_float(score_meta.get("final_score"))
+        if setup_score is None:
+            setup_score = safe_float(score_meta.get("base_score"))
+        regime_meta = score_meta.get("regime_penalty") if isinstance(score_meta, dict) else None
+        vol_meta = score_meta.get("volatility_bonus") if isinstance(score_meta, dict) else None
+        if isinstance(regime_meta, dict) and regime_meta.get("points"):
+            points = safe_float(regime_meta.get("points")) or 0.0
+            label = (regime_meta.get("label") or "").upper()
+            sign = "−" if points < 0 else "+"
+            dynamic_lines.append(f"Regime {label}: {sign}{abs(points):.1f}P")
+            if points < 0:
+                setup_issues.append(f"regime {label}")
+        if isinstance(vol_meta, dict) and vol_meta.get("points"):
+            points = safe_float(vol_meta.get("points")) or 0.0
+            z_val = safe_float(vol_meta.get("volatility_z"))
+            z_txt = f" z={z_val:.2f}" if z_val is not None else ""
+            dynamic_lines.append(f"Volatilitás bónusz +{points:.1f}P{z_txt}")
+          
+    price, utc = spot_from_sig_or_file(asset, sig)
+    spot_s = fmt_num(price)
+    utc_s  = utc or "-"
+    
+    setup_score = setup_score if setup_score is not None else safe_float(p_raw)
+    if setup_score is not None:
+        if setup_score >= 60 and not setup_issues:
+            setup_grade = "A"
+            setup_classification = "A Setup (Prémium) — Teljes pozícióméret, agresszív menedzsment."
+        elif setup_score >= 30:
+            setup_grade = "B"
+            issue_txt = ", ".join(setup_issues) if setup_issues else "legalább egy feltétel gyenge vagy hiányzik"
+            setup_classification = (
+                "B Setup (Standard) — Fél pozícióméret, szigorúbb Stop Loss. "
+                f"Gyenge/hiányzó: {issue_txt}."
+            )
+        elif setup_score >= 25:
+            setup_grade = "C"
+            setup_classification = (
+                "C Setup (Speculatív) — Negyed méret vagy manuális megerősítés. "
+                "Csak erős triggerrel (sweep/hír/divergencia) vállald."
+            )
+        else:
+            setup_grade = "X"
+            setup_classification = (
+                "❌ Setup túl gyenge — P-score <25. Csak figyelés, belépő nem ajánlott."
+            )
+
+    if setup_classification:
+      direction_txt = (setup_direction or "n/a").upper()
+      setup_with_direction = f"{setup_classification} — Irány: {direction_txt}"
+      setup_classification_line = colorize_setup_text(setup_with_direction, setup_grade)
+
+    # státusz
+    status_emoji = "🔴"
+    if dec in ("BUY", "SELL"):
+        if core_bos_pending or not is_stable:
+            status_emoji = "🟡"
+        else:
+            status_emoji = "🟢"
+
+    base_label = dec.title() if dec else ""
+    if base_label in ("Buy", "Sell") and setup_grade:
+        status_label = f"{base_label} (Grade {setup_grade})"
+    elif setup_grade:
+        status_label = f"{setup_grade} Setup"
+    else:
+        status_label = base_label or dec
+    status_bold  = f"{status_emoji} **{status_label}**"
+
+    lines = [
+        f"{status_bold} • P={p}% • mód: `{display_mode}`",
+        f"Spot: `{spot_s}` • UTC: `{utc_s}`",
+    ] 
+    if setup_classification_line:
+        lines.append(setup_classification_line)
+
+    no_entry_reason = None
+    missing_note = None
+    if mode == "analysis_error":
+        reason_detail = None
+        reasons = sig.get("reasons") if isinstance(sig, dict) else None
+        if isinstance(reasons, list):
+            for reason in reasons:
+                if isinstance(reason, str) and reason.strip():
+                    reason_detail = reason.strip()
+                    break
+        diagnostics = sig.get("diagnostics") if isinstance(sig, dict) else None
+        diag_msg = None
+        if isinstance(diagnostics, dict):
+            diag_err = diagnostics.get("error")
+            if isinstance(diag_err, dict):
+                diag_msg = diag_err.get("message")
+        detail = reason_detail or diag_msg
+        note_suffix = f" — {detail}" if detail else ""
+        no_entry_reason = f"⚠️ Analysis hiba{note_suffix}."
+    missing_names = []
+    for gate in missing_list:
+        gate_s = str(gate or "").strip()
+        if not gate_s:
+            continue
+        gate_s = gate_s.replace("_", " ")
+        gate_s = gate_s.replace("bos", "BOS")
+        missing_names.append(gate_s)
+
+    if missing_names:
+        missing_txt = ", ".join(missing_names)
+        missing_note = f"⏳ Nincs belépési trigger — hiányzik: {missing_txt}."
       
-    return embed
+          
+    if dynamic_lines:
+        lines.append("⚙️ Dinamikus: " + " | ".join(dynamic_lines))
+
+    if no_entry_reason:
+        lines.append(no_entry_reason)
+
+    if missing_note and missing_note not in lines:
+        lines.append(missing_note)
+
+    if closed:
+        lines.append(f"🔒 {closed_note or 'Piac zárva (market closed)'}")
+    elif monitor_open and entry_open is False:
+        lines.append("🌙 Entry ablak zárva — csak pozíció menedzsment, új belépő tiltva.")
+
+    position_note = None
+    if isinstance(sig, dict):
+        raw_note = sig.get("position_management")
+        if not raw_note:
+            pm_reasons = sig.get("reasons")
+            if isinstance(pm_reasons, list):
+                for reason in pm_reasons:
+                    if isinstance(reason, str) and reason.strip().lower().startswith("pozíciómenedzsment"):
+                        raw_note = reason
+                        break
+        if isinstance(raw_note, str):
+            raw_note = raw_note.strip()
+        position_note = raw_note
+
+    if position_note:
+        if not any(line.strip() == position_note for line in lines):
+            lines.append(f"🧭 {position_note}")
+    # RR/TP/SL sor (ha minden adat megvan)
+    if dec in ("BUY", "SELL") and all(v is not None for v in (entry, sl, t1, t2, rr)):
+        lines.append(f"@ `{fmt_num(entry)}` • SL `{fmt_num(sl)}` • TP1 `{fmt_num(t1)}` • TP2 `{fmt_num(t2)}` • RR≈`{rr}`")
+    # Stabilizálás információ
+    if dec in ("BUY","SELL") and kind in ("normal","heartbeat"):
+        if core_bos_pending:
+            lines.append("⏳ Állapot: *stabilizálás alatt (5m BOS megerősítésre várunk)*")
+        elif not is_stable:
+            lines.append("⏳ Állapot: *stabilizálás alatt*")
+
+    # Hiányzó feltételek — ha vannak, mindig mutatjuk
+    miss = missing_from_sig(sig)
+    if miss and not (no_entry_reason and "hiányzik" in no_entry_reason.lower()) and not missing_note:
+        lines.append(f"Hiányzó: *{miss}*")
+
+    # cím + szín
+    title = f"{emoji} **{asset}**"
+    if kind == "invalidate":
+        title += " • ❌ Invalidate"
+    elif kind == "flip":
+        arrow = "→"
+        title += f" • 🔁 Flip ({(prev_decision or '').upper()} {arrow} {dec})"
+    elif kind == "heartbeat":
+        title += " • ℹ️ Állapot"
+
+    color = card_color(dec, is_stable, kind, setup_grade)
+
+    return {
+        "title": title,
+        "description": "\n".join(lines),
+        "color": color,
+    }
 
 # ---------------- főlogika ----------------
 
