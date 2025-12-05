@@ -20,6 +20,9 @@ Küldés:
 
 ENV:
 - DISCORD_WEBHOOK_URL
+- DISCORD_WEBHOOK_URL_LIVE (opcionális: #🚨-live-signals)
+- DISCORD_WEBHOOK_URL_MANAGEMENT (opcionális: #💼-management)
+- DISCORD_WEBHOOK_URL_MARKET_SCAN (opcionális: #📊-market-scan)
 - DISCORD_COOLDOWN_MIN (perc, default 10)
 - DISCORD_FORCE_NOTIFY=1 ➜ cooldown figyelmen kívül hagyása + összefoglaló kényszerítése
 - DISCORD_FORCE_HEARTBEAT=1 ➜ csak az összefoglalót kényszerítjük (cooldown marad)
@@ -122,6 +125,45 @@ def int_env(name: str, default: int) -> int:
         )
         return default
 
+
+def load_webhooks() -> Dict[str, str]:
+    base = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+
+    def pick(env_var: str) -> str:
+        val = os.getenv(env_var, "").strip()
+        return val or base
+
+    return {
+        "_base": base,
+        "live": pick("DISCORD_WEBHOOK_URL_LIVE"),
+        "management": pick("DISCORD_WEBHOOK_URL_MANAGEMENT"),
+        "market_scan": pick("DISCORD_WEBHOOK_URL_MARKET_SCAN"),
+    }
+
+
+def classify_signal_channel(decision: str, kind: str, is_stable: bool) -> str:
+    """Routing szabályok a fő jel-kártyákhoz.
+
+    - Zöld BUY/SELL (stabil, normál küldés) ➜ #🚨-live-signals
+    - Minden más jel- és státuszkártya ➜ #📊-market-scan
+    """
+
+    decision = (decision or "").lower()
+    if decision in {"buy", "sell"} and is_stable and kind == "normal":
+        return "live"
+    return "market_scan"
+
+
+def post_batches(hook: str, content: str, embeds: List[Dict[str, Any]]) -> None:
+    """Küldjünk 10-es csomagokban az embedeket egy webhookra."""
+
+    if not hook:
+        return
+    batches = [embeds[i : i + 10] for i in range(0, len(embeds), 10)]
+    for batch in batches:
+        r = requests.post(hook, json={"content": content, "embeds": batch}, timeout=20)
+        r.raise_for_status()
+      
 def build_entry_gate_summary_embed() -> Optional[Dict[str, Any]]:
     """Return a compact embed with top entry gate elutasítási okok."""
 
@@ -1835,8 +1877,8 @@ def main():
         payload["event"] = event
         LOGGER.info(event, extra=payload)
 
-    hook = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
-    if not hook:
+    webhooks = load_webhooks()
+    if not any(val for key, val in webhooks.items() if key != "_base"):
         log_event("notify_skipped", reason="missing_webhook")
         print("No DISCORD_WEBHOOK_URL, skipping notify.")
         return
@@ -1900,7 +1942,7 @@ def main():
     last_heartbeat_prev = meta.get("last_heartbeat_key")
     last_heartbeat_iso = meta.get("last_heartbeat_utc")
     asset_embeds = {}
-    actionable_any = False
+    asset_channels: Dict[str, str] = {}
     now_dt  = datetime.now(timezone.utc)
     now_iso = to_utc_iso(now_dt)
     now_ep  = int(now_dt.timestamp())
@@ -1945,7 +1987,6 @@ def main():
         display_stable = is_stable and not core_bos_pending
         per_asset_is_stable[asset] = display_stable
         is_actionable_now = (eff in ("buy","sell")) and is_stable and not core_bos_pending
-        actionable_any = actionable_any or is_actionable_now
 
         cooldown_until_iso = st.get("cooldown_until")
         cooldown_active = False
@@ -1975,14 +2016,16 @@ def main():
 
         # --- embed + állapot frissítés ---        
         if send_kind:
-            asset_embeds[asset] = build_embed_for_asset(
+            embed = build_embed_for_asset(
                 asset,
                 sig,
                 display_stable,
                 kind=send_kind,
                 prev_decision=prev_sent_decision,
-                tdstatus=tdstatus,                
+                tdstatus=tdstatus,
             )
+            asset_embeds[asset] = embed
+            asset_channels[asset] = classify_signal_channel(eff, send_kind, display_stable)
             if send_kind in ("normal","flip"):
                 cooldown_minutes = COOLDOWN_MIN
                 if COOLDOWN_MIN > 0 and mode_current == "momentum":
@@ -2038,8 +2081,9 @@ def main():
                     sig,
                     is_stable=is_stable,
                     kind="heartbeat",
-                    tdstatus=tdstatus,                    
+                    tdstatus=tdstatus,
                 )
+                asset_channels.setdefault(asset, "market_scan")
                 heartbeat_added = True
 
         heartbeat_snapshots = watcher.snapshot_embeds(exclude=watcher.changed_assets)
@@ -2052,33 +2096,53 @@ def main():
     state["_meta"] = meta
     save_state(state)
 
-    ordered_embeds = [asset_embeds[a] for a in ASSETS if a in asset_embeds]
-    ordered_embeds.extend(watcher_embeds)
-    ordered_embeds.extend(heartbeat_snapshots)
+    live_embeds = [asset_embeds[a] for a in ASSETS if asset_channels.get(a) == "live"]
+    management_embeds = list(watcher_embeds)
+    market_scan_embeds = [
+        asset_embeds[a]
+        for a in ASSETS
+        if a in asset_embeds and asset_channels.get(a, "market_scan") != "live"
+    ]
+    market_scan_embeds.extend(heartbeat_snapshots)
     gate_embed = build_entry_gate_summary_embed()
     if gate_embed:
-        ordered_embeds.append(gate_embed)
+        market_scan_embeds.append(gate_embed)
 
     pipeline_embed = build_pipeline_diag_embed(now=now_dt)
     if pipeline_embed:
-        ordered_embeds.append(pipeline_embed)
-  
-    if not ordered_embeds:
+        market_scan_embeds.append(pipeline_embed)
+
+    if not (live_embeds or management_embeds or market_scan_embeds):
         print("Discord notify: nothing to send.")
         return
 
-    # Fejléc: Budapest-idővel
     bud_str = bud_time_str(bud_dt)
     title  = f"📣 eToro-Riasztás • Budapest: {bud_str}"
-    header = "Aktív jelzés(ek):" if actionable_any else "Összefoglaló / változás:"
-    content = f"**{title}**\n{header}"
+    headers = {
+        "live": "Aktív BUY/SELL jelek (#🚨-live-signals)",
+        "management": "Pozíció menedzsment / zárás (#💼-management)",
+        "market_scan": "Piaci státusz, várakozás (#📊-market-scan)",
+    }
 
-    try:
-        r = requests.post(hook, json={"content": content, "embeds": ordered_embeds[:10]}, timeout=20)
-        r.raise_for_status()
+    channel_payloads = {
+        "live": (webhooks.get("live"), live_embeds),
+        "management": (webhooks.get("management"), management_embeds),
+        "market_scan": (webhooks.get("market_scan"), market_scan_embeds),
+    }
+
+    dispatched = False
+    for channel, (hook, embeds) in channel_payloads.items():
+        if not embeds:
+            continue
+        content = f"**{title}**\n{headers[channel]}"
+        try:
+            post_batches(hook, content, embeds)
+            dispatched = True
+        except Exception as e:
+            print(f"Discord notify FAILED ({channel}):", e)
+
+    if dispatched:
         print("Discord notify OK.")
-    except Exception as e:
-        print("Discord notify FAILED:", e)
-
+    
 if __name__ == "__main__":
     main()
