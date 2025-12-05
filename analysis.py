@@ -12321,9 +12321,14 @@ def main():
                         analysis_delay_seconds,
                     )
 
-    hheartbeat_path = Path(PUBLIC_DIR) / "system_heartbeat.json"
-    heartbeat_ts = _load_heartbeat_timestamp(heartbeat_path)
-    heartbeat_age = None
+    heartbeat_path: Path = Path(PUBLIC_DIR) / "system_heartbeat.json"
+    heartbeat_ts: Optional[datetime]
+    heartbeat_age: Optional[float] = None
+    try:
+        heartbeat_ts = _load_heartbeat_timestamp(heartbeat_path)
+    except Exception as exc:
+        LOGGER.warning("Heartbeat betöltése sikertelen: %s", exc)
+        heartbeat_ts = None
     if heartbeat_ts:
         heartbeat_age = (analysis_started_at - heartbeat_ts).total_seconds()
 
@@ -12680,6 +12685,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
