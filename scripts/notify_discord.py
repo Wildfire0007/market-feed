@@ -274,6 +274,8 @@ def build_mobile_embed_for_asset(
     is_stable: bool,
     is_flip: bool,
     is_invalidate: bool,
+    *,
+    kind: str = "normal",
 ) -> Dict[str, Any]:
     """Mobil-optimalizált kereskedési kártya."""
 
@@ -326,13 +328,54 @@ def build_mobile_embed_for_asset(
 
     title = f"{_get_emoji(asset)} {asset}"  # csak eszköz azonosító a push értesítés vágásának elkerülésére
 
-    line_status = f"{status_icon} **{status_text}** • Mód: {mode_hu}"
+    event_suffix = ""
+    if kind == "flip":
+        event_suffix = " • 🔁 Flip"
+    elif kind == "invalidate":
+        event_suffix = " • ❌ Invalidate"
+    elif kind == "heartbeat":
+        event_suffix = " • ℹ️ Állapot"
+
+    line_status = f"{status_icon} **{status_text}** • Mód: {mode_hu}{event_suffix}"
     p_bar = draw_progress_bar(p_score)
     line_score = f"📊 `{p_bar}` {int(p_score)}%"
     line_price = f"💵 {format_price(spot, asset)} • 🕒 {local_time}"
 
     grade_icon = "🟢" if setup_info["grade"] == "A" else "🟡" if setup_info["grade"] == "B" else "⚪"
     line_setup = f"🎯 {grade_icon} **{setup_info['title']}** — {setup_info['action']}"
+
+    # Pozíciómenedzsment
+    position_note = None
+    if isinstance(signal_data, dict):
+        raw_note = signal_data.get("position_management")
+        if not raw_note:
+            pm_reasons = signal_data.get("reasons")
+            if isinstance(pm_reasons, list):
+                for reason in pm_reasons:
+                    if isinstance(reason, str) and reason.strip().lower().startswith("pozíciómenedzsment"):
+                        raw_note = reason
+                        break
+        if isinstance(raw_note, str):
+            raw_note = raw_note.strip()
+        position_note = raw_note
+
+    line_plan = ""
+    if isinstance(signal_data, dict):
+        entry = signal_data.get("entry")
+        sl = signal_data.get("sl")
+        tp1 = signal_data.get("tp1")
+        tp2 = signal_data.get("tp2")
+        rr = signal_data.get("rr")
+        if decision_upper in {"BUY", "SELL"} and all(v is not None for v in (entry, sl, tp1, tp2)):
+            plan_parts = [
+                f"Belépő `{format_price(entry, asset)}`",
+                f"SL `{format_price(sl, asset)}`",
+                f"TP1 `{format_price(tp1, asset)}`",
+                f"TP2 `{format_price(tp2, asset)}`",
+            ]
+            if rr is not None:
+                plan_parts.append(f"RR≈`{rr}`")
+            line_plan = "🎯 " + " • ".join(plan_parts)
 
     line_block = ""
     if status_text == "NINCS BELÉPŐ":
@@ -342,9 +385,17 @@ def build_mobile_embed_for_asset(
             reasons_hu = translate_reasons(missing)
             line_block = f"\n⛔ **Blokkolók:** {reasons_hu}"
 
-    description = "\n".join(
-        [line_status, line_score, line_price, "", line_setup + line_block]
-    )
+    lines = [line_status, line_score, line_price]
+
+    if line_plan:
+        lines.append(line_plan)
+
+    if position_note:
+        lines.append(f"🧭 {position_note}")
+
+    lines.extend(["", line_setup + line_block])
+
+    description = "\n".join(lines)
 
     return {
         "title": title,
@@ -2262,13 +2313,16 @@ def main():
 
         # --- embed + állapot frissítés ---        
         if send_kind:
-            embed = build_embed_for_asset(
+            embed = build_mobile_embed_for_asset(
                 asset,
+                state,
                 sig,
+                eff,
+                mode_current,
                 display_stable,
-                kind=send_kind,
-                prev_decision=prev_sent_decision,
-                tdstatus=tdstatus,
+                is_flip=send_kind == "flip",
+                is_invalidate=send_kind == "invalidate",
+                kind=send_kind,                
             )
             asset_embeds[asset] = embed
             asset_channels[asset] = classify_signal_channel(eff, send_kind, display_stable)
@@ -2322,12 +2376,16 @@ def main():
             sig = per_asset_sigs.get(asset) or {"asset": asset, "signal": "no entry", "probability": 0}
             is_stable = per_asset_is_stable.get(asset, True)        
             if asset not in asset_embeds:
-                asset_embeds[asset] = build_embed_for_asset(
+                asset_embeds[asset] = build_mobile_embed_for_asset(
                     asset,
+                    state,
                     sig,
+                    decision_of(sig),
+                    gates_mode(sig),
                     is_stable=is_stable,
-                    kind="heartbeat",
-                    tdstatus=tdstatus,
+                    is_flip=False,
+                    is_invalidate=False,
+                    kind="heartbeat",                   
                 )
                 asset_channels.setdefault(asset, "market_scan")
                 heartbeat_added = True
