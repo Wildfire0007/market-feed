@@ -358,7 +358,7 @@ EMOJI = {
     "NVDA": "🤖",    
 }
 COLOR = {
-    "BUY":   0x2ecc71,  # zöld (csak tényleges Buy/Sell döntésnél)
+    "LONG":   0x2ecc71,  # zöld (csak tényleges Buy/Sell döntésnél)
     "SELL":  0x2ecc71,  # zöld (csak tényleges Buy/Sell döntésnél)
     "NO":    0xe74c3c,  # piros (invalidate)
     "WAIT":  0xf7dc6f,  # citromsárga (várakozás/stabilizálás)
@@ -378,6 +378,22 @@ def bud_hh_key(dt=None) -> str:
 def bud_time_str(dt=None) -> str:
     dt = dt or bud_now()
     return dt.strftime("%Y-%m-%d %H:%M ") + (dt.tzname() or "CET")
+
+def draw_progress_bar(value, min_val=0, max_val=100, length=10):
+    """
+    ASCII progress bar generálása a P-score vizualizálásához.
+    Pl: [■■■■■■■□□□] 70%
+    """
+    try:
+        val = float(value)
+        pct = (val - min_val) / (max_val - min_val)
+        pct = max(0.0, min(1.0, pct))
+        filled = int(round(length * pct))
+        # ■ karakter a teli, □ az üres részre
+        bar = "■" * filled + "□" * (length - filled)
+        return bar
+    except:
+        return "□" * length
 
 def utcnow_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1671,9 +1687,9 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
             )
 
     if setup_classification:
-      direction_txt = (setup_direction or "n/a").upper()
-      setup_with_direction = f"{setup_classification} — Irány: {direction_txt}"
-      setup_classification_line = colorize_setup_text(setup_with_direction, setup_grade)
+        direction_txt = (setup_direction or "n/a").upper()
+        setup_with_direction = f"{setup_classification} — Irány: {direction_txt}"
+        setup_classification_line = colorize_setup_text(setup_with_direction, setup_grade)
 
     # státusz
     status_emoji = "🔴"
@@ -1767,7 +1783,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     if dec in ("BUY", "SELL") and all(v is not None for v in (entry, sl, t1, t2, rr)):
         lines.append(f"@ `{fmt_num(entry)}` • SL `{fmt_num(sl)}` • TP1 `{fmt_num(t1)}` • TP2 `{fmt_num(t2)}` • RR≈`{rr}`")
     # Stabilizálás információ
-    if dec in ("BUY","SELL") and kind in ("normal","heartbeat"):
+    if dec in ("BUY", "SELL") and kind in ("normal", "heartbeat"):
         if core_bos_pending:
             lines.append("⏳ Állapot: *stabilizálás alatt (5m BOS megerősítésre várunk)*")
         elif not is_stable:
