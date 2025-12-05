@@ -152,9 +152,10 @@ def draw_progress_bar(value: float, length: int = 10) -> str:
     try:
         pct = max(0.0, min(1.0, float(value) / 100.0))
         filled = int(round(length * pct))
-        return "■" * filled + "□" * (length - filled)
+        inner = "■" * filled + "□" * (length - filled)
+        return f"[{inner}]"
     except Exception:
-        return "□" * length
+        return "[" + ("□" * length) + "]"
 
 
 def format_price(val: Any, asset: str) -> str:
@@ -281,8 +282,8 @@ def build_mobile_embed_for_asset(
         reason = session.get("market_closed_reason") or "Hétvége"
         next_open = session.get("next_open_utc", "Ismeretlen")
         return {
-            "title": f"🔴 {asset} - PIAC ZÁRVA",
-            "description": f"Ok: {reason}\nNyitás: {next_open}",
+            "title": f"{_get_emoji(asset)} {asset}",
+            "description": f"🔴 **PIAC ZÁRVA**\nOk: {reason}\nNyitás: {next_open}",
             "color": 0x2C3E50,
         }
 
@@ -300,26 +301,31 @@ def build_mobile_embed_for_asset(
 
     status_text = "NINCS BELÉPŐ"
     color = COLORS["NO"]
+    status_icon = "⚪"
 
     decision_upper = (decision or "").upper()
     if decision_upper == "BUY":
         status_text = "LONG"
         color = COLORS["LONG"]
+        status_icon = "🟢"
     elif decision_upper == "SELL":
         status_text = "SHORT"
         color = COLORS["SHORT"]
+        status_icon = "🔴"
 
     if is_flip:
         status_text = "FORDULAT (FLIP)"
         color = COLORS["FLIP"]
+        status_icon = "🟠"
     if not is_stable and decision_upper in {"BUY", "SELL"}:
         status_text = "VÁRAKOZÁS (Stabilizálás...)"
         color = COLORS["WAIT"]
+        status_icon = "🟡"
 
     mode_hu = "Bázis" if "core" in str(mode).lower() else "Lendület"
 
     title = f"{_get_emoji(asset)} {asset}"
-    line_2 = f"**{status_text}** • Mód: {mode_hu}"
+    line_2 = f"{status_icon} **{status_text}** • Mód: {mode_hu}"
     p_bar = draw_progress_bar(p_score)
     line_3 = f"`{p_bar}` **{int(p_score)}%**"
     line_4 = f"Spot: **{format_price(spot, asset)}** • 🕒 {local_time}"
@@ -342,6 +348,7 @@ def build_mobile_embed_for_asset(
         "description": description,
         "color": color if status_text != "NINCS BELÉPŐ" else setup_info["color"],
     }
+
   
 # ---- Debounce / stabilitás / cooldown ----
 STATE_PATH = f"{PUBLIC_DIR}/_notify_state.json"
