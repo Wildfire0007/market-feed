@@ -739,6 +739,7 @@ _ENV_PROFILE = os.getenv("ENTRY_THRESHOLD_PROFILE")
 _ENV_ACTIVE_PROFILE = os.getenv("ACTIVE_ENTRY_PROFILE")
 _CFG_ACTIVE_PROFILE = _get_config_value("active_entry_threshold_profile")
 _CFG_WEEKDAY_PROFILE = _get_config_value("weekday_entry_threshold_profile")
+_ENTRY_PROFILE_SCHEDULE = _get_config_value("entry_profile_schedule_by_tod") or {}
 
 def _weekday_profile_candidate() -> Optional[str]:
     try:
@@ -779,7 +780,56 @@ def _env_flag_enabled(flag_name: Optional[str], *, default: bool = False) -> boo
     raw = os.getenv(str(flag_name))
     if raw is None:
         return default
-    return raw.strip().lower() not in {"0", "false", "off", "no"}    
+    return raw.strip().lower() not in {"0", "false", "off", "no"}
+
+
+def _tod_buckets_from_config() -> List[Tuple[str, range]]:
+    profiles = _get_config_value("atr_percentile_min_by_tod_profiles") or {}
+    profile_cfg = profiles.get(ENTRY_THRESHOLD_PROFILE_NAME) or profiles.get(
+        _DEFAULT_ENTRY_PROFILE_NAME
+    )
+    buckets: List[Tuple[str, range]] = []
+    if not isinstance(profile_cfg, dict):
+        return buckets
+    for bucket in profile_cfg.get("buckets", []) or []:
+        if not isinstance(bucket, dict):
+            continue
+        name = str(bucket.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            start_minute = int(bucket.get("start_minute", 0))
+            end_minute = int(bucket.get("end_minute", 0))
+        except (TypeError, ValueError):
+            continue
+        start_minute = max(0, start_minute)
+        end_minute = max(start_minute, min(1440, end_minute))
+        buckets.append((name, range(start_minute, end_minute)))
+    return buckets
+
+
+def _current_tod_bucket(now: Optional[datetime] = None) -> Optional[str]:
+    ts = now or _now_utc()
+    minute_of_day = ts.hour * 60 + ts.minute
+    for name, bucket_range in _tod_buckets_from_config():
+        if minute_of_day in bucket_range:
+            return name
+    return None
+
+
+def _resolve_scheduled_profile(asset: str, now: Optional[datetime] = None) -> Optional[str]:
+    bucket = _current_tod_bucket(now)
+    if not bucket:
+        return None
+    schedule_default = (_ENTRY_PROFILE_SCHEDULE.get("default") or {}).get(bucket)
+    asset_cfg = (_ENTRY_PROFILE_SCHEDULE.get("assets") or {}).get(asset.upper(), {})
+    schedule_asset = None
+    if isinstance(asset_cfg, dict):
+        schedule_asset = asset_cfg.get(bucket)
+    profile_name = schedule_asset or schedule_default
+    if profile_name and profile_name in ENTRY_THRESHOLD_PROFILES:
+        return profile_name
+    return None    
 _ACTIVE_PROFILE = ENTRY_THRESHOLD_PROFILES[ENTRY_THRESHOLD_PROFILE_NAME]
 _P_SCORE_PROFILE = _ACTIVE_PROFILE.get("p_score_min", {})
 _ATR_MULT_PROFILE = _ACTIVE_PROFILE.get("atr_threshold_multiplier", {})
@@ -803,18 +853,29 @@ def get_entry_threshold_profile_name_for_asset(asset: str) -> str:
     """Return the entry threshold profile name configured for ``asset``."""
 
     asset_key = str(asset or "").upper()
+    mapped_profile: Optional[str] = None
+    
     if asset_key:
         mapping = _load_asset_entry_profile_map()
         profile_name = mapping.get(asset_key)
         if profile_name:
             if profile_name in ENTRY_THRESHOLD_PROFILES:
-                return profile_name
-            LOGGER.warning(
-                "Asset %s mapped to unknown entry profile '%s'; using %s",
-                asset_key,
-                profile_name,
-                ENTRY_THRESHOLD_PROFILE_NAME,
-            )
+                if profile_name != ENTRY_THRESHOLD_PROFILE_NAME:
+                    return profile_name
+                mapped_profile = profile_name
+            else:
+                LOGGER.warning(
+                    "Asset %s mapped to unknown entry profile '%s'; using %s",
+                    asset_key,
+                    profile_name,
+                    ENTRY_THRESHOLD_PROFILE_NAME,
+                )
+
+    scheduled_profile = _resolve_scheduled_profile(asset_key)
+    if scheduled_profile:
+        return scheduled_profile
+    if mapped_profile:
+        return mapped_profile
     return ENTRY_THRESHOLD_PROFILE_NAME
 
 
