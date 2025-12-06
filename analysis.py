@@ -846,6 +846,7 @@ LATENCY_GUARD_PROFILE_LIMIT_SECONDS: Dict[str, int] = {"suppressed": 420}
 ML_FEATURE_SNAPSHOT_DIRNAME = "ml_features"
 PRECISION_SCORE_PROFILE_OVERRIDES: Dict[str, Dict[str, float]] = {
     "NVDA": {"suppressed": 52.0},
+    "GOLD_CFD": {"relaxed": 50.0},
 }
 ENTRY_GATE_EXTRA_LOGS_DISABLE = "DISABLE_ENTRY_GATE_EXTRA_LOGS"
 MACRO_DATA_DIR = Path("data") / "macro"
@@ -7885,6 +7886,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         adx_range_threshold=ADX_RANGE_MAX,
     )
     regime_snapshot = classifier.classify(k5m_closed, k1h_closed)
+    try:
+        regime_adx = float(regime_snapshot.get("adx"))
+    except (TypeError, ValueError):
+        regime_adx = None
     regime_val = float(regime_snapshot.get("ema_slope") or 0.0)
     regime_slope_signed = float(regime_snapshot.get("ema_slope_signed") or 0.0)
     regime_ok = regime_val >= slope_threshold
@@ -8392,21 +8397,85 @@ def analyze(asset: str) -> Dict[str, Any]:
     intraday_bias_gate_meta: Optional[Dict[str, Any]] = None
     bias_gate_notes: List[str] = []
     mean_reversion_bias: Optional[str] = None
+    rsi14_val: float = float("nan")
+    try:
+        rsi_series = rsi(k5m_closed["close"].astype(float), 14)
+        rsi14_val = float(rsi_series.iloc[-1]) if not rsi_series.empty else float("nan")
+    except Exception:
+        rsi14_val = float("nan")
     if regime_label == "choppy":
-        try:
-            rsi_series = rsi(k5m_closed["close"].astype(float), 14)
-            rsi_val = float(rsi_series.iloc[-1]) if not rsi_series.empty else float("nan")
-        except Exception:
-            rsi_val = float("nan")
-        if np.isfinite(rsi_val):
-            if rsi_val < 30:
+        if np.isfinite(rsi14_val):
+            if rsi14_val < 30:
                 mean_reversion_bias = "long"
-            elif rsi_val > 70:
+            elif rsi14_val > 70:
                 mean_reversion_bias = "short"
         if mean_reversion_bias:
             reasons.append(
-                f"Mean reversion jelzés CHOPPY rezsimben (RSI14 {rsi_val:.1f} → {mean_reversion_bias})"
+                f"Mean reversion jelzés CHOPPY rezsimben (RSI14 {rsi14_val:.1f} → {mean_reversion_bias})"
             )
+
+    gold_reversal_meta: Dict[str, Any] = {}
+    gold_reversal_hits = 0
+    gold_reversal_reasons: List[str] = []
+    if asset == "GOLD_CFD":
+        rsi_extreme = np.isfinite(rsi14_val) and (rsi14_val < 30 or rsi14_val > 70)
+        if rsi_extreme:
+            gold_reversal_hits += 1
+            gold_reversal_reasons.append(f"RSI14 szélsőséges ({rsi14_val:.1f})")
+
+        daily_range: Optional[float] = None
+        if not k1h_closed.empty:
+            last_day = k1h_closed.tail(24)
+            if not last_day.empty:
+                try:
+                    daily_range = float(last_day["high"].max() - last_day["low"].min())
+                except Exception:
+                    daily_range = None
+        if daily_range is not None and atr1h is not None and atr1h > 0:
+            if daily_range >= 1.2 * float(atr1h):
+                gold_reversal_hits += 1
+                gold_reversal_reasons.append("Napi range ≥ 1.2×ATR")
+            gold_reversal_meta["daily_range"] = daily_range
+
+        fib_touch = bool(fib_ok)
+        if fib_touch:
+            gold_reversal_hits += 1
+            gold_reversal_reasons.append("Kulcsszint érintve (Fib/pivot)")
+
+        bos_against_trend = False
+        if trend_bias == "long" and (bos1h_short or bos5m_short):
+            bos_against_trend = True
+        elif trend_bias == "short" and (bos1h_long or bos5m_long):
+            bos_against_trend = True
+        if bos_against_trend:
+            gold_reversal_hits += 1
+            gold_reversal_reasons.append("BOS a trend ellen")
+
+        adx_value_safe: Optional[float] = None
+        if adx_value is not None and np.isfinite(adx_value):
+            adx_value_safe = float(adx_value)
+        bias_conflict = trend_bias in {"long", "short"} and effective_bias in {"long", "short"} and trend_bias != effective_bias
+        adx_weak = adx_value_safe is not None and adx_value_safe < 18.0
+        gold_reversal_meta.update(
+            {
+                "rsi": rsi14_val if np.isfinite(rsi14_val) else None,
+                "hits": gold_reversal_hits,
+                "adx_value": adx_value_safe,
+                "bias_conflict": bool(bias_conflict),
+                "rr_target": [1.0, 1.2],
+                "sl_pct": [0.005, 0.008],
+            }
+        )
+        if gold_reversal_hits >= 2 and (adx_weak or bias_conflict):
+            gold_reversal_meta["active"] = True
+            gold_reversal_meta["reasons"] = gold_reversal_reasons.copy()
+            reasons.append("GOLD reversal mód engedélyezve — legalább 2 jelzés aktív")
+            dynamic_tp_profile["reversal"] = {"tp1": 1.0, "tp2": 1.2, "rr": 1.1}
+            entry_thresholds_meta["gold_reversal"] = gold_reversal_meta
+        elif gold_reversal_reasons:
+            gold_reversal_meta["active"] = False
+            gold_reversal_meta["reasons"] = gold_reversal_reasons.copy()
+            entry_thresholds_meta["gold_reversal"] = gold_reversal_meta
 
     if trend_bias == "neutral" and bias1h in ("long", "short"):
         override_dir = bias1h
@@ -10372,6 +10441,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     mom_trigger_desc: Optional[str] = None
 
     momentum_liquidity_ok = True
+    momentum_adx_ok = True
     if asset in ENABLE_MOMENTUM_ASSETS:
         direction = effective_bias if effective_bias in {"long", "short"} else None
         if not session_ok_flag:
@@ -10481,6 +10551,10 @@ def analyze(asset: str) -> Dict[str, Any]:
                 elif direction == "short" and of_pressure > -ORDER_FLOW_PRESSURE_TH:
                     momentum_liquidity_ok = False
                     missing_mom.append("order_flow_pressure")
+            if asset == "GOLD_CFD":
+                momentum_adx_ok = regime_adx is not None and regime_adx >= 20.0
+                if not momentum_adx_ok:
+                    missing_mom.append("adx")
             ofi_confirm = True
             if ofi_zscore is not None and OFI_Z_TRIGGER > 0 and direction in {"long", "short"}:
                 if direction == "long":
@@ -10502,6 +10576,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 if (
                     session_ok_flag
                     and regime_ok
+                    and momentum_adx_ok
                     and mom_atr_ok
                     and cross_flag
                     and momentum_liquidity_ok
@@ -11003,6 +11078,12 @@ def analyze(asset: str) -> Dict[str, Any]:
                             slip_limit_r = slip_limit_r
                     profile_for_no_chase = btc_profile_name or _btc_active_profile()
                     no_chase_limit_r = slip_limit_r
+                    risk_no_chase = risk_template_values.get("no_chase_r")
+                    if risk_no_chase is not None:
+                        try:
+                            no_chase_limit_r = float(risk_no_chase)
+                        except (TypeError, ValueError):
+                            no_chase_limit_r = slip_limit_r
                     if asset == "BTCUSD":
                         no_chase_cfg = None
                         if isinstance(BTC_PROFILE_CONFIG, dict):
@@ -11031,7 +11112,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                                 except (TypeError, ValueError):
                                     slip_limit_r = max(slip_limit_r, no_chase_limit_r)
                     else:
-                        no_chase_limit_r = slip_limit_r
+                        slip_limit_r = min(slip_limit_r, no_chase_limit_r)
                     allowed_slip = slip_limit_r * last_computed_risk
                     if decision == "buy":
                         slip = max(0.0, price_for_calc - last5_close)
@@ -12868,6 +12949,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
