@@ -292,6 +292,8 @@ def test_profile_specific_helpers(monkeypatch):
 def test_entry_profile_routing_helpers(monkeypatch, tmp_path):
     settings = _reload_settings(monkeypatch)
     default_name = settings.ENTRY_THRESHOLD_PROFILE_NAME
+    monkeypatch.setattr(settings, "_ENTRY_PROFILE_SCHEDULE", {})
+    monkeypatch.setattr(settings, "_current_tod_bucket", lambda *_args, **_kwargs: None)
 
     custom_map_path = tmp_path / "asset_profile_map.json"
     custom_map_path.write_text(
