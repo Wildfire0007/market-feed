@@ -164,6 +164,40 @@ def btc_precision_state(profile: str, asset: str, score: float, trigger_ready: b
         return "precision_soft_block"
     return "none"  # ne blokkoljon önmagában
 
+
+def calculate_position_size_multiplier(
+    regime_label: str, atr_gate_ok: bool, p_score: float
+) -> float:
+    """Dynamic position sizing based on soft gate quality.
+
+    Base size is 1.0 and sequential multipliers are applied for
+    choppy regimes, low volatility, and sub-70 P-scores. The resulting
+    multiplier is clamped to a minimum of 0.0; callers should block
+    entries if the applied size would fall below 0.25.
+    """
+
+    multiplier = 1.0
+    if regime_label.lower() == "choppy":
+        multiplier *= 0.5
+    if not atr_gate_ok:
+        multiplier *= 0.5
+    if p_score < 70:
+        multiplier *= 0.5
+    return max(multiplier, 0.0)
+
+
+def classify_gate_failure(gate: str) -> str:
+    """Categorise gates into critical or soft buckets.
+
+    Critical gates hard-block the entry because they materially impact
+    execution quality or risk management. Soft gates express alignment
+    preferences; they should apply score/size penalties instead of
+    preventing a trade outright.
+    """
+
+    critical = {"session", "session_open", "data_integrity", "spread", "spread_guard", "risk_reward"}
+    return "critical" if gate in critical else "soft"
+
 # --- Elemzendő eszközök ---
 from config.analysis_settings import (
     ACTIVE_INVALID_BUFFER_ABS,
@@ -8331,6 +8365,23 @@ def analyze(asset: str) -> Dict[str, Any]:
     bias_override_reason: Optional[str] = None
     intraday_bias_gate_meta: Optional[Dict[str, Any]] = None
     bias_gate_notes: List[str] = []
+    mean_reversion_bias: Optional[str] = None
+    if regime_label == "choppy":
+        try:
+            rsi_series = rsi(k5m_closed["close"].astype(float), 14)
+            rsi_val = float(rsi_series.iloc[-1]) if not rsi_series.empty else float("nan")
+        except Exception:
+            rsi_val = float("nan")
+        if np.isfinite(rsi_val):
+            if rsi_val < 30:
+                mean_reversion_bias = "long"
+            elif rsi_val > 70:
+                mean_reversion_bias = "short"
+        if mean_reversion_bias:
+            reasons.append(
+                f"Mean reversion jelzés CHOPPY rezsimben (RSI14 {rsi_val:.1f} → {mean_reversion_bias})"
+            )
+
     if trend_bias == "neutral" and bias1h in ("long", "short"):
         override_dir = bias1h
         bos_support = bos5m_long if override_dir == "long" else bos5m_short
@@ -8353,8 +8404,14 @@ def analyze(asset: str) -> Dict[str, Any]:
         and regime_ok
     ):
         effective_bias = bias1h
-        bias_override_used = True
-        bias_override_reason = "Bias override: NVDA 1h trend cash-session megerősítés"
+            bias_override_used = True
+            bias_override_reason = "Bias override: NVDA 1h trend cash-session megerősítés"
+
+    if mean_reversion_bias:
+        if effective_bias != mean_reversion_bias:
+            bias_override_used = True
+            bias_override_reason = "Mean reversion bias override"
+        effective_bias = mean_reversion_bias
 
     btc_bias_cfg = _btc_profile_section("bias_relax") if asset == "BTCUSD" else {}
     btc_momentum_cfg = _btc_profile_section("momentum_override") if asset == "BTCUSD" else {}
@@ -10164,10 +10221,14 @@ def analyze(asset: str) -> Dict[str, Any]:
             return merged
         return extra
 
+    data_integrity_ok = not any(flag for flag in stale_timeframes.values())
+    soft_structure_gate = bool(structure_gate or (strong_momentum and not structure_gate))
+
     core_required = [
         "session",
-        "regime",
-        "bias",
+        "spread_guard",
+        "data_integrity",
+        "risk_reward",
         structure_label,
         range_guard_label,
         "atr",
@@ -10179,9 +10240,11 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     conds_core = {
         "session": bool(session_ok_flag),
+        "spread_guard": bool(spread_gate_ok),
+        "data_integrity": bool(data_integrity_ok),
         "regime": bool(regime_ok),
         "bias": effective_bias in ("long", "short"),
-        structure_label: bool(structure_gate),
+        structure_label: bool(soft_structure_gate),
         "atr": bool(atr_ok),
         range_guard_label: range_guard_ok,
     }
@@ -10191,9 +10254,47 @@ def analyze(asset: str) -> Dict[str, Any]:
             conds_core["funding_alignment"] = effective_bias == funding_dir_filter
         else:
             conds_core["funding_alignment"] = False
-    base_core_ok = all(conds_core.values())
+
+    critical_missing: List[str] = []
+    soft_flags: List[str] = []
+    for name, ok in conds_core.items():
+        category = classify_gate_failure(name)
+        if ok:
+            continue
+        if category == "critical":
+            critical_missing.append(name)
+        else:
+            soft_flags.append(name)
+
+    if not data_integrity_ok:
+        reasons.append("Data integrity gate: adatfrissítés >2 perc vagy hiányzik")
+    if not spread_gate_ok:
+        reasons.append("Spread gate: aktuális spread meghaladja az ATR arány limitet")
+
+    if not regime_ok and "regime" in conds_core:
+        P -= 10.0
+        reasons.append("Regime kapu: CHOPPY miatt −10 P-score, pozícióskálázás csökkentve")
+    if not atr_ok:
+        P -= 5.0
+        position_size_scale *= 0.5
+        reasons.append("ATR soft gate: alacsony volatilitás −5 P-score, méret felezve")
+    if not conds_core.get("bias", True):
+        P -= 15.0
+        reasons.append("Bias eltérés: H1 trend ütközik az M5 belépéssel (−15 P-score)")
+    if not structure_gate and soft_structure_gate:
+        reasons.append("Strukturális kapu lazítva: momentum erős, BOS hiány engedve")
+
+    P = max(0.0, min(100.0, P))
+
+    size_multiplier = calculate_position_size_multiplier(regime_label, atr_ok, P)
+    position_size_scale *= size_multiplier
+    if position_size_scale < 0.25:
+        critical_missing.append("position_sizing_floor")
+        reasons.append("Pozícióméret 0.25× alatt — belépés blokkolva")
+
+    base_core_ok = not critical_missing
     can_enter_core = (P >= p_score_min_local) and base_core_ok
-    missing_core = [k for k, v in conds_core.items() if not v]
+    missing_core = list(critical_missing)
     if P < p_score_min_local:
         if float(p_score_min_local).is_integer():
             p_score_label = str(int(round(p_score_min_local)))
@@ -12730,6 +12831,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
