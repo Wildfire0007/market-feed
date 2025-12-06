@@ -11,7 +11,7 @@ on:
     - cron: "*/6 * * * *"   # 6 percenként (UTC)
 
 permissions:
-  contents: read
+  contents: write
   
 concurrency:
   # Allow manual dispatches to finish even if a scheduled run starts by
@@ -149,6 +149,7 @@ jobs:
         with:
           name: analysis-public
           path: public
+
   predeploy:
     name: 3) Pre-deploy verification & tests
     needs: analysis
@@ -161,6 +162,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          persist-credentials: true
 
       - name: Sync with origin/main
         run: |
@@ -264,6 +266,21 @@ jobs:
           if [ "$main_rev" != "$baseline_rev" ]; then
             echo "origin/main advanced during job run; proceeding with baseline validation." >&2
           fi
+
+      - name: Commit and push updated public outputs
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          set -euo pipefail
+          git status
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add public
+          if git diff --cached --quiet; then
+            echo "No changes in public/ to commit."
+            exit 0
+          fi
+          git commit -m "Auto-update analysis outputs (public/) [skip ci]"
+          git push origin main
 
   notify:
     name: 4) Discord értesítő
