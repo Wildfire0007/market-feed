@@ -8404,8 +8404,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         and regime_ok
     ):
         effective_bias = bias1h
-            bias_override_used = True
-            bias_override_reason = "Bias override: NVDA 1h trend cash-session megerősítés"
+        bias_override_used = True
+        bias_override_reason = "Bias override: NVDA 1h trend cash-session megerősítés"
 
     if mean_reversion_bias:
         if effective_bias != mean_reversion_bias:
@@ -12831,6 +12831,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
