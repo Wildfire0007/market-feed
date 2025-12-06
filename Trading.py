@@ -129,6 +129,7 @@ TD_BACKOFF_BASE = float(os.getenv("TD_BACKOFF_BASE", str(max(TD_PAUSE, 0.25))))
 TD_BACKOFF_MAX = float(os.getenv("TD_BACKOFF_MAX", "8.0"))
 TD_REQUESTS_PER_MINUTE = max(10, _env_int("TD_REQUESTS_PER_MINUTE", 55))
 TD_REQUEST_BURST = max(1, _env_int("TD_REQUEST_BURST", min(10, TD_REQUESTS_PER_MINUTE)))
+TD_RESPONSE_CACHE_TTL = max(5.0, float(os.getenv("TD_RESPONSE_CACHE_TTL", "90")))
 REALTIME_FLAG = os.getenv("TD_REALTIME_SPOT", "0").lower() in {"1", "true", "yes", "on"}
 REALTIME_INTERVAL = float(os.getenv("TD_REALTIME_INTERVAL", "5"))
 REALTIME_DURATION = float(os.getenv("TD_REALTIME_DURATION", "20"))
@@ -737,6 +738,7 @@ _REQUEST_SESSION.mount("http://", _REQUEST_ADAPTER)
 _REQUEST_SESSION.trust_env = False
 _REQUEST_SESSION.headers.update({"User-Agent": "market-feed/td-only/1.0"})
 _ORIGINAL_REQUESTS_GET = requests.get
+_TD_RESPONSE_CACHE: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], Tuple[float, Dict[str, Any]]] = {}
 ANCHOR_LOCK = threading.Lock()
 _REALTIME_BACKGROUND_LOCK = threading.Lock()
 REALTIME_BACKGROUND_THREADS: List[threading.Thread] = []
@@ -1606,6 +1608,42 @@ def _coerce_float(value: Any) -> Optional[float]:
         return None
 
 
+def _td_cache_key(path: str, params: Dict[str, Any]) -> Tuple[str, Tuple[Tuple[str, str], ...]]:
+    normalized_params = []
+    for key, value in params.items():
+        if key == "apikey":
+            continue
+        normalized_params.append((str(key), str(value)))
+    normalized_params.sort(key=lambda item: (item[0], item[1]))
+    return path, tuple(normalized_params)
+
+
+def _get_cached_td_response(path: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    key = _td_cache_key(path, params)
+    cached = _TD_RESPONSE_CACHE.get(key)
+    if not cached:
+        return None
+    recorded_at, payload = cached
+    age = max(0.0, time.monotonic() - recorded_at)
+    if age > TD_RESPONSE_CACHE_TTL:
+        _TD_RESPONSE_CACHE.pop(key, None)
+        return None
+    cached_payload = dict(payload)
+    cached_payload.setdefault("ok", True)
+    cached_payload.setdefault("from_cache", True)
+    cached_payload["cache_age_seconds"] = age
+    return cached_payload
+
+
+def _store_cached_td_response(path: str, params: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    if not isinstance(payload, dict):
+        return
+    key = _td_cache_key(path, params)
+    payload_copy = dict(payload)
+    payload_copy.setdefault("retrieved_at_utc", now_utc())
+    _TD_RESPONSE_CACHE[key] = (time.monotonic(), payload_copy)
+
+
 def _td_error_details(payload: Any) -> Tuple[Optional[str], Optional[int]]:
     """Extract Twelve Data error information from a JSON payload."""
 
@@ -1687,6 +1725,7 @@ def td_get(path: str, **params) -> Dict[str, Any]:
     params["apikey"] = API_KEY
     last_error: Optional[Exception] = None
     last_status: Optional[int] = None
+    cached_response = _get_cached_td_response(path, params)
     for attempt in range(1, TD_MAX_RETRIES + 1):
         TD_RATE_LIMITER.wait()
         response: Optional[requests.Response] = None
@@ -1728,6 +1767,7 @@ def td_get(path: str, **params) -> Dict[str, Any]:
                     raise td_error
             else:
                 TD_RATE_LIMITER.record_success()
+                _store_cached_td_response(path, params, data)
                 return data
         except requests.HTTPError as exc:
             last_error = exc
@@ -1736,6 +1776,7 @@ def td_get(path: str, **params) -> Dict[str, Any]:
             if exc.response is not None:
                 retry_after_hint = _parse_retry_after(exc.response.headers.get("Retry-After"))
             throttled = last_status in {429, 503}
+            cache_ready = bool(throttled and cached_response)
             TD_RATE_LIMITER.record_failure(
                 throttled=throttled,
                 retry_after=retry_after_hint,
@@ -1743,9 +1784,12 @@ def td_get(path: str, **params) -> Dict[str, Any]:
             if last_status and last_status < 500 and not throttled:
                 raise TDError(str(exc), status_code=last_status, throttled=throttled) from exc
             if attempt == TD_MAX_RETRIES:
-                if last_status and last_status < 500:
+                if last_status and last_status < 500 and not throttled:
                     raise TDError(str(exc), status_code=last_status, throttled=throttled) from exc
-                raise
+                if last_status and last_status < 500 and not cache_ready:
+                    raise TDError(str(exc), status_code=last_status, throttled=throttled) from exc
+                if not cache_ready:
+                    raise
         except (requests.RequestException, ValueError, json.JSONDecodeError) as exc:
             last_error = exc
             last_status = None
@@ -1760,6 +1804,11 @@ def td_get(path: str, **params) -> Dict[str, Any]:
         time.sleep(backoff)
 
     status_str = f" status={last_status}" if last_status else ""
+    if cached_response and (last_status is None or last_status >= 500 or last_status == 429):
+        cached_response.setdefault("from_cache", True)
+        cached_response.setdefault("ok", True)
+        cached_response["cache_fallback_reason"] = status_str.strip() or "unknown"
+        return cached_response
     raise TDError(
         f"TD request failed after {TD_MAX_RETRIES} attempts{status_str}: {last_error}",
         status_code=last_status,
@@ -3933,6 +3982,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
