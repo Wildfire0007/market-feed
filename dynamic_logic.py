@@ -7,8 +7,12 @@ that callers can surface in diagnostics.
 """
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any, Dict, List, Optional, Tuple
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -21,10 +25,167 @@ def _safe_float(value: Any) -> Optional[float]:
     return result
 
 
+def _coerce_float(
+    value: Any,
+    *,
+    path: str,
+    warnings: List[str],
+    allow_negative: bool = True,
+    allow_none: bool = True,
+) -> Optional[float]:
+    """Convert ``value`` to float with validation side effects."""
+
+    if value is None and allow_none:
+        return None
+    coerced = _safe_float(value)
+    if coerced is None:
+        warnings.append(f"Invalid numeric value at {path}: {value!r}")
+        return None
+    if not allow_negative and coerced < 0:
+        warnings.append(f"Negative value not allowed at {path}: {coerced}")
+        return None
+    return coerced
+
+
 def _is_enabled(config: Optional[Dict[str, Any]]) -> bool:
     if not isinstance(config, dict):
         return False
     return bool(config.get("enabled"))
+
+
+def validate_dynamic_logic_config(
+    config: Any, *, logger: Optional[logging.Logger] = None
+) -> Tuple[Dict[str, Any], List[str]]:
+    """Return a sanitized dynamic logic config and validation warnings."""
+
+    log = logger or LOGGER
+    warnings: List[str] = []
+    default_cfg: Dict[str, Any] = {
+        "enabled": False,
+        "p_score": {
+            "volatility_bonus": {"enabled": False, "z_threshold": None, "points": None},
+            "momentum_boost": {"enabled": False, "adx_min": None, "points": None},
+            "regime_penalty": {"enabled": False, "adx_max": None, "points": None},
+        },
+        "soft_gates": {"atr": {"enabled": False, "tolerance_pct": 0.15, "penalty_max": 6.0}},
+        "latency_relaxation": {
+            "profiles": {"strict": {"limit": None, "penalty": 0.0}},
+            "asset_map": {"default": "strict"},
+        },
+    }
+
+    if not isinstance(config, dict):
+        return default_cfg, warnings
+
+    sanitized: Dict[str, Any] = {"enabled": bool(config.get("enabled", False))}
+
+    p_score_cfg: Dict[str, Any] = {}
+    raw_p_score = config.get("p_score")
+    if isinstance(raw_p_score, dict):
+        vol_raw = raw_p_score.get("volatility_bonus")
+        if isinstance(vol_raw, dict):
+            vol_cfg: Dict[str, Any] = {"enabled": bool(vol_raw.get("enabled"))}
+            vol_cfg["z_threshold"] = _coerce_float(
+                vol_raw.get("z_threshold"), path="p_score.volatility_bonus.z_threshold", warnings=warnings
+            )
+            vol_cfg["points"] = _coerce_float(
+                vol_raw.get("points"), path="p_score.volatility_bonus.points", warnings=warnings
+            )
+            p_score_cfg["volatility_bonus"] = vol_cfg
+
+        momentum_raw = raw_p_score.get("momentum_boost")
+        if isinstance(momentum_raw, dict):
+            momentum_cfg: Dict[str, Any] = {"enabled": bool(momentum_raw.get("enabled"))}
+            momentum_cfg["adx_min"] = _coerce_float(
+                momentum_raw.get("adx_min"),
+                path="p_score.momentum_boost.adx_min",
+                warnings=warnings,
+            )
+            momentum_cfg["points"] = _coerce_float(
+                momentum_raw.get("points"), path="p_score.momentum_boost.points", warnings=warnings
+            )
+            p_score_cfg["momentum_boost"] = momentum_cfg
+
+        regime_raw = raw_p_score.get("regime_penalty")
+        if isinstance(regime_raw, dict):
+            regime_cfg: Dict[str, Any] = {"enabled": bool(regime_raw.get("enabled"))}
+            regime_cfg["adx_max"] = _coerce_float(
+                regime_raw.get("adx_max"),
+                path="p_score.regime_penalty.adx_max",
+                warnings=warnings,
+            )
+            regime_cfg["points"] = _coerce_float(
+                regime_raw.get("points"), path="p_score.regime_penalty.points", warnings=warnings
+            )
+            p_score_cfg["regime_penalty"] = regime_cfg
+
+    sanitized["p_score"] = p_score_cfg
+
+    soft_gates_cfg: Dict[str, Any] = {}
+    raw_soft = config.get("soft_gates")
+    if isinstance(raw_soft, dict):
+        atr_raw = raw_soft.get("atr")
+        if isinstance(atr_raw, dict):
+            atr_cfg: Dict[str, Any] = {"enabled": bool(atr_raw.get("enabled"))}
+            atr_cfg["tolerance_pct"] = _coerce_float(
+                atr_raw.get("tolerance_pct"),
+                path="soft_gates.atr.tolerance_pct",
+                warnings=warnings,
+                allow_negative=False,
+            )
+            atr_cfg["penalty_max"] = _coerce_float(
+                atr_raw.get("penalty_max"),
+                path="soft_gates.atr.penalty_max",
+                warnings=warnings,
+                allow_negative=False,
+            )
+            soft_gates_cfg["atr"] = atr_cfg
+    sanitized["soft_gates"] = soft_gates_cfg
+
+    latency_cfg: Dict[str, Any] = {"profiles": {}, "asset_map": {}}
+    raw_latency = config.get("latency_relaxation")
+    if isinstance(raw_latency, dict):
+        profiles_raw = raw_latency.get("profiles") if isinstance(raw_latency.get("profiles"), dict) else {}
+        profiles: Dict[str, Dict[str, Any]] = {}
+        for name, meta in profiles_raw.items():
+            if not isinstance(meta, dict):
+                warnings.append(f"Ignoring latency profile {name!r}: expected mapping")
+                continue
+            profile_cfg: Dict[str, Any] = {}
+            profile_cfg["limit"] = _coerce_float(
+                meta.get("limit"), path=f"latency_relaxation.profiles.{name}.limit", warnings=warnings
+            )
+            profile_cfg["penalty"] = _coerce_float(
+                meta.get("penalty"),
+                path=f"latency_relaxation.profiles.{name}.penalty",
+                warnings=warnings,
+                allow_none=False,
+            )
+            profiles[str(name)] = profile_cfg
+        if "strict" not in profiles:
+            profiles["strict"] = {"limit": None, "penalty": 0.0}
+        latency_cfg["profiles"] = profiles
+
+        asset_map_raw = raw_latency.get("asset_map")
+        if isinstance(asset_map_raw, dict):
+            latency_cfg["asset_map"] = {
+                str(asset).upper(): str(profile)
+                for asset, profile in asset_map_raw.items()
+                if isinstance(asset, str) and isinstance(profile, str)
+            }
+    else:
+        latency_cfg["profiles"] = {"strict": {"limit": None, "penalty": 0.0}}
+        latency_cfg["asset_map"] = {"default": "strict"}
+
+    if "default" not in latency_cfg.get("asset_map", {}):
+        latency_cfg.setdefault("asset_map", {})["default"] = "strict"
+
+    sanitized["latency_relaxation"] = latency_cfg
+
+    for warning in warnings:
+        log.warning(warning)
+
+    return sanitized, warnings
 
 
 def apply_dynamic_p_score(
@@ -53,8 +214,8 @@ def apply_dynamic_p_score(
     # Volatility-driven bonus when implied volatility materially exceeds
     # realised observations.
     vol_cfg = p_score_cfg.get("volatility_bonus") if isinstance(p_score_cfg, dict) else {}
-    z_threshold = _safe_float(vol_cfg.get("z_threshold")) if isinstance(vol_cfg, dict) else None
-    vol_points = _safe_float(vol_cfg.get("points")) if isinstance(vol_cfg, dict) else None
+    z_threshold = vol_cfg.get("z_threshold") if isinstance(vol_cfg, dict) else None
+    vol_points = vol_cfg.get("points") if isinstance(vol_cfg, dict) else None
     overlay_ratio = None
     if isinstance(volatility_overlay, dict):
         overlay_ratio = _safe_float(volatility_overlay.get("implied_realised_ratio"))
@@ -77,8 +238,8 @@ def apply_dynamic_p_score(
 
     # ADX-driven momentum bump.
     momentum_cfg = p_score_cfg.get("momentum_boost") if isinstance(p_score_cfg, dict) else {}
-    adx_min = _safe_float(momentum_cfg.get("adx_min")) if isinstance(momentum_cfg, dict) else None
-    momentum_points = _safe_float(momentum_cfg.get("points")) if isinstance(momentum_cfg, dict) else None
+    adx_min = momentum_cfg.get("adx_min") if isinstance(momentum_cfg, dict) else None
+    momentum_points = momentum_cfg.get("points") if isinstance(momentum_cfg, dict) else None
     if _is_enabled(momentum_cfg) and adx_min is not None and momentum_points is not None:
         adx_value_normalized = _safe_float(adx_value)
         if adx_value_normalized is not None and adx_value_normalized >= adx_min:
@@ -94,8 +255,8 @@ def apply_dynamic_p_score(
 
     # Conditional regime penalty for low-momentum environments.
     regime_cfg = p_score_cfg.get("regime_penalty") if isinstance(p_score_cfg, dict) else {}
-    adx_cap = _safe_float(regime_cfg.get("adx_max")) if isinstance(regime_cfg, dict) else None
-    regime_points = _safe_float(regime_cfg.get("points")) if isinstance(regime_cfg, dict) else None
+    adx_cap = regime_cfg.get("adx_max") if isinstance(regime_cfg, dict) else None
+    regime_points = regime_cfg.get("points") if isinstance(regime_cfg, dict) else None
     adx_value_normalized = _safe_float(adx_value)
     if _is_enabled(regime_cfg) and adx_cap is not None and regime_points is not None:
         if adx_value_normalized is not None and adx_value_normalized <= adx_cap:
@@ -116,8 +277,14 @@ def apply_dynamic_p_score(
 class DynamicScoreEngine:
     """Compute dynamic P-score adjustments in a dedicated workflow."""
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
-        self.config = config or {}
+    def __init__(
+        self, config: Optional[Dict[str, Any]] = None, *, validate_config: bool = True
+    ) -> None:
+        if validate_config:
+            sanitized, _ = validate_dynamic_logic_config(config or {})
+            self.config = sanitized
+        else:
+            self.config = config or {}
 
     def score(
         self,
@@ -137,7 +304,7 @@ class DynamicScoreEngine:
         p_score_cfg = self.config.get("p_score") if isinstance(self.config, dict) else {}
 
         regime_cfg = p_score_cfg.get("regime_penalty") if isinstance(p_score_cfg, dict) else {}
-        regime_points = _safe_float(regime_cfg.get("points")) if isinstance(regime_cfg, dict) else None
+        regime_points = regime_cfg.get("points") if isinstance(regime_cfg, dict) else None
         regime_label = str((regime_data or {}).get("label") or "").upper()
         if _is_enabled(regime_cfg) and regime_points is not None and regime_label == "CHOPPY":
             score += regime_points
@@ -156,8 +323,8 @@ class DynamicScoreEngine:
                 )
 
         vol_cfg = p_score_cfg.get("volatility_bonus") if isinstance(p_score_cfg, dict) else {}
-        vol_threshold = _safe_float(vol_cfg.get("z_threshold")) if isinstance(vol_cfg, dict) else None
-        vol_bonus = _safe_float(vol_cfg.get("points")) if isinstance(vol_cfg, dict) else None
+        vol_threshold = vol_cfg.get("z_threshold") if isinstance(vol_cfg, dict) else None
+        vol_bonus = vol_cfg.get("points") if isinstance(vol_cfg, dict) else None
         volatility_z = _safe_float((volatility_data or {}).get("volatility_z"))
         if volatility_z is None:
             volatility_z = _safe_float((volatility_data or {}).get("implied_realised_ratio"))
@@ -216,8 +383,8 @@ def apply_atr_soft_gate(
     if atr_ok:
         return True, 0.0, {"soft_gate": False}
 
-    tolerance_pct = _safe_float(config.get("tolerance_pct")) if isinstance(config, dict) else None
-    penalty_max = _safe_float(config.get("penalty_max")) if isinstance(config, dict) else None
+    tolerance_pct = config.get("tolerance_pct") if isinstance(config, dict) else None
+    penalty_max = config.get("penalty_max") if isinstance(config, dict) else None
     rel_atr_val = _safe_float(rel_atr)
     atr_threshold_val = _safe_float(atr_threshold)
 
@@ -266,8 +433,8 @@ class VolatilityManager:
 
         rel_atr_val = _safe_float(rel_atr)
         threshold_val = _safe_float(threshold)
-        tolerance_pct = _safe_float(self.config.get("tolerance_pct"))
-        penalty_max = _safe_float(self.config.get("penalty_max"))
+        tolerance_pct = self.config.get("tolerance_pct") if isinstance(self.config, dict) else None
+        penalty_max = self.config.get("penalty_max") if isinstance(self.config, dict) else None
         enabled = _is_enabled(self.config)
         # Fall back to sane defaults when the config block is incomplete to keep
         # soft-gating behaviour backwards compatible.
@@ -351,8 +518,8 @@ def apply_latency_relaxation(
     if not isinstance(profile_cfg, dict):
         return 0.0, None, guard_status
 
-    relaxed_limit = _safe_float(profile_cfg.get("limit"))
-    penalty = _safe_float(profile_cfg.get("penalty")) or 0.0
+    relaxed_limit = profile_cfg.get("limit") if isinstance(profile_cfg, dict) else None
+    penalty = profile_cfg.get("penalty") if isinstance(profile_cfg, dict) else 0.0
     if relaxed_limit is None:
         return penalty, None, guard_status
 
