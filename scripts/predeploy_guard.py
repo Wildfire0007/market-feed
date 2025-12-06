@@ -8,6 +8,7 @@ prior to deploying or notifying, with an escape hatch for rollback flows.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ ensure_json_stream_handler(LOGGER, static_fields={"component": "predeploy"})
 
 
 DEFAULT_STATUS_PATH = Path("public/status.json")
+DEFAULT_HASH_MANIFEST = Path("public/pipeline/hash_manifest.json")
 
 
 class StatusValidationError(RuntimeError):
@@ -71,16 +73,76 @@ class StatusValidator:
         self.ensure_assets()
 
 
+def _compute_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8192), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+class HashValidator:
+    def __init__(self, manifest_path: Path) -> None:
+        self.manifest_path = manifest_path
+
+    def load_manifest(self) -> Dict[str, Any]:
+        if not self.manifest_path.exists():
+            raise StatusValidationError(f"hash manifest missing: {self.manifest_path}")
+        try:
+            with self.manifest_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except json.JSONDecodeError as exc:
+            raise StatusValidationError(f"hash manifest invalid JSON: {exc}") from exc
+        if not isinstance(payload, dict) or "files" not in payload:
+            raise StatusValidationError("hash manifest must contain 'files' map")
+        return payload
+
+    def validate(self) -> None:
+        payload = self.load_manifest()
+        files = payload.get("files") or {}
+        if not isinstance(files, dict) or not files:
+            raise StatusValidationError("hash manifest files map is empty")
+        mismatches: Dict[str, str] = {}
+        missing: Dict[str, str] = {}
+        for rel_path, meta in files.items():
+            expected = None
+            if isinstance(meta, dict):
+                expected = meta.get("sha256")
+            if not expected or not isinstance(expected, str):
+                raise StatusValidationError(f"hash manifest missing sha256 for {rel_path}")
+            candidate = Path(rel_path)
+            if not candidate.is_absolute():
+                candidate = _REPO_ROOT / candidate
+            if not candidate.exists():
+                missing[str(rel_path)] = "missing"
+                continue
+            actual = _compute_sha256(candidate)
+            if actual != expected:
+                mismatches[str(rel_path)] = actual
+        if missing:
+            raise StatusValidationError(f"hash targets missing: {sorted(missing)}")
+        if mismatches:
+            raise StatusValidationError(
+                "hash mismatch for "
+                + ", ".join(f"{path} (actual {digest})" for path, digest in sorted(mismatches.items()))
+            )
+
+
 class GuardConfig:
-    def __init__(self, *, skip: bool, status_path: Path) -> None:
+    def __init__(self, *, skip: bool, status_path: Path, hash_manifest: Path) -> None:
         self.skip = skip
         self.status_path = status_path
+        self.hash_manifest = hash_manifest
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "GuardConfig":
         env_skip = os.getenv("PREDEPLOY_SKIP_FOR_ROLLBACK")
         skip = args.allow_rollback or (env_skip not in (None, "", "0", "false", "False"))
-        return cls(skip=bool(skip), status_path=Path(args.status_path))
+        return cls(
+            skip=bool(skip),
+            status_path=Path(args.status_path),
+            hash_manifest=Path(args.hash_manifest),
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -89,6 +151,11 @@ def parse_args() -> argparse.Namespace:
         "--status-path",
         default=str(DEFAULT_STATUS_PATH),
         help="Path to the status.json artefact",
+    )
+    parser.add_argument(
+        "--hash-manifest",
+        default=str(DEFAULT_HASH_MANIFEST),
+        help="Path to the expected hash manifest",
     )
     parser.add_argument(
         "--allow-rollback",
@@ -119,6 +186,8 @@ def main() -> int:
         payload = loader.load()
         validator = StatusValidator(payload)
         validator.validate()
+        hash_validator = HashValidator(cfg.hash_manifest)
+        hash_validator.validate()
     except StatusValidationError as exc:
         LOGGER.error("predeploy_guard_failed", extra={"error": str(exc)})
         return 1
