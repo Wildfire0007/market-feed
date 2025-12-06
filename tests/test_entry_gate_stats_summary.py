@@ -4,7 +4,11 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.analyze_entry_gates import SymbolStats, build_json_summary
+from tools.analyze_entry_gates import (
+    SymbolStats,
+    build_daily_visualization,
+    build_json_summary,
+)
 
 
 def test_entry_gate_stats_summary_is_deterministic():
@@ -22,3 +26,17 @@ def test_entry_gate_stats_summary_is_deterministic():
     assert list(summary.keys()) == ["ASYM", "ZSYM"]
     assert list(summary["ZSYM"]["by_reason"].keys()) == ["a_reason", "b_reason"]
     assert summary["ZSYM"]["by_time_of_day"]["open"]["total_candidates"] == 2
+
+
+def test_daily_visualization_is_bucketised_and_sorted():
+    stats = {
+        "EURUSD": SymbolStats(total_candidates=0, total_rejected=0),
+    }
+    stats["EURUSD"].daily_candidates.update({("2024-01-01", "open"): 2, ("2024-01-02", "mid"): 1})
+    stats["EURUSD"].daily_rejections.update({("2024-01-02", "mid"): 1})
+
+    daily = build_daily_visualization(stats)
+    assert list(daily.keys()) == ["2024-01-01", "2024-01-02"]
+    assert daily["2024-01-01"]["open"]["total_candidates"] == 2
+    assert daily["2024-01-01"]["open"].get("total_rejected", 0) == 0
+    assert daily["2024-01-02"]["mid"]["total_rejected"] == 1
