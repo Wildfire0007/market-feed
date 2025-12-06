@@ -33,7 +33,7 @@ def test_default_profile_configuration(monkeypatch):
 
     assert profile["p_score_min"]["default"] == pytest.approx(30.0)
     assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(30.0)
-    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(30.0)
+    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(25.0)
     assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(30.0)
     assert profile["p_score_min"]["by_asset"]["NVDA"] == pytest.approx(30.0)
     assert profile["p_score_min"]["by_asset"]["USOIL"] == pytest.approx(30.0)
@@ -102,7 +102,7 @@ def test_relaxed_profile_override(monkeypatch):
     assert profile["name"] == "relaxed"
 
     # RELAXED értékek
-    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(30.0)
+    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(25.0)
     assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(30.0)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.0)
     assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.0)
@@ -285,6 +285,7 @@ def test_profile_specific_helpers(monkeypatch):
     assert relaxed.get_bos_lookback(None) == 28
     assert relaxed.get_fib_tolerance("GOLD_CFD") == pytest.approx(0.05)
     assert relaxed.get_fib_tolerance("NVDA") == pytest.approx(0.1)
+    assert relaxed.get_max_risk_pct("GOLD_CFD") == pytest.approx(1.2)
 
     _reload_settings(monkeypatch)
 
