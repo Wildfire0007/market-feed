@@ -76,6 +76,7 @@ REASON_KEYS_NESTED = (
 JSON_EXTENSIONS = {".json", ".jsonl"}
 ENTRY_GATE_LOG_RELATIVE_DIR = Path("debug/entry_gates")
 ENTRY_GATE_STATS_RELATIVE_PATH = Path("debug/entry_gate_stats.json")
+ENTRY_GATE_DAILY_RELATIVE_PATH = Path("monitoring/entry_gate_daily.json")
 
 
 @dataclass
@@ -89,6 +90,8 @@ class SymbolStats:
         default_factory=lambda: defaultdict(Counter)
     )
     total_candidates_by_tod: Counter[str] = field(default_factory=Counter)
+    daily_candidates: Counter[Tuple[str, str]] = field(default_factory=Counter)
+    daily_rejections: Counter[Tuple[str, str]] = field(default_factory=Counter)
 
     def register(self, reasons: Sequence[str], timestamp: Optional[datetime]) -> None:
         self.total_candidates += 1
@@ -104,6 +107,12 @@ class SymbolStats:
                 tod_counter = self.by_time_of_day[bucket]
                 for reason in unique_reasons:
                     tod_counter[reason] += 1
+        if timestamp is not None:
+            date_key = timestamp.astimezone(timezone.utc).date().isoformat()
+            if bucket is not None:
+                self.daily_candidates[(date_key, bucket)] += 1
+                if unique_reasons:
+                    self.daily_rejections[(date_key, bucket)] += 1
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +583,29 @@ def build_json_summary(stats: Mapping[str, SymbolStats]) -> Dict[str, Any]:
     return summary
 
 
+def build_daily_visualization(stats: Mapping[str, SymbolStats]) -> Dict[str, Any]:
+    daily: Dict[str, Dict[str, Dict[str, int]]] = {}
+    for record in stats.values():
+        for (date_key, bucket), count in record.daily_candidates.items():
+            bucket_payload = daily.setdefault(date_key, {}).setdefault(
+                bucket, {"total_candidates": 0, "total_rejected": 0}
+            )
+            bucket_payload["total_candidates"] += count
+        for (date_key, bucket), count in record.daily_rejections.items():
+            bucket_payload = daily.setdefault(date_key, {}).setdefault(
+                bucket, {"total_candidates": 0, "total_rejected": 0}
+            )
+            bucket_payload["total_rejected"] += count
+
+    normalized: Dict[str, Any] = {}
+    for date_key in sorted(daily):
+        buckets = daily[date_key]
+        normalized[date_key] = {
+            bucket: buckets[bucket] for bucket in sorted(buckets)
+        }
+    return normalized
+
+
 def write_json_summary(path: Path, summary: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
@@ -607,6 +639,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--output-json",
         type=Path,
         help="If provided, write a machine-readable summary to this path.",
+    )
+    parser.add_argument(
+        "--output-daily-json",
+        type=Path,
+        help="Optional path for daily bucketised stats (default: public/monitoring/entry_gate_daily.json)",
     )
     return parser.parse_args(argv)
 
@@ -658,8 +695,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         output_json = (public_root / ENTRY_GATE_STATS_RELATIVE_PATH).resolve()
 
+    if args.output_daily_json is not None:
+        output_daily = args.output_daily_json.expanduser()
+        if not output_daily.is_absolute():
+            output_daily = (Path.cwd() / output_daily).resolve()
+    else:
+        output_daily = (public_root / ENTRY_GATE_DAILY_RELATIVE_PATH).resolve()
+
     summary_payload = build_json_summary(stats)
     write_json_summary(output_json, summary_payload)
+    daily_payload = build_daily_visualization(stats)
+    write_json_summary(output_daily, daily_payload)
 
     return 0
 
