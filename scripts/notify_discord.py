@@ -359,42 +359,50 @@ def build_mobile_embed_for_asset(
             raw_note = raw_note.strip()
         position_note = raw_note
 
-    line_plan = ""
+    entry = sl = tp1 = tp2 = rr = None
     if isinstance(signal_data, dict):
         entry = signal_data.get("entry")
         sl = signal_data.get("sl")
         tp1 = signal_data.get("tp1")
         tp2 = signal_data.get("tp2")
         rr = signal_data.get("rr")
-        if decision_upper in {"BUY", "SELL"} and all(v is not None for v in (entry, sl, tp1, tp2)):
-            plan_parts = [
-                f"Belépő `{format_price(entry, asset)}`",
-                f"SL `{format_price(sl, asset)}`",
-                f"TP1 `{format_price(tp1, asset)}`",
-                f"TP2 `{format_price(tp2, asset)}`",
-            ]
-            if rr is not None:
-                plan_parts.append(f"RR≈`{rr}`")
-            line_plan = "🎯 " + " • ".join(plan_parts)
+  
+    # --- Mobil + pszicho struktúra (7–8 sor) ---
+    lines = []
 
-    line_block = ""
-    if status_text == "NINCS BELÉPŐ":
-        gates = signal_data.get("gates", {}) if isinstance(signal_data, dict) else {}
-        missing = gates.get("missing", []) if isinstance(gates, dict) else []
-        if missing:
-            reasons_hu = translate_reasons(missing)
-            line_block = f"\n⛔ **Blokkolók:** {reasons_hu}"
+    # TLDR döntés + setup
+    grade_emoji = "🟢" if setup_info["grade"] == "A" else "🟡" if setup_info["grade"] == "B" else "⚪"
+    lines.append(f"{status_icon} {decision_upper or 'NINCS'} • {setup_info['grade']} setup • {setup_info['action']}")
+    
+    # Spot ár és idő
+    lines.append(f"💵 {format_price(spot, asset)} • 🕒 {local_time}")
 
-    lines = [line_status, line_score, line_price]
+    # Entry/SL/TP1/TP2/RR blokk
+    if decision_upper in {"BUY", "SELL"} and all(v is not None for v in (entry, sl, tp1, tp2)):
+        rr_txt = f"RR≈`{rr}`" if rr is not None else ""
+        lines.append(f"🎯 Belépő `{format_price(entry, asset)}` • SL `{format_price(sl, asset)}` • TP1 `{format_price(tp1, asset)}` • TP2 `{format_price(tp2, asset)}` • {rr_txt}".strip(" • "))
 
-    if line_plan:
-        lines.append(line_plan)
-
+    # Pozíciómenedzsment
     if position_note:
         lines.append(f"🧭 {position_note}")
+    
+    # Dinamikus setup komment vagy megjegyzés
+    gates_missing = (signal_data.get("gates") or {}).get("missing") if isinstance(signal_data, dict) else []
+    if gates_missing:
+        reasons = translate_reasons(gates_missing)
+        lines.append(f"🧠 Figyelem: {reasons}")
 
-    lines.extend(["", line_setup + line_block])
+    # P-score vizuálisan
+    p_bar = draw_progress_bar(p_score)
+    lines.append(f"📊 P: `{p_bar}` {int(p_score)}%")
 
+    # Entry tiltás, ha van
+    if status_text == "NINCS BELÉPŐ":
+        if gates_missing:
+            reasons_hu = translate_reasons(gates_missing)
+            lines.append(f"⛔ Blokkolók: {reasons_hu}")
+
+    # Final description
     description = "\n".join(lines)
 
     return {
