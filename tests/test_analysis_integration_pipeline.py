@@ -1,56 +1,16 @@
-import importlib
 import json
-import sys
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from datetime import timedelta
 
 import pytest
 
-
-def _reload_analysis(monkeypatch):
-    monkeypatch.delenv("SESSION_STATUS_PROFILE", raising=False)
-    monkeypatch.delenv("ENTRY_THRESHOLD_PROFILE", raising=False)
-    if "analysis" in sys.modules:
-        return importlib.reload(sys.modules["analysis"])
-    return importlib.import_module("analysis")
+from conftest import apply_common_analysis_stubs, make_raw_klines
 
 
-def _make_raw_klines(final_time: datetime, periods: int, step: timedelta, base: float):
-    rows = []
-    start = final_time - step * (periods - 1)
-    for idx in range(periods):
-        ts = start + step * idx
-        rows.append(
-            {
-                "datetime": ts.isoformat(),
-                "open": base + idx * 0.1,
-                "high": base + idx * 0.1 + 0.2,
-                "low": base + idx * 0.1 - 0.2,
-                "close": base + idx * 0.1 + 0.05,
-                "volume": 100 + idx,
-            }
-        )
-    return rows
-
-
-def test_integration_latency_guard_and_precision(monkeypatch, tmp_path, caplog):
-    analysis = _reload_analysis(monkeypatch)
-
-    fixed_now = datetime(2024, 1, 10, 15, 0, tzinfo=timezone.utc)
-    real_datetime = analysis.datetime
-
-    class FixedDateTime(real_datetime):
-        @classmethod
-        def now(cls, tz=None):
-            if tz is None:
-                return fixed_now.replace(tzinfo=None)
-            return fixed_now.astimezone(tz)
-
-    monkeypatch.setattr(analysis, "datetime", FixedDateTime)
-    monkeypatch.setattr(analysis, "PUBLIC_DIR", str(tmp_path))
-
+def test_integration_latency_guard_and_precision(
+    monkeypatch, tmp_path, caplog, analysis_module, fixed_now, asset_registry
+):
+    analysis = analysis_module
+    
     alerts = []
 
     def fake_record_latency_alert(asset, feed, message, metadata=None):
@@ -74,39 +34,15 @@ def test_integration_latency_guard_and_precision(monkeypatch, tmp_path, caplog):
         }
 
     monkeypatch.setattr(analysis, "session_state", fake_session_state)
-    monkeypatch.setattr(analysis, "evaluate_news_lockout", lambda asset, now: (False, None))
-    monkeypatch.setattr(analysis, "load_funding_snapshot", lambda asset: {})
-    monkeypatch.setattr(analysis, "load_tick_order_flow", lambda asset, outdir: {})
-    monkeypatch.setattr(analysis, "compute_order_flow_metrics", lambda *a, **k: {})
-    monkeypatch.setattr(analysis, "current_anchor_state", lambda: {})
-    monkeypatch.setattr(analysis, "log_feature_snapshot", lambda *a, **k: None)
-    monkeypatch.setattr(analysis, "inspect_model_artifact", lambda asset: {})
-    monkeypatch.setattr(analysis, "missing_model_artifacts", lambda asset: [])
-    monkeypatch.setattr(analysis, "predict_signal_probability", lambda *a, **k: (0.42, {"model": "stub"}))
-    monkeypatch.setattr(analysis, "runtime_dependency_issues", lambda: [])
-    monkeypatch.setattr(analysis, "load_sentiment", lambda asset, now: ([], None))
-    monkeypatch.setattr(analysis, "load_volatility_overlay", lambda *a, **k: {})
-    monkeypatch.setattr(analysis, "update_precision_gate_report", lambda *a, **k: None)
-    monkeypatch.setattr(analysis, "update_signal_health_report", lambda *a, **k: None)
-    monkeypatch.setattr(analysis, "update_data_latency_report", lambda *a, **k: None)
-    monkeypatch.setattr(analysis, "update_live_validation", lambda *a, **k: None)
-    monkeypatch.setattr(analysis, "record_signal_event", lambda *a, **k: None)
-    monkeypatch.setattr(analysis, "record_analysis_run", lambda *a, **k: None)
-    monkeypatch.setattr(analysis, "record_ml_model_status", lambda *a, **k: None)
-    monkeypatch.setattr(analysis, "load_anchor_state", lambda: {})
-    monkeypatch.setattr(analysis, "record_anchor", lambda *a, **k: None)
-    monkeypatch.setattr(analysis, "update_anchor_metrics", lambda *a, **k: None)
-    monkeypatch.setattr(analysis, "ensure_closed_candles", lambda df, now, tolerance_seconds=0: df)
-    monkeypatch.setattr(analysis, "file_mtime", lambda path: None)
-
-    data_registry = {}
+    apply_common_analysis_stubs(analysis, monkeypatch, missing_models={})
+    
     for asset, stale_offset in {"USOIL": timedelta(minutes=16), "NVDA": timedelta(minutes=1)}.items():
         asset_map = {}
         final_k1m = fixed_now - stale_offset
-        asset_map["klines_1m.json"] = _make_raw_klines(final_k1m, 30, timedelta(minutes=1), 70.0 if asset == "USOIL" else 450.0)
-        asset_map["klines_5m.json"] = _make_raw_klines(fixed_now - timedelta(minutes=5), 30, timedelta(minutes=5), 71.0 if asset == "USOIL" else 452.0)
-        asset_map["klines_1h.json"] = _make_raw_klines(fixed_now - timedelta(hours=1), 30, timedelta(hours=1), 72.0 if asset == "USOIL" else 455.0)
-        asset_map["klines_4h.json"] = _make_raw_klines(fixed_now - timedelta(hours=4), 30, timedelta(hours=4), 73.0 if asset == "USOIL" else 458.0)
+        asset_map["klines_1m.json"] = make_raw_klines(final_k1m, 30, timedelta(minutes=1), 70.0 if asset == "USOIL" else 450.0)
+        asset_map["klines_5m.json"] = make_raw_klines(fixed_now - timedelta(minutes=5), 30, timedelta(minutes=5), 71.0 if asset == "USOIL" else 452.0)
+        asset_map["klines_1h.json"] = make_raw_klines(fixed_now - timedelta(hours=1), 30, timedelta(hours=1), 72.0 if asset == "USOIL" else 455.0)
+        asset_map["klines_4h.json"] = make_raw_klines(fixed_now - timedelta(hours=4), 30, timedelta(hours=4), 73.0 if asset == "USOIL" else 458.0)
         asset_map["klines_1m_meta.json"] = {}
         asset_map["klines_5m_meta.json"] = {}
         asset_map["klines_1h_meta.json"] = {}
@@ -120,17 +56,8 @@ def test_integration_latency_guard_and_precision(monkeypatch, tmp_path, caplog):
         asset_map["spot_realtime.json"] = {}
         asset_map["latency_profile.json"] = {"ema_delay": 120}
         asset_map["order_flow_ticks.json"] = {}
-        data_registry[asset] = asset_map
-
-    def fake_load_json(path):
-        p = Path(path)
-        asset = p.parent.name
-        asset_map = data_registry.get(asset)
-        if asset_map and p.name in asset_map:
-            return asset_map[p.name]
-        return {}
-
-    monkeypatch.setattr(analysis, "load_json", fake_load_json)
+        asset_registry[asset] = asset_map
+   
     monkeypatch.setattr(analysis, "load_latency_profile", lambda outdir: {"ema_delay": 90})
     monkeypatch.setattr(analysis, "update_latency_profile", lambda outdir, latency_seconds: None)
 
