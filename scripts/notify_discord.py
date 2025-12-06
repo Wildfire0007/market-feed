@@ -28,7 +28,7 @@ ENV:
 - DISCORD_FORCE_HEARTBEAT=1 ➜ csak az összefoglalót kényszerítjük (cooldown marad)
 """
 
-import os, json, sys, logging, requests
+import os, json, sys, logging, requests, time
 from dataclasses import dataclass
 from copy import deepcopy
 from pathlib import Path
@@ -422,6 +422,13 @@ def int_env(name: str, default: int) -> int:
         )
         return default
 
+NETWORK_RETRIES = int_env("DISCORD_NETWORK_RETRIES", 3)
+NETWORK_BACKOFF_BASE = max(1.0, float(os.getenv("DISCORD_NETWORK_BACKOFF_BASE", "2")))
+NETWORK_BACKOFF_CAP = max(NETWORK_BACKOFF_BASE, float(os.getenv("DISCORD_NETWORK_BACKOFF_CAP", "20")))
+NETWORK_COOLDOWN_MIN = max(1, int_env("DISCORD_NETWORK_COOLDOWN_MIN", 5))
+_WEBHOOK_COOLDOWN_UNTIL: Dict[str, float] = {}
+
+
 
 def load_webhooks() -> Dict[str, str]:
     base = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
@@ -456,10 +463,62 @@ def post_batches(hook: str, content: str, embeds: List[Dict[str, Any]]) -> None:
 
     if not hook:
         return
+    now = time.time()
+    cooldown_until = _WEBHOOK_COOLDOWN_UNTIL.get(hook)
+    if cooldown_until and now < cooldown_until:
+        LOGGER.warning(
+            "notify_webhook_cooldown_active",
+            extra={"hook": hook[:32], "retry_at_epoch": cooldown_until},
+        )
+        return
+
+    def _sleep_with_cap(delay: float) -> None:
+        time.sleep(min(delay, NETWORK_BACKOFF_CAP))
+
+    def _retry_delay(attempt: int, response: Optional[requests.Response]) -> float:
+        if response is not None:
+            retry_after = response.headers.get("Retry-After") if hasattr(response, "headers") else None
+            if retry_after:
+                try:
+                    return float(retry_after)
+                except (TypeError, ValueError):
+                    pass
+        return min(NETWORK_BACKOFF_CAP, NETWORK_BACKOFF_BASE * (2 ** (attempt - 1)))
+      
     batches = [embeds[i : i + 10] for i in range(0, len(embeds), 10)]
     for batch in batches:
-        r = requests.post(hook, json={"content": content, "embeds": batch}, timeout=20)
-        r.raise_for_status()
+        last_error: Optional[Exception] = None
+        for attempt in range(1, NETWORK_RETRIES + 1):
+            try:
+                r = requests.post(hook, json={"content": content, "embeds": batch}, timeout=20)
+                r.raise_for_status()
+                break
+            except requests.HTTPError as exc:  # pragma: no cover - exercised via RequestException
+                last_error = exc
+                status = exc.response.status_code if exc.response else None
+                delay = _retry_delay(attempt, exc.response)
+                LOGGER.warning(
+                    "notify_webhook_http_error",
+                    extra={"status": status, "attempt": attempt, "delay": delay},
+                )
+                if status == 429:
+                    _WEBHOOK_COOLDOWN_UNTIL[hook] = time.time() + NETWORK_COOLDOWN_MIN * 60
+                if attempt == NETWORK_RETRIES:
+                    raise
+                _sleep_with_cap(delay)
+            except requests.RequestException as exc:
+                last_error = exc
+                delay = _retry_delay(attempt, None)
+                LOGGER.warning(
+                    "notify_webhook_network_error",
+                    extra={"attempt": attempt, "delay": delay, "error": str(exc)},
+                )
+                if attempt == NETWORK_RETRIES:
+                    raise
+                _sleep_with_cap(delay)
+        else:
+            if last_error:
+                raise last_error
       
 def build_entry_gate_summary_embed() -> Optional[Dict[str, Any]]:
     """Return a compact embed with top entry gate elutasítási okok."""
