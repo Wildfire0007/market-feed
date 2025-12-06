@@ -27,11 +27,25 @@ LOCAL_TZ = ZoneInfo("Europe/Budapest")
 
 from logging_utils import ensure_json_file_handler
 
+LOGGER = logging.getLogger(__name__)
+
+# Track optional dependencies that fell back to no-op stubs so the summary
+# can surface degraded guardrails.
+MISSING_OPTIONAL_DEPENDENCIES: Set[str] = set()
+OPTIONAL_DEPENDENCY_ISSUES: List[str] = []
+
+
+def _log_optional_dependency_warning(name: str, exc: Exception) -> None:
+    MISSING_OPTIONAL_DEPENDENCIES.add(name)
+    OPTIONAL_DEPENDENCY_ISSUES.append(f"{name}: {exc}")
+    LOGGER.warning("Optional dependency missing: %s (%s) — using fallback", name, exc)
+
 from config import analysis_settings as settings
 from dynamic_logic import (
     DynamicScoreEngine,
     VolatilityManager,
     apply_latency_relaxation,
+    validate_dynamic_logic_config,
 )
 
 from active_anchor import load_anchor_state, record_anchor, update_anchor_metrics
@@ -47,7 +61,9 @@ from news_feed import SentimentSignal, load_sentiment
 
 try:  # Optional monitoring utilities; keep analysis resilient if absent.
     from reports.trade_journal import record_signal_event
-except Exception:  # pragma: no cover - optional dependency guard
+except Exception as exc:  # pragma: no cover - optional dependency guard
+    _log_optional_dependency_warning("reports.trade_journal.record_signal_event", exc)
+
     def record_signal_event(*_args, **_kwargs):
         return None
 
@@ -57,7 +73,9 @@ try:
         update_data_latency_report,
         record_latency_alert,
     )
-except Exception:  # pragma: no cover - optional dependency guard
+except Exception as exc:  # pragma: no cover - optional dependency guard
+    _log_optional_dependency_warning("reports.monitoring", exc)
+
     def update_signal_health_report(*_args, **_kwargs):
         return None
 
@@ -69,19 +87,25 @@ except Exception:  # pragma: no cover - optional dependency guard
 
 try:
     from reports.precision_monitor import update_precision_gate_report
-except Exception:  # pragma: no cover - optional dependency guard
+except Exception as exc:  # pragma: no cover - optional dependency guard
+    _log_optional_dependency_warning("reports.precision_monitor.update_precision_gate_report", exc)
+
     def update_precision_gate_report(*_args, **_kwargs):
         return None
 
 try:
     from reports.backtester import update_live_validation
-except Exception:  # pragma: no cover - optional dependency guard
+except Exception as exc:  # pragma: no cover - optional dependency guard
+    _log_optional_dependency_warning("reports.backtester.update_live_validation", exc)
+
     def update_live_validation(*_args, **_kwargs):
         return None
 
 try:
     from volatility_metrics import load_volatility_overlay
-except Exception:  # pragma: no cover - optional helper
+except Exception as exc:  # pragma: no cover - optional helper
+    _log_optional_dependency_warning("volatility_metrics.load_volatility_overlay", exc)
+
     def load_volatility_overlay(asset: str, outdir: Path, k1m: Optional[Any] = None) -> Dict[str, Any]:
         return {}
 
@@ -94,7 +118,8 @@ try:
         record_ml_model_status,
         get_run_logging_context,
     )
-except Exception:  # pragma: no cover - optional helper
+except Exception as exc:  # pragma: no cover - optional helper
+    _log_optional_dependency_warning("reports.pipeline_monitor", exc)
     record_analysis_run = None
     finalize_analysis_run = None
     get_pipeline_log_path = None
@@ -794,8 +819,6 @@ def get_precision_timeouts(asset: str) -> Dict[str, int]:
     if arming_raw is None:
         arming = max(arming, ready)
     return {"ready": ready, "arming": max(arming, ready)}
-
-LOGGER = logging.getLogger(__name__)
 
 # Az asset-specifikus küszöböket a config/analysis_settings.json állomány
 # szolgáltatja, így új eszköz felvételekor elegendő azt módosítani.
@@ -7013,7 +7036,14 @@ def analyze(asset: str) -> Dict[str, Any]:
     asset_entry_profile = _entry_threshold_profile_name(asset)
     entry_thresholds_meta: Dict[str, Any] = {"profile": asset_entry_profile}
     entry_gate_context_hu: Dict[str, Any] = {}
-    dynamic_logic_cfg = settings.DYNAMIC_LOGIC if isinstance(settings.DYNAMIC_LOGIC, dict) else {}
+    dynamic_logic_cfg_raw = settings.DYNAMIC_LOGIC if isinstance(settings.DYNAMIC_LOGIC, dict) else {}
+    dynamic_logic_cfg, dynamic_logic_warnings = validate_dynamic_logic_config(
+        dynamic_logic_cfg_raw, logger=LOGGER
+    )
+    if dynamic_logic_warnings:
+        entry_thresholds_meta["dynamic_logic_validation"] = {
+            "warnings": dynamic_logic_warnings
+        }
     p_score_min_base = get_p_score_min(asset)
     p_score_min_local = p_score_min_base
     xag_overrides, usoil_overrides, eurusd_overrides = _initialize_asset_overrides(
@@ -7613,17 +7643,13 @@ def analyze(asset: str) -> Dict[str, Any]:
         dynamic_logic_cfg.get("latency_relaxation") if isinstance(dynamic_logic_cfg, dict) else {}
     )
 
-    def _safe_float(value: Any) -> Optional[float]:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
     strict_limit_seconds: Optional[float] = None
     if isinstance(latency_relax_cfg, dict):
         profiles_cfg = latency_relax_cfg.get("profiles")
         strict_profile = profiles_cfg.get("strict") if isinstance(profiles_cfg, dict) else None
-        strict_limit_seconds = _safe_float(strict_profile.get("limit")) if strict_profile else None
+        strict_limit_seconds = (
+            strict_profile.get("limit") if isinstance(strict_profile, dict) else None
+        )
 
     latency_penalty, latency_relax_meta, guard_status = apply_latency_relaxation(
         asset,
@@ -9006,7 +9032,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     base_p_score = P
 
     dynamic_score_engine = DynamicScoreEngine(
-        dynamic_logic_cfg if isinstance(dynamic_logic_cfg, dict) else {}
+        dynamic_logic_cfg if isinstance(dynamic_logic_cfg, dict) else {},
+        validate_config=False,
     )
     volatility_score_data = {
         "volatility_z": overlay_ratio,
@@ -12539,6 +12566,16 @@ def main():
         "sentiment_alerts": [],
         "troubleshooting": list(REFRESH_TIPS),
     }
+    if MISSING_OPTIONAL_DEPENDENCIES:
+        summary["degraded_mode"] = True
+        summary["degraded_components"] = sorted(MISSING_OPTIONAL_DEPENDENCIES)
+        degraded_note = (
+            "Guardrail modulok hiányoznak: "
+            + ", ".join(sorted(MISSING_OPTIONAL_DEPENDENCIES))
+            + " — monitoring/precision/latency hook-ok fallback módot használnak."
+        )
+        summary["troubleshooting"].append(degraded_note)
+        summary["optional_dependency_issues"] = list(OPTIONAL_DEPENDENCY_ISSUES)
     run_context = summary.setdefault("run_context", {})
     run_context.update({k: v for k, v in (get_run_logging_context() or {}).items() if v is not None})
     current_weekday = datetime.now(timezone.utc).weekday()
@@ -12831,6 +12868,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
