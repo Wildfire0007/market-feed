@@ -246,8 +246,12 @@ SERIES_FETCH_PLAN = [
 ]
 
 _SERIES_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
-_SERIES_REPLAY_DIR = Path(os.getenv("TD_SERIES_REPLAY_DIR", "")).expanduser()
-_SERIES_REPLAY_ENABLED = _SERIES_REPLAY_DIR.exists()
+_SERIES_REPLAY_DIR_RAW = os.getenv("TD_SERIES_REPLAY_DIR")
+_SERIES_REPLAY_DIR = (
+    Path(_SERIES_REPLAY_DIR_RAW).expanduser() if _SERIES_REPLAY_DIR_RAW else None
+)
+# Only enable replay mode when the directory is explicitly configured and exists.
+_SERIES_REPLAY_ENABLED = bool(_SERIES_REPLAY_DIR and _SERIES_REPLAY_DIR.exists())
 
 
 class AdaptiveRateLimiter:
@@ -3982,6 +3986,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
