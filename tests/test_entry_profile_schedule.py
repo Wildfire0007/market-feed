@@ -1,0 +1,22 @@
+from unittest import mock
+
+from config import analysis_settings as settings
+
+
+def test_schedule_default_bucket_applied():
+    schedule = {"default": {"open": "suppressed", "mid": "baseline", "close": "suppressed"}}
+    with mock.patch.object(settings, "_ENTRY_PROFILE_SCHEDULE", schedule):
+        with mock.patch("config.analysis_settings._current_tod_bucket", return_value="open"):
+            profile = settings.get_entry_threshold_profile_name_for_asset("EURUSD")
+    assert profile == "suppressed"
+
+
+def test_schedule_asset_override_wins():
+    schedule = {
+        "default": {"open": "suppressed"},
+        "assets": {"BTCUSD": {"open": "baseline"}},
+    }
+    with mock.patch.object(settings, "_ENTRY_PROFILE_SCHEDULE", schedule):
+        with mock.patch("config.analysis_settings._current_tod_bucket", return_value="open"):
+            profile = settings.get_entry_threshold_profile_name_for_asset("BTCUSD")
+    assert profile == "baseline"
