@@ -47,17 +47,25 @@ def ensure_within_repo(root: Path, target: Path) -> None:
         ) from exc
 
 
+def _fallback_payload(reason: str, stats_path: Path) -> Mapping[str, Any]:
+    return {
+        "status": "unavailable",
+        "reason": reason,
+        "source": str(stats_path),
+    }
+
+
 def load_stats(stats_path: Path) -> Mapping[str, Any]:
     if not stats_path.is_file():
-        raise SystemExit(f"Stats file not found: {stats_path}")
+        return _fallback_payload("stats file not found", stats_path)
 
     try:
         data = json.loads(stats_path.read_text())
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"Stats file is not valid JSON: {stats_path}") from exc
+    except json.JSONDecodeError:
+        return _fallback_payload("stats file is not valid JSON", stats_path)
 
     if not isinstance(data, Mapping):
-        raise SystemExit("Stats content must be a JSON object/dictionary")
+        return _fallback_payload("stats content must be a JSON object/dictionary", stats_path)
 
     return data
 
