@@ -11,6 +11,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import re
 from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 PUBLIC_DIR = Path(os.getenv("PUBLIC_DIR", "public"))
 MONITOR_DIR = Path(os.getenv("PIPELINE_MONITOR_DIR", str(PUBLIC_DIR / "monitoring")))
@@ -34,6 +35,7 @@ WARNING_TREND_BUCKET_MINUTES = max(
 RUN_ID_ENV_VARS = ("PIPELINE_RUN_ID", "GITHUB_RUN_ID")
 RUN_CAPTURED_AT_UTC = datetime.now(timezone.utc)
 LOGGER = logging.getLogger("market_feed.pipeline_monitor")
+LOCAL_TIMEZONE = os.getenv("PIPELINE_LOCAL_TIMEZONE", "Europe/Budapest")
 
 
 def _now() -> datetime:
@@ -42,6 +44,11 @@ def _now() -> datetime:
 
 def _to_iso(dt: datetime) -> str:
     return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _to_local_iso(dt: datetime, tz: ZoneInfo) -> str:
+    localized = dt.astimezone(tz).replace(microsecond=0)
+    return localized.isoformat()
 
 
 def _parse_iso(value: Optional[str]) -> Optional[datetime]:
@@ -126,6 +133,47 @@ def _validate_timestamp_payload(
     return payload
 
 
+def _append_localized_timestamps(payload: Dict[str, Any]) -> None:
+    """Attach Europe/Budapest timestamp másolatok a payloadhoz."""
+
+    try:
+        tz = ZoneInfo(LOCAL_TIMEZONE)
+    except Exception:
+        LOGGER.warning(
+            "Nem sikerült betölteni a helyi időzónát, UTC marad.",
+            extra={"timezone": LOCAL_TIMEZONE},
+        )
+        return
+
+    localized: Dict[str, Any] = {"timezone": LOCAL_TIMEZONE}
+
+    def _copy_section(section_key: str, keys: Iterable[str]) -> None:
+        section = payload.get(section_key)
+        if not isinstance(section, dict):
+            return
+        local_section: Dict[str, str] = {}
+        for key in keys:
+            value = section.get(key)
+            parsed = _parse_iso(value) if isinstance(value, str) else None
+            if parsed is None:
+                continue
+            local_section[key.replace("_utc", "_local")] = _to_local_iso(parsed, tz)
+        if local_section:
+            localized[section_key] = local_section
+
+    _copy_section("run", ("captured_at_utc", "started_at_utc"))
+    _copy_section("trading", ("started_utc", "completed_utc"))
+    _copy_section("analysis", ("started_utc", "completed_utc", "updated_utc"))
+
+    if isinstance(payload.get("updated_utc"), str):
+        parsed_updated = _parse_iso(payload["updated_utc"])
+        if parsed_updated is not None:
+            localized["updated_local"] = _to_local_iso(parsed_updated, tz)
+
+    if len(localized) > 1:
+        payload["localized_times"] = localized
+
+
 def load_pipeline_payload(path: Optional[Path] = None) -> Dict[str, Any]:
     """Load and normalize the pipeline monitor payload (best effort)."""
 
@@ -176,8 +224,8 @@ def _ensure_run_metadata(payload: Dict[str, Any], *, now: Optional[datetime] = N
     meta = _current_run_metadata(now)
     if run_section.get("run_id") is None:
         run_section["run_id"] = meta.get("run_id")
-    run_section.setdefault("captured_at_utc", meta.get("captured_at_utc"))
-    run_section.setdefault("started_at_utc", meta.get("started_at_utc"))
+    run_section["captured_at_utc"] = meta.get("captured_at_utc")
+    run_section["started_at_utc"] = meta.get("started_at_utc")
     payload["run"] = run_section
     return payload
 
@@ -397,6 +445,7 @@ def record_trading_run(
         "duration_seconds": round(float(computed_duration), 3),
     }
     payload["updated_utc"] = _to_iso(_now())
+    _append_localized_timestamps(payload)
     _save_payload(payload, path)
     return payload
 
@@ -438,6 +487,7 @@ def record_analysis_run(
         "lag_breached": breach,
     }
     payload["updated_utc"] = _to_iso(_now())
+    _append_localized_timestamps(payload)
     _save_payload(payload, path)
     return payload, lag_seconds, threshold, breach
 
@@ -489,6 +539,7 @@ def finalize_analysis_run(
         "hashes": collect_artifact_hashes(),
         "updated_utc": _to_iso(_now()),
     }
+    _append_localized_timestamps(payload)
     written_path = _save_payload(payload, path)
     written_key = str(Path(written_path))
     artifacts = payload.get("artifacts", {})
@@ -497,6 +548,7 @@ def finalize_analysis_run(
         hashes[written_key] = _hash_file(Path(written_path))
         artifacts["hashes"] = hashes
         payload["artifacts"] = artifacts
+        _append_localized_timestamps(payload)
         _save_payload(payload, path)
     return payload
 
