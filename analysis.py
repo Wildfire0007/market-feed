@@ -7071,7 +7071,16 @@ def analyze(asset: str) -> Dict[str, Any]:
     spot_latency: Optional[float] = None
     if spot_ts:
         spot_latency = (now - spot_ts).total_seconds()
-    freshness_limit = 60 if asset.upper() in {"BTCUSD", "ETHUSD", "ETHUSDT", "BTCUSDT"} else 120
+    freshness_limit = spot_max_age
+    # Allow per-asset overrides embedded in the spot snapshot metadata while keeping
+    # the configured ``spot_max_age_seconds`` as the primary guardrail. This prevents
+    # overly aggressive data-gap triggering when the upstream feed delivers crypto
+    # prices with a slower cadence (e.g., >60s), as observed with BTCUSD.
+    if isinstance(spot, dict) and spot.get("freshness_limit_seconds"):
+        try:
+            freshness_limit = int(spot["freshness_limit_seconds"])
+        except (TypeError, ValueError):
+            LOGGER.debug("Invalid freshness_limit_seconds in spot payload", exc_info=True)
     if spot_latency is not None and spot_latency > freshness_limit:
         reason = f"Data Stale (Lat: {int(spot_latency)} sec)"
         diagnostics = {
@@ -12949,6 +12958,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
