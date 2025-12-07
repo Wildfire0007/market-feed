@@ -5384,7 +5384,7 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     roll_down = pd.Series(down, index=series.index).rolling(period).mean()
     rs = roll_up / (roll_down.replace(0, np.nan))
     r = 100 - (100 / (1 + rs))
-    return r.fillna(method="bfill").fillna(50.0)
+    return r.bfill().fillna(50.0)
 
 def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     if df.empty: return pd.Series(dtype=float)
@@ -12958,6 +12958,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
