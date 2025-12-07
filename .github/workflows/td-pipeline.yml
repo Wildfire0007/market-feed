@@ -80,6 +80,8 @@ jobs:
       TZ: UTC
       SESSION_OVERRIDE_24_7: "1"
       PIPELINE_MAX_LAG_SECONDS: "600"
+      DISABLE_ML_PROBABILITY: "1"
+      ML_PROBABILITY_MANUAL_OVERRIDE: "1"
     steps:
       - name: Checkout (fresh HEAD incl. trading commit)
         uses: actions/checkout@v4
@@ -126,20 +128,9 @@ jobs:
       - name: Verify model exists & loadable
         run: python scripts/check_ml_readiness.py BTCUSD
 
-      - name: Run analysis with ML preferred
-        env:
-          USE_ML: "1"
+      - name: Run analysis (ML disabled)        
         run: |
-          python analysis.py
-          python - <<'PY'
-          import json, pathlib
-          signal_path = pathlib.Path("public/BTCUSD/signal.json")
-          data = json.loads(signal_path.read_text())
-          source = data.get("probability_stack", {}).get("source")
-          print("probability_stack.source =", source)
-          if source != "sklearn":
-              raise SystemExit("ML probability stack not sourced from scikit-learn")
-          PY
+          python analysis.py         
                
       - name: Generate latency monitoring snapshot
         run: |
