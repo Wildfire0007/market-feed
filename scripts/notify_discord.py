@@ -395,7 +395,7 @@ def build_mobile_embed_for_asset(
     
     # Dinamikus setup komment vagy megjegyzés
     gates_missing = (signal_data.get("gates") or {}).get("missing") if isinstance(signal_data, dict) else []
-    if gates_missing:
+    if gates_missing and status_text != "NINCS BELÉPŐ":
         reasons = translate_reasons(gates_missing)
         lines.append(f"🧠 Figyelem: {reasons}")
 
