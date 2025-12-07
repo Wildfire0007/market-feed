@@ -372,7 +372,14 @@ def build_mobile_embed_for_asset(
 
     # TLDR döntés + setup
     grade_emoji = "🟢" if setup_info["grade"] == "A" else "🟡" if setup_info["grade"] == "B" else "⚪"
-    lines.append(f"{status_icon} {decision_upper or 'NINCS'} • {setup_info['grade']} setup • {setup_info['action']}")
+    setup_direction = resolve_setup_direction(signal_data, decision_upper)
+    direction_suffix = ""
+    if setup_info["grade"] in {"A", "B", "C"} and setup_direction:
+        direction_suffix = f" ({setup_direction.upper()})"
+
+    lines.append(
+        f"{status_icon} {decision_upper or 'NINCS'} • {setup_info['grade']} setup{direction_suffix} • {setup_info['action']}"
+    )
     
     # Spot ár és idő
     lines.append(f"💵 {format_price(spot, asset)} • 🕒 {local_time}")
