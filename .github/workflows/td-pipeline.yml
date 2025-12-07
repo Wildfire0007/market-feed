@@ -79,6 +79,7 @@ jobs:
     env:
       TZ: UTC
       SESSION_OVERRIDE_24_7: "1"
+      PIPELINE_MAX_LAG_SECONDS: "400"
     steps:
       - name: Checkout (fresh HEAD incl. trading commit)
         uses: actions/checkout@v4
@@ -332,13 +333,4 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             python scripts/notify_discord.py --manual
           else
-            python scripts/notify_discord.py
-          fi
-
-      - name: Upload notify state snapshot
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: notify-state
-          path: public/_notify_state.json
-          if-no-files-found: ignore
+            python scripts/notify_d_
