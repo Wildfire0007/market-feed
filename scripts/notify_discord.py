@@ -180,9 +180,9 @@ def translate_reasons(missing_list: List[str]) -> str:
 
     map_dict = {
         "atr": "Alacsony volatilitás (ATR)",
-        "atr_gate": "ATR küszöb alatt",
+        "atr_gate": "ATR küszöb alatt / felett",
         "spread": "Túl magas spread",
-        "spread_gate": "Magas spread",
+        "spread_gate": "Spread kapu blokkol",
         "bias": "Trend (Bias) semleges/ellentétes",
         "regime": "Piaci rezsim hiba",
         "choppy": "Oldalazás (Choppy)",
@@ -192,26 +192,64 @@ def translate_reasons(missing_list: List[str]) -> str:
         "structure": "Struktúra hiba",
         "intervention_watch": "Beavatkozási figyelés",
         "no_chase": "Túl késő (No Chase)",
+        "structure(2of3)": "Struktúra kapu (2/3 komponens) nem teljesült",
+      
+        # Momentum + order-flow
+        "momentum_trigger": "Momentum trigger hiányzik",
+        "ofi": "Order-flow (OFI) megerősítés hiányzik",
+
+        # Precision / trigger kapuk
+        "triggers": "Core belépő jel hiányzik",
+        "precision_flow_alignment": "Precision: order-flow nincs összhangban",
+        "precision_trigger_sync": "Precision: trigger szinkronra vár",
+
+        # RR / TP / SL / range
+        "intraday_range_guard": "Napi tartomány-védelem (range guard) blokkol",
+        "min_stoploss": "Stop-loss feltétel nem teljesül",
+
+        # Meta
+        "p_score": "Alacsony P-score",
+        "intervention_watch": "Beavatkozási figyelés aktív",
+        "choppy": "Oldalazó (choppy) piaci szakasz",
+        "no_chase": "Ne üldözd az árat (No Chase szabály)",
     }
 
     clean_reasons: List[str] = []
     seen = set()
+
     for missing in missing_list:
         key = str(missing or "").strip()
         if not key:
             continue
+
+        # RR-hez kapcsolódó kulcsok (pl. rr_math>=1.6)
         if "rr_" in key:
-            txt = "Gyenge RR arány"
-        elif "tp_" in key:
-            txt = "Kicsi profit potenciál"
+            txt = "Gyenge RR arány / RR kapu nem teljesül"
+
+        # TP / profit-kapuk (pl. tp_min_profit, tp1_net>=+75%)
+        elif key.startswith("tp"):
+            txt = "Kicsi profit potenciál / TP kapu nem teljesül"
+
+        # Precision kapuk (pl. precision_score>=52, precision_flow_alignment, precision_trigger_sync)
+        elif key.startswith("precision_"):
+            if "flow_alignment" in key:
+                txt = "Precision: order-flow nincs összhangban"
+            elif "trigger_sync" in key:
+                txt = "Precision: trigger szinkronra vár"
+            elif "score" in key:
+                txt = "Precision: P-score küszöb nem teljesül"
+            else:
+                txt = "Precision kapu feltételei nem teljesülnek"
+
         else:
+            # Ha van konkrét magyar fordítás, azt használjuk, különben a nyers kulcsot
             txt = map_dict.get(key, key)
 
-        if txt not in seen:
+        if txt and txt not in seen:
             clean_reasons.append(txt)
             seen.add(txt)
 
-    return ", ".join(clean_reasons)
+    return ", ".join(clean_reasons) if clean_reasons else "—"
 
 
 def extract_regime(signal_data: Dict[str, Any]) -> Tuple[Optional[str], Optional[float]]:
