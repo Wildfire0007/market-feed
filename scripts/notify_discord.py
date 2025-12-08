@@ -214,6 +214,49 @@ def translate_reasons(missing_list: List[str]) -> str:
     return ", ".join(clean_reasons)
 
 
+def extract_regime(signal_data: Dict[str, Any]) -> Tuple[Optional[str], Optional[float]]:
+    """
+    Fő piaci rezsim (TREND / CHOPPY / BALANCED …) és az ADX érték kiolvasása.
+
+    Elsődlegesen az entry_thresholds.adx_regime mezőt használjuk,
+    ha ez nincs, akkor a dynamic_score_engine.regime_penalty.label mezőt.
+    """
+    if not isinstance(signal_data, dict):
+        return None, None
+
+    et = signal_data.get("entry_thresholds") or {}
+
+    # ADX érték
+    adx_raw = et.get("adx_value")
+    try:
+        adx_value = float(adx_raw) if adx_raw is not None else None
+    except (TypeError, ValueError):
+        adx_value = None
+
+    # Rezsim string
+    adx_regime = str(
+        et.get("adx_regime") or et.get("adx_regime_initial") or ""
+    ).strip().lower()
+
+    label: Optional[str] = None
+    if adx_regime:
+        if "trend" in adx_regime:
+            label = "TREND"
+        elif "choppy" in adx_regime or "range" in adx_regime:
+            label = "CHOPPY"
+        elif "balanced" in adx_regime:
+            label = "BALANCED"
+        else:
+            label = adx_regime.upper()
+    else:
+        dse = et.get("dynamic_score_engine") or {}
+        reg_pen = dse.get("regime_penalty") or {}
+        raw_label = reg_pen.get("label") or ""
+        if raw_label:
+            label = str(raw_label).strip().upper()
+
+    return label, adx_value
+
 def classify_setup(p_score: float, gates: Dict[str, Any], decision: str) -> Dict[str, Any]:
     """Felhasználói szabály alapú A/B/C setup besorolás."""
 
@@ -298,8 +341,39 @@ def build_mobile_embed_for_asset(
         local_time = dt.astimezone(HB_TZ).strftime("%H:%M")
     except Exception:
         local_time = "--:--"
-
+    
     setup_info = classify_setup(float(p_score or 0), (signal_data or {}).get("gates", {}), decision)
+
+    # --- Piaci rezsim (CHOPPY / TREND) kiolvasása és magyar szöveg készítése ---
+    regime_label, adx_value = extract_regime(signal_data)
+    regime_line = None
+    if regime_label or adx_value is not None:
+        regime_icons = {
+            "TREND": "📈",
+            "CHOPPY": "🌊",
+            "BALANCED": "⚖️",
+        }
+        icon = regime_icons.get(regime_label or "", "📊")
+
+        extra_hu = ""
+        if regime_label == "TREND":
+            extra_hu = " (irányított trend)"
+        elif regime_label == "CHOPPY":
+            extra_hu = " (oldalazó/range piac)"
+        elif regime_label == "BALANCED":
+            extra_hu = " (átmeneti/balanced)"
+
+        if regime_label and adx_value is not None:
+            regime_line = (
+                f"{icon} Piaci rezsim: **{regime_label}**{extra_hu} • ADX≈`{adx_value:.1f}`"
+            )
+        elif regime_label:
+            regime_line = f"{icon} Piaci rezsim: **{regime_label}**{extra_hu}"
+        elif adx_value is not None:
+            regime_line = f"{icon} ADX≈`{adx_value:.1f}`"
+
+
+    
 
     status_text = "NINCS BELÉPŐ"
     color = COLORS["NO"]
@@ -383,6 +457,9 @@ def build_mobile_embed_for_asset(
     
     # Spot ár és idő
     lines.append(f"💵 {format_price(spot, asset)} • 🕒 {local_time}")
+
+    if regime_line:
+        lines.append(regime_line)
 
     # Entry/SL/TP1/TP2/RR blokk
     if decision_upper in {"BUY", "SELL"} and all(v is not None for v in (entry, sl, tp1, tp2)):
