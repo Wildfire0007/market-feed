@@ -522,6 +522,34 @@ def _normalize_risk_templates(raw_map: Any) -> Dict[str, Dict[str, Any]]:
     return templates
 
 
+def _normalize_low_atr_overrides(raw_map: Any) -> Dict[str, Dict[str, float]]:
+    """Validate ATR floor overrides used for adaptive TP and RR thresholds."""
+
+    result: Dict[str, Dict[str, float]] = {}
+    if not isinstance(raw_map, dict):
+        return result
+
+    for asset, meta in raw_map.items():
+        if not isinstance(meta, dict):
+            continue
+        asset_key = "default" if str(asset).lower() == "default" else str(asset).upper()
+        cfg: Dict[str, float] = {}
+        for key in ("floor", "rel_atr_floor"):
+            value = _safe_float(meta.get(key))
+            if value is not None:
+                cfg["floor"] = value
+                break
+        tp_override = _safe_float(meta.get("tp_min_pct"))
+        if tp_override is not None:
+            cfg["tp_min_pct"] = tp_override
+        rr_override = _safe_float(meta.get("rr_required"))
+        if rr_override is not None:
+            cfg["rr_required"] = rr_override
+        if cfg:
+            result[asset_key] = cfg
+    return result
+
+
 def _normalize_bias_relax(raw_map: Any) -> Dict[str, Dict[str, Any]]:
     result: Dict[str, Dict[str, Any]] = {}
     if not isinstance(raw_map, dict):
@@ -1127,6 +1155,10 @@ NVDA_POSITION_SCALE: Dict[str, float] = {
     for key, value in dict(_get_config_value("nvda_position_scale") or {}).items()
 }
 
+LOW_ATR_OVERRIDES: Dict[str, Dict[str, float]] = _normalize_low_atr_overrides(
+    _get_config_value("low_atr_overrides")
+)
+
 
 _REALTIME_PRICE_GUARD_FALLBACK: Dict[str, float] = {"limit_pct": 0.01, "min_abs": 0.1}
 
@@ -1201,6 +1233,17 @@ def get_realtime_price_guard(asset: Optional[str]) -> Dict[str, float]:
     if asset_key and asset_key in REALTIME_PRICE_GUARD:
         return dict(REALTIME_PRICE_GUARD[asset_key])
     return dict(REALTIME_PRICE_GUARD.get("default", _REALTIME_PRICE_GUARD_FALLBACK))
+
+
+def get_low_atr_override(asset: str) -> Dict[str, float]:
+    """Return ATR floor overrides merged with the default mapping."""
+
+    base = dict(LOW_ATR_OVERRIDES.get("default", {}))
+    asset_cfg = LOW_ATR_OVERRIDES.get(str(asset).upper(), {})
+    base.update(asset_cfg)
+    return base
+
+
 def _resolve_momentum_assets() -> Set[str]:
     """Return the configured momentum-capable assets with fallbacks."""
 
