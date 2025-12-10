@@ -30,7 +30,11 @@ ensure_json_stream_handler(LOGGER, static_fields={"component": "predeploy"})
 
 
 DEFAULT_STATUS_PATH = Path("public/status.json")
-DEFAULT_HASH_MANIFEST = Path("public/pipeline/hash_manifest.json")
+# Keep the hash manifest under version control so it cannot be overwritten by
+# the downloaded analysis artefact. The previous location under ``public/`` was
+# wiped before the pre-deploy step, which meant the validation was reading an
+# outdated manifest from the artefact rather than the repository.
+DEFAULT_HASH_MANIFEST = Path("config/pipeline/hash_manifest.json")
 
 
 class StatusValidationError(RuntimeError):
