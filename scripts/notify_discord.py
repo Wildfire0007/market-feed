@@ -169,7 +169,9 @@ def _translate_market_closed_reason(reason: Optional[str]) -> str:
 
     humanized = reason_key.replace("_", " ").strip()
     return humanized.capitalize() if humanized else "Ismeretlen ok"
-  
+
+
+ 
 
 def draw_progress_bar(value: float, length: int = 10) -> str:
     """ASCII sáv: [■■■■■■■□□□]"""
@@ -387,7 +389,8 @@ def build_mobile_embed_for_asset(
 
     session = (signal_data or {}).get("session_info", {})
     if not session.get("open", True):
-        reason = session.get("market_closed_reason") or "Hétvége"
+        raw_reason = session.get("market_closed_reason") or "Hétvége"
+        reason = _translate_market_closed_reason(raw_reason)
         next_open = session.get("next_open_utc", "Ismeretlen")
         return {
             "title": f"{_get_emoji(asset)} {asset}",
