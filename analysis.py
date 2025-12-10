@@ -1119,6 +1119,30 @@ MOMENTUM_TRAIL_LOCK = 0.5
 ANCHOR_P_SCORE_DELTA_WARN = 10.0
 ANCHOR_ATR_DROP_RATIO = 0.75
 INTRADAY_EXHAUSTION_PCT = 0.82
+
+
+def _btc_precision_thresholds_from_config() -> Dict[str, float]:
+    """Build per-profile precision score minimums from the settings map."""
+
+    thresholds: Dict[str, float] = {}
+    for profile_name, meta in BTC_PROFILE_OVERRIDES.items():
+        if not isinstance(meta, dict):
+            continue
+        precision_cfg = meta.get("precision") or {}
+        try:
+            score_min = float(precision_cfg.get("score_min"))
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(score_min) and score_min > 0:
+            thresholds[str(profile_name)] = score_min
+
+    # Ensure we always have a usable baseline fallback
+    if "baseline" not in thresholds:
+        thresholds["baseline"] = float(PRECISION_SCORE_THRESHOLD_DEFAULT)
+    return thresholds
+
+
+BTC_PRECISION_MIN: Dict[str, float] = _btc_precision_thresholds_from_config()
 INTRADAY_ATR_EXHAUSTION = 0.75
 INTRADAY_COMPRESSION_TH = 0.45
 INTRADAY_EXPANSION_TH = 1.25
@@ -13398,6 +13422,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
