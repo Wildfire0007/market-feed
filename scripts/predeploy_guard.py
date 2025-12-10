@@ -128,7 +128,10 @@ class HashValidator:
         if mismatches:
             raise StatusValidationError(
                 "hash mismatch for "
-                + ", ".join(f"{path} (actual {digest})" for path, digest in sorted(mismatches.items()))
+                + ", ".join(
+                    f"{path} (expected {files[path]['sha256']}, actual {digest})"  # type: ignore[index]
+                    for path, digest in sorted(mismatches.items())
+                )
             )
 
 
