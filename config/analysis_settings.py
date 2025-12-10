@@ -152,6 +152,37 @@ def _get_config_value(key: str) -> Any:
     return cfg.get(key)
 
 
+def is_intraday_relax_enabled(asset: str) -> bool:
+    """Return whether intraday prerequisite relaxation is enabled for ``asset``."""
+
+    raw = _get_config_value("enable_intraday_relax") or {}
+    default_value = False
+    if isinstance(raw, dict):
+        default_value = bool(raw.get("default", False))
+        return bool(raw.get(asset, default_value))
+    return bool(raw)
+
+
+def get_intraday_relax_size_scale(asset: str) -> float:
+    """Return the risk scaling factor applied when intraday relax is active."""
+
+    raw = _get_config_value("intraday_relax_size_scale") or {}
+    default_value = 0.6
+    if isinstance(raw, dict):
+        try:
+            default_value = float(raw.get("default", default_value))
+        except (TypeError, ValueError):
+            default_value = 0.6
+        value = raw.get(asset, default_value)
+    else:
+        value = raw or default_value
+    try:
+        scale = float(value)
+    except (TypeError, ValueError):
+        return default_value
+    return max(0.1, min(scale, 1.0))
+
+
 def _normalize_threshold_map(raw_map: Any, default_value: float) -> Dict[str, float]:
     mapping: Dict[str, float] = {"default": float(default_value)}
     if isinstance(raw_map, dict):
