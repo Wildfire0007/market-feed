@@ -2109,6 +2109,8 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
     info["within_monitor_window"] = monitor_ok
     info["weekday_ok"] = weekday_ok
     info["status_profile"] = status_profile_name
+    market_closed_reason: Optional[str] = None
+
     if status_profile.get("force_session_closed"):
         info["status_profile_forced"] = True
     if profile_tags:
@@ -2118,9 +2120,11 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
     if not weekday_ok:
         status = "closed_weekend"
         status_note = "Piac zárva (hétvége)"
+        market_closed_reason = "weekend"
     elif not open_now:
         status = "closed_out_of_hours"
         status_note = "Piac zárva (nyitáson kívül)"
+        market_closed_reason = "outside_hours"
     elif not entry_open:
         status = "open_entry_limited"
         status_note = "Piac nyitva (csak pozíciómenedzsment, entry ablak zárva)"
@@ -2131,6 +2135,8 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
         status = special_status
     if special_note:
         status_note = special_note
+    if special_reason:
+        market_closed_reason = special_reason
     if status_profile:
         override_status = status_profile.get("status")
         override_note = status_profile.get("status_note")
@@ -2139,9 +2145,7 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
         if override_note:
             status_note = str(override_note)
         if "market_closed_reason" in status_profile:
-            info["market_closed_reason"] = str(
-                status_profile.get("market_closed_reason")
-            )
+            market_closed_reason = str(status_profile.get("market_closed_reason"))
         if "market_closed_assumed" in status_profile:
             info["market_closed_assumed"] = bool(
                 status_profile.get("market_closed_assumed")
@@ -2169,6 +2173,8 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
         ).isoformat()
     info["status"] = status
     info["status_note"] = status_note
+    if market_closed_reason:
+        info["market_closed_reason"] = market_closed_reason
     if profile_notes:
         notes_bucket = info.setdefault("notes", [])
         for note in profile_notes:
@@ -12958,6 +12964,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
