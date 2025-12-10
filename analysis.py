@@ -7983,6 +7983,11 @@ def analyze(asset: str) -> Dict[str, Any]:
     elif regime_label == "ranging":
         adx_regime = "range"
     entry_thresholds_meta["adx_regime_initial"] = adx_regime
+    eurusd_range_mode = False
+    eurusd_range_meta: Dict[str, Any] = {}
+    eurusd_range_signal: Optional[str] = None
+    eurusd_range_levels: Dict[str, Any] = {}
+    eurusd_momentum_trigger = False
     if asset == "EURUSD":
         adx_for_eurusd = regime_adx if regime_adx is not None else adx_value
         bias_flat = bias1h == "neutral" and bias4h == "neutral"
@@ -13287,6 +13292,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
