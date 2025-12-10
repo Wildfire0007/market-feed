@@ -258,6 +258,8 @@ from config.analysis_settings import (
     LEVERAGE,
     MIN_RISK_ABS,
     MOMENTUM_RR_MIN,
+    XAGUSD_ATR_5M_FLOOR,
+    XAGUSD_ATR_5M_FLOOR_ENABLED,
     OFI_Z_SETTINGS,
     NVDA_EXTENDED_ATR_REL,
     NVDA_MOMENTUM_ATR_REL,
@@ -8162,7 +8164,16 @@ def analyze(asset: str) -> Dict[str, Any]:
         except Exception:
             atr_abs_ok = False
 
+    xag_atr_floor_triggered = False
+    if asset == "XAGUSD" and XAGUSD_ATR_5M_FLOOR_ENABLED:
+        try:
+            xag_atr_floor_triggered = float(atr5) < float(XAGUSD_ATR_5M_FLOOR)
+        except Exception:
+            xag_atr_floor_triggered = False
+
     atr_ok = bool(atr_ratio_ok and atr_abs_ok)
+    if xag_atr_floor_triggered:
+        atr_ok = False
     entry_thresholds_meta["atr_ratio_ok"] = bool(atr_ratio_ok)
     if not spread_gate_ok:
         atr_ok = False
@@ -8184,6 +8195,16 @@ def analyze(asset: str) -> Dict[str, Any]:
         "allowed": bool(spread_gate_ok),
         "cost_model": cost_model,
     }
+    if asset == "XAGUSD":
+        entry_thresholds_meta["xag_atr_5m_floor"] = {
+            "enabled": bool(XAGUSD_ATR_5M_FLOOR_ENABLED),
+            "floor": float(XAGUSD_ATR_5M_FLOOR),
+            "triggered": bool(xag_atr_floor_triggered),
+        }
+        if xag_atr_floor_triggered:
+            reasons.append(
+                "XAGUSD 5m ATR floor alatt — új belépés blokkolva"
+            )
     entry_thresholds_meta["risk_guard"] = risk_guard_meta
     if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
         entry_gate_context_hu.update(
@@ -8432,6 +8453,9 @@ def analyze(asset: str) -> Dict[str, Any]:
     gold_reversal_meta: Dict[str, Any] = {}
     gold_reversal_hits = 0
     gold_reversal_reasons: List[str] = []
+    xag_reversal_active = False
+    xag_reversal_side: Optional[str] = None
+    xag_reversal_meta: Dict[str, Any] = {}
     if asset == "GOLD_CFD":
         rsi_extreme = np.isfinite(rsi14_val) and (rsi14_val < 30 or rsi14_val > 70)
         if rsi_extreme:
@@ -8491,6 +8515,138 @@ def analyze(asset: str) -> Dict[str, Any]:
             gold_reversal_meta["active"] = False
             gold_reversal_meta["reasons"] = gold_reversal_reasons.copy()
             entry_thresholds_meta["gold_reversal"] = gold_reversal_meta
+
+    if asset == "XAGUSD":
+        price_now = safe_float(last5_close)
+        recent_window = k5m_closed.tail(48)
+        swing_hi = swing_lo = None
+        if not k5m_closed.empty:
+            swings = find_swings(k5m_closed, lb=2)
+            swing_hi, swing_lo = last_swing_levels(swings)
+
+        pct_up_move = pct_down_move = None
+        if price_now and not recent_window.empty:
+            try:
+                min_close = float(recent_window["close"].min())
+                max_close = float(recent_window["close"].max())
+                if min_close > 0:
+                    pct_up_move = (price_now - min_close) / min_close * 100.0
+                if max_close > 0:
+                    pct_down_move = (price_now - max_close) / max_close * 100.0
+            except Exception:
+                pct_up_move = pct_down_move = None
+
+        def _near_level(level: Optional[float]) -> bool:
+            if price_now is None or level is None:
+                return False
+            try:
+                return abs(price_now - float(level)) / float(price_now) <= 0.002
+            except Exception:
+                return False
+
+        def _wick_reversal(df: pd.DataFrame, side: str) -> bool:
+            if df.empty:
+                return False
+            last = df.iloc[-1]
+            try:
+                high = float(last["high"])
+                low = float(last["low"])
+                open_ = float(last["open"])
+                close_ = float(last["close"])
+                volume = float(last.get("volume", 0.0))
+            except Exception:
+                return False
+            range_val = high - low
+            if range_val <= 0:
+                return False
+            body = abs(close_ - open_)
+            upper_wick = high - max(open_, close_)
+            lower_wick = min(open_, close_) - low
+            vol_window = df["volume"].tail(20) if "volume" in df else None
+            vol_ok = True
+            if vol_window is not None and not vol_window.empty:
+                try:
+                    vol_ok = volume >= 1.2 * float(vol_window.median())
+                except Exception:
+                    vol_ok = True
+            if side == "short":
+                return upper_wick >= 0.4 * range_val and upper_wick > body and vol_ok
+            if side == "long":
+                return lower_wick >= 0.4 * range_val and lower_wick > body and vol_ok
+            return False
+
+        rsi_extreme_short = np.isfinite(rsi14_val) and rsi14_val >= 75
+        rsi_extreme_long = np.isfinite(rsi14_val) and rsi14_val <= 25
+        level_resistance = any(
+            _near_level(level)
+            for level in (
+                intraday_profile.get("day_high") if isinstance(intraday_profile, dict) else None,
+                swing_hi,
+            )
+        )
+        level_support = any(
+            _near_level(level)
+            for level in (
+                intraday_profile.get("day_low") if isinstance(intraday_profile, dict) else None,
+                swing_lo,
+            )
+        )
+
+        pattern_short = _wick_reversal(k5m_closed, "short")
+        pattern_long = _wick_reversal(k5m_closed, "long")
+        bos_short = bool(micro_bos_short)
+        bos_long = bool(micro_bos_long)
+
+        xag_reversal_meta = {
+            "rsi": rsi14_val if np.isfinite(rsi14_val) else None,
+            "pct_up_move": pct_up_move,
+            "pct_down_move": pct_down_move,
+            "level_resistance": level_resistance,
+            "level_support": level_support,
+            "pattern_short": pattern_short,
+            "pattern_long": pattern_long,
+            "bos_short": bos_short,
+            "bos_long": bos_long,
+        }
+
+        short_conditions = all(
+            (
+                rsi_extreme_short,
+                pct_up_move is not None and pct_up_move >= 1.5,
+                level_resistance,
+                pattern_short,
+                bos_short,
+            )
+        )
+        long_conditions = all(
+            (
+                rsi_extreme_long,
+                pct_down_move is not None and pct_down_move <= -1.5,
+                level_support,
+                pattern_long,
+                bos_long,
+            )
+        )
+
+        if short_conditions:
+            xag_reversal_active = True
+            xag_reversal_side = "sell"
+            xag_reversal_meta["direction"] = "short"
+        elif long_conditions:
+            xag_reversal_active = True
+            xag_reversal_side = "buy"
+            xag_reversal_meta["direction"] = "long"
+
+        if xag_reversal_active:
+            xag_reversal_meta["active"] = True
+            xag_reversal_meta["tp_targets"] = [1.0, 1.5]
+            xag_reversal_meta["risk_cap_pct"] = 1.0
+            reasons.append("XAGUSD reversal setup aktív — kockázat korlátozva 1% alá")
+            dynamic_tp_profile["reversal"] = {"tp1": 1.0, "tp2": 1.5, "rr": 1.0}
+        elif xag_reversal_meta:
+            xag_reversal_meta["active"] = False
+        if xag_reversal_meta:
+            entry_thresholds_meta["xag_reversal"] = xag_reversal_meta
 
     if trend_bias == "neutral" and bias1h in ("long", "short"):
         override_dir = bias1h
@@ -9839,6 +9995,10 @@ def analyze(asset: str) -> Dict[str, Any]:
     range_giveback_ratio: Optional[float] = None
     btc_rr_band_meta: Dict[str, Any] = {}
     nvda_small_breakout = False
+    if asset == "XAGUSD" and xag_reversal_active:
+        risk_cap_pct = 1.0 if risk_cap_pct is None else min(risk_cap_pct, 1.0)
+        risk_guard_meta["max_risk_pct"] = risk_cap_pct
+        entry_thresholds_meta["risk_guard"] = risk_guard_meta
     if asset == "NVDA":
         nvda_rr_meta: Dict[str, Any] = {}
         low_rel = float(NVDA_RR_BANDS.get("low_rel_atr") or 0.0)
@@ -10457,11 +10617,13 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     momentum_liquidity_ok = True
     momentum_adx_ok = True
+    xag_momentum_regime_bypass = asset == "XAGUSD" and P >= 30.0
     if asset in ENABLE_MOMENTUM_ASSETS:
         direction = effective_bias if effective_bias in {"long", "short"} else None
         if not session_ok_flag:
             missing_mom.append("session")
-        if not regime_ok:
+        regime_gate_for_momentum = bool(regime_ok or xag_momentum_regime_bypass)
+        if not regime_gate_for_momentum:
             missing_mom.append("regime")
         if direction is None:
             missing_mom.append("bias")
@@ -10526,7 +10688,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             elif (
                 direction in {"long", "short"}
                 and session_ok_flag
-                and regime_ok
+                and (regime_ok or xag_momentum_regime_bypass)
                 and mom_atr_ok
                 and cross_flag
                 and ofi_confirm
@@ -10535,6 +10697,8 @@ def analyze(asset: str) -> Dict[str, Any]:
                 mom_trigger_desc = "EMA9×21 momentum cross"
                 momentum_trigger_ok = True
                 missing_mom = [item for item in missing_mom if item not in {"liquidity", "ofi"}]
+                if asset == "XAGUSD" and xag_momentum_regime_bypass:
+                    entry_thresholds_meta["xag_momentum_bias_bypass"] = True
                 if funding_dir_filter and (
                     (funding_dir_filter == "long" and mom_dir != "buy")
                     or (funding_dir_filter == "short" and mom_dir != "sell")
@@ -10966,7 +11130,30 @@ def analyze(asset: str) -> Dict[str, Any]:
         last_computed_risk = risk
         return True
 
-    if can_enter_core:
+    reversal_mode_used = False
+    if asset == "XAGUSD" and xag_reversal_active and xag_reversal_side in {"buy", "sell"}:
+        mode = "reversal"
+        decision = xag_reversal_side
+        required_list = ["session", "data_integrity", "spread_guard", "reversal_signal"]
+        missing = []
+        if not session_ok_flag:
+            missing.append("session")
+        if not data_integrity_ok:
+            missing.append("data_integrity")
+        if not spread_gate_ok:
+            missing.append("spread_guard")
+        if xag_atr_floor_triggered:
+            missing.append("atr_floor")
+        if decision in {"buy", "sell"} and not missing:
+            position_size_scale *= 0.8
+            if not compute_levels(decision, 1.0, tp1_mult=1.0, tp2_mult=1.5):
+                decision = "no entry"
+            else:
+                reversal_mode_used = True
+        else:
+            decision = "no entry"
+
+    if can_enter_core and not reversal_mode_used:
         if effective_bias == "long":
             decision = "buy"
         elif effective_bias == "short":
@@ -11062,7 +11249,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                     msg_net = f"TP1 nettó profit ≈ {tp1_net_pct_value*100:.2f}%"
                     if msg_net not in reasons:
                         reasons.append(msg_net)
-    else:
+    elif not reversal_mode_used:
         if mom_dir is not None:
             mode = "momentum"
             required_list = list(mom_required)
@@ -12964,6 +13151,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
