@@ -179,8 +179,9 @@ def get_intraday_relax_size_scale(asset: str) -> float:
     try:
         scale = float(value)
     except (TypeError, ValueError):
-        return default_value
-    return max(0.1, min(scale, 1.0))
+        scale = default_value
+    clamped_default = max(0.1, min(float(default_value), 1.0))
+    return max(0.1, min(scale, clamped_default if scale == default_value else 1.0))
 
 
 def _normalize_threshold_map(raw_map: Any, default_value: float) -> Dict[str, float]:
