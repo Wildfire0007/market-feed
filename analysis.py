@@ -246,6 +246,8 @@ from config.analysis_settings import (
     EMA_SLOPE_SIGN_ENFORCED,
     EMA_SLOPE_TH_ASSET,
     EMA_SLOPE_TH_DEFAULT,
+    get_intraday_relax_size_scale,
+    is_intraday_relax_enabled,
     BTC_PROFILE_OVERRIDES,
     NEWS_MODE_SETTINGS,
     FX_TP_TARGETS,
@@ -10586,6 +10588,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         tp_net_label,
     ]
 
+    intraday_relax_active = bool(intraday_profile) and is_intraday_relax_enabled(asset)
+    intraday_relaxed_guards: List[str] = []
+    intraday_relax_scale = get_intraday_relax_size_scale(asset)
+
     conds_core = {
         "session": bool(session_ok_flag),
         "spread_guard": bool(spread_gate_ok),
@@ -10605,14 +10611,31 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     critical_missing: List[str] = []
     soft_flags: List[str] = []
+    intraday_relaxable_guards = {"data_integrity", range_guard_label}
     for name, ok in conds_core.items():
         category = classify_gate_failure(name)
         if ok:
+            continue
+        if (
+            intraday_relax_active
+            and category == "critical"
+            and name in intraday_relaxable_guards
+        ):
+            if name not in intraday_relaxed_guards:
+                intraday_relaxed_guards.append(name)
+                position_size_scale *= intraday_relax_scale
+                reasons.append(
+                    f"Intraday relax: {name} hiány kockázatcsökkentéssel engedve (×{intraday_relax_scale:.2f})"
+                )
             continue
         if category == "critical":
             critical_missing.append(name)
         else:
             soft_flags.append(name)
+
+    if intraday_relaxed_guards:
+        entry_thresholds_meta["intraday_relaxed_guards"] = list(intraday_relaxed_guards)
+        entry_thresholds_meta["intraday_relax_size_scale"] = intraday_relax_scale
 
     if not data_integrity_ok:
         reasons.append("Data integrity gate: adatfrissítés >2 perc vagy hiányzik")
@@ -12284,6 +12307,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         "required": required_list,
         "missing": missing,
     }
+    if intraday_relaxed_guards:
+        gates_payload["relaxed_guards"] = list(intraday_relaxed_guards)
+        gates_payload["relax_size_scale"] = intraday_relax_scale
+        gates_payload["relax_mode"] = "intraday"
     if session_meta:
         session_window_status = {
             "entry_open": bool(session_meta.get("entry_open")),
@@ -13292,6 +13319,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
