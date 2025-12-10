@@ -80,6 +80,23 @@ def test_weekend_profile_skips_non_target_assets(monkeypatch):
         _reload_for_status_profile(monkeypatch, None)
 
 
+def test_default_profile_sets_outside_hours_reason(monkeypatch):
+    fake_now = datetime(2025, 1, 6, 10, 0, tzinfo=timezone.utc)  # hétfő, nyitás előtt
+    settings, analysis_module = _reload_for_status_profile(
+        monkeypatch, None, forced_now=fake_now
+    )
+    try:
+        assert settings.SESSION_STATUS_PROFILE_NAME == "default"
+
+        entry_open, info = analysis_module.session_state("NVDA", now=fake_now)
+
+        assert entry_open is False
+        assert info["status"] == "closed_out_of_hours"
+        assert info.get("market_closed_reason") == "outside_hours"
+    finally:
+        _reload_for_status_profile(monkeypatch, None)
+
+
 def test_invalid_session_status_profile_fallback(monkeypatch):
     # Időfüggetlenítés: fagyasszuk hétfőre az "aktuális" időt, hogy a weekend auto-profil ne befolyásolja a fallbacket.
     fake_weekday = datetime(2025, 1, 6, 12, 0, tzinfo=timezone.utc)  # hétfő
