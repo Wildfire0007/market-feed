@@ -81,7 +81,7 @@ def test_suppressed_profile_configuration(monkeypatch):
     assert profile["name"] == "suppressed"
     assert profile["p_score_min"]["default"] == pytest.approx(42.0)
     assert profile["p_score_min"]["by_asset"]["USOIL"] == pytest.approx(44.0)
-    assert profile["p_score_min"]["by_asset"]["XAGUSD"] == pytest.approx(44.0)
+    assert profile["p_score_min"]["by_asset"]["XAGUSD"] == pytest.approx(38.0)
     assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.90)
     assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.95)
 
@@ -235,7 +235,7 @@ def test_rr_minimum_settings(monkeypatch):
     assert settings.CORE_RR_MIN["USOIL"] == pytest.approx(1.3)
     assert settings.CORE_RR_MIN["NVDA"] == pytest.approx(1.4)
     assert settings.CORE_RR_MIN["BTCUSD"] == pytest.approx(1.25)
-    assert settings.CORE_RR_MIN["XAGUSD"] == pytest.approx(1.3)
+    assert settings.CORE_RR_MIN["XAGUSD"] == pytest.approx(1.4)
 
     assert settings.MOMENTUM_RR_MIN["default"] == pytest.approx(1.1)
     assert settings.MOMENTUM_RR_MIN["EURUSD"] == pytest.approx(1.15)
