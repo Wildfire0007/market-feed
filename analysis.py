@@ -139,30 +139,32 @@ BTC_ADX_TREND_MIN = 20.0
 BTC_ATR_FLOOR_USD = {
     "baseline": 90.0,
     "relaxed": 80.0,
+    "intraday": 78.0,
     "suppressed": 75.0,
 }
 BTC_ATR_PCT_TOD = {  # percentilis minimum a nap adott szakaszára
     "baseline": {"open": 0.45, "mid": 0.40, "close": 0.45},
     "relaxed": {"open": 0.38, "mid": 0.36, "close": 0.38},
+    "intraday": {"open": 0.36, "mid": 0.34, "close": 0.36},
     "suppressed": {"open": 0.32, "mid": 0.30, "close": 0.34},
 }
 
 # P-score / RR / TP / SL / no-chase per profile
-BTC_P_SCORE_MIN = {"baseline": 48, "relaxed": 46, "suppressed": 44}
-BTC_RR_MIN_TREND = {"baseline": 1.60, "relaxed": 1.55, "suppressed": 1.45}
-BTC_RR_MIN_RANGE = {"baseline": 1.60, "relaxed": 1.50, "suppressed": 1.40}
+BTC_P_SCORE_MIN = {"baseline": 48, "relaxed": 46, "intraday": 45, "suppressed": 44}
+BTC_RR_MIN_TREND = {"baseline": 1.60, "relaxed": 1.55, "intraday": 1.50, "suppressed": 1.45}
+BTC_RR_MIN_RANGE = {"baseline": 1.60, "relaxed": 1.50, "intraday": 1.45, "suppressed": 1.40}
 
-BTC_RANGE_SIZE_SCALE = {"baseline": 0.55, "relaxed": 0.52, "suppressed": 0.48}
-BTC_RANGE_TIME_STOP_MIN = {"baseline": 24, "relaxed": 18, "suppressed": 15}
-BTC_RANGE_BE_TRIGGER_R = {"baseline": 0.32, "relaxed": 0.28, "suppressed": 0.24}
+BTC_RANGE_SIZE_SCALE = {"baseline": 0.55, "relaxed": 0.52, "intraday": 0.50, "suppressed": 0.48}
+BTC_RANGE_TIME_STOP_MIN = {"baseline": 24, "relaxed": 18, "intraday": 16, "suppressed": 15}
+BTC_RANGE_BE_TRIGGER_R = {"baseline": 0.32, "relaxed": 0.28, "intraday": 0.26, "suppressed": 0.24}
 
-BTC_TP_MIN_PCT = {"baseline": 0.0068, "relaxed": 0.0064, "suppressed": 0.006}
-BTC_SL_ATR_MULT = {"baseline": 0.26, "relaxed": 0.25, "suppressed": 0.24}
+BTC_TP_MIN_PCT = {"baseline": 0.0068, "relaxed": 0.0064, "intraday": 0.0062, "suppressed": 0.006}
+BTC_SL_ATR_MULT = {"baseline": 0.26, "relaxed": 0.25, "intraday": 0.24, "suppressed": 0.24}
 BTC_SL_ABS_MIN = 90.0  # USD
 
 # Momentum override és no-chase (slippage tiltó R-ben)
-BTC_MOMENTUM_RR_MIN = {"baseline": 1.50, "relaxed": 1.45, "suppressed": 1.35}
-BTC_NO_CHASE_R = {"baseline": 0.25, "relaxed": 0.22, "suppressed": 0.18}
+BTC_MOMENTUM_RR_MIN = {"baseline": 1.50, "relaxed": 1.45, "intraday": 1.40, "suppressed": 1.35}
+BTC_NO_CHASE_R = {"baseline": 0.25, "relaxed": 0.22, "intraday": 0.20, "suppressed": 0.18}
 
 # Runtime state for BTC momentum overrides and guardrails. Populated lazily
 # during analysis to support helper utilities and optional real-time adapters.
@@ -173,7 +175,7 @@ _BTC_NO_CHASE_LIMITS: Dict[str, float] = {}
 _PRECISION_RUNTIME: Dict[str, Dict[str, Any]] = {}
 
 # Precision pipeline alsó határ (ne blokkoljon túl korán)
-BTC_PRECISION_MIN = {"baseline": 52, "relaxed": 50, "suppressed": 48}
+BTC_NO_CHASE_R = {"baseline": 0.25, "relaxed": 0.22, "intraday": 0.20, "suppressed": 0.18}
 BTC_PRECISION_SOFT_DELTA = 2.0
 
 
@@ -657,6 +659,10 @@ def btc_sl_tp_checks(
         return
     profile_key = profile if profile in BTC_SL_ATR_MULT else "baseline"
 
+    relaxed_blockers: Set[str] = set()
+    if profile_key == "intraday":
+        relaxed_blockers = {"sl_too_tight", "tp_min_pct"}
+
     sp_limit = get_spread_max_atr_pct(asset, profile)
     spread_func = globals().get("spread_usd")
     sp = spread_func(asset) if callable(spread_func) else 0.0
@@ -694,14 +700,20 @@ def btc_sl_tp_checks(
     info["spread_usd"] = float(sp)
     info["spread_limit_atr_mult"] = float(sp_limit)
     if sl_dist < sl_buf:
-        blockers.append("sl_too_tight")
-      
+        if "sl_too_tight" not in relaxed_blockers:
+            blockers.append("sl_too_tight")
+        else:
+            info.setdefault("relaxed_checks", []).append("sl_buffer")
+
     tp_min = BTC_TP_MIN_PCT.get(profile_key, BTC_TP_MIN_PCT["baseline"])
     tp_pct = abs(tp1 - entry) / entry if entry else 0.0
     info["tp_pct"] = tp_pct
     info["tp_min_pct"] = tp_min
     if tp_pct < tp_min:
-        blockers.append("tp_min_pct")
+        if "tp_min_pct" not in relaxed_blockers:
+            blockers.append("tp_min_pct")
+        else:
+            info.setdefault("relaxed_checks", []).append("tp_min_pct")
 
     rr = abs(tp1 - entry) / max(1e-9, abs(entry - sl))
     info["rr"] = rr
@@ -1625,6 +1637,13 @@ def _btc_time_of_day_bucket(minute: int) -> str:
 
 def time_of_day_bucket(now_utc: Optional[datetime]) -> str:
     """Return the BTC intraday bucket name ("open"/"mid"/"close")."""
+
+    try:
+        bucket = settings.time_of_day_bucket("BTCUSD", now_utc)
+    except Exception:
+        bucket = None
+    if bucket:
+        return str(bucket)
 
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
@@ -10378,13 +10397,24 @@ def analyze(asset: str) -> Dict[str, Any]:
         xag_overrides.setdefault("position_scale", {}).update(xag_scale_meta)
 
     if asset == "BTCUSD":
+        btc_position_meta: Dict[str, Any] = {}
+        btc_active_profile = btc_profile_name or _btc_active_profile()
+        if btc_active_profile in {"relaxed", "intraday"}:
+            profile_cap = 0.62 if btc_active_profile == "relaxed" else 0.6
+            if profile_cap < position_size_scale:
+                position_size_scale = profile_cap
+                btc_position_meta["profile_cap"] = profile_cap
+                btc_position_meta["profile"] = btc_active_profile
         if btc_momentum_override_active:
             position_size_scale = min(position_size_scale, 0.55)
             if "BTC momentum override — pozícióméret csökkentve" not in reasons:
                 reasons.append("BTC momentum override — pozícióméret csökkentve")
+            btc_position_meta["momentum_override_cap"] = 0.55
         else:
             position_size_scale = min(position_size_scale, 0.75)
         entry_thresholds_meta["btc_position_scale"] = position_size_scale
+        if btc_position_meta:
+            entry_thresholds_meta["btc_position_meta"] = btc_position_meta
 
     if asset == "USOIL":
         minute_now = analysis_now.hour * 60 + analysis_now.minute
@@ -13368,6 +13398,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
