@@ -295,6 +295,7 @@ from config.analysis_settings import (
     get_realtime_price_guard,
     get_sl_buffer_config,
     get_spread_max_atr_pct,
+    get_low_atr_override,
     get_tp_min_abs_value,
     get_tp_min_pct_value,
     get_tp_net_min,
@@ -3649,6 +3650,22 @@ def atr_low_threshold(asset: str) -> float:
     multiplier = get_atr_threshold_multiplier(asset)
     return base * multiplier
 
+def tp_min_pct_for(asset: str, rel_atr: float, session_flag: bool) -> float:
+    base = get_tp_min_pct_value(asset)
+    if asset == "BTCUSD":
+        profile = _btc_active_profile()
+        override_tp = BTC_TP_MIN_PCT.get(profile)
+        if override_tp is not None:
+            return float(override_tp)
+    if np.isnan(rel_atr):
+        return base
+    low_atr_cfg = get_low_atr_override(asset)
+    floor = safe_float(low_atr_cfg.get("floor"))
+    tp_override = safe_float(low_atr_cfg.get("tp_min_pct"))
+    if floor is not None and tp_override is not None and rel_atr < floor:
+        return min(base, tp_override)
+    return base
+  
 def tp_min_pct_for(asset: str, rel_atr: float, session_flag: bool) -> float:
     base = get_tp_min_pct_value(asset)
     if asset == "BTCUSD":
@@ -10526,6 +10543,29 @@ def analyze(asset: str) -> Dict[str, Any]:
     mom_tp2_mult = dynamic_tp_profile["momentum"]["tp2"]
     momentum_rr_min = max(momentum_rr_min, dynamic_tp_profile["momentum"]["rr"])
 
+    low_atr_meta: Dict[str, Any] = {}
+    low_atr_tp_override: Optional[float] = None
+    low_atr_cfg = get_low_atr_override(asset)
+    low_atr_floor = safe_float(low_atr_cfg.get("floor"))
+    if low_atr_floor is not None and not np.isnan(rel_atr) and rel_atr < low_atr_floor:
+        low_atr_meta["floor"] = low_atr_floor
+        low_atr_meta["rel_atr"] = float(rel_atr)
+        tp_override = safe_float(low_atr_cfg.get("tp_min_pct"))
+        if tp_override is not None:
+            low_atr_tp_override = tp_override
+            low_atr_meta["tp_min_pct"] = tp_override
+        rr_override = safe_float(low_atr_cfg.get("rr_required"))
+        if rr_override is not None:
+            core_rr_min = min(core_rr_min, rr_override)
+            momentum_rr_min = min(momentum_rr_min, rr_override)
+            low_atr_meta["rr_required"] = rr_override
+        msg = (
+            f"ATR-floor override: rel_atr {rel_atr:.4f} < {low_atr_floor:.4f} "
+            "→ adaptív RR/TP küszöb"
+        )
+        if msg not in reasons:
+            reasons.append(msg)
+
     rr_gate_meta: Dict[str, Any] = {
         "core_rr_min_base": core_rr_min,
         "momentum_rr_min_base": momentum_rr_min,
@@ -10544,11 +10584,21 @@ def analyze(asset: str) -> Dict[str, Any]:
             rr_gate_meta["relax_reason"] = "alacsony vol / range momentum"
             core_rr_min = relaxed_core
             momentum_rr_min = relaxed_momentum
+    if low_atr_meta:
+        rr_gate_meta["low_atr_override"] = {
+            **low_atr_meta,
+            "core_rr_min_effective": core_rr_min,
+            "momentum_rr_min_effective": momentum_rr_min,
+        }
     rr_gate_meta["core_rr_min"] = core_rr_min
     rr_gate_meta["momentum_rr_min"] = momentum_rr_min
     entry_thresholds_meta["rr_min_core"] = core_rr_min
     entry_thresholds_meta["rr_min_momentum"] = momentum_rr_min
     entry_thresholds_meta["rr_meta"] = rr_gate_meta
+    if low_atr_meta:
+        entry_thresholds_meta["low_atr_override"] = dict(low_atr_meta)
+        if low_atr_tp_override is not None:
+            entry_thresholds_meta["low_atr_override"]["tp_min_pct_override"] = low_atr_tp_override
 
     range_guard_label = "intraday_range_guard"
     structure_label = "structure(2of3)"
@@ -11214,7 +11264,17 @@ def analyze(asset: str) -> Dict[str, Any]:
         rel_atr_local = float(rel_atr) if not np.isnan(rel_atr) else float("nan")
         high_vol = (not np.isnan(rel_atr_local)) and (rel_atr_local >= ATR_VOL_HIGH_REL)
         cost_mult = COST_MULT_HIGH_VOL if high_vol else COST_MULT_DEFAULT
-        tp_min_pct = tp_min_pct_for(asset, rel_atr_local, session_ok_flag)
+        tp_min_base = tp_min_pct_for(asset, rel_atr_local, session_ok_flag)
+        tp_min_pct = tp_min_base
+        if low_atr_tp_override is not None:
+            tp_min_pct = min(tp_min_base, low_atr_tp_override)
+        if low_atr_meta:
+            entry_thresholds_meta.setdefault("low_atr_override", {}).update(
+                {
+                    "tp_min_pct_effective": tp_min_pct,
+                    "rr_required_effective": rr_required,
+                }
+            )
         overnight_days = estimate_overnight_days(asset, analysis_now)
         cost_round_pct, overnight_pct = compute_cost_components(asset, entry, overnight_days)
         total_cost_pct = cost_mult * cost_round_pct + overnight_pct
@@ -13319,6 +13379,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
