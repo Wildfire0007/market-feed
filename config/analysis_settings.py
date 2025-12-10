@@ -85,6 +85,8 @@ def _build_session_windows(raw: Dict[str, Any]) -> Dict[str, Dict[str, Optional[
     return processed
 
 
+
+    
 def _optional_int(value: Any, *, field: str, asset: str) -> Optional[int]:
     """Return ``value`` converted to ``int`` when possible, otherwise ``None``.
 
@@ -150,6 +152,13 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
 def _get_config_value(key: str) -> Any:
     cfg = load_config()
     return cfg.get(key)
+
+
+_SESSION_BUCKET_PROXIES_RAW: Dict[str, str] = {
+    str(key).upper(): str(value).upper()
+    for key, value in dict(_get_config_value("session_bucket_proxies") or {}).items()
+    if value is not None
+}
 
 
 def is_intraday_relax_enabled(asset: str) -> bool:
@@ -868,7 +877,38 @@ def _tod_buckets_from_config() -> List[Tuple[str, range]]:
     return buckets
 
 
-def _current_tod_bucket(now: Optional[datetime] = None) -> Optional[str]:
+def _session_bucket(asset: Optional[str], now: Optional[datetime] = None) -> Optional[str]:
+    ts = now or _now_utc()
+    minute_of_day = ts.hour * 60 + ts.minute
+    asset_key = str(asset or "").upper()
+    proxy_asset = _SESSION_BUCKET_PROXIES_RAW.get(asset_key, asset_key)
+    rules = SESSION_TIME_RULES.get(proxy_asset)
+    if not isinstance(rules, dict):
+        return None
+    open_minute = rules.get("sunday_open_minute")
+    close_minute = rules.get("friday_close_minute")
+    if open_minute is None or close_minute is None:
+        return None
+    try:
+        open_minute = int(open_minute)
+        close_minute = int(close_minute)
+    except (TypeError, ValueError):
+        return None
+    if minute_of_day < open_minute or minute_of_day > close_minute:
+        return None
+    session_span = max(1, close_minute - open_minute)
+    segment = max(1, session_span // 3)
+    if minute_of_day < open_minute + segment:
+        return "open"
+    if minute_of_day < close_minute - segment:
+        return "mid"
+    return "close"
+
+
+def _current_tod_bucket(asset: Optional[str] = None, now: Optional[datetime] = None) -> Optional[str]:
+    session_bucket = _session_bucket(asset, now)
+    if session_bucket:
+        return session_bucket
     ts = now or _now_utc()
     minute_of_day = ts.hour * 60 + ts.minute
     for name, bucket_range in _tod_buckets_from_config():
@@ -877,8 +917,14 @@ def _current_tod_bucket(now: Optional[datetime] = None) -> Optional[str]:
     return None
 
 
+def time_of_day_bucket(asset: str, now: Optional[datetime] = None) -> Optional[str]:
+    """Return the intraday bucket label for ``asset`` at ``now``."""
+
+    return _current_tod_bucket(asset, now)
+
+
 def _resolve_scheduled_profile(asset: str, now: Optional[datetime] = None) -> Optional[str]:
-    bucket = _current_tod_bucket(now)
+    bucket = _current_tod_bucket(asset, now)
     if not bucket:
         return None
     schedule_default = (_ENTRY_PROFILE_SCHEDULE.get("default") or {}).get(bucket)
@@ -1284,6 +1330,7 @@ for key, value in _RAW_LATENCY_GUARD.items():
 INTERVENTION_WATCH_DEFAULT: Dict[str, Any] = dict(_get_config_value("intervention_watch_default") or {})
 SESSION_WEEKDAYS: Dict[str, Any] = dict(_get_config_value("session_weekdays") or {})
 SESSION_TIME_RULES: Dict[str, Dict[str, Any]] = load_config()["session_time_rules"]
+SESSION_BUCKET_PROXIES: Dict[str, str] = dict(_SESSION_BUCKET_PROXIES_RAW)
 _ATR_PERCENTILE_PROFILES: Dict[str, Any] = dict(
     _get_config_value("atr_percentile_min_by_tod_profiles") or {}
 )
