@@ -146,6 +146,31 @@ def _get_emoji(asset: str) -> str:
     return ASSET_EMOJIS.get((asset or "").upper(), "📉")
 
 
+def _translate_market_closed_reason(reason: Optional[str]) -> str:
+    """Magyar nyelvű, felhasználóbarát indok a piac zártságára."""
+
+    if not reason:
+        return "Ismeretlen ok"
+
+    reason_key = str(reason).strip().lower()
+    translations = {
+        "weekend": "Hétvége",
+        "outside_hours": "Kereskedési időn kívül",
+        "holiday": "Ünnepnap",
+        "market_holiday": "Tőzsdei szünnap",
+        "status_profile_forced": "Profil által lezárva",
+        "maintenance": "Karbantartás",
+        "no_data": "Nincs friss adat",
+        "frozen": "Jegelve",
+    }
+
+    if reason_key in translations:
+        return translations[reason_key]
+
+    humanized = reason_key.replace("_", " ").strip()
+    return humanized.capitalize() if humanized else "Ismeretlen ok"
+  
+
 def draw_progress_bar(value: float, length: int = 10) -> str:
     """ASCII sáv: [■■■■■■■□□□]"""
 
