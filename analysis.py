@@ -3665,17 +3665,6 @@ def tp_min_pct_for(asset: str, rel_atr: float, session_flag: bool) -> float:
     if floor is not None and tp_override is not None and rel_atr < floor:
         return min(base, tp_override)
     return base
-  
-def tp_min_pct_for(asset: str, rel_atr: float, session_flag: bool) -> float:
-    base = get_tp_min_pct_value(asset)
-    if asset == "BTCUSD":
-        profile = _btc_active_profile()
-        override_tp = BTC_TP_MIN_PCT.get(profile)
-        if override_tp is not None:
-            return float(override_tp)
-    if np.isnan(rel_atr):
-        return base
-    return base
 
 def tp_net_min_for(asset: str) -> float:
     return get_tp_net_min(asset)
@@ -13379,6 +13368,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
