@@ -7940,6 +7940,9 @@ def analyze(asset: str) -> Dict[str, Any]:
     atr_period = get_atr_period(asset)
     atr_series_5 = atr(k5m_closed, period=atr_period)
     atr5 = atr_series_5.iloc[-1]
+    atr5_mean_recent = (
+        float(atr_series_5.tail(48).mean()) if not atr_series_5.empty else None
+    )
     rel_atr = float(atr5 / price_for_calc) if (atr5 and price_for_calc) else float("nan")
     bid = safe_float(spot.get("bid")) if isinstance(spot, dict) else None
     ask = safe_float(spot.get("ask")) if isinstance(spot, dict) else None
@@ -7980,6 +7983,71 @@ def analyze(asset: str) -> Dict[str, Any]:
     elif regime_label == "ranging":
         adx_regime = "range"
     entry_thresholds_meta["adx_regime_initial"] = adx_regime
+    if asset == "EURUSD":
+        adx_for_eurusd = regime_adx if regime_adx is not None else adx_value
+        bias_flat = bias1h == "neutral" and bias4h == "neutral"
+        if adx_for_eurusd is not None and adx_for_eurusd < 15 and bias_flat:
+            eurusd_range_mode = True
+            eurusd_range_meta = {
+                "adx": float(adx_for_eurusd),
+                "bias1h": bias1h,
+                "bias4h": bias4h,
+            }
+        atr_spike = (
+            atr5 is not None
+            and atr5_mean_recent is not None
+            and np.isfinite(float(atr5_mean_recent))
+            and float(atr5_mean_recent) > 0
+            and float(atr5) > 3.0 * float(atr5_mean_recent)
+        )
+        adx_momentum = adx_for_eurusd is not None and adx_for_eurusd > 25
+        eurusd_momentum_trigger = bool(atr_spike and adx_momentum)
+        if eurusd_momentum_trigger:
+            eurusd_range_meta.setdefault("momentum_drive", {})
+            eurusd_range_meta["momentum_drive"] = {
+                "atr5": float(atr5) if atr5 is not None else None,
+                "atr5_avg": float(atr5_mean_recent)
+                if atr5_mean_recent is not None
+                else None,
+                "adx": float(adx_for_eurusd) if adx_for_eurusd is not None else None,
+            }
+        swings = find_swings(k5m_closed, lb=3)
+        range_high, range_low = last_swing_levels(swings)
+        eurusd_range_levels = {"range_high": range_high, "range_low": range_low}
+        range_width_pips: Optional[float] = None
+        if range_high is not None and range_low is not None and range_high > range_low:
+            range_width_pips = (range_high - range_low) / EURUSD_PIP
+            eurusd_range_levels["range_width_pips"] = range_width_pips
+        price_now = price_for_calc
+        near_low = False
+        near_high = False
+        tolerance = 0.0008
+        if price_now is not None and np.isfinite(price_now):
+            if range_low is not None:
+                near_low = abs(price_now - range_low) <= tolerance
+            if range_high is not None:
+                near_high = abs(price_now - range_high) <= tolerance
+        if eurusd_range_mode:
+            if range_width_pips is not None:
+                eurusd_range_meta["range_width_pips"] = range_width_pips
+            if near_low and np.isfinite(rsi14_val) and rsi14_val < 30 and bos5m_long:
+                eurusd_range_signal = "buy"
+            elif near_high and np.isfinite(rsi14_val) and rsi14_val > 70 and bos5m_short:
+                eurusd_range_signal = "sell"
+            if eurusd_range_signal:
+                eurusd_range_meta["signal"] = eurusd_range_signal
+                eurusd_range_meta["rsi14"] = rsi14_val if np.isfinite(rsi14_val) else None
+                eurusd_range_meta["bos"] = {
+                    "long": bool(bos5m_long),
+                    "short": bool(bos5m_short),
+                }
+        if eurusd_range_meta:
+            entry_thresholds_meta["eurusd_range_mode"] = eurusd_range_meta
+    eurusd_range_mode = False
+    eurusd_range_meta: Dict[str, Any] = {}
+    eurusd_range_signal: Optional[str] = None
+    eurusd_range_levels: Dict[str, Any] = {}
+    eurusd_momentum_trigger = False
     if asset == "BTCUSD":
         btc_profile_active = btc_profile_name or _btc_active_profile()
         if adx_value is not None:
@@ -8188,6 +8256,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     entry_thresholds_meta["spread_gate_ok"] = spread_gate_ok
     cost_model = settings.ASSET_COST_MODEL.get(asset) or settings.DEFAULT_COST_MODEL
     risk_cap_pct = get_max_risk_pct(asset)
+    if asset == "EURUSD" and eurusd_range_mode:
+        risk_cap_pct = 1.0 if risk_cap_pct is None else min(risk_cap_pct, 1.0)
     risk_guard_meta = {
         "profile": asset_entry_profile,
         "max_risk_pct": float(risk_cap_pct) if risk_cap_pct is not None else None,
@@ -10220,6 +10290,8 @@ def analyze(asset: str) -> Dict[str, Any]:
                 "mode": eurusd_rr_bias,
                 "atr1h_pips": atr1h_pips,
             }
+    if asset == "EURUSD":
+        momentum_rr_min = min(momentum_rr_min, 1.2)
 
     entry_thresholds_meta["adx_regime"] = adx_regime
 
@@ -10618,15 +10690,25 @@ def analyze(asset: str) -> Dict[str, Any]:
     momentum_liquidity_ok = True
     momentum_adx_ok = True
     xag_momentum_regime_bypass = asset == "XAGUSD" and P >= 30.0
+    eurusd_momentum_regime_bypass = (
+        asset == "EURUSD" and eurusd_momentum_trigger and P >= p_score_min_local
+    )
     if asset in ENABLE_MOMENTUM_ASSETS:
         direction = effective_bias if effective_bias in {"long", "short"} else None
+        if direction is None and asset == "EURUSD" and eurusd_momentum_regime_bypass:
+            direction = desired_bias if desired_bias in {"long", "short"} else None
         if not session_ok_flag:
             missing_mom.append("session")
-        regime_gate_for_momentum = bool(regime_ok or xag_momentum_regime_bypass)
+        regime_gate_for_momentum = bool(
+            regime_ok or xag_momentum_regime_bypass or eurusd_momentum_regime_bypass
+        )
         if not regime_gate_for_momentum:
             missing_mom.append("regime")
         if direction is None:
-            missing_mom.append("bias")
+            if eurusd_momentum_regime_bypass:
+                direction = trend_bias if trend_bias in {"long", "short"} else direction
+            if direction is None:
+                missing_mom.append("bias")
         if funding_dir_filter and direction in {"long", "short"}:
             if direction != funding_dir_filter:
                 missing_mom.append("funding_alignment")
@@ -11034,7 +11116,10 @@ def analyze(asset: str) -> Dict[str, Any]:
                 risk = sl - entry
 
         risk = max(risk, 1e-6)
-        min_stoploss_ok_local = risk >= entry * MIN_STOPLOSS_PCT - 1e-9
+        min_stop_distance = entry * MIN_STOPLOSS_PCT
+        if asset == "EURUSD":
+            min_stop_distance = 10 * EURUSD_PIP
+        min_stoploss_ok_local = risk >= min_stop_distance - 1e-9
         if not min_stoploss_ok_local:
             min_stoploss_ok = False
 
@@ -11131,6 +11216,57 @@ def analyze(asset: str) -> Dict[str, Any]:
         return True
 
     reversal_mode_used = False
+    if asset == "EURUSD" and eurusd_range_signal in {"buy", "sell"}:
+        mode = "range_reversal"
+        decision = eurusd_range_signal
+        required_list = ["session", "data_integrity", "spread_guard", "reversal_signal"]
+        missing = []
+        if not session_ok_flag:
+            missing.append("session")
+        if not data_integrity_ok:
+            missing.append("data_integrity")
+        if not spread_gate_ok:
+            missing.append("spread_guard")
+        if decision in {"buy", "sell"} and not missing:
+            band_width_pips = eurusd_range_levels.get("range_width_pips")
+            if band_width_pips is None or not np.isfinite(band_width_pips):
+                band_width_pips = 35.0
+            band_width_pips = min(max(band_width_pips, 30.0), 40.0)
+            band_width = band_width_pips * EURUSD_PIP
+            anchor_level = eurusd_range_levels.get("range_low") if decision == "buy" else eurusd_range_levels.get("range_high")
+            if anchor_level is None:
+                anchor_level = price_for_calc
+            stop_buffer = 0.0012
+            if decision == "buy":
+                sl = anchor_level - stop_buffer
+                entry = price_for_calc
+                tp1 = anchor_level + band_width
+            else:
+                sl = anchor_level + stop_buffer
+                entry = price_for_calc
+                tp1 = anchor_level - band_width
+            tp2 = tp1
+            if entry is not None and sl is not None and tp1 is not None:
+                risk = abs(entry - sl)
+                min_stoploss_ok = risk >= 10 * EURUSD_PIP - 1e-9
+                rr = abs(tp1 - entry) / risk if risk > 0 else None
+                if not min_stoploss_ok or rr is None or rr <= 0:
+                    missing.append("min_stoploss")
+            else:
+                missing.append("reversal_signal")
+            if not missing:
+                reversal_mode_used = True
+                reasons.append("EURUSD range/reversal setup aktiválva — ML küszöb lazítva")
+                entry_thresholds_meta["eurusd_range_trade"] = {
+                    "band_pips": band_width_pips,
+                    "stop_buffer": stop_buffer,
+                    "signal": eurusd_range_signal,
+                }
+        if missing:
+            decision = "no entry"
+        else:
+            mode = "reversal"
+
     if asset == "XAGUSD" and xag_reversal_active and xag_reversal_side in {"buy", "sell"}:
         mode = "reversal"
         decision = xag_reversal_side
@@ -13151,6 +13287,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
