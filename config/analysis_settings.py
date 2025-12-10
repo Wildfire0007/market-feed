@@ -1073,6 +1073,10 @@ EMA_SLOPE_TH_DEFAULT: float = float(_get_config_value("ema_slope_th_default") or
 EMA_SLOPE_TH_ASSET: Dict[str, float] = dict(_get_config_value("ema_slope_th_asset") or {})
 EMA_SLOPE_SIGN_ENFORCED: set = load_config()["ema_slope_sign_enforced"]
 ATR_ABS_MIN: Dict[str, float] = dict(_get_config_value("atr_abs_min") or {})
+XAGUSD_ATR_5M_FLOOR: float = float(_get_config_value("xagusd_atr_5m_floor") or 0.0)
+XAGUSD_ATR_5M_FLOOR_ENABLED: bool = bool(
+    _get_config_value("xagusd_atr_5m_floor_enabled")
+)
 CORE_RR_MIN: Dict[str, float] = dict(_get_config_value("core_rr_min") or {})
 MOMENTUM_RR_MIN: Dict[str, float] = dict(_get_config_value("momentum_rr_min") or {})
 FX_TP_TARGETS: Dict[str, float] = dict(_get_config_value("fx_tp_targets") or {})
