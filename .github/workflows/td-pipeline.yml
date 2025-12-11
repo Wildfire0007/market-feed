@@ -48,12 +48,28 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
-          cache-dependency-path: requirements.lock   
-      
-      - name: Install deps
+          cache-dependency-path: requirements.lock
+
+      - name: Restore Python virtualenv cache
+        id: cache-venv-trading
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('requirements.lock') }}
+          restore-keys: |
+            venv-${{ runner.os }}-
+
+      - name: Create virtualenv (cache miss)
+        if: steps.cache-venv-trading.outputs.cache-hit != 'true'
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.lock
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/pip install -r requirements.lock
+
+      - name: Activate virtualenv for subsequent steps
+        run: |
+          echo "VIRTUAL_ENV=$PWD/.venv" >> $GITHUB_ENV
+          echo "PATH=$PWD/.venv/bin:$PATH" >> $GITHUB_ENV
 
       - name: Show sklearn/joblib versions
         run: |
@@ -109,13 +125,27 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
-          cache-dependency-path: requirements.lock
+          
+      - name: Restore Python virtualenv cache
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('requirements.lock') }}
+          restore-keys: |
+            venv-${{ runner.os }}-
 
-      - name: Install deps
+      - name: Create virtualenv (cache miss)
+        if: steps.cache-venv.outputs.cache-hit != 'true'
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.lock
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/pip install -r requirements.lock
+
+      - name: Activate virtualenv for subsequent steps
+        run: |
+          echo "VIRTUAL_ENV=$PWD/.venv" >> $GITHUB_ENV
+          echo "PATH=$PWD/.venv/bin:$PATH" >> $GITHUB_ENV
 
       - name: Show sklearn/joblib versions
         run: |
@@ -185,13 +215,27 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
-          cache-dependency-path: requirements.lock
+          
+      - name: Restore Python virtualenv cache
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('requirements.lock') }}
+          restore-keys: |
+            venv-${{ runner.os }}-
 
-      - name: Install deps
+      - name: Create virtualenv (cache miss)
+        if: steps.cache-venv.outputs.cache-hit != 'true'
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.lock
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/pip install -r requirements.lock
+
+      - name: Activate virtualenv for subsequent steps
+        run: |
+          echo "VIRTUAL_ENV=$PWD/.venv" >> $GITHUB_ENV
+          echo "PATH=$PWD/.venv/bin:$PATH" >> $GITHUB_ENV
 
       - name: Validate public/status.json
         run: python -m json.tool public/status.json > /dev/null
@@ -311,13 +355,27 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
-          cache-dependency-path: requirements.lock
+          
+      - name: Restore Python virtualenv cache
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('requirements.lock') }}
+          restore-keys: |
+            venv-${{ runner.os }}-
 
-      - name: Install deps
+      - name: Create virtualenv (cache miss)
+        if: steps.cache-venv.outputs.cache-hit != 'true'
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.lock
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/pip install -r requirements.lock
+
+      - name: Activate virtualenv for subsequent steps
+        run: |
+          echo "VIRTUAL_ENV=$PWD/.venv" >> $GITHUB_ENV
+          echo "PATH=$PWD/.venv/bin:$PATH" >> $GITHUB_ENV
 
       - name: Run Discord notifier
         run: |
