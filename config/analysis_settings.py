@@ -981,6 +981,12 @@ def _session_bucket(asset: Optional[str], now: Optional[datetime] = None) -> Opt
     asset_key = str(asset or "").upper()
     proxy_asset = _SESSION_BUCKET_PROXIES_RAW.get(asset_key, asset_key)
     rules = SESSION_TIME_RULES.get(proxy_asset)
+
+    # Some tests monkeypatch ``SESSION_TIME_RULES`` and forget to restore it, so
+    # grab a fresh view from the cached config when the primary mapping is
+    # missing to avoid dropping session buckets for proxied assets like BTCUSD.
+    if not isinstance(rules, dict):
+        rules = (_get_config_value("session_time_rules") or {}).get(proxy_asset)
     if not isinstance(rules, dict):
         return None
     open_minute = rules.get("sunday_open_minute")
