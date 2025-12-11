@@ -155,6 +155,11 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
     if isinstance(momentum_flags, list):
         momentum_assets = {str(asset).upper() for asset in momentum_flags if isinstance(asset, str)}
 
+    proxy_targets: Set[str] = set()
+    raw_proxies = raw.get("session_bucket_proxies") or {}
+    if isinstance(raw_proxies, dict):
+        proxy_targets = {str(proxy).upper() for proxy in raw_proxies.values() if proxy}
+        
     valid_assets: List[str] = []
     issues: List[str] = []
 
