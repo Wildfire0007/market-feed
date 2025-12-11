@@ -73,14 +73,14 @@ jobs:
 
       - name: Show sklearn/joblib versions
         run: |
-          python - <<'PY'
+          .venv/bin/python - <<'PY'
           import sklearn, joblib
           print("scikit-learn:", sklearn.__version__)
           print("joblib:", joblib.__version__)
           PY
 
       - name: Run Trading.py (pull all OHLC + spot)
-        run: python Trading.py
+        run: .venv/bin/python Trading.py
 
       - name: Upload trading outputs
         uses: actions/upload-artifact@v4
@@ -149,22 +149,22 @@ jobs:
 
       - name: Show sklearn/joblib versions
         run: |
-          python - <<'PY'
+          .venv/bin/python - <<'PY'
           import sklearn, joblib
           print("scikit-learn:", sklearn.__version__)
           print("joblib:", joblib.__version__)
           PY
 
       - name: Verify model exists & loadable
-        run: python scripts/check_ml_readiness.py BTCUSD
+        run: .venv/bin/python scripts/check_ml_readiness.py BTCUSD
 
-      - name: Run analysis (ML disabled)        
+      - name: Run analysis (ML disabled)
         run: |
-          python analysis.py         
+          .venv/bin/python analysis.py      
                
       - name: Generate latency monitoring snapshot
         run: |
-          python scripts/check_latency_sources.py --output public/monitoring/data_latency.json --pretty
+          .venv/bin/python scripts/check_latency_sources.py --output public/monitoring/data_latency.json --pretty
                
       - name: Upload analysis outputs
         uses: actions/upload-artifact@v4
@@ -238,12 +238,12 @@ jobs:
           echo "PATH=$PWD/.venv/bin:$PATH" >> $GITHUB_ENV
 
       - name: Validate public/status.json
-        run: python -m json.tool public/status.json > /dev/null
+        run: .venv/bin/python -m json.tool public/status.json > /dev/null
         
       - name: Enforce predeploy status health
         env:
           PREDEPLOY_SKIP_FOR_ROLLBACK: ${{ github.event.inputs.skip_rollback_guard || '' }}
-        run: python scripts/predeploy_guard.py --status-path public/status.json
+        run: .venv/bin/python scripts/predeploy_guard.py --status-path public/status.json
       
       - name: Verify analysis.py hash against origin/main
         run: |
@@ -258,12 +258,12 @@ jobs:
           fi
 
       - name: Run pytest suite
-        run: pytest
+        run: .venv/bin/pytest
 
       - name: Generate entry gate statistics
         run: |
           mkdir -p public/debug
-          python tools/analyze_entry_gates.py \
+          .venv/bin/python tools/analyze_entry_gates.py \
             --root . \
             --limit-runs 40 \
             --output-json public/debug/entry_gate_stats.json
@@ -271,7 +271,7 @@ jobs:
       - name: Persist entry gate statistics per run
         if: ${{ always() }}
         run: |
-          python tools/persist_entry_gate_stats.py \
+          .venv/bin/python tools/persist_entry_gate_stats.py \
             --stats-file public/debug/entry_gate_stats.json \
             --run-id "${{ github.run_id }}" \
             --output-dir public/debug-entry-gates
@@ -380,7 +380,7 @@ jobs:
       - name: Run Discord notifier
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            python scripts/notify_discord.py --manual
+            .venv/bin/python scripts/notify_discord.py --manual
           else
-            python scripts/notify_discord.py
+            .venv/bin/python scripts/notify_discord.py
           fi
