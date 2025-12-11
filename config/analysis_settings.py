@@ -134,6 +134,20 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
     if not isinstance(assets, list) or not assets:
         raise AnalysisConfigError("Config must define a non-empty 'assets' list")
 
+    leverage_raw = raw.get("leverage", {})
+    leverage: Dict[str, float] = {}
+    if isinstance(leverage_raw, dict):
+        for asset, lev in leverage_raw.items():
+            asset_key = str(asset).upper()
+            try:
+                leverage[asset_key] = float(lev)
+            except (TypeError, ValueError):
+                LOGGER.warning(
+                    "Ignoring invalid leverage value %r for asset %s", lev, asset_key
+                )
+    else:
+        LOGGER.error("Expected leverage to be a mapping; falling back to empty config")
+    
     session_windows = raw.get("session_windows_utc", {})
     session_time_rules = raw.get("session_time_rules", {})
     momentum_flags = raw.get("enable_momentum_assets", [])
