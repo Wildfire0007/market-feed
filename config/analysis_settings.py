@@ -19,6 +19,7 @@ LOGGER = logging.getLogger(__name__)
 _DEFAULT_CONFIG_PATH = Path(__file__).with_name("analysis_settings.json")
 _ASSET_PROFILE_MAP_PATH = Path(__file__).with_name("asset_profile_map.json")
 _ENV_OVERRIDE = "ANALYSIS_CONFIG_FILE"
+_MIN_INTRADAY_ASSETS = ("BTCUSD", "EURUSD")
 
 SequenceTuple = Tuple[Any, ...]
 T = TypeVar("T")
@@ -133,18 +134,96 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
     if not isinstance(assets, list) or not assets:
         raise AnalysisConfigError("Config must define a non-empty 'assets' list")
 
-    leverage = raw.get("leverage", {})
-    missing_leverage = [asset for asset in assets if asset not in leverage]
-    if missing_leverage:
-        raise AnalysisConfigError(f"Missing leverage configuration for: {missing_leverage}")
+    session_windows = raw.get("session_windows_utc", {})
+    session_time_rules = raw.get("session_time_rules", {})
+    momentum_flags = raw.get("enable_momentum_assets", [])
+    momentum_assets: Set[str] = set()
+    if isinstance(momentum_flags, list):
+        momentum_assets = {str(asset).upper() for asset in momentum_flags if isinstance(asset, str)}
+
+    valid_assets: List[str] = []
+    issues: List[str] = []
+
+    for asset in assets:
+        asset_key = str(asset).upper()
+        missing_fields: List[str] = []
+        if asset_key not in leverage:
+            missing_fields.append("leverage")
+        if asset_key not in session_windows:
+            missing_fields.append("session_windows_utc")
+        if asset_key not in session_time_rules:
+            missing_fields.append("session_time_rules")
+
+        if missing_fields:
+            hints = []
+            if "leverage" in missing_fields:
+                hints.append(f"Add leverage['{asset_key}'] to config/analysis_settings.json")
+            if "session_windows_utc" in missing_fields:
+                hints.append(
+                    f"Define entry/monitor windows for {asset_key} under session_windows_utc"
+                )
+            if "session_time_rules" in missing_fields:
+                hints.append(
+                    f"Add session_time_rules for {asset_key} with sunday_open_minute/friday_close_minute"
+                )
+            issues.append(
+                f"Asset {asset_key} missing {', '.join(missing_fields)}. {'; '.join(hints)}."
+            )
+            continue
+
+        valid_assets.append(asset_key)
+
+        if momentum_flags is not None and asset_key not in momentum_assets:
+            LOGGER.info(
+                "Asset %s has no momentum flag. Add it to enable_momentum_assets to opt in.",
+                asset_key,
+            )
+
+    if issues:
+        for issue in issues:
+            LOGGER.error(issue)
+
+    if not valid_assets:
+        fallback_assets = list(_MIN_INTRADAY_ASSETS)
+        LOGGER.error(
+            "No valid assets after validation; falling back to minimal intraday set: %s",
+            fallback_assets,
+        )
+        valid_assets = fallback_assets
+
+    valid_asset_set = set(valid_assets)
+
+    leverage_map: Dict[str, float] = {}
+    for asset in valid_assets:
+        if asset in leverage:
+            leverage_map[asset] = leverage[asset]
+        else:
+            LOGGER.error(
+                "Using default leverage 1.0 for %s; add leverage['%s'] to the config to override.",
+                asset,
+                asset,
+            )
+            leverage_map[asset] = 1.0
+            
 
     config: Dict[str, Any] = dict(raw)
-    config["assets"] = assets
-    config["leverage"] = leverage
-    config["session_windows_utc"] = _build_session_windows(raw.get("session_windows_utc", {}))
-    config["session_time_rules"] = _build_session_time_rules(raw.get("session_time_rules", {}))
+    config["assets"] = valid_assets
+    config["leverage"] = leverage_map
+    config["session_windows_utc"] = _build_session_windows(
+        {asset: session_windows.get(asset, {}) for asset in valid_assets}
+    )
+    config["session_time_rules"] = _build_session_time_rules(
+        {asset: session_time_rules.get(asset, {}) for asset in valid_assets}
+    )
     config["ema_slope_sign_enforced"] = set(raw.get("ema_slope_sign_enforced", []))
-    config["enable_momentum_assets"] = set(raw.get("enable_momentum_assets", []))
+    filtered_momentum_assets = {asset for asset in momentum_assets if asset in valid_asset_set}
+    removed_momentum = momentum_assets - filtered_momentum_assets
+    if removed_momentum:
+        LOGGER.warning(
+            "Dropping momentum flags for assets removed during validation: %s",
+            sorted(removed_momentum),
+        )
+    config["enable_momentum_assets"] = filtered_momentum_assets
 
     return config
 
@@ -1300,11 +1379,13 @@ def _resolve_momentum_assets() -> Set[str]:
     except Exception:
         raw_assets = []
 
-    enabled: Set[str] = {
-        str(asset)
-        for asset in raw_assets
-        if isinstance(asset, str)
-    }
+    enabled: Set[str] = set()
+    for asset in raw_assets:
+        if isinstance(asset, str):
+            asset_key = asset.strip().upper()
+            if asset_key:
+                enabled.add(asset_key)
+                
     enabled.add("BTCUSD")
     return enabled
 
