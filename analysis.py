@@ -137,30 +137,30 @@ BTC_ADX_TREND_MIN = 20.0
 
 # ATR floor + napszak-percentilis (TOD = time-of-day buckets) – baseline/relaxed/suppressed
 BTC_ATR_FLOOR_USD = {
-    "baseline": 90.0,
+    "baseline": 80.0,
     "relaxed": 80.0,
-    "intraday": 78.0,
+    "intraday": 80.0,
     "suppressed": 75.0,
 }
 BTC_ATR_PCT_TOD = {  # percentilis minimum a nap adott szakaszára
-    "baseline": {"open": 0.45, "mid": 0.40, "close": 0.45},
-    "relaxed": {"open": 0.38, "mid": 0.36, "close": 0.38},
-    "intraday": {"open": 0.36, "mid": 0.34, "close": 0.36},
-    "suppressed": {"open": 0.32, "mid": 0.30, "close": 0.34},
+    "baseline": {"open": 0.34, "mid": 0.34, "close": 0.34},
+    "relaxed": {"open": 0.34, "mid": 0.34, "close": 0.34},
+    "intraday": {"open": 0.34, "mid": 0.34, "close": 0.34},
+    "suppressed": {"open": 0.32, "mid": 0.32, "close": 0.32},
 }
 
 # P-score / RR / TP / SL / no-chase per profile
-BTC_P_SCORE_MIN = {"baseline": 48, "relaxed": 46, "intraday": 45, "suppressed": 44}
-BTC_RR_MIN_TREND = {"baseline": 1.60, "relaxed": 1.55, "intraday": 1.50, "suppressed": 1.45}
-BTC_RR_MIN_RANGE = {"baseline": 1.60, "relaxed": 1.50, "intraday": 1.45, "suppressed": 1.40}
+BTC_P_SCORE_MIN = {"baseline": 34, "relaxed": 34, "intraday": 34, "suppressed": 32}
+BTC_RR_MIN_TREND = {"baseline": 1.50, "relaxed": 1.50, "intraday": 1.50, "suppressed": 1.45}
+BTC_RR_MIN_RANGE = {"baseline": 1.50, "relaxed": 1.50, "intraday": 1.50, "suppressed": 1.45}
 
-BTC_RANGE_SIZE_SCALE = {"baseline": 0.55, "relaxed": 0.52, "intraday": 0.50, "suppressed": 0.48}
-BTC_RANGE_TIME_STOP_MIN = {"baseline": 24, "relaxed": 18, "intraday": 16, "suppressed": 15}
-BTC_RANGE_BE_TRIGGER_R = {"baseline": 0.32, "relaxed": 0.28, "intraday": 0.26, "suppressed": 0.24}
+BTC_RANGE_SIZE_SCALE = {"baseline": 0.50, "relaxed": 0.50, "intraday": 0.50, "suppressed": 0.48}
+BTC_RANGE_TIME_STOP_MIN = {"baseline": 20, "relaxed": 20, "intraday": 20, "suppressed": 18}
+BTC_RANGE_BE_TRIGGER_R = {"baseline": 0.26, "relaxed": 0.26, "intraday": 0.26, "suppressed": 0.24}
 
-BTC_TP_MIN_PCT = {"baseline": 0.0068, "relaxed": 0.0064, "intraday": 0.0062, "suppressed": 0.006}
-BTC_SL_ATR_MULT = {"baseline": 0.26, "relaxed": 0.25, "intraday": 0.24, "suppressed": 0.24}
-BTC_SL_ABS_MIN = 90.0  # USD
+BTC_TP_MIN_PCT = {"baseline": 0.0062, "relaxed": 0.0062, "intraday": 0.0062, "suppressed": 0.0060}
+BTC_SL_ATR_MULT = {"baseline": 0.24, "relaxed": 0.24, "intraday": 0.24, "suppressed": 0.24}
+BTC_SL_ABS_MIN = 80.0  # USD
 
 # Momentum override és no-chase (slippage tiltó R-ben)
 BTC_MOMENTUM_RR_MIN = {"baseline": 1.50, "relaxed": 1.45, "intraday": 1.40, "suppressed": 1.35}
@@ -13422,6 +13422,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
