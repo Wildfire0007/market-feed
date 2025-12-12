@@ -906,10 +906,34 @@ def save_json(path: str, obj: Dict[str, Any]) -> None:
     target = Path(path)
     ensure_dir(str(target.parent))
     tmp_path = target.with_suffix(target.suffix + ".tmp")
-    with tmp_path.open("w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, separators=(",", ":"))
-        f.flush()
-        os.fsync(f.fileno())
+
+    # ENV flags (defaults: fast + safe enough for CI)
+    durable_flag = os.getenv("TD_DURABLE_WRITES", "0").strip().lower() in {"1", "true", "yes", "on"}
+    skip_unchanged_flag = (
+        os.getenv("TD_SKIP_UNCHANGED_KLINES_WRITES", "1").strip().lower() in {"1", "true", "yes", "on"}
+    )
+
+    # Serialize once
+    data = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    # Only skip unchanged for heavy raw series files (preserve freshness semantics for spot/meta/signal)
+    name = target.name
+    is_heavy_raw_series = name.startswith("klines_") and name.endswith(".json") and (not name.endswith("_meta.json"))
+    if skip_unchanged_flag and is_heavy_raw_series and target.exists():
+        try:
+            st = target.stat()
+            if st.st_size == len(data):
+                with target.open("rb") as rf:
+                    if rf.read() == data:
+                        return
+        except Exception:
+            pass
+
+    with tmp_path.open("wb") as f:
+        f.write(data)
+        if durable_flag:
+            f.flush()
+            os.fsync(f.fileno())
     os.replace(tmp_path, target)
 
 
@@ -1349,13 +1373,19 @@ def _finalize_series_payload(
     original_retries = data.get("freshness_retries")
 
     if data.get("ok"):
-        data = _refresh_series_if_stale(
-            attempts,
-            interval,
-            data,
-            freshness_limit,
-            attempt_memory=attempt_memory,
-        )
+        retries_done = 0
+        try:
+            retries_done = int(data.get("freshness_retries") or 0)
+        except Exception:
+            retries_done = 0
+        if retries_done <= 0:
+            data = _refresh_series_if_stale(
+                attempts,
+                interval,
+                data,
+                freshness_limit,
+                attempt_memory=attempt_memory,
+            )
         data = _prefer_existing_series(out_dir, name, data, freshness_limit)
 
     asset_name = os.path.basename(out_dir) or ""
@@ -1408,10 +1438,10 @@ def _collect_series_payloads(
                 attempt_memory=attempt_memory,
                 raise_on_all_client_errors=True,
             )
-            future_map[future] = (name, interval, freshness_limit)
+            future_map[future] = (name, interval, freshness_limit, outputsize)
 
-        for future in as_completed(future_map):
-            name, interval, freshness_limit = future_map[future]
+        for future in as_completed(future_map):␊
+            name, interval, freshness_limit, outputsize = future_map[future]
             try:
                 payload = future.result()
             except Exception as exc:
@@ -2308,7 +2338,7 @@ def td_time_series(symbol: str, interval: str, outputsize: int = 500,
                    exchange: Optional[str] = None, order: str = "desc") -> Dict[str, Any]:
     """Hibatűrő time_series (hiba esetén ok:false + üres values)."""
 
-    cache_key = (symbol, interval)
+    cache_key = (symbol, interval, exchange or "", int(outputsize), order or "desc")
     if cache_key in _SERIES_CACHE:
         return _SERIES_CACHE[cache_key]
 
@@ -3986,6 +4016,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
