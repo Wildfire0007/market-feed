@@ -32,12 +32,12 @@ def test_default_profile_configuration(monkeypatch):
     assert default_name in settings.list_entry_threshold_profiles()
 
     assert profile["p_score_min"]["default"] == pytest.approx(34.0)
-    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(34.0)
-    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(33.0)
-    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(34.0)
-    assert profile["p_score_min"]["by_asset"]["NVDA"] == pytest.approx(34.0)
-    assert profile["p_score_min"]["by_asset"]["USOIL"] == pytest.approx(34.0)
-    assert profile["p_score_min"]["by_asset"]["XAGUSD"] == pytest.approx(36.0)
+    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(30.0)
+    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(30.0)
+    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(30.0)
+    assert profile["p_score_min"]["by_asset"]["NVDA"] == pytest.approx(30.0)
+    assert profile["p_score_min"]["by_asset"]["USOIL"] == pytest.approx(30.0)
+    assert profile["p_score_min"]["by_asset"]["XAGUSD"] == pytest.approx(30.0)
 
     assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.0)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.0)
@@ -102,13 +102,13 @@ def test_relaxed_profile_override(monkeypatch):
     assert profile["name"] == "relaxed"
 
     # RELAXED értékek
-    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(33.0)
-    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(34.0)
+    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(30.0)
+    assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(30.0)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.0)
     assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.0)
     
     # EURUSD override a relaxed profilban
-    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(34.0)
+    assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(30.0)
 
     # Baseline ellenőrzés (aktív)
     baseline = settings.describe_entry_threshold_profile("baseline")
@@ -128,10 +128,10 @@ def test_intraday_bias_and_atr_overrides(monkeypatch):
     settings = _reload_settings(monkeypatch)
 
     # INTRADAY_ATR_RELAX új értékek
-    assert settings.INTRADAY_ATR_RELAX["EURUSD"] == pytest.approx(0.75)
-    assert settings.INTRADAY_ATR_RELAX["GOLD_CFD"] == pytest.approx(0.90)
-    assert settings.INTRADAY_ATR_RELAX["BTCUSD"] == pytest.approx(0.40)
-    assert settings.INTRADAY_ATR_RELAX["NVDA"] == pytest.approx(0.93)
+    assert settings.INTRADAY_ATR_RELAX["EURUSD"] == pytest.approx(0.90)
+    assert settings.INTRADAY_ATR_RELAX["GOLD_CFD"] == pytest.approx(1.0)
+    assert settings.INTRADAY_ATR_RELAX["BTCUSD"] == pytest.approx(0.80)
+    assert settings.INTRADAY_ATR_RELAX["NVDA"] == pytest.approx(1.0)
 
     # Bias relax struktúra és címkék változatlan logikával
     eurusd_bias = settings.INTRADAY_BIAS_RELAX["EURUSD"]
@@ -364,7 +364,7 @@ def test_risk_template_helpers(monkeypatch):
     assert gold_risk["core_rr_min"] == pytest.approx(1.4)
     assert gold_risk["momentum_rr_min"] == pytest.approx(1.4)
     assert gold_risk["tp_min_pct"] == pytest.approx(0.0025)
-    assert gold_risk["tp_net_min"] == pytest.approx(0.6)
+    assert gold_risk["tp_net_min"] == pytest.approx(0.4)
 
     suppressed_after = _reload_settings(monkeypatch, profile="suppressed")
     assert suppressed_after.get_spread_max_atr_pct("USOIL") == pytest.approx(0.60)
