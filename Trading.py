@@ -1440,7 +1440,7 @@ def _collect_series_payloads(
             )
             future_map[future] = (name, interval, freshness_limit, outputsize)
 
-        for future in as_completed(future_map):␊
+        for future in as_completed(future_map):
             name, interval, freshness_limit, outputsize = future_map[future]
             try:
                 payload = future.result()
@@ -4016,6 +4016,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
