@@ -33,7 +33,7 @@ def test_default_profile_configuration(monkeypatch):
 
     assert profile["p_score_min"]["default"] == pytest.approx(34.0)
     assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(34.0)
-    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(36.0)
+    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(35.0)
     assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(34.0)
     assert profile["p_score_min"]["by_asset"]["NVDA"] == pytest.approx(34.0)
     assert profile["p_score_min"]["by_asset"]["USOIL"] == pytest.approx(34.0)
@@ -41,7 +41,7 @@ def test_default_profile_configuration(monkeypatch):
 
     assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.0)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.0)
-    assert profile["atr_threshold_multiplier"]["by_asset"]["GOLD_CFD"] == pytest.approx(0.0)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["GOLD_CFD"] == pytest.approx(0.85)
     assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.0)
 
     # Fib toleranciák és ATR floor (relaxed / aktív profil)
@@ -102,7 +102,7 @@ def test_relaxed_profile_override(monkeypatch):
     assert profile["name"] == "relaxed"
 
     # RELAXED értékek
-    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(36.0)
+    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(35.0)
     assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(34.0)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.0)
     assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.0)
@@ -129,7 +129,7 @@ def test_intraday_bias_and_atr_overrides(monkeypatch):
 
     # INTRADAY_ATR_RELAX új értékek
     assert settings.INTRADAY_ATR_RELAX["EURUSD"] == pytest.approx(0.75)
-    assert settings.INTRADAY_ATR_RELAX["GOLD_CFD"] == pytest.approx(0.80)
+    assert settings.INTRADAY_ATR_RELAX["GOLD_CFD"] == pytest.approx(0.90)
     assert settings.INTRADAY_ATR_RELAX["BTCUSD"] == pytest.approx(0.40)
     assert settings.INTRADAY_ATR_RELAX["NVDA"] == pytest.approx(0.93)
 
@@ -285,7 +285,7 @@ def test_profile_specific_helpers(monkeypatch):
     assert relaxed.get_bos_lookback(None) == 28
     assert relaxed.get_fib_tolerance("GOLD_CFD") == pytest.approx(0.05)
     assert relaxed.get_fib_tolerance("NVDA") == pytest.approx(0.1)
-    assert relaxed.get_max_risk_pct("GOLD_CFD") == pytest.approx(1.2)
+    assert relaxed.get_max_risk_pct("GOLD_CFD") == pytest.approx(1.8)
 
     _reload_settings(monkeypatch)
 
