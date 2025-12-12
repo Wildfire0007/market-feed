@@ -33,7 +33,7 @@ def test_default_profile_configuration(monkeypatch):
 
     assert profile["p_score_min"]["default"] == pytest.approx(34.0)
     assert profile["p_score_min"]["by_asset"]["EURUSD"] == pytest.approx(34.0)
-    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(35.0)
+    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(33.0)
     assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(34.0)
     assert profile["p_score_min"]["by_asset"]["NVDA"] == pytest.approx(34.0)
     assert profile["p_score_min"]["by_asset"]["USOIL"] == pytest.approx(34.0)
@@ -41,7 +41,7 @@ def test_default_profile_configuration(monkeypatch):
 
     assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(0.0)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.0)
-    assert profile["atr_threshold_multiplier"]["by_asset"]["GOLD_CFD"] == pytest.approx(0.85)
+    assert profile["atr_threshold_multiplier"]["by_asset"]["GOLD_CFD"] == pytest.approx(0.5)
     assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.0)
 
     # Fib toleranciák és ATR floor (relaxed / aktív profil)
@@ -102,7 +102,7 @@ def test_relaxed_profile_override(monkeypatch):
     assert profile["name"] == "relaxed"
 
     # RELAXED értékek
-    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(35.0)
+    assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(33.0)
     assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(34.0)
     assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(0.0)
     assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(0.0)
@@ -358,6 +358,15 @@ def test_risk_template_helpers(monkeypatch):
     assert suppressed.get_max_slippage_r("USOIL") == pytest.approx(0.18)
     assert suppressed.get_spread_max_atr_pct("BTCUSD") == pytest.approx(0.75)
     assert suppressed.get_spread_max_atr_pct("NVDA") == pytest.approx(0.55)
-    assert suppressed.get_spread_max_atr_pct("USOIL") == pytest.approx(0.60)
+
+    relaxed = _reload_settings(monkeypatch, profile="relaxed")
+    gold_risk = relaxed.get_risk_template("GOLD_CFD")
+    assert gold_risk["core_rr_min"] == pytest.approx(1.4)
+    assert gold_risk["momentum_rr_min"] == pytest.approx(1.4)
+    assert gold_risk["tp_min_pct"] == pytest.approx(0.0025)
+    assert gold_risk["tp_net_min"] == pytest.approx(0.6)
+
+    suppressed_after = _reload_settings(monkeypatch, profile="suppressed")
+    assert suppressed_after.get_spread_max_atr_pct("USOIL") == pytest.approx(0.60)
     
     _reload_settings(monkeypatch)
