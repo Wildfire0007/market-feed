@@ -35,6 +35,21 @@ MISSING_OPTIONAL_DEPENDENCIES: Set[str] = set()
 OPTIONAL_DEPENDENCY_ISSUES: List[str] = []
 
 
+POSITION_SIZE_SCALE_FLOOR_BY_ASSET = {
+    "EURUSD": 0.05,
+    "XAGUSD": 0.03,
+    "GOLD_CFD": 0.05,
+    "USOIL": 0.04,
+    "BTCUSD": 0.04,
+    # NVDA itt nem kritikus, de legyen konzisztens:
+    "NVDA": 0.10,
+}
+
+ATR_ABS_MIN_OVERRIDE = {
+    "USOIL": 0.16,
+}
+
+
 def _log_optional_dependency_warning(name: str, exc: Exception) -> None:
     MISSING_OPTIONAL_DEPENDENCIES.add(name)
     OPTIONAL_DEPENDENCY_ISSUES.append(f"{name}: {exc}")
@@ -7343,6 +7358,22 @@ def analyze(asset: str) -> Dict[str, Any]:
     tick_order_flow = load_tick_order_flow(asset, outdir)
     order_flow_metrics = compute_order_flow_metrics(k1m_closed, k5m_closed, tick_order_flow)
 
+    order_flow_imbalance: Optional[float] = None
+    order_flow_pressure: Optional[float] = None
+
+    if isinstance(order_flow_metrics, dict):
+        order_flow_imbalance = order_flow_metrics.get("imbalance")
+        order_flow_pressure = order_flow_metrics.get("pressure")
+
+    flow_data_available = False
+    try:
+        flow_data_available = bool(
+            order_flow_imbalance is not None
+            or (order_flow_pressure is not None and abs(float(order_flow_pressure)) > 0.0)
+        )
+    except (TypeError, ValueError):
+        flow_data_available = order_flow_imbalance is not None
+
     ofi_zscore = None
     if isinstance(order_flow_metrics, dict):
         ofi_zscore = order_flow_metrics.get("imbalance_z")
@@ -7369,6 +7400,8 @@ def analyze(asset: str) -> Dict[str, Any]:
             momentum_state["ofi_z"] = float(ofi_zscore)
         elif isinstance(momentum_state, dict):
             momentum_state.pop("ofi_z", None)
+    ofi_available = ofi_zscore is not None
+
     if asset == "BTCUSD" and ofi_zscore is not None:
         state = "neutral"
         if ofi_zscore >= BTC_OFI_Z["strong"]:
@@ -7924,6 +7957,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         display_spot = price_for_calc
 
     reasons: List[str] = []
+    gate_skips: List[str] = []
 
     # 2) Bias 4H→1H (zárt 1h/4h)
     raw_bias4h = bias_from_emas(k4h_closed)
@@ -8280,7 +8314,12 @@ def analyze(asset: str) -> Dict[str, Any]:
         else:
             atr_ratio_ok = base_ratio_ok
 
-    atr_abs_min = get_atr_abs_min(asset)
+    atr_abs_min_config = get_atr_abs_min(asset)
+    atr_abs_override_applied = False
+    if asset in ATR_ABS_MIN_OVERRIDE:
+        atr_abs_override_applied = True
+        atr_abs_min_config = ATR_ABS_MIN_OVERRIDE[asset]
+    atr_abs_min = atr_abs_min_config
     atr_abs_ok = True
     if atr_abs_min is not None:
         try:
@@ -8331,6 +8370,12 @@ def analyze(asset: str) -> Dict[str, Any]:
             reasons.append(
                 "XAGUSD 5m ATR floor alatt — új belépés blokkolva"
             )
+    entry_thresholds_meta["atr_abs_min_used"] = (
+        float(atr_abs_min) if atr_abs_min is not None else None
+    )
+    entry_thresholds_meta["atr_abs_override_applied"] = bool(
+        atr_abs_override_applied
+    )
     entry_thresholds_meta["risk_guard"] = risk_guard_meta
     if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
         entry_gate_context_hu.update(
@@ -10752,9 +10797,12 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     size_multiplier = calculate_position_size_multiplier(regime_label, atr_ok, P)
     position_size_scale *= size_multiplier
-    if position_size_scale < 0.25:
+    floor = POSITION_SIZE_SCALE_FLOOR_BY_ASSET.get(asset, 0.25)
+    if position_size_scale < floor:
         critical_missing.append("position_sizing_floor")
-        reasons.append("Pozícióméret 0.25× alatt — belépés blokkolva")
+        reasons.append(
+            f"Position size scale {position_size_scale:.4f} below floor {floor:.2f} — entry blocked"
+        )
 
     base_core_ok = not critical_missing
     can_enter_core = (P >= p_score_min_local) and base_core_ok
@@ -10814,6 +10862,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     eurusd_momentum_regime_bypass = (
         asset == "EURUSD" and eurusd_momentum_trigger and P >= p_score_min_local
     )
+    liquidity_data_available = momentum_vol_ratio is not None
     if asset in ENABLE_MOMENTUM_ASSETS:
         direction = effective_bias if effective_bias in {"long", "short"} else None
         if direction is None and asset == "EURUSD" and eurusd_momentum_regime_bypass:
@@ -10843,10 +10892,10 @@ def analyze(asset: str) -> Dict[str, Any]:
             ofi_confirm = False
             if direction == "long":
                 cross_flag = bool(ema_cross_long)
-                ofi_confirm = ofi_zscore is not None and ofi_th > 0 and ofi_zscore >= ofi_th
+                ofi_confirm = ofi_available and ofi_th > 0 and ofi_zscore >= ofi_th
             elif direction == "short":
                 cross_flag = bool(ema_cross_short)
-                ofi_confirm = ofi_zscore is not None and ofi_th > 0 and ofi_zscore <= -ofi_th
+                ofi_confirm = ofi_available and ofi_th > 0 and ofi_zscore <= -ofi_th
             momentum_state = globals().get("_BTC_MOMENTUM_RUNTIME", {})
             override_state: Dict[str, Any] = {}
             if isinstance(momentum_state, dict):
@@ -10917,34 +10966,53 @@ def analyze(asset: str) -> Dict[str, Any]:
                 if not ofi_confirm and "ofi" not in missing_mom:
                     missing_mom.append("ofi")
         else:
-            if momentum_vol_ratio is None or momentum_vol_ratio < MOMENTUM_VOLUME_RATIO_TH:
+            if not liquidity_data_available:
+                momentum_liquidity_ok = True
+                if "Liquidity gate skipped (no volume proxy available)" not in reasons:
+                    reasons.append("Liquidity gate skipped (no volume proxy available)")
+                if "liquidity_no_data" not in gate_skips:
+                    gate_skips.append("liquidity_no_data")
+            elif momentum_vol_ratio < MOMENTUM_VOLUME_RATIO_TH:
                 momentum_liquidity_ok = False
                 missing_mom.append("liquidity")
 
-            of_imb = order_flow_metrics.get("imbalance")
-            if of_imb is not None and abs(of_imb) < ORDER_FLOW_IMBALANCE_TH:
-                momentum_liquidity_ok = False
-                missing_mom.append("order_flow")
-            of_pressure = order_flow_metrics.get("pressure")
-            if of_pressure is not None and direction is not None:
-                if direction == "long" and of_pressure < ORDER_FLOW_PRESSURE_TH:
+            if flow_data_available:
+                if order_flow_imbalance is not None and abs(order_flow_imbalance) < ORDER_FLOW_IMBALANCE_TH:
                     momentum_liquidity_ok = False
-                    missing_mom.append("order_flow_pressure")
-                elif direction == "short" and of_pressure > -ORDER_FLOW_PRESSURE_TH:
-                    momentum_liquidity_ok = False
-                    missing_mom.append("order_flow_pressure")
+                    missing_mom.append("order_flow")
+                if order_flow_pressure is not None and direction is not None:
+                    if direction == "long" and order_flow_pressure < ORDER_FLOW_PRESSURE_TH:
+                        momentum_liquidity_ok = False
+                        missing_mom.append("order_flow_pressure")
+                    elif direction == "short" and order_flow_pressure > -ORDER_FLOW_PRESSURE_TH:
+                        momentum_liquidity_ok = False
+                        missing_mom.append("order_flow_pressure")
+            else:
+                if "Order-flow gates skipped (no tick/imbalance data)" not in reasons:
+                    reasons.append("Order-flow gates skipped (no tick/imbalance data)")
+                if "orderflow_no_data" not in gate_skips:
+                    gate_skips.append("orderflow_no_data")
             if asset == "GOLD_CFD":
                 momentum_adx_ok = regime_adx is not None and regime_adx >= 20.0
                 if not momentum_adx_ok:
                     missing_mom.append("adx")
             ofi_confirm = True
-            if ofi_zscore is not None and OFI_Z_TRIGGER > 0 and direction in {"long", "short"}:
+            if ofi_available and OFI_Z_TRIGGER > 0 and direction in {"long", "short"}:
                 if direction == "long":
                     ofi_confirm = ofi_zscore >= OFI_Z_TRIGGER
                 else:
                     ofi_confirm = ofi_zscore <= -OFI_Z_TRIGGER
             if not ofi_confirm:
-                missing_mom.append("ofi")
+                if ofi_available:
+                    missing_mom.append("ofi")
+                elif "Order-flow gates skipped (no tick/imbalance data)" not in reasons:
+                    reasons.append("Order-flow gates skipped (no tick/imbalance data)")
+                if not ofi_available and "ofi_no_data" not in gate_skips:
+                    gate_skips.append("ofi_no_data")
+            elif not ofi_available and "Order-flow gates skipped (no tick/imbalance data)" not in reasons:
+                reasons.append("Order-flow gates skipped (no tick/imbalance data)")
+                if "ofi_no_data" not in gate_skips:
+                    gate_skips.append("ofi_no_data")
 
             if direction is not None:
                 cross_flag = False
@@ -11749,8 +11817,12 @@ def analyze(asset: str) -> Dict[str, Any]:
 
         # Only track downstream precision gates once the score threshold is met –
         # otherwise suppressed-vol regimes would spam redundant blockers.
-        precision_flow_gate_needed = precision_ready_for_entry
+        precision_flow_gate_needed = precision_ready_for_entry and flow_data_available
         precision_trigger_gate_needed = precision_ready_for_entry
+
+        if precision_ready_for_entry and not flow_data_available:
+            if "Order-flow gates skipped (no tick/imbalance data)" not in reasons:
+                reasons.append("Order-flow gates skipped (no tick/imbalance data)")
 
         if precision_flow_gate_needed:
             if precision_flow_gate_label not in required_list:
@@ -12468,6 +12540,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             "adjusted_1h": bias1h,
         },
         "gates": gates_payload,
+        "gate_skips": list(gate_skips),
         "session_info": session_meta,
         "diagnostics": diagnostics_payload(tf_meta, source_files, latency_flags),
         "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else []))
@@ -13422,6 +13495,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
