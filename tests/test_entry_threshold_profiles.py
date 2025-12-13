@@ -341,7 +341,7 @@ def test_risk_template_helpers(monkeypatch):
     settings = _reload_settings(monkeypatch, profile="baseline")
     assert settings.get_tp_min_pct_value("EURUSD") == pytest.approx(0.0018)
     assert settings.get_tp_min_abs_value("NVDA") == pytest.approx(0.8)
-    assert settings.get_tp_net_min("GOLD_CFD") == pytest.approx(0.7)
+    assert settings.get_tp_net_min("GOLD_CFD") == pytest.approx(0.0035)
     sl_buffer = settings.get_sl_buffer_config("USOIL")
     assert sl_buffer["abs_min"] == pytest.approx(0.35)
     assert settings.get_max_slippage_r("XAGUSD") == pytest.approx(0.22)
@@ -352,7 +352,7 @@ def test_risk_template_helpers(monkeypatch):
 
     suppressed = _reload_settings(monkeypatch, profile="suppressed")
     assert suppressed.get_tp_min_pct_value("EURUSD") == pytest.approx(0.0018)
-    assert suppressed.get_tp_net_min("BTCUSD") == pytest.approx(0.75)
+    assert suppressed.get_tp_net_min("BTCUSD") == pytest.approx(0.006)
     sl_buffer_supp = suppressed.get_sl_buffer_config("XAGUSD")
     assert sl_buffer_supp["atr_mult"] == pytest.approx(0.22)
     assert suppressed.get_max_slippage_r("USOIL") == pytest.approx(0.18)
@@ -364,7 +364,7 @@ def test_risk_template_helpers(monkeypatch):
     assert gold_risk["core_rr_min"] == pytest.approx(1.4)
     assert gold_risk["momentum_rr_min"] == pytest.approx(1.4)
     assert gold_risk["tp_min_pct"] == pytest.approx(0.0025)
-    assert gold_risk["tp_net_min"] == pytest.approx(0.4)
+    assert "tp_net_min" not in gold_risk
 
     suppressed_after = _reload_settings(monkeypatch, profile="suppressed")
     assert suppressed_after.get_spread_max_atr_pct("USOIL") == pytest.approx(0.60)
