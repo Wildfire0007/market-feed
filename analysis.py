@@ -11729,12 +11729,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                         msg_net = f"TP1 nettó profit ≈ {tp1_net_pct_value*100:.2f}%"
                         if msg_net not in reasons:
                             reasons.append(msg_net)
-        elif asset in ENABLE_MOMENTUM_ASSETS and missing_mom:
-            mode = "momentum"
-            required_list = list(mom_required)
-            missing = list(dict.fromkeys(missing_mom))  # uniq
-
-    precision_direction: Optional[str] = None
+        precision_direction: Optional[str] = None
     execution_playbook: List[Dict[str, Any]] = []
     if decision in ("buy", "sell"):
         precision_direction = decision
@@ -11742,6 +11737,20 @@ def analyze(asset: str) -> Dict[str, Any]:
         precision_direction = "buy"
     elif effective_bias == "short":
         precision_direction = "sell"
+
+    momentum_diagnostics = {
+        "evaluated": bool(asset in ENABLE_MOMENTUM_ASSETS),
+        "used_for_decision": bool(momentum_used),
+        "direction_result": mom_dir,
+        "required": list(mom_required),
+        "missing": list(dict.fromkeys(missing_mom)),
+        "liquidity_data_available": bool(liquidity_data_available),
+        "flow_data_available": bool(flow_data_available),
+        "ofi_available": bool(ofi_available) if "ofi_available" in locals() else None,
+        "momentum_trigger_ok": bool(momentum_trigger_ok) if momentum_trigger_ok is not None else None,
+        "momentum_atr_ok": bool(mom_atr_ok) if mom_atr_ok is not None else None,
+        "trigger_desc": mom_trigger_desc if "mom_trigger_desc" in locals() else None,
+    }
 
     if precision_direction:
         atr5_value = float(atr5) if atr5 is not None and np.isfinite(float(atr5)) else None
@@ -12543,6 +12552,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "gates": gates_payload,
         "gate_skips": list(gate_skips),
         "session_info": session_meta,
+        "momentum_diagnostics": momentum_diagnostics,
         "diagnostics": diagnostics_payload(tf_meta, source_files, latency_flags),
         "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else []))
         or ["no signal"],
@@ -13496,6 +13506,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
