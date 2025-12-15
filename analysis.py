@@ -11919,7 +11919,8 @@ def analyze(asset: str) -> Dict[str, Any]:
                 if item not in {precision_gate_label, precision_flow_gate_label, precision_trigger_gate_label}
             ]
             if decision in ("buy", "sell"):
-                if not precision_flow_ready:
+                # csak akkor blokkoljon a flow, ha a flow-kapu ténylegesen aktív/szükséges
+                if precision_flow_gate_needed and (not precision_flow_ready):
                     flow_note = "Precision belépő: order flow megerősítésre vár"
                     if flow_note not in reasons:
                         reasons.append(flow_note)
@@ -13495,6 +13496,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
