@@ -4724,6 +4724,30 @@ def classify_critical_staleness(
     return critical_flags, reasons
 
 
+def compute_data_integrity_status(
+    spot_stale: bool,
+    critical_flags: Dict[str, bool],
+    latency_seconds: Dict[str, Optional[int]],
+) -> Tuple[bool, bool, bool, Dict[str, str]]:
+    """Derive core vs precision data health and human readable reasons."""
+
+    reason_by_frame: Dict[str, str] = {}
+    for key, description in CRITICAL_STALE_FRAMES.items():
+        if not critical_flags.get(key):
+            continue
+        latency = latency_seconds.get(key)
+        if latency is not None:
+            minutes = latency // 60
+            reason_by_frame[key] = f"{description} — {minutes} perc késés"
+        else:
+            reason_by_frame[key] = description
+
+    core_data_ok = (not spot_stale) and not critical_flags.get("k5m", False)
+    precision_data_ok = core_data_ok and not critical_flags.get("k1m", False)
+    precision_disabled_due_to_data_gap = core_data_ok and not precision_data_ok
+    return core_data_ok, precision_data_ok, precision_disabled_due_to_data_gap, reason_by_frame
+
+
 # Probability stack helpers -------------------------------------------------
 
 
@@ -7891,8 +7915,26 @@ def analyze(asset: str) -> Dict[str, Any]:
     for key, flag in critical_flags.items():
         if key in tf_meta:
             tf_meta[key]["critical_stale"] = flag
-    if critical_reasons:
-        reasons_payload = ["Critical data latency — belépés tiltva"] + critical_reasons
+
+    spot_critical = bool(spot_stale_reason or spot_price is None)
+    (
+        core_data_ok,
+        precision_data_ok,
+        precision_disabled_due_to_data_gap,
+        critical_reason_map,
+    ) = compute_data_integrity_status(spot_critical, critical_flags, latency_by_frame)
+
+    core_data_gap = not core_data_ok
+    other_critical_blocks = critical_flags.get("k1h") or critical_flags.get("k4h")
+    if core_data_gap or other_critical_blocks:
+        reasons_payload = ["Critical data latency — belépés tiltva"]
+        if spot_critical and spot_stale_reason:
+            reasons_payload.append(spot_stale_reason)
+        for key in ("k5m", "k1h", "k4h", "k1m"):
+            if critical_flags.get(key):
+                reason = critical_reason_map.get(key)
+                if reason:
+                    reasons_payload.append(reason)
         msg = build_data_gap_signal(
             asset,
             spot_price,
@@ -7939,6 +7981,18 @@ def analyze(asset: str) -> Dict[str, Any]:
         )
         save_json(os.path.join(outdir, "signal.json"), msg)
         return msg
+
+    gates_mode_override: Optional[str] = None
+    precision_data_gap_reason: Optional[str] = None
+    if precision_disabled_due_to_data_gap:
+        flow_data_available = False
+        ofi_available = False
+        precision_data_gap_reason = (
+            "k1m stale — precision/momentum/flow modulok letiltva, core (spot+k5m) fut tovább"
+        )
+        gates_mode_override = "core_only"
+        if precision_data_gap_reason not in reasons:
+            reasons.append(precision_data_gap_reason)
 
     required_closed = {
         "k5m": k5m_closed,
@@ -10747,7 +10801,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             return merged
         return extra
 
-    data_integrity_ok = not any(flag for flag in stale_timeframes.values())
+    data_integrity_ok = core_data_ok and not critical_flags.get("k1h", False) and not critical_flags.get("k4h", False)
     soft_structure_gate = bool(structure_gate or (strong_momentum and not structure_gate))
 
     core_required = [
@@ -10902,7 +10956,13 @@ def analyze(asset: str) -> Dict[str, Any]:
         asset == "EURUSD" and eurusd_momentum_trigger and P >= p_score_min_local
     )
     liquidity_data_available = momentum_vol_ratio is not None
-    if asset in ENABLE_MOMENTUM_ASSETS:
+    if precision_disabled_due_to_data_gap:
+        mom_dir = None
+        momentum_trigger_ok = False
+        missing_mom = []
+        momentum_liquidity_ok = False
+        mom_trigger_desc = precision_data_gap_reason or "precision data gap"
+    elif asset in ENABLE_MOMENTUM_ASSETS:
         direction = effective_bias if effective_bias in {"long", "short"} else None
         if direction is None and asset == "EURUSD" and eurusd_momentum_regime_bypass:
             direction = desired_bias if desired_bias in {"long", "short"} else None
@@ -11124,6 +11184,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     precision_ready_for_entry = False
     precision_flow_ready = False
     precision_trigger_ready = False
+    precision_flow_gate_needed = False
+    precision_trigger_gate_needed = False
     precision_trigger_state: Optional[str] = None
     precision_threshold_value = get_precision_score_threshold(asset)
     if float(precision_threshold_value).is_integer():
@@ -11794,9 +11856,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         "momentum_trigger_ok": bool(momentum_trigger_ok) if momentum_trigger_ok is not None else None,
         "momentum_atr_ok": bool(mom_atr_ok) if mom_atr_ok is not None else None,
         "trigger_desc": mom_trigger_desc if "mom_trigger_desc" in locals() else None,
+        "precision_data_gap_mode": bool(precision_disabled_due_to_data_gap),
     }
 
-    if precision_direction:
+    if precision_direction and not precision_disabled_due_to_data_gap:
         atr5_value = float(atr5) if atr5 is not None and np.isfinite(float(atr5)) else None
         precision_plan = compute_precision_entry(
             asset,
@@ -11808,6 +11871,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             order_flow_metrics,
             score_threshold=precision_threshold_value,
         )
+
+    if precision_disabled_due_to_data_gap:
+        precision_trigger_state = "disabled"
 
     if precision_plan:
         precision_plan.setdefault("score_threshold", precision_threshold_value)
@@ -12531,8 +12597,10 @@ def analyze(asset: str) -> Dict[str, Any]:
     analysis_timestamp = nowiso()
     probability_percent = int(max(0, min(100, round(combined_probability * 100))))
   
+    gate_mode_value = gates_mode_override if gates_mode_override and mode == "core" else mode
+
     gates_payload: Dict[str, Any] = {
-        "mode": mode,
+        "mode": gate_mode_value,
         "required": required_list,
         "missing": missing,
     }
@@ -12623,6 +12691,16 @@ def analyze(asset: str) -> Dict[str, Any]:
         "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else []))
         or ["no signal"],
         "realtime_transport": realtime_transport,
+    }
+    decision_obj["data_integrity_diagnostics"] = {
+        "core_data_ok": bool(core_data_ok),
+        "precision_data_ok": bool(precision_data_ok),
+        "precision_disabled_due_to_data_gap": bool(precision_disabled_due_to_data_gap),
+        "core_required_sources": ["spot", "k5m"],
+        "precision_required_sources": ["spot", "k5m", "k1m"],
+        "spot": tf_meta.get("spot"),
+        "k5m": tf_meta.get("k5m"),
+        "k1m": tf_meta.get("k1m"),
     }
     decision_obj["profile_resolution"] = profile_resolution
     decision_obj["effective_thresholds"] = effective_thresholds
@@ -13574,6 +13652,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
