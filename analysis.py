@@ -7109,6 +7109,16 @@ def analyze(asset: str) -> Dict[str, Any]:
     realtime_confidence: float = 1.0
     realtime_transport = str(spot_realtime.get("transport") or "http").lower() if isinstance(spot_realtime, dict) else "http"
     asset_entry_profile = _entry_threshold_profile_name(asset)
+    schedule_cfg = getattr(settings, "_ENTRY_PROFILE_SCHEDULE", {})
+    profile_resolution: Dict[str, Any] = {
+        "asset": asset,
+        "entry_profile": asset_entry_profile,
+        "global_default_profile": os.getenv("ENTRY_THRESHOLD_PROFILE_NAME") or None,
+        "schedule_enabled": bool(schedule_cfg),
+        "schedule_bucket": None,
+        "schedule_selected_profile": None,
+        "resolution_notes": [],
+    }
     entry_thresholds_meta: Dict[str, Any] = {"profile": asset_entry_profile}
     entry_gate_context_hu: Dict[str, Any] = {}
     dynamic_logic_cfg_raw = settings.DYNAMIC_LOGIC if isinstance(settings.DYNAMIC_LOGIC, dict) else {}
@@ -7130,6 +7140,26 @@ def analyze(asset: str) -> Dict[str, Any]:
     btc_atr_floor_ratio: Optional[float] = None
     btc_atr_floor_passed = False
     now = datetime.now(timezone.utc)
+    schedule_bucket: Optional[str] = None
+    schedule_profile: Optional[str] = None
+    try:
+        schedule_bucket = settings.time_of_day_bucket(asset, now)
+    except Exception:
+        schedule_bucket = None
+    resolve_fn = getattr(settings, "_resolve_scheduled_profile", None)
+    if callable(resolve_fn):
+        try:
+            schedule_profile = resolve_fn(asset, now)
+        except Exception:
+            schedule_profile = None
+    if schedule_bucket:
+        profile_resolution["schedule_bucket"] = schedule_bucket
+    if schedule_profile:
+        profile_resolution["schedule_selected_profile"] = schedule_profile
+    if schedule_bucket and schedule_profile:
+        profile_resolution["resolution_notes"].append(
+            f"profile via schedule bucket {schedule_bucket} -> {schedule_profile}"
+        )
     asset_leverage = LEVERAGE.get(asset, 1.0)
     spot_max_age = int(SPOT_MAX_AGE_SECONDS.get(asset, SPOT_MAX_AGE_SECONDS["default"]))
     if spot:
@@ -7146,6 +7176,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     if spot_ts:
         spot_latency = (now - spot_ts).total_seconds()
     freshness_limit = spot_max_age
+    staleness_max_age = freshness_limit
     # Allow per-asset overrides embedded in the spot snapshot metadata while keeping
     # the configured ``spot_max_age_seconds`` as the primary guardrail. This prevents
     # overly aggressive data-gap triggering when the upstream feed delivers crypto
@@ -8232,6 +8263,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         atr_threshold = max(atr_threshold, float(atr_percentile_value))
         entry_thresholds_meta["atr_threshold_percentile"] = float(atr_percentile_value)
     volatility_overlay: Dict[str, Any] = {}
+    atr_overlay_min: Optional[float] = None
     atr_overlay_gate = True
     try:
         volatility_overlay = load_volatility_overlay(asset, Path(outdir), k1m_closed)
@@ -8553,6 +8585,9 @@ def analyze(asset: str) -> Dict[str, Any]:
         ema21_relation = "stale"
 
     bos_lookback = get_bos_lookback(asset)
+    session_window_payload = SESSION_WINDOWS_UTC.get(
+        asset, SESSION_WINDOWS_UTC.get(asset.upper(), {})
+    )
 
     if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
         fib_zone_payload = {
@@ -8561,7 +8596,6 @@ def analyze(asset: str) -> Dict[str, Any]:
             "tures_frac": fib_tol,
             "tures_atr": float(atr1h_tol * 0.75) if np.isfinite(atr1h_val) else None,
         }
-        session_window_payload = SESSION_WINDOWS_UTC.get(asset, SESSION_WINDOWS_UTC.get(asset.upper(), {}))
         entry_gate_context_hu.update(
             {
                 "bos_visszatekintes": bos_lookback,
@@ -10151,6 +10185,10 @@ def analyze(asset: str) -> Dict[str, Any]:
     tp_net_threshold = tp_net_min_for(asset)
     tp_net_pct_display = f"{tp_net_threshold * 100:.2f}".rstrip("0").rstrip(".")
     tp_net_label = f"tp1_net>=+{tp_net_pct_display}%"
+    if tp_net_threshold > 0.2:
+        profile_resolution["resolution_notes"].append(
+            "WARNING: tp_net_min unusually high; check units"
+        )
 
     risk_template_values = get_risk_template(asset)
     core_rr_min = float(risk_template_values.get("core_rr_min", CORE_RR_MIN.get(asset, CORE_RR_MIN["default"])))
@@ -10797,7 +10835,8 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     size_multiplier = calculate_position_size_multiplier(regime_label, atr_ok, P)
     position_size_scale *= size_multiplier
-    floor = POSITION_SIZE_SCALE_FLOOR_BY_ASSET.get(asset, 0.25)
+    position_scale_floor = POSITION_SIZE_SCALE_FLOOR_BY_ASSET.get(asset, 0.25)
+    floor = position_scale_floor
     if position_size_scale < floor:
         critical_missing.append("position_sizing_floor")
         reasons.append(
@@ -11101,6 +11140,9 @@ def analyze(asset: str) -> Dict[str, Any]:
         sl_buffer_defaults = {"atr_mult": 0.2, "abs_min": 0.0005}
     tp_min_abs_default = get_tp_min_abs_value(asset)
     profile_slippage_limit = get_max_slippage_r(asset)
+    rr_required_effective: Optional[float] = None
+    tp_min_profit_pct: Optional[float] = None
+    min_stoploss_pct = MIN_STOPLOSS_PCT
 
     def compute_slippage_state(decision_side: str, limit_r: Optional[float]) -> Optional[Dict[str, float]]:
         if (
@@ -11137,10 +11179,11 @@ def analyze(asset: str) -> Dict[str, Any]:
             missing_mom = [item for item in missing_mom if item != range_guard_label]
 
     def compute_levels(decision_side: str, rr_required: float, tp1_mult: float = TP1_R, tp2_mult: float = TP2_R):
-        nonlocal entry, sl, tp1, tp2, rr, missing, min_stoploss_ok, tp1_net_pct_value, last_computed_risk, current_tp1_mult, current_tp2_mult
+        nonlocal entry, sl, tp1, tp2, rr, missing, min_stoploss_ok, tp1_net_pct_value, last_computed_risk, current_tp1_mult, current_tp2_mult, rr_required_effective, tp_min_profit_pct
         current_tp1_mult = tp1_mult
         current_tp2_mult = tp2_mult
         atr5_val  = float(atr5 or 0.0)
+        rr_required_effective = rr_required
 
         buf_rule = dict(sl_buffer_defaults) if isinstance(sl_buffer_defaults, dict) else {}
         if asset == "BTCUSD":
@@ -11386,6 +11429,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                     "rr_required_effective": rr_required,
                 }
             )
+        tp_min_profit_pct = tp_min_pct
         overnight_days = estimate_overnight_days(asset, analysis_now)
         cost_round_pct, overnight_pct = compute_cost_components(asset, entry, overnight_days)
         total_cost_pct = cost_mult * cost_round_pct + overnight_pct
@@ -12513,6 +12557,28 @@ def analyze(asset: str) -> Dict[str, Any]:
     if intraday_bias_gate_meta:
         gates_payload["intraday_bias"] = intraday_bias_gate_meta
 
+    effective_thresholds = {
+        "asset": asset,
+        "entry_profile": asset_entry_profile,
+        "p_score_min": float(p_score_min_local) if p_score_min_local is not None else None,
+        "spread_max_atr_pct": float(spread_limit) if spread_limit is not None else None,
+        "tp_net_min": float(tp_net_threshold) if tp_net_threshold is not None else None,
+        "rr_required": float(rr_required_effective) if rr_required_effective is not None else None,
+        "tp_min_profit_pct": float(tp_min_profit_pct) if tp_min_profit_pct is not None else None,
+        "min_stoploss_pct": float(min_stoploss_pct) if min_stoploss_pct is not None else None,
+        "atr_abs_min_used": float(atr_abs_min) if atr_abs_min is not None else None,
+        "atr_low_threshold": float(atr_threshold) if atr_threshold is not None else None,
+        "atr_overlay_min": float(atr_overlay_min) if atr_overlay_min is not None else None,
+        "bos_lookback": int(bos_lookback) if bos_lookback is not None else None,
+        "fib_tolerance": float(fib_tol) if fib_tol is not None else None,
+        "position_scale_floor": float(position_scale_floor)
+        if position_scale_floor is not None
+        else None,
+        "staleness_max_age_seconds": int(staleness_max_age) if staleness_max_age is not None else None,
+        "session_window": session_window_payload,
+    }
+
+
     decision_obj = {
         "asset": asset,
         "ok": True,
@@ -12558,6 +12624,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         or ["no signal"],
         "realtime_transport": realtime_transport,
     }
+    decision_obj["profile_resolution"] = profile_resolution
+    decision_obj["effective_thresholds"] = effective_thresholds
     if news_lockout_active:
         decision_obj["news_lockout_active"] = True
         if news_reason:
@@ -13506,6 +13574,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
