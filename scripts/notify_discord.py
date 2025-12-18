@@ -106,6 +106,14 @@ ACTIVE_WATCHER_CONFIG = {
     },
 }
 
+EXIT_DEDUP_MINUTES_BY_ASSET = {
+    "EURUSD": 30,
+}
+
+
+def _dedup_minutes_for_exit(asset: str) -> int:
+    return int(EXIT_DEDUP_MINUTES_BY_ASSET.get(asset, 0))
+
 # ---- Mobil-optimalizált kártyák segédfüggvényei ----
 HB_TZ = timezone.utc  # Alapértelmezés, ha nincs pytz
 try:
@@ -2082,6 +2090,11 @@ class ActivePositionWatcher:
             desc_lines.append(f"Trigger: {reason}.")
         elif state == "HOLD":
             desc_lines.append("Anchor bias intact – defensive management only.")
+          
+        if state == "EXIT" and asset == "EURUSD":
+            dedup_line = "EXIT jel deduplikálva: ugyanarra a pozícióra 30 percig nem küldünk ismétlést."
+            if dedup_line not in desc_lines:
+                desc_lines.append(dedup_line)
 
         color_map = {
             "HOLD": 0x2ecc71,
@@ -2107,6 +2120,21 @@ class ActivePositionWatcher:
             "updated": _now_utc_iso(self.now),
         }
         self.latest_cards[asset] = deepcopy(embed)
+        exit_dedup_min = _dedup_minutes_for_exit(asset)
+        if state == "EXIT" and exit_dedup_min > 0:
+            last_exit_sent_iso = prev_entry.get("last_exit_sent_utc")
+            if last_exit_sent_iso:
+                age_sec = iso_to_epoch(_now_utc_iso(self.now)) - iso_to_epoch(last_exit_sent_iso)
+                if age_sec >= 0 and age_sec < exit_dedup_min * 60:
+                    state_record["last_exit_sent_utc"] = last_exit_sent_iso
+                    self.state_cache[asset] = state_record
+                    self.updated_state = True
+                    return None
+
+            state_record["last_exit_sent_utc"] = _now_utc_iso(self.now)
+            self.updated_state = True
+        elif state != "EXIT" and "last_exit_sent_utc" in prev_entry and "last_exit_sent_utc" not in state_record:
+            state_record["last_exit_sent_utc"] = prev_entry["last_exit_sent_utc"]
   
         if prev_entry.get("key") != state_key:
             self.state_cache[asset] = state_record
