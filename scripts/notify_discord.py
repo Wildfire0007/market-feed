@@ -835,6 +835,15 @@ def build_pipeline_diag_embed(
 COOLDOWN_MIN   = int_env("DISCORD_COOLDOWN_MIN", 10)  # perc; 0 = off
 MOMENTUM_COOLDOWN_MIN = int_env("DISCORD_COOLDOWN_MOMENTUM_MIN", 8)
 
+FLIP_COOLDOWN_MINUTES_BY_ASSET = {
+    "EURUSD": 30,
+}
+
+
+def _flip_cooldown_minutes(asset: str) -> int:
+    return int(FLIP_COOLDOWN_MINUTES_BY_ASSET.get(asset, 0))
+
+
 def env_flag(name: str) -> bool:
     raw = os.getenv(name)
     if not raw:
@@ -2538,6 +2547,20 @@ def main():
             cooldown_active = False
 
         prev_sent_decision = st.get("last_sent_decision")
+        flip_cd_min = _flip_cooldown_minutes(asset)
+        last_sent_iso = st.get("last_sent")
+        flip_cd_active = False
+        age_sec: Optional[int] = None
+        if (
+            flip_cd_min > 0
+            and last_sent_iso
+            and prev_sent_decision in ("buy", "sell")
+            and eff in ("buy", "sell")
+            and eff != prev_sent_decision
+        ):
+            age_sec = now_ep - iso_to_epoch(last_sent_iso)
+            if age_sec >= 0 and age_sec < flip_cd_min * 60:
+                flip_cd_active = True
 
         # --- küldési döntés ---
         send_kind = None  # None | "normal" | "invalidate" | "flip"
@@ -2545,7 +2568,11 @@ def main():
         if is_actionable_now:
             if prev_sent_decision in ("buy","sell"):
                 if eff != prev_sent_decision:
-                    send_kind = "flip"
+                    if flip_cd_active:
+                        print(f"notify: flip suppressed by cooldown ({asset}) age_sec={age_sec} cd_min={flip_cd_min}")
+                        send_kind = None
+                    else:
+                        send_kind = "flip"
                 else:
                     if not cooldown_active:
                         send_kind = "normal"
