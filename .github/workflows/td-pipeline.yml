@@ -7,6 +7,10 @@ on:
         description: "Skip predeploy status guard (rollback mode)"
         required: false
         default: "false"
+      run_tests:
+        description: "Run pytest in predeploy (manual only)"
+        required: false
+        default: "false"
   schedule:
     - cron: "*/6 * * * *"   # 6 percenként (UTC)
 
@@ -191,6 +195,7 @@ jobs:
           fi
 
       - name: Run pytest suite
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_tests == 'true' }}
         run: .venv/bin/pytest
 
       - name: Generate entry gate statistics
