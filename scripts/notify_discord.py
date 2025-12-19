@@ -23,7 +23,7 @@ ENV:
 - DISCORD_WEBHOOK_URL_LIVE (opcionális: #🚨-live-signals)
 - DISCORD_WEBHOOK_URL_MANAGEMENT (opcionális: #💼-management)
 - DISCORD_WEBHOOK_URL_MARKET_SCAN (opcionális: #📊-market-scan)
-- DISCORD_COOLDOWN_MIN (perc, default 10)
+- DISCORD_COOLDOWN_MIN (perc, default 5)
 - DISCORD_FORCE_NOTIFY=1 ➜ cooldown figyelmen kívül hagyása + összefoglaló kényszerítése
 - DISCORD_FORCE_HEARTBEAT=1 ➜ csak az összefoglalót kényszerítjük (cooldown marad)
 """
@@ -832,9 +832,8 @@ def build_pipeline_diag_embed(
     }
   
 
-COOLDOWN_MIN   = int_env("DISCORD_COOLDOWN_MIN", 10)  # perc; 0 = off
-MOMENTUM_COOLDOWN_MIN = int_env("DISCORD_COOLDOWN_MOMENTUM_MIN", 8)
-
+COOLDOWN_MIN   = int_env("DISCORD_COOLDOWN_MIN", 5)  # perc; 0 = off
+MOMENTUM_COOLDOWN_MIN = int_env("DISCORD_COOLDOWN_MOMENTUM_MIN", 5)
 FLIP_COOLDOWN_MINUTES_BY_ASSET = {
     "EURUSD": 30,
 }
