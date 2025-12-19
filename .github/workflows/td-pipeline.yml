@@ -23,14 +23,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  trading:
-    name: 1) Trading.py — adatszedés (TD)
+  trading_and_analysis:
+    name: 1) Trading.py → Analysis (egy runneren)
     runs-on: ubuntu-latest
     env:
       TZ: UTC
       OUT_DIR: public
       TD_PAUSE: "0.3"
-      TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+      TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}    
+      SESSION_OVERRIDE_24_7: "1"
+      PIPELINE_MAX_LAG_SECONDS: "800"
+      DISABLE_ML_PROBABILITY: "1"
+      ML_PROBABILITY_MANUAL_OVERRIDE: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,84 +47,11 @@ jobs:
           git fetch origin main
           git reset --hard origin/main
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-          cache-dependency-path: requirements.lock
-
-      - name: Restore Python virtualenv cache
-        id: cache-venv-trading
-        uses: actions/cache@v4
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('requirements.lock') }}
-          restore-keys: |
-            venv-${{ runner.os }}-
-
-      - name: Create virtualenv (cache miss)
-        if: steps.cache-venv-trading.outputs.cache-hit != 'true'
-        run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install --upgrade pip
-          .venv/bin/pip install -r requirements.lock
-
-      - name: Activate virtualenv for subsequent steps
-        run: |
-          echo "VIRTUAL_ENV=$PWD/.venv" >> $GITHUB_ENV
-          echo "PATH=$PWD/.venv/bin:$PATH" >> $GITHUB_ENV
-
-      - name: Show sklearn/joblib versions
-        run: |
-          .venv/bin/python - <<'PY'
-          import sklearn, joblib
-          print("scikit-learn:", sklearn.__version__)
-          print("joblib:", joblib.__version__)
-          PY
-
-      - name: Run Trading.py (pull all OHLC + spot)
-        run: .venv/bin/python Trading.py
-
-      - name: Upload trading outputs
-        uses: actions/upload-artifact@v4
-        with:
-          name: trading-public
-          path: public
-         
-  analysis:
-    name: 2) Analysis — jelzésképzés (csak trading után)
-    needs: trading
-    runs-on: ubuntu-latest
-    env:
-      TZ: UTC
-      SESSION_OVERRIDE_24_7: "1"
-      PIPELINE_MAX_LAG_SECONDS: "800"
-      DISABLE_ML_PROBABILITY: "1"
-      ML_PROBABILITY_MANUAL_OVERRIDE: "1"
-    steps:
-      - name: Checkout (fresh HEAD incl. trading commit)
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-
-      - name: Sync with latest trading outputs
-        run: |
-          git fetch origin main
-          git reset --hard origin/main
-
       - name: Prepare public directory
         run: |
           rm -rf public
           mkdir -p public
-
-      - name: Download trading outputs
-        uses: actions/download-artifact@v4
-        with:
-          name: trading-public
-          path: public
-          
+      
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -157,12 +88,15 @@ jobs:
           print("joblib:", joblib.__version__)
           PY
 
+      - name: Run Trading.py (pull all OHLC + spot)
+        run: .venv/bin/python Trading.py
+        
       - name: Verify model exists & loadable
         run: .venv/bin/python scripts/check_ml_readiness.py BTCUSD
 
       - name: Run analysis (ML disabled)
         run: |
-          .venv/bin/python analysis.py      
+          .venv/bin/python analysis.py
                
       - name: Generate latency monitoring snapshot
         run: |
@@ -175,8 +109,8 @@ jobs:
           path: public
 
   predeploy:
-    name: 3) Pre-deploy verification & tests
-    needs: analysis
+    name: 2) Pre-deploy verification & tests
+    needs: trading_and_analysis
     runs-on: ubuntu-latest
     env:
       TZ: UTC
@@ -323,9 +257,9 @@ jobs:
           git push origin main
 
   notify:
-    name: 4) Discord értesítő
+    name: 3) Discord értesítő
     needs:
-      - analysis
+      - trading_and_analysis
       - predeploy
     runs-on: ubuntu-latest
     env:
