@@ -31,7 +31,7 @@ concurrency:
 jobs:
   trading_and_analysis:
     name: 1) Trading.py → Analysis (egy runneren)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       TZ: UTC
       OUT_DIR: public
@@ -46,7 +46,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Sync default branch
         run: |
@@ -113,7 +113,7 @@ jobs:
     name: 2) Pre-deploy verification & tests
     if: github.event_name == 'workflow_dispatch'
     needs: trading_and_analysis
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       TZ: UTC
     steps:
@@ -245,7 +245,7 @@ jobs:
         github.event_name != 'workflow_dispatch' ||
         needs.predeploy.result == 'success'
       )
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       DISCORD_COOLDOWN_MIN: ${{ secrets.DISCORD_COOLDOWN_MIN }}
@@ -255,7 +255,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Sync with latest main
         run: |
