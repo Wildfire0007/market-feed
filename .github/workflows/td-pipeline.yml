@@ -199,31 +199,7 @@ jobs:
       - name: Run pytest suite
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_tests == 'true' }}
         run: .venv/bin/pytest
-
-      - name: Generate entry gate statistics
-        run: |
-          mkdir -p public/debug
-          .venv/bin/python tools/analyze_entry_gates.py \
-            --root . \
-            --limit-runs 40 \
-            --output-json public/debug/entry_gate_stats.json
-            
-      - name: Persist entry gate statistics per run
-        if: ${{ always() }}
-        run: |
-          .venv/bin/python tools/persist_entry_gate_stats.py \
-            --stats-file public/debug/entry_gate_stats.json \
-            --run-id "${{ github.run_id }}" \
-            --output-dir public/debug-entry-gates
-            
-      - name: Upload entry gate statistics
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: entry-gate-stats
-          path: public/debug-entry-gates
-          if-no-files-found: error
-          
+      
       - name: Ensure checked-out commit remains consistent
         run: |
           set -euo pipefail
