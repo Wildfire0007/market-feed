@@ -111,6 +111,7 @@ jobs:
 
   predeploy:
     name: 2) Pre-deploy verification & tests
+    if: github.event_name == 'workflow_dispatch'
     needs: trading_and_analysis
     runs-on: ubuntu-latest
     env:
@@ -239,6 +240,11 @@ jobs:
     needs:
       - trading_and_analysis
       - predeploy
+    if: |
+      always() && (
+        github.event_name != 'workflow_dispatch' ||
+        needs.predeploy.result == 'success'
+      )
     runs-on: ubuntu-latest
     env:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
