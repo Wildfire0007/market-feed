@@ -12846,6 +12846,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         "required": required_list,
         "missing": missing,
     }
+    entry_required_snapshot = list(gates_payload.get("required") or [])
+    entry_missing_snapshot = list(gates_payload.get("missing") or [])
     if intraday_relaxed_guards:
         gates_payload["relaxed_guards"] = list(intraday_relaxed_guards)
         gates_payload["relax_size_scale"] = intraday_relax_scale
@@ -13103,8 +13105,41 @@ def analyze(asset: str) -> Dict[str, Any]:
         entry_thresholds_meta=entry_thresholds_meta,
         entry_gate_context_hu=entry_gate_context_hu,
     )
+    entry_blockers_snapshot = (
+        list(action_plan.get("blockers") or []) if isinstance(action_plan, dict) else []
+    )
     if action_plan:
         decision_obj["action_plan"] = action_plan
+
+    entry_p_score_used: Optional[int] = None
+    try:
+        entry_p_score_used = int(round(P)) if P is not None else None
+    except Exception:
+        entry_p_score_used = None
+    position_p_score_used = (
+        anchor_prev_p if anchor_prev_p is not None else entry_p_score_used
+    )
+    decision_obj["entry_diagnostics"] = {
+        "required": entry_required_snapshot,
+        "missing": entry_missing_snapshot,
+        "blockers": entry_blockers_snapshot,
+        "p_score_used": entry_p_score_used,
+    }
+    position_diagnostics = {
+        "state": None,
+        "severity": None,
+        "reasons": [],
+        "p_score_used": position_p_score_used,
+    }
+    if exit_signal:
+        position_diagnostics.update(
+            {
+                "state": exit_signal.get("state") or exit_signal.get("action"),
+                "severity": exit_signal.get("severity"),
+                "reasons": list(exit_signal.get("reasons") or []),
+            }
+        )
+    decision_obj["position_diagnostics"] = position_diagnostics
 
     snapshot_metadata = {
         "analysis_timestamp": analysis_timestamp,
@@ -13222,6 +13257,18 @@ def analyze(asset: str) -> Dict[str, Any]:
         analysis_timestamp=analysis_timestamp,
         outdir=Path(outdir),
     )
+
+    intent = decision_obj.get("intent")
+    if intent in {"manage_position", "hard_exit"}:
+        gates_payload["missing"] = []
+        if decision_obj.get("gates") is not gates_payload:
+            try:
+                decision_obj.setdefault("gates", {})["missing"] = []
+            except Exception:
+                pass
+        if action_plan:
+            action_plan["blockers"] = []
+            action_plan["blockers_raw"] = []
 
     anchor_metrics_payload = {
         "p_score": P,
@@ -13905,6 +13952,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
