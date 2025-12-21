@@ -86,6 +86,46 @@ jobs:
       - name: Run Trading.py (pull all OHLC + spot)
         run: .venv/bin/python Trading.py
 
+      - name: Sync pipeline artifacts into public
+        env:
+          PUBLIC_SYNC_RUN_ID: ${{ github.run_id }}
+          PUBLIC_SYNC_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          .venv/bin/python scripts/update_public.py --target "${OUT_DIR:-public}" \
+            --sources data reports \
+            --run-id "$PUBLIC_SYNC_RUN_ID" \
+            --commit "$PUBLIC_SYNC_COMMIT"
+
+      - name: Verify public sync metadata
+        env:
+          EXPECTED_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          .venv/bin/python - <<'PY'
+          from pathlib import Path
+          import json
+          import sys
+
+          meta_path = Path('public/.sync-metadata.json')
+          if not meta_path.exists():
+            raise SystemExit("Missing public/.sync-metadata.json after sync")
+
+          metadata = json.loads(meta_path.read_text())
+          if metadata.get('run_id') != "${EXPECTED_RUN_ID}":
+            raise SystemExit(f"Unexpected run_id in metadata: {metadata.get('run_id')}")
+
+          checksum = metadata.get('checksum')
+          if not checksum:
+            raise SystemExit("Empty checksum recorded for public sync")
+
+          last_sync = Path('public/.last_sync')
+          if not last_sync.exists():
+            raise SystemExit("Missing public/.last_sync stamp after sync")
+
+          print("Verified public sync metadata", metadata)
+          PY
+          
       - name: Verify model exists & loadable
         run: .venv/bin/python scripts/check_ml_readiness.py BTCUSD
 
