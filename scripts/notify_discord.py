@@ -447,6 +447,8 @@ def build_mobile_embed_for_asset(
     p_score = signal_data.get("probability_raw", 0) if isinstance(signal_data, dict) else 0
     spot = (signal_data.get("spot") or {}).get("price") if isinstance(signal_data, dict) else None
     ts_raw = signal_data.get("retrieved_at_utc") if isinstance(signal_data, dict) else None
+    entry_diag = signal_data.get("entry_diagnostics") if isinstance(signal_data, dict) else {}
+    position_diag = signal_data.get("position_diagnostics") if isinstance(signal_data, dict) else {}
 
     try:
         dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
@@ -454,7 +456,10 @@ def build_mobile_embed_for_asset(
     except Exception:
         local_time = "--:--"
     
-    setup_info = classify_setup(float(p_score or 0), (signal_data or {}).get("gates", {}), decision)
+    gates_for_setup = (signal_data or {}).get("gates", {})
+    if isinstance(gates_for_setup, dict) and isinstance(entry_diag, dict):
+        gates_for_setup = {**gates_for_setup, "missing": entry_diag.get("missing", [])}
+    setup_info = classify_setup(float(p_score or 0), gates_for_setup, decision)
 
     # --- Piaci rezsim (CHOPPY / TREND) kiolvasása és magyar szöveg készítése ---
     regime_label, adx_value = extract_regime(signal_data)
@@ -598,19 +603,49 @@ def build_mobile_embed_for_asset(
     # Pozíciómenedzsment
     if position_note:
         lines.append(f"🧭 {position_note}")
-    
+
+    if intent in {"hard_exit", "manage_position"}:
+        pos_state = position_diag.get("state") if isinstance(position_diag, dict) else None
+        pos_severity = position_diag.get("severity") if isinstance(position_diag, dict) else None
+        diag_parts: List[str] = []
+        if pos_state:
+            diag_parts.append(str(pos_state))
+        if pos_severity:
+            diag_parts.append(f"súlyosság: {pos_severity}")
+        if diag_parts:
+            lines.append(f"🧭 Pozíció diagnosztika: {' • '.join(diag_parts)}")
+        pos_reasons = position_diag.get("reasons") if isinstance(position_diag, dict) else []
+        if pos_reasons:
+            reasons_hu = translate_reasons([str(reason) for reason in pos_reasons])
+            lines.append(f"➤ Okok: {reasons_hu}")
+          
     # Dinamikus setup komment vagy megjegyzés
-    gates_missing = (signal_data.get("gates") or {}).get("missing") if isinstance(signal_data, dict) else []
+    if isinstance(entry_diag, dict):
+        entry_missing = entry_diag.get("missing") or []
+    else:
+        entry_missing = []
+    gates_missing = entry_missing if intent == "entry" else []
     if gates_missing and status_text != "NINCS BELÉPŐ":
         reasons = translate_reasons(gates_missing)
         lines.append(f"🧠 Figyelem: {reasons}")
 
     # P-score vizuálisan
-    p_bar = draw_progress_bar(p_score)
-    lines.append(f"📊 P: `{p_bar}` {int(p_score)}%")
+    score_display = (
+        position_diag.get("p_score_used")
+        if intent in {"hard_exit", "manage_position"}
+        else entry_diag.get("p_score_used")
+    )
+    if score_display is None:
+        score_display = p_score
+    p_bar = draw_progress_bar(score_display)
+    try:
+        score_text = int(score_display)
+    except Exception:
+        score_text = score_display
+    lines.append(f"📊 P: `{p_bar}` {score_text}%")
 
     # Entry tiltás, ha van
-    if status_text == "NINCS BELÉPŐ":
+    if status_text == "NINCS BELÉPŐ" and intent == "entry":
         if gates_missing:
             reasons_hu = translate_reasons(gates_missing)
             lines.append(f"⛔ Blokkolók: {reasons_hu}")
