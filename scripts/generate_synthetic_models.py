@@ -1,8 +1,8 @@
-"""Generate deterministic GradientBoosting models for configured assets.
+"""Generate deterministic portable models for configured assets.
 
 This helper provides loadable ML artefacts in environments where real labelled
 trade data is unavailable. It builds a synthetic training set covering the
-canonical MODEL_FEATURES and fits a small GradientBoostingClassifier for each
+canonical MODEL_FEATURES and fits a lightweight, numpy-only classifier for each
 asset declared in the analysis settings.
 
 The resulting pickles live under ``public/models/<ASSET>_gbm.pkl`` and are
@@ -12,21 +12,20 @@ for production trading decisions.
 from __future__ import annotations
 
 import hashlib
+import pickle
 import sys
 from pathlib import Path
 from typing import Iterable
 
-import joblib
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import GradientBoostingClassifier
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from config.analysis_settings import ASSETS
-from ml_model import MODEL_DIR, MODEL_FEATURES
+from ml_model import MODEL_DIR, MODEL_FEATURES, PortableGradientBoosting
 
 
 def _seed_for_asset(asset: str) -> int:
@@ -55,23 +54,19 @@ def _synthetic_dataset(asset: str, *, rows: int = 400) -> pd.DataFrame:
     return frame
 
 
-def _train_model(asset: str, dataset: pd.DataFrame) -> GradientBoostingClassifier:
-    """Fit a small GradientBoostingClassifier on the provided dataset."""
+def _train_model(asset: str, dataset: pd.DataFrame) -> PortableGradientBoosting:
+    """Fit a portable classifier on the provided dataset."""
 
-    clf = GradientBoostingClassifier(
-        n_estimators=80,
-        learning_rate=0.05,
-        max_depth=3,
-        random_state=_seed_for_asset(asset),
-    )
+    clf = PortableGradientBoosting(feature_names=MODEL_FEATURES)
     clf.fit(dataset[MODEL_FEATURES], dataset["label"])
     return clf
 
 
-def _persist_model(asset: str, clf: GradientBoostingClassifier) -> Path:
+def _persist_model(asset: str, clf: PortableGradientBoosting) -> Path:
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     path = MODEL_DIR / f"{asset}_gbm.pkl"
-    joblib.dump(clf, path)
+    with path.open("wb") as fh:
+        pickle.dump(clf, fh)
     return path
 
 
