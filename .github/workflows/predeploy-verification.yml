@@ -105,6 +105,7 @@ jobs:
           .venv/bin/python - <<'PY'
           from pathlib import Path
           import json
+          import os
           import sys
 
           meta_path = Path('public/.sync-metadata.json')
@@ -112,7 +113,12 @@ jobs:
             raise SystemExit("Missing public/.sync-metadata.json after sync")
 
           metadata = json.loads(meta_path.read_text())
-          if metadata.get('run_id') != "${EXPECTED_RUN_ID}":
+          
+          expected_run_id = os.environ.get("EXPECTED_RUN_ID")
+          if not expected_run_id:
+            raise SystemExit("EXPECTED_RUN_ID environment variable missing")
+
+          if metadata.get('run_id') != expected_run_id:
             raise SystemExit(f"Unexpected run_id in metadata: {metadata.get('run_id')}")
 
           checksum = metadata.get('checksum')
