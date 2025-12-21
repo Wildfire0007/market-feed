@@ -2284,6 +2284,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     core_bos_pending = (mode == "core") and ("bos5m" in missing_list)
 
     entry_thresholds = sig.get("entry_thresholds") if isinstance(sig, dict) else {}
+    entry_diagnostics = sig.get("entry_diagnostics") if isinstance(sig, dict) else {}
     dynamic_lines: List[str] = []
     setup_classification: Optional[str] = None
     setup_classification_line: Optional[str] = None
@@ -2291,6 +2292,8 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     setup_score: Optional[float] = None
     setup_issues: List[str] = []
     setup_direction = resolve_setup_direction(sig, dec)
+    if isinstance(entry_diagnostics, dict) and entry_diagnostics.get("precision_override"):
+        dynamic_lines.append("Precision override (reduced size)")
     if isinstance(entry_thresholds, dict):
         atr_soft_meta = entry_thresholds.get("atr_soft_gate") or {}
         atr_soft_used = bool(entry_thresholds.get("atr_soft_gate_used"))
