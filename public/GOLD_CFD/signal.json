@@ -1,41 +1,118 @@
 {
   "asset": "GOLD_CFD",
-  "ok": false,
-  "retrieved_at_utc": "2025-12-21T01:57:58Z",
+  "ok": true,
+  "retrieved_at_utc": "2025-12-21T02:08:02Z",
   "source": "Twelve Data (lokális JSON)",
   "spot": {
     "price": 4338.63147,
-    "utc": "2025-12-21T01:56:51Z",
-    "retrieved_at_utc": "2025-12-21T01:56:51Z"
+    "utc": "2025-12-21T02:07:22Z",
+    "retrieved_at_utc": "2025-12-21T02:07:22Z",
+    "source": "twelvedata:quote",
+    "realtime_override": false,
+    "fallback_used": false,
+    "confidence": 1.0,
+    "avg_latency_profile": 46.1678870834321,
+    "realtime_stats": null
   },
   "signal": "market closed",
   "probability": 0,
-  "probability_model": null,
-  "probability_model_raw": null,
-  "probability_calibrated": null,
-  "probability_threshold": null,
-  "probability_model_source": "sklearn",
-  "probability_stack": {
-    "source": "sklearn",
-    "status": "data_gap",
-    "unavailable_reason": "data_gap",
-    "detail": "Piac zárva (vasárnapi nyitás 23:00 UTC / 00:00 Budapest után); Critical data latency — belépés tiltva; k1m: latency guard 777 perc késés (limit 7 perc)"
-  },
+  "probability_raw": 0,
   "entry": null,
   "sl": null,
   "tp1": null,
   "tp2": null,
   "rr": null,
   "leverage": 20.0,
+  "position_size_scale": 0.0625,
+  "range_time_stop": {
+    "timeout": 20,
+    "breakeven_trigger": 0.3,
+    "giveback_ratio": 0.4
+  },
+  "funding_filter": null,
+  "funding_rate": null,
+  "stale_timeframes": {
+    "k1m": true,
+    "k5m": true,
+    "k1h": true,
+    "k4h": true
+  },
+  "biases": {
+    "raw_4h": "long",
+    "raw_1h": "long",
+    "adjusted_4h": "neutral",
+    "adjusted_1h": "neutral"
+  },
   "gates": {
     "mode": "session_closed",
     "required": [
       "session"
     ],
     "missing": [
-      "session"
-    ]
+      "session",
+      "P_score>=30"
+    ],
+    "session_window_status": {
+      "entry_open": false,
+      "monitor_window": false,
+      "status": "closed_out_of_hours",
+      "status_note": "Piac zárva (vasárnapi nyitás 23:00 UTC / 00:00 Budapest után)",
+      "összefoglaló": "Entry ablak ZÁRVA, Megfigyelési ablakon kívül"
+    },
+    "intraday_bias": {
+      "configured": true,
+      "allow_neutral": true,
+      "scenarios": [
+        {
+          "direction": "long",
+          "requires": [
+            "struct_retest_long",
+            "atr_ok"
+          ],
+          "missing": [
+            "struct_retest_long",
+            "atr_ok"
+          ],
+          "met": false,
+          "label": "5m retest long + ATR",
+          "missing_pretty": [
+            "5m retest long",
+            "ATR gate"
+          ],
+          "requires_pretty": [
+            "5m retest long",
+            "ATR gate"
+          ]
+        },
+        {
+          "direction": "short",
+          "requires": [
+            "struct_retest_short",
+            "atr_ok"
+          ],
+          "missing": [
+            "struct_retest_short",
+            "atr_ok"
+          ],
+          "met": false,
+          "label": "5m retest short + ATR",
+          "missing_pretty": [
+            "5m retest short",
+            "ATR gate"
+          ],
+          "requires_pretty": [
+            "5m retest short",
+            "ATR gate"
+          ]
+        }
+      ],
+      "matched": false
+    }
   },
+  "gate_skips": [
+    "liquidity_no_data",
+    "orderflow_no_data"
+  ],
   "session_info": {
     "open": false,
     "entry_open": false,
@@ -43,8 +120,8 @@
     "within_entry_window": false,
     "within_monitor_window": false,
     "weekday_ok": true,
-    "now_utc": "2025-12-21T01:57:58.472581+00:00",
-    "now_budapest": "2025-12-21T02:57:58.472581+01:00",
+    "now_utc": "2025-12-21T02:08:02.032857+00:00",
+    "now_budapest": "2025-12-21T03:08:02.032857+01:00",
     "windows_utc": [
       [
         0,
@@ -89,80 +166,112 @@
     ],
     "next_open_utc": "2025-12-22T00:00:00+00:00"
   },
+  "momentum_diagnostics": {
+    "evaluated": true,
+    "used_for_decision": false,
+    "direction_result": null,
+    "required": [
+      "session",
+      "regime",
+      "bias",
+      "momentum_trigger",
+      "structure(2of3)",
+      "atr",
+      "rr_math>=1.4",
+      "tp_min_profit",
+      "min_stoploss",
+      "tp1_net>=+0.35%",
+      "intraday_range_guard"
+    ],
+    "missing": [
+      "session",
+      "regime",
+      "bias",
+      "adx"
+    ],
+    "liquidity_data_available": false,
+    "flow_data_available": false,
+    "ofi_available": false,
+    "momentum_trigger_ok": null,
+    "momentum_atr_ok": null,
+    "trigger_desc": null,
+    "precision_data_gap_mode": false
+  },
   "diagnostics": {
     "timeframes": {
       "k1m": {
         "last_raw_utc": "2025-12-20T12:59:00Z",
         "last_closed_utc": "2025-12-20T12:59:00Z",
-        "latency_seconds": 46738,
+        "latency_seconds": 47342,
         "expected_max_delay_seconds": 180,
-        "source_mtime_utc": "2025-12-21T01:56:01Z",
+        "source_mtime_utc": "2025-12-21T02:06:00Z",
         "stale_for_signals": true,
         "freshness_limit_seconds": 420.0,
         "freshness_violation": false,
         "freshness_retries": 0,
         "used_symbol": "XAU/USD",
         "used_exchange": "PHYSICAL METAL",
-        "retrieved_at_utc": "2025-12-21T01:56:55Z",
-        "latency_guard_seconds": 46675,
-        "latency_guard_adjustment_seconds": 63,
-        "latency_guard_triggered": true,
-        "latency_guard_age_seconds": 46675,
-        "latency_guard_limit_seconds": 420
+        "retrieved_at_utc": "2025-12-21T02:07:35Z",
+        "latency_guard_seconds": 47315,
+        "latency_guard_adjustment_seconds": 27,
+        "critical_stale": false
       },
       "k5m": {
         "last_raw_utc": "2025-12-20T12:55:00Z",
         "last_closed_utc": "2025-12-20T12:55:00Z",
-        "latency_seconds": 46978,
+        "latency_seconds": 47582,
         "expected_max_delay_seconds": 300,
-        "source_mtime_utc": "2025-12-21T01:56:01Z",
+        "source_mtime_utc": "2025-12-21T02:06:00Z",
         "stale_for_signals": true,
         "freshness_limit_seconds": 1200.0,
         "freshness_violation": false,
         "freshness_retries": 0,
         "used_symbol": "XAU/USD",
         "used_exchange": "PHYSICAL METAL",
-        "retrieved_at_utc": "2025-12-21T01:57:23Z",
-        "latency_guard_seconds": 46943,
-        "latency_guard_adjustment_seconds": 35
+        "retrieved_at_utc": "2025-12-21T02:07:36Z",
+        "latency_guard_seconds": 47556,
+        "latency_guard_adjustment_seconds": 26,
+        "critical_stale": false
       },
       "k1h": {
         "last_raw_utc": "2025-12-20T12:00:00Z",
         "last_closed_utc": "2025-12-20T12:00:00Z",
-        "latency_seconds": 50278,
+        "latency_seconds": 50882,
         "expected_max_delay_seconds": 3600,
-        "source_mtime_utc": "2025-12-21T01:56:01Z",
+        "source_mtime_utc": "2025-12-21T02:06:00Z",
         "stale_for_signals": true,
         "freshness_limit_seconds": 9000.0,
         "freshness_violation": false,
         "freshness_retries": 0,
         "used_symbol": "XAU/USD",
         "used_exchange": "PHYSICAL METAL",
-        "retrieved_at_utc": "2025-12-21T01:57:07Z",
-        "latency_guard_seconds": 50227,
-        "latency_guard_adjustment_seconds": 51
+        "retrieved_at_utc": "2025-12-21T02:07:24Z",
+        "latency_guard_seconds": 50844,
+        "latency_guard_adjustment_seconds": 38,
+        "critical_stale": false
       },
       "k4h": {
         "last_raw_utc": "2025-12-20T12:00:00Z",
         "last_closed_utc": "2025-12-20T12:00:00Z",
-        "latency_seconds": 50278,
+        "latency_seconds": 50882,
         "expected_max_delay_seconds": 14400,
-        "source_mtime_utc": "2025-12-21T01:56:01Z",
+        "source_mtime_utc": "2025-12-21T02:06:00Z",
         "stale_for_signals": true,
         "freshness_limit_seconds": 36000.0,
         "freshness_violation": false,
         "freshness_retries": 0,
         "used_symbol": "XAU/USD",
         "used_exchange": "PHYSICAL METAL",
-        "retrieved_at_utc": "2025-12-21T01:56:54Z",
-        "latency_guard_seconds": 50214,
-        "latency_guard_adjustment_seconds": 64
+        "retrieved_at_utc": "2025-12-21T02:07:32Z",
+        "latency_guard_seconds": 50852,
+        "latency_guard_adjustment_seconds": 30,
+        "critical_stale": false
       },
       "spot": {
-        "last_raw_utc": "2025-12-21T01:56:51Z",
-        "latency_seconds": 67,
+        "last_raw_utc": "2025-12-21T02:07:22Z",
+        "latency_seconds": 40,
         "expected_max_delay_seconds": 900,
-        "source_mtime_utc": "2025-12-21T01:57:51Z",
+        "source_mtime_utc": "2025-12-21T02:07:58Z",
         "source": "twelvedata:quote",
         "fallback_used": false,
         "realtime_override": false,
@@ -175,22 +284,21 @@
       }
     },
     "source_files": {
-      "spot.json": "2025-12-21T01:57:51Z",
-      "klines_1m.json": "2025-12-21T01:56:01Z",
-      "klines_5m.json": "2025-12-21T01:56:01Z",
-      "klines_1h.json": "2025-12-21T01:56:01Z",
-      "klines_4h.json": "2025-12-21T01:56:01Z"
+      "spot.json": "2025-12-21T02:07:58Z",
+      "klines_1m.json": "2025-12-21T02:06:00Z",
+      "klines_5m.json": "2025-12-21T02:06:00Z",
+      "klines_1h.json": "2025-12-21T02:06:00Z",
+      "klines_4h.json": "2025-12-21T02:06:00Z"
     },
     "latency_flags": [
-      "k1m: utolsó zárt gyertya 778 perc késésben van",
-      "k1m: jelzés korlátozva 778 perc késés miatt",
-      "k5m: utolsó zárt gyertya 782 perc késésben van",
-      "k5m: jelzés korlátozva 782 perc késés miatt",
-      "k1h: utolsó zárt gyertya 837 perc késésben van",
-      "k1h: jelzés korlátozva 837 perc késés miatt",
-      "k4h: utolsó zárt gyertya 837 perc késésben van",
-      "k4h: jelzés korlátozva 837 perc késés miatt",
-      "k1m: latency guard 777 perc késés (limit 7 perc)"
+      "k1m: utolsó zárt gyertya 789 perc késésben van",
+      "k1m: jelzés korlátozva 789 perc késés miatt",
+      "k5m: utolsó zárt gyertya 793 perc késésben van",
+      "k5m: jelzés korlátozva 793 perc késés miatt",
+      "k1h: utolsó zárt gyertya 848 perc késésben van",
+      "k1h: jelzés korlátozva 848 perc késés miatt",
+      "k4h: utolsó zárt gyertya 848 perc késésben van",
+      "k4h: jelzés korlátozva 848 perc késés miatt"
     ],
     "refresh_tips": [
       "Az analysis.py mindig a legutóbbi ZÁRT gyertyával számol (5m: max. ~5 perc késés).",
@@ -202,7 +310,594 @@
   },
   "reasons": [
     "Piac zárva (vasárnapi nyitás 23:00 UTC / 00:00 Budapest után)",
-    "Critical data latency — belépés tiltva",
-    "k1m: latency guard 777 perc késés (limit 7 perc)"
-  ]
+    "Intraday bias gate feltételek hiányosak — 5m retest long + ATR: 5m retest long, ATR gate | 5m retest short + ATR: 5m retest short, ATR gate",
+    "Bias neutrálsávban",
+    "Regime filter inaktív",
+    "ATR nincs rendben (relatív vagy abszolút küszöb)",
+    "Alacsony realised vol → magasabb RR igény",
+    "Fib zóna konfluencia (0.618–0.886) (+18.0)",
+    "5m adat késés — momentum pontok csökkentve",
+    "HTF adat késés — trend pontok csökkentve",
+    "ATR-floor override: rel_atr 0.0000 < 0.0025 → adaptív RR/TP küszöb",
+    "Regime kapu: CHOPPY miatt −10 P-score, pozícióskálázás csökkentve",
+    "ATR soft gate: alacsony volatilitás −5 P-score, méret felezve",
+    "Bias eltérés: H1 trend ütközik az M5 belépéssel (−15 P-score)",
+    "Liquidity gate skipped (no volume proxy available)",
+    "Order-flow gates skipped (no tick/imbalance data)",
+    "Diagnosztika: k1m: utolsó zárt gyertya 789 perc késésben van",
+    "Diagnosztika: k1m: jelzés korlátozva 789 perc késés miatt",
+    "Diagnosztika: k5m: utolsó zárt gyertya 793 perc késésben van",
+    "Diagnosztika: k5m: jelzés korlátozva 793 perc késés miatt",
+    "Diagnosztika: k1h: utolsó zárt gyertya 848 perc késésben van",
+    "Diagnosztika: k1h: jelzés korlátozva 848 perc késés miatt",
+    "Diagnosztika: k4h: utolsó zárt gyertya 848 perc késésben van",
+    "Diagnosztika: k4h: jelzés korlátozva 848 perc késés miatt",
+    "missing: session, P_score>=30"
+  ],
+  "realtime_transport": "http",
+  "data_integrity_diagnostics": {
+    "core_data_ok": true,
+    "precision_data_ok": true,
+    "precision_disabled_due_to_data_gap": false,
+    "core_required_sources": [
+      "spot",
+      "k5m"
+    ],
+    "precision_required_sources": [
+      "spot",
+      "k5m",
+      "k1m"
+    ],
+    "spot": {
+      "last_raw_utc": "2025-12-21T02:07:22Z",
+      "latency_seconds": 40,
+      "expected_max_delay_seconds": 900,
+      "source_mtime_utc": "2025-12-21T02:07:58Z",
+      "source": "twelvedata:quote",
+      "fallback_used": false,
+      "realtime_override": false,
+      "freshness_limit_seconds": 900.0,
+      "freshness_retries": 0,
+      "freshness_violation": false,
+      "freshness_violation_meta": false,
+      "used_symbol": "XAU/USD",
+      "used_exchange": "PHYSICAL METAL"
+    },
+    "k5m": {
+      "last_raw_utc": "2025-12-20T12:55:00Z",
+      "last_closed_utc": "2025-12-20T12:55:00Z",
+      "latency_seconds": 47582,
+      "expected_max_delay_seconds": 300,
+      "source_mtime_utc": "2025-12-21T02:06:00Z",
+      "stale_for_signals": true,
+      "freshness_limit_seconds": 1200.0,
+      "freshness_violation": false,
+      "freshness_retries": 0,
+      "used_symbol": "XAU/USD",
+      "used_exchange": "PHYSICAL METAL",
+      "retrieved_at_utc": "2025-12-21T02:07:36Z",
+      "latency_guard_seconds": 47556,
+      "latency_guard_adjustment_seconds": 26,
+      "critical_stale": false
+    },
+    "k1m": {
+      "last_raw_utc": "2025-12-20T12:59:00Z",
+      "last_closed_utc": "2025-12-20T12:59:00Z",
+      "latency_seconds": 47342,
+      "expected_max_delay_seconds": 180,
+      "source_mtime_utc": "2025-12-21T02:06:00Z",
+      "stale_for_signals": true,
+      "freshness_limit_seconds": 420.0,
+      "freshness_violation": false,
+      "freshness_retries": 0,
+      "used_symbol": "XAU/USD",
+      "used_exchange": "PHYSICAL METAL",
+      "retrieved_at_utc": "2025-12-21T02:07:35Z",
+      "latency_guard_seconds": 47315,
+      "latency_guard_adjustment_seconds": 27,
+      "critical_stale": false
+    }
+  },
+  "profile_resolution": {
+    "asset": "GOLD_CFD",
+    "entry_profile": "baseline",
+    "global_default_profile": null,
+    "schedule_enabled": true,
+    "schedule_bucket": "mid",
+    "schedule_selected_profile": "baseline",
+    "resolution_notes": [
+      "profile via schedule bucket mid -> baseline"
+    ]
+  },
+  "effective_thresholds": {
+    "asset": "GOLD_CFD",
+    "entry_profile": "baseline",
+    "p_score_min": 30.0,
+    "spread_max_atr_pct": 0.55,
+    "tp_net_min": 0.0035,
+    "rr_required": null,
+    "tp_min_profit_pct": null,
+    "min_stoploss_pct": 0.01,
+    "atr_abs_min_used": 0.55,
+    "atr_low_threshold": 0.00275,
+    "atr_overlay_min": null,
+    "bos_lookback": 45,
+    "fib_tolerance": 0.01,
+    "position_scale_floor": 0.05,
+    "staleness_max_age_seconds": 900,
+    "session_window": {
+      "entry": [
+        [
+          0,
+          0,
+          23,
+          55
+        ]
+      ],
+      "monitor": [
+        [
+          0,
+          0,
+          23,
+          55
+        ]
+      ]
+    }
+  },
+  "probability_model_source": "sklearn",
+  "probability_model": null,
+  "probability_model_raw": null,
+  "probability_calibrated": null,
+  "probability_threshold": null,
+  "probability_stack": {
+    "source": "sklearn",
+    "status": "disabled",
+    "unavailable_reason": "ml_scoring_disabled"
+  },
+  "ema21_slope_1h": 0.00024238953476511113,
+  "ema21_slope_threshold": 0.022,
+  "ema21_relation_1h": "stale",
+  "last_swing_high_1h": 4338.72685,
+  "last_swing_low_1h": 4338.47694,
+  "last_close_1h": 4338.63147,
+  "bos_5m_dir": "range",
+  "atr1h": 0.2527849999999359,
+  "momentum_volume_ratio": null,
+  "momentum_liquidity_ok": true,
+  "dynamic_tp_profile": {
+    "core": {
+      "tp1": 1.4400000000000002,
+      "tp2": 2.1600000000000006,
+      "rr": 1.87425
+    },
+    "momentum": {
+      "tp1": 1.275,
+      "tp2": 2.04,
+      "rr": 1.5618750000000001
+    },
+    "regime": "compressed",
+    "reference": {
+      "current": 0.20017857142868575,
+      "q20": 0.20622957142864576,
+      "q50": 0.22950857142866102,
+      "q80": 2.8103492857142824
+    },
+    "reversal": {
+      "tp1": 1.0,
+      "tp2": 1.2,
+      "rr": 1.1
+    }
+  },
+  "order_flow_metrics": {
+    "imbalance": null,
+    "pressure": 0.0,
+    "delta_volume": 0.0,
+    "aggressor_ratio": null,
+    "imbalance_z": null,
+    "status": "ok"
+  },
+  "intraday_profile": {
+    "asset": "GOLD_CFD",
+    "timestamp": "2025-12-21T02:08:02Z",
+    "day_start_utc": "2025-12-20T23:00:00Z",
+    "day_open": 4338.53835,
+    "day_high": 4338.72953,
+    "day_low": 4338.4752,
+    "day_range": 0.25432999999975436,
+    "range_vs_atr": 1.2705156110595994,
+    "range_position": 0.6144379349685651,
+    "range_bias": "balanced",
+    "range_state": "expansion",
+    "range_compression": false,
+    "range_expansion": true,
+    "range_exhaustion_long": false,
+    "range_exhaustion_short": false,
+    "range_guard": {
+      "long": false,
+      "short": false
+    },
+    "opening_range_high": null,
+    "opening_range_low": null,
+    "opening_break": "none",
+    "opening_range_minutes": 45,
+    "opening_drive_ratio": null,
+    "previous_close": 4338.63147,
+    "opening_gap": -0.09312000000045373,
+    "opening_gap_pct": -0.0021462989111737975,
+    "opening_gap_direction": "down",
+    "price_reference": 4338.63147,
+    "elapsed_minutes": 188,
+    "notes": []
+  },
+  "entry_thresholds": {
+    "profile": "baseline",
+    "news_lockout": false,
+    "latency_guard_recovery": {
+      "asset": "GOLD_CFD",
+      "feed": "k1m",
+      "recovered_utc": "2025-12-21 02:08:02",
+      "recovered_cet": "2025-12-21 03:08:02",
+      "previous_triggered_utc": "2025-12-21 01:57:58",
+      "previous_triggered_cet": "2025-12-21 02:57:58",
+      "limit_seconds": 420,
+      "profile": "baseline"
+    },
+    "adx_value": 15.25919832446211,
+    "adx_trend_threshold": 20.0,
+    "adx_regime_initial": "range",
+    "atr_multiplier": 0.5,
+    "atr_threshold_base": 0.0055,
+    "atr_threshold_initial": 0.00275,
+    "atr_percentile_meta": {
+      "bucket": "mid",
+      "samples": 191,
+      "percentile": 0.25,
+      "threshold": 4.8577754842932984e-05
+    },
+    "atr_threshold_percentile": 4.8577754842932984e-05,
+    "spread_ratio": null,
+    "atr_soft_gate": {
+      "enabled": true,
+      "rel_atr": 4.6138643674357925e-05,
+      "threshold": 0.00275,
+      "tolerance_pct": 0.15,
+      "penalty_max": 6.0,
+      "diff_ratio": 0.9832223113911426,
+      "mode": "fail"
+    },
+    "atr_ratio_ok": false,
+    "atr_threshold_effective": 0.00275,
+    "spread_gate_ok": true,
+    "atr_abs_min_used": 0.55,
+    "atr_abs_override_applied": false,
+    "risk_guard": {
+      "profile": "baseline",
+      "max_risk_pct": 1.8,
+      "spread_gate_ok": true,
+      "allowed": true,
+      "cost_model": {
+        "type": "pct",
+        "round_trip_pct": 0.0006,
+        "overnight_pct": 0.0002
+      }
+    },
+    "fib_tolerance_fraction": 0.01,
+    "gold_reversal": {
+      "daily_range": 34.51711999999952,
+      "rsi": 57.16180537308359,
+      "hits": 2,
+      "adx_value": 15.25919832446211,
+      "bias_conflict": false,
+      "rr_target": [
+        1.0,
+        1.2
+      ],
+      "sl_pct": [
+        0.005,
+        0.008
+      ],
+      "active": true,
+      "reasons": [
+        "Napi range ≥ 1.2×ATR",
+        "Kulcsszint érintve (Fib/pivot)"
+      ]
+    },
+    "dynamic_score_engine": {
+      "base_score": 0.0,
+      "final_score": 0.0
+    },
+    "ofi_z": null,
+    "vwap_confluence": {
+      "trend_pullback": false,
+      "mean_revert": false
+    },
+    "structure_components": {
+      "bos": false,
+      "liquidity": true,
+      "ofi": false
+    },
+    "p_score_min_base": 30.0,
+    "p_score_min_effective": 30.0,
+    "range_giveback_ratio": 0.4,
+    "adx_regime": "range",
+    "gold_atr_ratio": 0.01677768860885743,
+    "position_size_scale": 0.5,
+    "rr_min_core": 1.35,
+    "rr_min_momentum": 1.35,
+    "rr_meta": {
+      "core_rr_min_base": 1.35,
+      "momentum_rr_min_base": 1.35,
+      "low_atr_override": {
+        "floor": 0.0025,
+        "rel_atr": 4.6138643674357925e-05,
+        "tp_min_pct": 0.0025,
+        "rr_required": 1.35,
+        "core_rr_min_effective": 1.35,
+        "momentum_rr_min_effective": 1.35
+      },
+      "core_rr_min": 1.35,
+      "momentum_rr_min": 1.35
+    },
+    "low_atr_override": {
+      "floor": 0.0025,
+      "rel_atr": 4.6138643674357925e-05,
+      "tp_min_pct": 0.0025,
+      "rr_required": 1.35,
+      "tp_min_pct_override": 0.0025
+    },
+    "precision_score_threshold": 55.0,
+    "precision_timeouts": {
+      "ready": 15,
+      "arming": 20
+    }
+  },
+  "entry_gate_context_hu": {
+    "atr_kapu": {
+      "ok": false,
+      "rel_atr": 4.6138643674357925e-05,
+      "threshold": 0.00275,
+      "abs_ok": false,
+      "overlay_ok": false,
+      "btc_atr_gate": true,
+      "timestamp_utc": "2025-12-21 02:08:02",
+      "timestamp_bud": "2025-12-21 03:08:02"
+    },
+    "spread_kapu": {
+      "ok": true,
+      "spread_ratio_atr": null,
+      "spread_limit_atr": 0.55,
+      "timestamp_utc": "2025-12-21 02:08:02",
+      "timestamp_bud": "2025-12-21 03:08:02"
+    },
+    "kockazat_guard": {
+      "max_risk_pct": 1.8,
+      "engedi": true,
+      "cost_model": {
+        "type": "pct",
+        "round_trip_pct": 0.0006,
+        "overnight_pct": 0.0002
+      },
+      "timestamp_utc": "2025-12-21 02:08:02",
+      "timestamp_bud": "2025-12-21 03:08:02"
+    },
+    "profil_kuszobok": {
+      "profil": "baseline",
+      "p_score_min": 30.0,
+      "p_score_min_base": 30.0,
+      "atr_kuszob_rel": 0.00275,
+      "atr_abs_min": 0.55,
+      "fib_tures_frac": 0.01,
+      "fib_tures_atr": 0.18958874999995196,
+      "timestamp_utc": "2025-12-21 02:08:02",
+      "timestamp_bud": "2025-12-21 03:08:02"
+    },
+    "bos_visszatekintes": 45,
+    "fib_zona": {
+      "ok": true,
+      "sav": [
+        0.618,
+        0.886
+      ],
+      "tures_frac": 0.01,
+      "tures_atr": 0.18958874999995196,
+      "timestamp_utc": "2025-12-21 02:08:02",
+      "timestamp_bud": "2025-12-21 03:08:02"
+    },
+    "session_ablak_utc": {
+      "entry": [
+        [
+          0,
+          0,
+          23,
+          55
+        ]
+      ],
+      "monitor": [
+        [
+          0,
+          0,
+          23,
+          55
+        ]
+      ]
+    },
+    "p_score_profil": "baseline",
+    "structure_kapu": {
+      "ok": false,
+      "komponensek": {
+        "bos": false,
+        "liquidity": true,
+        "ofi": false
+      },
+      "timestamp_utc": "2025-12-21 02:08:02",
+      "timestamp_bud": "2025-12-21 03:08:02"
+    },
+    "rr_kapuk": {
+      "core_rr_min": 1.35,
+      "momentum_rr_min": 1.35,
+      "relaxalt": false,
+      "indok": null,
+      "timestamp_utc": "2025-12-21 02:08:02",
+      "timestamp_bud": "2025-12-21 03:08:02"
+    },
+    "momentum_kapu": {
+      "momentum_ok": false,
+      "momentum_direction": null,
+      "momentum_reason": "missing:adx,bias,regime,session",
+      "momentum_missing": [
+        "session",
+        "regime",
+        "bias",
+        "adx"
+      ],
+      "momentum_regime_ok": false,
+      "momentum_structure_ok": false,
+      "momentum_atr_ok": false,
+      "momentum_liquidity_ok": true,
+      "momentum_trigger_ok": false,
+      "momentum_ofi_z": null,
+      "timestamp_utc": "2025-12-21 02:08:02",
+      "timestamp_bud": "2025-12-21 03:08:02",
+      "momentum_asset_class": "equity_metal"
+    }
+  },
+  "volatility_overlay": {
+    "implied_vol": null,
+    "realised_vol": 2.0965933007083224e-05,
+    "realised_window_minutes": 120,
+    "regime": "suppressed",
+    "premium": null,
+    "source_path": null,
+    "implied_realised_ratio": null
+  },
+  "invalid_levels": {
+    "buy": 4338.32694,
+    "sell": 4338.87685
+  },
+  "invalid_buffer_abs": 0.15,
+  "action_plan": {
+    "status": "standby",
+    "priority": "low",
+    "summary": "Állapot: market closed",
+    "steps": [],
+    "blockers": [
+      "Piac zárva – várj a kereskedési ablakra.",
+      "P_score>=30"
+    ],
+    "blockers_raw": [
+      "session",
+      "P_score>=30"
+    ],
+    "notes": [
+      "Összesített valószínűség: 0%.",
+      "Ajánlott tőkeáttétel: ×20.0.",
+      "Piac zárva (vasárnapi nyitás 23:00 UTC / 00:00 Budapest után)",
+      "Intraday bias gate feltételek hiányosak — 5m retest long + ATR: 5m retest long, ATR gate | 5m retest short + ATR: 5m retest short, ATR gate",
+      "Bias neutrálsávban",
+      "Regime filter inaktív",
+      "ATR nincs rendben (relatív vagy abszolút küszöb)",
+      "Alacsony realised vol → magasabb RR igény"
+    ],
+    "context": {
+      "asset": "GOLD_CFD",
+      "decision": "market closed",
+      "probability": 0,
+      "session_open": false,
+      "session_entry_open": false,
+      "session_status": "closed_out_of_hours",
+      "intraday_profile": {
+        "range_state": "expansion",
+        "range_position": 0.6144379349685651,
+        "range_vs_atr": 1.2705156110595994,
+        "range_guard": {
+          "long": false,
+          "short": false
+        },
+        "opening_break": "none"
+      },
+      "next_session_open_utc": "2025-12-22T00:00:00+00:00"
+    }
+  },
+  "active_position_meta": {
+    "ema21_slope_abs": 0.00024238953476511113,
+    "ema21_slope_signed": 0.00024238953476511113,
+    "ema21_slope_threshold": 0.022,
+    "ema21_relation": "stale",
+    "structure_5m": "range",
+    "stale_timeframes": {
+      "k1m": true,
+      "k5m": true,
+      "k1h": true,
+      "k4h": true
+    },
+    "atr1h": 0.2527849999999359,
+    "atr1h_trail_floor": 0.15,
+    "atr5": 0.20017857142868575,
+    "atr5_rel": 4.6138643674357925e-05,
+    "atr5_threshold": 0.00275,
+    "bos1h_long": true,
+    "bos1h_short": false,
+    "regime_ok": false,
+    "effective_bias": "neutral",
+    "last_close_1h": 4338.63147,
+    "last_swing_high_1h": 4338.72685,
+    "last_swing_low_1h": 4338.47694,
+    "invalid_level_sell": 4338.87685,
+    "invalid_level_buy": 4338.32694,
+    "invalid_buffer_abs": 0.15,
+    "p_score": 0,
+    "probability_calibrated": null,
+    "probability_threshold": null,
+    "probability_model_raw": null,
+    "probability_model_source": "sklearn",
+    "tp_profile": {
+      "tp1_r": 1.4400000000000002,
+      "tp2_r": 2.1600000000000006
+    },
+    "realtime_confidence": 1.0,
+    "avg_latency_profile": 46.1678870834321,
+    "action_plan": {
+      "status": "standby",
+      "priority": "low",
+      "summary": "Állapot: market closed",
+      "steps": [],
+      "blockers": [
+        "Piac zárva – várj a kereskedési ablakra.",
+        "P_score>=30"
+      ],
+      "blockers_raw": [
+        "session",
+        "P_score>=30"
+      ],
+      "notes": [
+        "Összesített valószínűség: 0%.",
+        "Ajánlott tőkeáttétel: ×20.0.",
+        "Piac zárva (vasárnapi nyitás 23:00 UTC / 00:00 Budapest után)",
+        "Intraday bias gate feltételek hiányosak — 5m retest long + ATR: 5m retest long, ATR gate | 5m retest short + ATR: 5m retest short, ATR gate",
+        "Bias neutrálsávban",
+        "Regime filter inaktív",
+        "ATR nincs rendben (relatív vagy abszolút küszöb)",
+        "Alacsony realised vol → magasabb RR igény"
+      ],
+      "context": {
+        "asset": "GOLD_CFD",
+        "decision": "market closed",
+        "probability": 0,
+        "session_open": false,
+        "session_entry_open": false,
+        "session_status": "closed_out_of_hours",
+        "intraday_profile": {
+          "range_state": "expansion",
+          "range_position": 0.6144379349685651,
+          "range_vs_atr": 1.2705156110595994,
+          "range_guard": {
+            "long": false,
+            "short": false
+          },
+          "opening_break": "none"
+        },
+        "next_session_open_utc": "2025-12-22T00:00:00+00:00"
+      }
+    }
+  }
 }
