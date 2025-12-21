@@ -1,7 +1,12 @@
 name: TD Full Pipeline (5m)
 
 on:
-  workflow_dispatch:    
+  workflow_dispatch:
+    inputs:
+      force_public_sync:
+        description: "Kézi futtatáskor is frissítsd a public tartalmat"
+        required: false
+        default: "true"
   schedule:
     # GitHub Actions only guarantees cron triggers at a minimum 2-minute cadence,
     - cron: "*/2 * * * *" # 2 percenként (UTC)
@@ -84,6 +89,56 @@ jobs:
       - name: Run Trading.py (pull all OHLC + spot)
         run: .venv/bin/python Trading.py
         
+      - name: Sync pipeline artifacts into public
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.force_public_sync != 'false'
+        env:
+          PUBLIC_SYNC_RUN_ID: ${{ github.run_id }}
+          PUBLIC_SYNC_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          .venv/bin/python scripts/update_public.py --target "${OUT_DIR:-public}" \
+            --sources data reports \
+            --run-id "$PUBLIC_SYNC_RUN_ID" \
+            --commit "$PUBLIC_SYNC_COMMIT"
+
+      - name: Verify public sync metadata
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.force_public_sync != 'false'
+        env:
+          EXPECTED_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          .venv/bin/python - <<'PY'
+          from pathlib import Path
+          import json
+          import sys
+
+          meta_path = Path('public/.sync-metadata.json')
+          if not meta_path.exists():
+            raise SystemExit("Missing public/.sync-metadata.json after sync")
+
+          metadata = json.loads(meta_path.read_text())
+          if metadata.get('run_id') != "${EXPECTED_RUN_ID}":
+            raise SystemExit(f"Unexpected run_id in metadata: {metadata.get('run_id')}")
+
+          checksum = metadata.get('checksum')
+          if not checksum:
+            raise SystemExit("Empty checksum recorded for public sync")
+
+          last_sync = Path('public/.last_sync')
+          if not last_sync.exists():
+            raise SystemExit("Missing public/.last_sync stamp after sync")
+
+          print("Verified public sync metadata", metadata)
+          PY
+
+      - name: Upload pipeline artifact bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-artifacts
+          path: |
+            data
+            reports
+            
       - name: Verify model exists & loadable
         run: .venv/bin/python scripts/check_ml_readiness.py BTCUSD
 
@@ -99,11 +154,38 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: analysis-public
-          path: public  
-  notify:
-    name: 2) Discord értesítő
+          path: public
+  deploy_public:
+    name: 2) Deploy refreshed public
     needs:
-      - trading_and_analysis      
+      - trading_and_analysis
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+    steps:
+      - name: Download refreshed public artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: analysis-public
+          path: public
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy public folder to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+  notify:
+    name: 3) Discord értesítő
+    needs:
+      - trading_and_analysis
+      - deploy_public    
     runs-on: ubuntu-24.04
     env:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
