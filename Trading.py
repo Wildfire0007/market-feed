@@ -35,7 +35,7 @@ Környezeti változók:
   PIPELINE_MAX_LAG_SECONDS = "240" (Trading → Analysis log figyelmeztetés küszöbe)
 """
 
-import os, json, time, math, logging
+import os, json, time, math, logging, shutil
 import threading
 from datetime import datetime, timezone, time as dt_time
 from pathlib import Path
@@ -146,6 +146,12 @@ REALTIME_HTTP_MAX_SAMPLES = int(os.getenv("TD_REALTIME_HTTP_MAX_SAMPLES", "6"))
 REALTIME_HTTP_DURATION = max(1.0, _env_float("TD_REALTIME_HTTP_DURATION", 8.0))
 _REALTIME_HTTP_BACKGROUND_FLAG = _env_flag("TD_REALTIME_HTTP_BACKGROUND")
 FORCED_SNAPSHOT_MAX_AGE = 300.0
+RESET_PUBLIC_ON_TRADING_START = os.getenv("RESET_PUBLIC_ON_TRADING_START", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 _SYMBOL_META_DISABLED = os.getenv("TD_DISABLE_SYMBOL_META", "").strip().lower() in {
     "1",
@@ -1174,6 +1180,26 @@ def _write_trading_status_summary(out_dir: str) -> None:
         "all_assets_ready": all_ready,
     }
     save_json(os.path.join(pipeline_dir, "trading_status.json"), payload)
+
+
+def _write_public_refresh_marker(
+    out_dir: str,
+    *,
+    started_at: datetime,
+    completed_at: datetime,
+    duration_seconds: float,
+) -> None:
+    pipeline_dir = os.path.join(out_dir, "pipeline")
+    ensure_dir(pipeline_dir)
+    save_json(
+        os.path.join(pipeline_dir, "public_refresh.json"),
+        {
+            "trading_started_at_utc": started_at.isoformat(),
+            "trading_completed_at_utc": completed_at.isoformat(),
+            "duration_seconds": duration_seconds,
+            "out_dir": out_dir,
+        },
+    )
 
 
 def _series_row_timestamp(row: Dict[str, Any]) -> Optional[float]:
@@ -3945,11 +3971,27 @@ def _process_asset_guard(asset: str, cfg: Dict[str, Any]) -> None:
         _record_asset_failure(asset, str(error))
 
 
+def _reset_out_dir_if_requested(out_dir: str, logger: logging.Logger) -> None:
+    if not RESET_PUBLIC_ON_TRADING_START:
+        return
+
+    try:
+        shutil.rmtree(out_dir)
+        logger.info("Reset public artefacts before trading run: %s", out_dir)
+    except FileNotFoundError:
+        logger.info("Public artefact directory missing, creating: %s", out_dir)
+    except Exception as exc:
+        logger.warning("Failed to reset public artefacts (%s): %s", out_dir, exc)
+
+    ensure_dir(out_dir)
+
+
 def main():
     if not API_KEY:
         raise SystemExit("TWELVEDATA_API_KEY hiányzik (GitHub Secret).")
-    ensure_dir(OUT_DIR)
     logger = logging.getLogger("market_feed.trading")
+    _reset_out_dir_if_requested(OUT_DIR, logger)
+    ensure_dir(OUT_DIR)
     pipeline_log_path = None
     try:
         pipeline_log_path = get_pipeline_log_path()
@@ -4014,8 +4056,19 @@ def main():
     except Exception as exc:
         logger.warning("Failed to update system heartbeat: %s", exc)
 
+    try:
+        _write_public_refresh_marker(
+            OUT_DIR,
+            started_at=started_at_dt,
+            completed_at=completed_at_dt,
+            duration_seconds=duration_seconds,
+        )
+    except Exception as exc:
+        logger.warning("Failed to write public refresh marker: %s", exc)
+
 if __name__ == "__main__":
     main()
+
 
 
 
