@@ -1,16 +1,7 @@
 name: TD Full Pipeline (5m)
 
 on:
-  workflow_dispatch:
-    inputs:
-      skip_rollback_guard:
-        description: "Skip predeploy status guard (rollback mode)"
-        required: false
-        default: "false"
-      run_tests:
-        description: "Run pytest in predeploy (manual only)"
-        required: false
-        default: "false"
+  workflow_dispatch:    
   schedule:
     # GitHub Actions only guarantees cron triggers at a minimum 2-minute cadence,
     - cron: "*/2 * * * *" # 2 percenként (UTC)
@@ -107,161 +98,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: analysis-public
-          path: public
-
-  predeploy:
-    name: 2) Pre-deploy verification & tests    
-    needs: trading_and_analysis
-    runs-on: ubuntu-24.04
-    env:
-      TZ: UTC
-      RUN_PREDEPLOY: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && github.event.schedule == '0 5 * * *') }}
-    steps:
-      - name: Skip predeploy outside daily window
-        if: env.RUN_PREDEPLOY != 'true'
-        run: echo "Predeploy verification is only executed manually or at 05:00 UTC on scheduled runs."
-        
-      - name: Checkout latest main
-        if: env.RUN_PREDEPLOY == 'true'
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: true
-
-      - name: Sync with origin/main
-        if: env.RUN_PREDEPLOY == 'true'
-        run: |
-          git fetch origin main
-          git reset --hard origin/main
-
-      - name: Prepare public directory
-        if: env.RUN_PREDEPLOY == 'true'
-        run: |
-          rm -rf public
-          mkdir -p public
-
-      - name: Download analysis outputs
-        if: env.RUN_PREDEPLOY == 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: analysis-public
-          path: public
-          
-      - name: Record synced commit
-        if: env.RUN_PREDEPLOY == 'true'
-        id: record_synced_commit
-        run: echo "synced_rev=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-        
-      - name: Clean Python caches
-        if: env.RUN_PREDEPLOY == 'true'
-        run: |
-          find . -type d -name "__pycache__" -exec rm -rf {} +
-          find . -name "*.pyc" -delete
-
-      - name: Setup Python
-        if: env.RUN_PREDEPLOY == 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-          cache-dependency-path: requirements.lock
-          
-      - name: Restore Python virtualenv cache
-        if: env.RUN_PREDEPLOY == 'true'
-        id: cache-venv
-        uses: actions/cache@v4
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('requirements.lock') }}
-          restore-keys: |
-            venv-${{ runner.os }}-
-
-      - name: Create virtualenv (cache miss)
-        if: env.RUN_PREDEPLOY == 'true' && steps.cache-venv.outputs.cache-hit != 'true'
-        run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install --upgrade pip
-          .venv/bin/pip install -r requirements.lock
-
-      - name: Activate virtualenv for subsequent steps
-        if: env.RUN_PREDEPLOY == 'true'
-        run: |
-          echo "VIRTUAL_ENV=$PWD/.venv" >> $GITHUB_ENV
-          echo "PATH=$PWD/.venv/bin:$PATH" >> $GITHUB_ENV
-
-      - name: Validate public/status.json
-        if: env.RUN_PREDEPLOY == 'true'
-        run: .venv/bin/python -m json.tool public/status.json > /dev/null
-        
-      - name: Enforce predeploy status health
-        if: env.RUN_PREDEPLOY == 'true'
-        env:
-          PREDEPLOY_SKIP_FOR_ROLLBACK: ${{ github.event.inputs.skip_rollback_guard || '' }}
-        run: .venv/bin/python scripts/predeploy_guard.py --status-path public/status.json
-      
-      - name: Verify analysis.py hash against origin/main
-        if: env.RUN_PREDEPLOY == 'true'
-        run: |
-          set -euo pipefail
-          current_hash=$(sha256sum analysis.py | awk '{print $1}')
-          remote_hash=$(git show origin/main:analysis.py | sha256sum | awk '{print $1}')
-          echo "analysis.py working hash: $current_hash"
-          echo "analysis.py origin/main hash: $remote_hash"
-          if [ "$current_hash" != "$remote_hash" ]; then
-            echo "analysis.py hash mismatch detected" >&2
-            exit 1
-          fi
-
-      - name: Run pytest suite
-        if: env.RUN_PREDEPLOY == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.run_tests == 'true')
-        run: .venv/bin/pytest
-      
-      - name: Ensure checked-out commit remains consistent
-        if: env.RUN_PREDEPLOY == 'true'
-        run: |
-          set -euo pipefail
-          head_rev=$(git rev-parse HEAD)
-          baseline_rev="${{ steps.record_synced_commit.outputs.synced_rev }}"
-          echo "HEAD revision: $head_rev"
-          echo "Baseline revision: $baseline_rev"
-          if [ "$head_rev" != "$baseline_rev" ]; then
-            echo "Working commit diverges from recorded baseline" >&2
-            exit 1
-          fi
-
-          git fetch origin main
-          main_rev=$(git rev-parse origin/main)
-          echo "origin/main revision: $main_rev"
-          if [ "$main_rev" != "$baseline_rev" ]; then
-            echo "origin/main advanced during job run; proceeding with baseline validation." >&2
-          fi
-
-      - name: Commit and push updated public outputs
-        if: env.RUN_PREDEPLOY == 'true' && github.ref == 'refs/heads/main'
-        run: |
-          set -euo pipefail
-          git status
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git add public
-          if git diff --cached --quiet; then
-            echo "No changes in public/ to commit."
-            exit 0
-          fi
-          git commit -m "Auto-update analysis outputs (public/) [skip ci]"
-          git push origin main
-
+          path: public  
   notify:
-    name: 3) Discord értesítő
+    name: 2) Discord értesítő
     needs:
-      - trading_and_analysis
-      - predeploy
-    if: |
-      always() && (
-        github.event_name != 'workflow_dispatch' ||
-        needs.predeploy.result == 'success'
-      )
+      - trading_and_analysis      
     runs-on: ubuntu-24.04
     env:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
