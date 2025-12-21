@@ -28,6 +28,7 @@ jobs:
   trading_and_analysis:
     name: 1) Trading.py → Analysis (egy runneren)
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
     env:
       TZ: UTC
       OUT_DIR: public
@@ -158,24 +159,7 @@ jobs:
       - name: Generate latency monitoring snapshot
         run: |
           .venv/bin/python scripts/check_latency_sources.py --output public/monitoring/data_latency.json --pretty
-               
-      - name: Commit and push refreshed public outputs
-        if: github.ref == 'refs/heads/main'
-        run: |
-          set -euo pipefail
-          git status
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git fetch origin main
-          git pull --rebase --autostash origin main
-          git add public
-          if git diff --cached --quiet; then
-            echo "No changes in public/ to commit."
-            exit 0
-          fi
-          git commit -m "Auto-update analysis outputs (public/) [skip ci]"
-          git push origin main
-          
+                           
       - name: Commit and push refreshed public outputs
         if: github.ref == 'refs/heads/main'
         run: |
@@ -203,6 +187,7 @@ jobs:
     needs:
       - trading_and_analysis
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: read
       pages: write
@@ -228,8 +213,9 @@ jobs:
     name: 3) Discord értesítő
     needs:
       - trading_and_analysis
-      - deploy_public    
+      - deploy_public
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     env:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       DISCORD_COOLDOWN_MIN: ${{ secrets.DISCORD_COOLDOWN_MIN }}
