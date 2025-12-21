@@ -32,6 +32,7 @@ import os, json, sys, logging, requests, time
 from dataclasses import dataclass
 from copy import deepcopy
 from pathlib import Path
+from functools import lru_cache
 import numpy as np
 from typing import Iterable, Optional, Set, Tuple, Dict, Any, List
 from datetime import datetime, timezone, timedelta
@@ -45,6 +46,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from active_anchor import load_anchor_state, touch_anchor
 from config.analysis_settings import ASSETS as CONFIG_ASSETS
+from config import analysis_settings as settings
 from logging_utils import ensure_json_stream_handler
 from reports.pipeline_monitor import (
     compute_run_timing_deltas,
@@ -113,6 +115,42 @@ EXIT_DEDUP_MINUTES_BY_ASSET = {
 
 def _dedup_minutes_for_exit(asset: str) -> int:
     return int(EXIT_DEDUP_MINUTES_BY_ASSET.get(asset, 0))
+
+
+@lru_cache(maxsize=1)
+def _signal_stability_config() -> Dict[str, Any]:
+    cfg = settings.load_config().get("signal_stability") or {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+@lru_cache(maxsize=4)
+def _load_manual_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
+    resolved = Path(path)
+    if not resolved.is_absolute():
+        resolved = Path.cwd() / resolved
+    if not resolved.exists():
+        return {} if treat_missing_as_flat else {}
+    try:
+        data = json.loads(resolved.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _manual_position_state(asset: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    tracking_cfg = (cfg.get("manual_position_tracking") or {})
+    enabled = bool(tracking_cfg.get("enabled"))
+    if not enabled:
+        return {"tracking_enabled": False, "has_position": True}
+    positions_path = tracking_cfg.get("positions_file") or "config/manual_positions.json"
+    treat_missing = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
+    positions = _load_manual_positions(positions_path, treat_missing)
+    entry = positions.get(asset) if isinstance(positions, dict) else None
+    side = str(entry.get("side") or "").strip().lower() if isinstance(entry, dict) else ""
+    return {
+        "tracking_enabled": True,
+        "has_position": side in {"long", "short"},
+    }
 
 # ---- Mobil-optimalizált kártyák segédfüggvényei ----
 HB_TZ = timezone.utc  # Alapértelmezés, ha nincs pytz
@@ -454,6 +492,7 @@ def build_mobile_embed_for_asset(
     status_icon = "⚪"
 
     decision_upper = (decision or "").upper()
+    intent = (signal_data or {}).get("intent")
     if decision_upper == "BUY":
         status_text = "LONG"
         color = COLORS["LONG"]
@@ -471,6 +510,20 @@ def build_mobile_embed_for_asset(
         status_text = "VÁRAKOZÁS (Stabilizálás...)"
         color = COLORS["WAIT"]
         status_icon = "🟡"
+
+    intent_header = None
+    if intent == "entry" and decision_upper in {"BUY", "SELL"}:
+        intent_header = f"🚀 ENTRY ({decision_upper})"
+    elif intent == "hard_exit":
+        intent_header = "⛔ HARD EXIT (close now)"
+        status_text = "HARD EXIT"
+        status_icon = "⛔"
+        color = COLORS.get("SHORT", COLORS["NO"])
+    elif intent == "manage_position":
+        intent_header = "🧭 MANAGE POSITION (scale out / tighten stop)"
+        status_text = "MENEDZSMENT"
+        status_icon = "🧭"
+        color = COLORS.get("WAIT", COLORS["NO"])
 
     mode_hu = "Bázis" if "core" in str(mode).lower() else "Lendület"
 
@@ -517,6 +570,8 @@ def build_mobile_embed_for_asset(
   
     # --- Mobil + pszicho struktúra (7–8 sor) ---
     lines = []
+    if intent_header:
+        lines.append(intent_header)
 
     # TLDR döntés + setup
     grade_emoji = "🟢" if setup_info["grade"] == "A" else "🟡" if setup_info["grade"] == "B" else "⚪"
@@ -2473,6 +2528,7 @@ def main():
     tdstatus = load_tdstatus()
     state = load_state()
     meta  = state.get("_meta", {})
+    signal_stability_cfg = _signal_stability_config()
 
     analysis_summary = load(f"{PUBLIC_DIR}/analysis_summary.json") or {}
     run_id = run_meta.get("run_id") or os.getenv("GITHUB_RUN_ID")
@@ -2538,6 +2594,24 @@ def main():
         per_asset_is_stable[asset] = display_stable
         is_actionable_now = (eff in ("buy","sell")) and is_stable and not core_bos_pending
 
+        notify_meta = sig.get("notify") if isinstance(sig, dict) else {}
+        intent = sig.get("intent") if isinstance(sig, dict) else None
+        manual_state = _manual_position_state(asset, signal_stability_cfg)
+        if intent in {"manage_position", "hard_exit"} and manual_state.get("tracking_enabled"):
+            if not manual_state.get("has_position"):
+                notify_meta = dict(notify_meta or {})
+                notify_meta["should_notify"] = False
+                notify_meta["reason"] = "no_open_position_tracked"
+                sig["notify"] = notify_meta
+        should_notify = True
+        if isinstance(notify_meta, dict):
+            should_notify = bool(notify_meta.get("should_notify", True))
+        if not should_notify:
+            state[asset] = st
+            per_asset_sigs[asset] = sig
+            per_asset_is_stable[asset] = display_stable
+            continue
+
         cooldown_until_iso = st.get("cooldown_until")
         cooldown_active = False
         if COOLDOWN_MIN > 0 and cooldown_until_iso:
@@ -2582,7 +2656,11 @@ def main():
             if prev_sent_decision in ("buy","sell") and eff == "no entry" and is_stable:
                 send_kind = "invalidate"
 
-        # --- embed + állapot frissítés ---        
+        if send_kind is None and intent in {"hard_exit", "manage_position"}:
+            send_kind = "normal"
+            display_stable = True
+
+        # --- embed + állapot frissítés ---
         if send_kind:
             embed = build_mobile_embed_for_asset(
                 asset,
@@ -2593,10 +2671,13 @@ def main():
                 display_stable,
                 is_flip=send_kind == "flip",
                 is_invalidate=send_kind == "invalidate",
-                kind=send_kind,                
+                kind=send_kind,
             )
             asset_embeds[asset] = embed
-            asset_channels[asset] = classify_signal_channel(eff, send_kind, display_stable)
+            channel = classify_signal_channel(eff, send_kind, display_stable)
+            if intent in {"hard_exit", "manage_position"}:
+                channel = "management"
+            asset_channels[asset] = channel
             if send_kind in ("normal","flip"):
                 cooldown_minutes = COOLDOWN_MIN
                 if COOLDOWN_MIN > 0 and mode_current == "momentum":
