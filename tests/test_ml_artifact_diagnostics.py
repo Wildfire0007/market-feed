@@ -80,12 +80,15 @@ def test_inspect_model_artifact_success(monkeypatch, tmp_path):
 
 def test_run_diagnostics_placeholder(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(ml_model, "MODEL_DIR", tmp_path)
+    monkeypatch.setattr(check_ml_readiness, "MODEL_DIR", tmp_path)
     path = tmp_path / "BTCUSD_gbm.pkl"
     path.write_text("placeholder", encoding="utf-8")
 
     monkeypatch.setattr(check_ml_readiness, "runtime_dependency_issues", lambda: {})
 
-    exit_code = check_ml_readiness.run_diagnostics(["BTCUSD"])
+    exit_code = check_ml_readiness.run_diagnostics(
+        ["BTCUSD"], auto_create_missing=False
+    )
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "PLACEHOLDER" in captured.out
