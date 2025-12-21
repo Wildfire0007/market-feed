@@ -14,6 +14,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from datetime import date, datetime, timezone, timedelta
@@ -5122,9 +5123,15 @@ def build_analysis_error_signal(asset: str, error: Exception) -> Dict[str, Any]:
     }
 
 def save_json(path: str, obj: Any) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+    target_path = Path(path)
+    os.makedirs(target_path.parent, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", delete=False, dir=target_path.parent
+    ) as tmp:
+        json.dump(obj, tmp, ensure_ascii=False, indent=2)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+    os.replace(tmp.name, target_path)
 
 
 def build_status_snapshot(summary: Dict[str, Any], public_dir: Path) -> Dict[str, Any]:
@@ -5324,6 +5331,240 @@ def load_json(path: str) -> Optional[Any]:
             return json.load(f)
     except Exception:
         return None
+
+
+def _resolve_signal_stability_config() -> Dict[str, Any]:
+    config = settings.load_config().get("signal_stability") or {}
+    return config if isinstance(config, dict) else {}
+
+
+def _resolve_asset_value(config_map: Any, asset: str, default: int) -> int:
+    if isinstance(config_map, dict):
+        try:
+            return int(config_map.get(asset, config_map.get("default", default)))
+        except (TypeError, ValueError):
+            return int(default)
+    return int(default)
+
+
+@lru_cache(maxsize=4)
+def _load_manual_positions_from_file(
+    positions_path: str, treat_missing_file_as_flat: bool
+) -> Dict[str, Any]:
+    path = Path(positions_path)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    if not path.exists():
+        return {} if treat_missing_file_as_flat else {}
+    payload = load_json(str(path)) or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _manual_position_state(
+    asset: str,
+    stability_config: Dict[str, Any],
+    manual_positions: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    tracking_cfg = stability_config.get("manual_position_tracking") or {}
+    enabled = bool(tracking_cfg.get("enabled"))
+    treat_missing = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
+    if manual_positions is None:
+        positions_path = tracking_cfg.get("positions_file") or "config/manual_positions.json"
+        manual_positions = _load_manual_positions_from_file(
+            positions_path, treat_missing
+        )
+    asset_positions = manual_positions if isinstance(manual_positions, dict) else {}
+    entry = asset_positions.get(asset) if isinstance(asset_positions, dict) else None
+    side_raw = None
+    if isinstance(entry, dict):
+        side_raw = str(entry.get("side") or "").strip().lower()
+    side_map = {"long": "buy", "short": "sell"}
+    entry_side = side_map.get(side_raw)
+    return {
+        "tracking_enabled": enabled,
+        "has_position": entry_side is not None,
+        "is_flat": entry_side is None,
+        "side": entry_side,
+    }
+
+
+def _load_signal_state(path: Path, history_window: int) -> Dict[str, Any]:
+    state = load_json(str(path)) or {}
+    if not isinstance(state, dict):
+        state = {}
+    entry_history = [
+        item
+        for item in state.get("entry_direction_history", [])
+        if item in {"buy", "sell"}
+    ]
+    state.setdefault("last_notified_intent", None)
+    state.setdefault("last_notified_side", None)
+    state.setdefault("last_notified_at_utc", None)
+    state.setdefault("hard_exit_cooldown_until_utc", None)
+    state.setdefault("hard_exit_side", None)
+    state["entry_direction_history"] = entry_history[-history_window:]
+    return state
+
+
+def _save_signal_state(path: Path, state: Dict[str, Any]) -> None:
+    save_json(str(path), state)
+
+
+def _update_entry_history(state: Dict[str, Any], direction: Optional[str], window: int) -> None:
+    if direction not in {"buy", "sell"}:
+        return
+    history = state.get("entry_direction_history") or []
+    history.append(direction)
+    state["entry_direction_history"] = history[-window:]
+
+
+def _trailing_streak(entries: Sequence[str], target: Optional[str]) -> int:
+    if target not in {"buy", "sell"}:
+        return 0
+    streak = 0
+    for item in reversed(list(entries)):
+        if item == target:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def apply_signal_stability_layer(
+    asset: str,
+    payload: Dict[str, Any],
+    *,
+    decision: str,
+    action_plan: Optional[Dict[str, Any]],
+    exit_signal: Optional[Dict[str, Any]],
+    gates_missing: Sequence[str],
+    analysis_timestamp: str,
+    outdir: Path,
+    stability_config: Optional[Dict[str, Any]] = None,
+    manual_positions: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    config = stability_config or _resolve_signal_stability_config()
+    stability_enabled = bool(config.get("enabled", False))
+
+    manual_state = _manual_position_state(asset, config, manual_positions)
+    now_dt = parse_utc_timestamp(analysis_timestamp) or datetime.now(timezone.utc)
+    direction_map = {"buy": "buy", "sell": "sell"}
+    exit_direction_map = {"long": "buy", "short": "sell"}
+    entry_side = direction_map.get(str(decision or "").lower())
+    exit_side = exit_direction_map.get(
+        str((exit_signal or {}).get("direction") or "").lower()
+    )
+
+    intent = "standby"
+    actionable = False
+    if exit_signal and exit_signal.get("state") == "hard_exit":
+        intent = "hard_exit"
+        actionable = manual_state["has_position"] or not manual_state["tracking_enabled"]
+    elif action_plan and action_plan.get("status") == "manage_position":
+        intent = "manage_position"
+        actionable = manual_state["has_position"] or not manual_state["tracking_enabled"]
+    elif entry_side in {"buy", "sell"} and not list(gates_missing):
+        intent = "entry"
+        actionable = manual_state["is_flat"] or not manual_state["tracking_enabled"]
+
+    notify: Dict[str, Any] = {
+        "should_notify": actionable,
+        "reason": None,
+        "cooldown_until_utc": None,
+    }
+
+    if not actionable:
+        if intent in {"manage_position", "hard_exit"} and manual_state["tracking_enabled"]:
+            notify["reason"] = "no_open_position_tracked"
+        elif intent == "entry" and manual_state["tracking_enabled"] and manual_state["has_position"]:
+            notify["reason"] = "position_already_open"
+        else:
+            notify["reason"] = "non_actionable"
+    else:
+        notify["reason"] = "actionable"
+
+    if not stability_enabled:
+        payload["intent"] = intent
+        payload["actionable"] = bool(actionable)
+        payload["notify"] = notify
+        return payload
+
+    flip_cfg = config.get("flip_flop_guard") or {}
+    min_bars_map = flip_cfg.get("min_bars_same_direction_before_flip") or {}
+    history_window = max(
+        1,
+        max(
+            [
+                int(value)
+                for value in min_bars_map.values()
+                if isinstance(value, (int, float))
+            ]
+            or [1]
+        ),
+    )
+    state_path = outdir / "signal_state.json"
+    state = _load_signal_state(state_path, history_window)
+    _update_entry_history(state, entry_side, history_window)
+
+    if actionable and intent == "entry":
+        cooldown_cfg = (config.get("cooldowns") or {}).get(
+            "min_minutes_between_entry_notifications", {}
+        )
+        min_between = _resolve_asset_value(cooldown_cfg, asset, 0)
+        last_intent = state.get("last_notified_intent")
+        last_ts = parse_utc_timestamp(state.get("last_notified_at_utc"))
+        if (
+            last_intent == "entry"
+            and last_ts
+            and now_dt - last_ts < timedelta(minutes=min_between)
+        ):
+            notify["should_notify"] = False
+            notify["reason"] = "entry_cooldown_active"
+            notify["cooldown_until_utc"] = to_utc_iso(
+                last_ts + timedelta(minutes=min_between)
+            )
+
+        hard_exit_cd = parse_utc_timestamp(state.get("hard_exit_cooldown_until_utc"))
+        hard_exit_side = state.get("hard_exit_side")
+        if hard_exit_cd and now_dt < hard_exit_cd:
+            if not hard_exit_side or (entry_side and entry_side != hard_exit_side):
+                notify["should_notify"] = False
+                notify["reason"] = "hard_exit_cooldown_active"
+                notify["cooldown_until_utc"] = to_utc_iso(hard_exit_cd)
+
+        if notify["should_notify"] and flip_cfg.get("enabled", False):
+            last_side = state.get("last_notified_side")
+            required = _resolve_asset_value(min_bars_map, asset, history_window)
+            streak = _trailing_streak(state.get("entry_direction_history", []), entry_side)
+            if last_side in {"buy", "sell"} and entry_side and entry_side != last_side:
+                if streak < required:
+                    notify["should_notify"] = False
+                    notify["reason"] = "flip_flop_guard"
+
+    if notify["should_notify"] and config.get("only_notify_on_state_change", False):
+        last_intent = state.get("last_notified_intent")
+        last_side = state.get("last_notified_side")
+        if intent == last_intent and (intent != "entry" or entry_side == last_side):
+            notify["should_notify"] = False
+            notify["reason"] = "no_state_change"
+
+    if notify["should_notify"]:
+        state["last_notified_intent"] = intent
+        state["last_notified_side"] = entry_side or exit_side
+        state["last_notified_at_utc"] = to_utc_iso(now_dt)
+        if intent == "hard_exit":
+            cd_cfg = (config.get("cooldowns") or {}).get("min_minutes_after_hard_exit", {})
+            min_after_exit = _resolve_asset_value(cd_cfg, asset, 0)
+            state["hard_exit_side"] = exit_side or entry_side
+            state["hard_exit_cooldown_until_utc"] = to_utc_iso(
+                now_dt + timedelta(minutes=min_after_exit)
+            )
+    _save_signal_state(state_path, state)
+
+    payload["intent"] = intent
+    payload["actionable"] = bool(actionable)
+    payload["notify"] = notify
+    return payload
 
 
 def _load_heartbeat_timestamp(path: Path) -> Optional[datetime]:
@@ -12971,6 +13212,17 @@ def analyze(asset: str) -> Dict[str, Any]:
     if intervention_summary:
         decision_obj["intervention_watch"] = intervention_summary
 
+    decision_obj = apply_signal_stability_layer(
+        asset,
+        decision_obj,
+        decision=decision,
+        action_plan=action_plan,
+        exit_signal=exit_signal,
+        gates_missing=decision_obj.get("gates", {}).get("missing", []),
+        analysis_timestamp=analysis_timestamp,
+        outdir=Path(outdir),
+    )
+
     anchor_metrics_payload = {
         "p_score": P,
         "atr5": float(atr5) if atr5 is not None and np.isfinite(float(atr5)) else None,
@@ -13653,6 +13905,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
