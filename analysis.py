@@ -43,7 +43,7 @@ POSITION_SIZE_SCALE_FLOOR_BY_ASSET = {
     "USOIL": 0.04,
     "BTCUSD": 0.04,
     # NVDA itt nem kritikus, de legyen konzisztens:
-    "NVDA": 0.10,
+    "NVDA": 0.05,
 }
 
 ATR_ABS_MIN_OVERRIDE = {
@@ -3769,6 +3769,30 @@ def safe_float(value: Any) -> Optional[float]:
     if not np.isfinite(result):
         return None
     return result
+
+
+def _nvda_precision_override_ready(
+    asset: str,
+    *,
+    precision_plan: Optional[Dict[str, Any]],
+    precision_threshold: float,
+    spread_gate_ok: bool,
+    session_entry_open: bool,
+    risk_guard_allowed: bool,
+    base_core_ok: bool,
+) -> bool:
+    if asset != "NVDA" or not base_core_ok:
+        return False
+    if not (precision_plan and spread_gate_ok and session_entry_open and risk_guard_allowed):
+        return False
+    if str(precision_plan.get("trigger_state") or "").lower() != "fire":
+        return False
+    score_val = safe_float(precision_plan.get("score")) or 0.0
+    try:
+        threshold_val = float(precision_threshold)
+    except Exception:
+        threshold_val = precision_threshold
+    return score_val >= threshold_val
 
 
 def _guard_realtime_price_stats(
@@ -8610,6 +8634,11 @@ def analyze(asset: str) -> Dict[str, Any]:
         soft_gates_cfg = dynamic_logic_cfg.get("soft_gates")
         if isinstance(soft_gates_cfg, dict):
             atr_soft_cfg = soft_gates_cfg.get("atr") if isinstance(soft_gates_cfg.get("atr"), dict) else {}
+    asset_soft_overrides = atr_soft_cfg.get("asset_overrides") if isinstance(atr_soft_cfg, dict) else None
+    if isinstance(asset_soft_overrides, dict):
+        override_cfg = asset_soft_overrides.get(asset)
+        if isinstance(override_cfg, dict):
+            atr_soft_cfg = {**atr_soft_cfg, **override_cfg}
     volatility_manager = VolatilityManager(atr_soft_cfg)
     atr_gate_result = volatility_manager.evaluate(rel_atr, atr_threshold)
     base_ratio_ok = bool(atr_gate_result.get("ok"))
@@ -11429,6 +11458,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     precision_flow_gate_needed = False
     precision_trigger_gate_needed = False
     precision_trigger_state: Optional[str] = None
+    precision_override_active = False
+    session_entry_open = bool(session_meta.get("entry_open"))
     precision_threshold_value = get_precision_score_threshold(asset)
     if float(precision_threshold_value).is_integer():
         precision_threshold_label = str(int(round(precision_threshold_value)))
@@ -11835,6 +11866,33 @@ def analyze(asset: str) -> Dict[str, Any]:
                 reversal_mode_used = True
         else:
             decision = "no entry"
+
+    if (
+        not can_enter_core
+        and not reversal_mode_used
+        and _nvda_precision_override_ready(
+            asset,
+            precision_plan=precision_plan,
+            precision_threshold=precision_threshold_value,
+            spread_gate_ok=spread_gate_ok,
+            session_entry_open=session_entry_open,
+            risk_guard_allowed=bool(risk_guard_meta.get("allowed")),
+            base_core_ok=base_core_ok,
+        )
+    ):
+        decision = "buy" if effective_bias == "long" else "sell" if effective_bias == "short" else "no entry"
+        if decision in {"buy", "sell"}:
+            required_list = list(core_required)
+            missing = [item for item in missing if not str(item).startswith("P_score>=")]
+            position_size_scale *= 0.4
+            entry_thresholds_meta["precision_override"] = True
+            if compute_levels(decision, core_rr_min, core_tp1_mult, core_tp2_mult):
+                precision_override_active = True
+                override_note = "Precision override: reduced size belépő engedve"
+                if override_note not in reasons:
+                    reasons.append(override_note)
+            else:
+                decision = "no entry"
 
     if can_enter_core and not reversal_mode_used:
         if effective_bias == "long":
@@ -13125,6 +13183,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         "blockers": entry_blockers_snapshot,
         "p_score_used": entry_p_score_used,
     }
+    if precision_override_active:
+        decision_obj["entry_diagnostics"]["precision_override"] = True
     position_diagnostics = {
         "state": None,
         "severity": None,
@@ -13952,6 +14012,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
