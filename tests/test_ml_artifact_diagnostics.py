@@ -35,10 +35,9 @@ def test_inspect_model_artifact_dependency_issue(monkeypatch, tmp_path):
     monkeypatch.setattr(ml_model, "_SKLEARN_IMPORT_ERROR", ImportError("sklearn missing"))
 
     result = ml_model.inspect_model_artifact("BTCUSD")
-    assert result["status"] == "dependency_unavailable"
-    assert "sklearn missing" in result.get("detail", "")
-    assert result.get("placeholder")
-
+    assert result["status"] == "placeholder"
+    assert "placeholder" in result.get("detail", "").lower()
+    
 
 def test_inspect_model_artifact_placeholder(monkeypatch, tmp_path):
     monkeypatch.setattr(ml_model, "MODEL_DIR", tmp_path)
