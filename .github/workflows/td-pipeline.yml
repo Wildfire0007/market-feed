@@ -156,6 +156,23 @@ jobs:
         run: |
           .venv/bin/python scripts/check_latency_sources.py --output public/monitoring/data_latency.json --pretty
                
+      - name: Commit and push refreshed public outputs
+        if: github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          git status
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git fetch origin main
+          git pull --rebase --autostash origin main
+          git add public
+          if git diff --cached --quiet; then
+            echo "No changes in public/ to commit."
+            exit 0
+          fi
+          git commit -m "Auto-update analysis outputs (public/) [skip ci]"
+          git push origin main
+          
       - name: Upload analysis outputs
         uses: actions/upload-artifact@v4
         with:
