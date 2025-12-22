@@ -44,6 +44,28 @@ def test_close_position_sets_cooldown_state():
     assert state["has_position"] is False
 
 
+def test_compute_state_disabled_never_sets_position_true():
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    manual_positions = position_tracker.open_position(
+        "BTCUSD", "buy", 100.5, 95.0, 120.0, "2025-01-01T11:00:00Z", positions={}
+    )
+
+    state = position_tracker.compute_state(
+        "BTCUSD", {"enabled": False}, manual_positions, now_dt
+    )
+
+    assert state["enabled"] is False
+    assert state["tracking_enabled"] is False
+    assert state["has_position"] is False
+    assert state["is_flat"] is True
+    assert state["side"] is None
+    assert state["opened_at_utc"] is None
+    assert state["entry"] is None
+    assert state["sl"] is None
+    assert state["tp2"] is None
+    assert state["position"] is None
+
+
 def test_cooldown_expiry_returns_to_flat_state():
     opened_at = "2025-01-01T11:00:00Z"
     closed_at = "2025-01-01T12:00:00Z"
@@ -68,6 +90,25 @@ def test_cooldown_expiry_returns_to_flat_state():
 
     assert state["cooldown_active"] is False
     assert state["has_position"] is False
+    assert state["is_flat"] is True
+
+
+def test_compute_state_disabled_never_sets_cooldown_active():
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    positions = {
+        "ETHUSD": {
+            "side": None,
+            "cooldown_until_utc": "2025-01-01T12:10:00Z",
+        }
+    }
+
+    state = position_tracker.compute_state(
+        "ETHUSD", {"enabled": False}, positions, now_dt
+    )
+
+    assert state["tracking_enabled"] is False
+    assert state["has_position"] is False
+    assert state["cooldown_active"] is False
     assert state["is_flat"] is True
 
 
