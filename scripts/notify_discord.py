@@ -790,8 +790,8 @@ def build_mobile_embed_for_asset(
     else:
         lines.append(
             f"{entry_status_icon} {decision_upper or 'NINCS'} • {setup_info['grade']} setup{direction_suffix} • {setup_info['action']}"
-        )    
-    lines.append(line_price)
+        )
+        lines.append(line_price)
         if regime_line:
             lines.append(regime_line)
         if decision_upper in {"BUY", "SELL"} and all(v is not None for v in (entry, sl, tp1, tp2)):
