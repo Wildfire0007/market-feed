@@ -15,6 +15,40 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 
+def _find_repo_root(start: Optional[Path] = None) -> Path:
+    """Locate repository root by walking upwards until markers are found."""
+
+    def _search(path: Path) -> Optional[Path]:
+        while True:
+            if (path / ".git").is_dir() or (path / "public").is_dir():
+                return path
+            if path.parent == path:
+                return None
+            path = path.parent
+
+    candidates = []
+    if start:
+        candidates.append(start)
+    candidates.extend([Path(__file__).resolve().parent, Path.cwd().resolve()])
+
+    for candidate in candidates:
+        resolved_candidate = candidate if candidate.is_dir() else candidate.parent
+        root = _search(resolved_candidate)
+        if root:
+            return root
+
+    return Path.cwd().resolve()
+
+
+def resolve_repo_path(path: str) -> Path:
+    candidate = Path(path)
+    if candidate.is_absolute():
+        return candidate
+
+    repo_root = _find_repo_root()
+    return (repo_root / candidate).resolve()
+
+
 def _parse_utc_timestamp(raw: Any) -> Optional[datetime]:
     if raw is None:
         return None
@@ -35,27 +69,41 @@ def _to_utc_iso(dt: datetime) -> str:
 
 
 def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
-    resolved = Path(path)
-    if not resolved.is_absolute():
-        resolved = Path.cwd() / resolved
+    resolved = resolve_repo_path(path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    
     if not resolved.exists():
-        return {} if treat_missing_as_flat else {}
+        resolved.write_text("{}\n", encoding="utf-8")
+        
     try:
         data = json.loads(resolved.read_text(encoding="utf-8"))
     except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
+        data = {}
+
+    positions = data if isinstance(data, dict) else {}
+    print(
+        "[manual_positions] positions_file=%s entries=%d"
+        % (resolved, len(positions)),
+        flush=True,
+    )
+    return positions
 
 
 def save_positions_atomic(path: str, data: Dict[str, Any]) -> None:
-    resolved = Path(path)
-    if not resolved.is_absolute():
-        resolved = Path.cwd() / resolved
+    resolved = resolve_repo_path(path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
     tmp_path = resolved.with_suffix(resolved.suffix + ".tmp")
     tmp_path.write_text(payload + "\n", encoding="utf-8")
     os.replace(tmp_path, resolved)
+
+    stat = resolved.stat()
+    mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+    print(
+        "[manual_positions] saved positions_file=%s size=%d mtime=%s"
+        % (resolved, stat.st_size, mtime),
+        flush=True,
+    )
 
 
 def compute_state(
