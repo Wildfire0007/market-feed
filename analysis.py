@@ -74,6 +74,7 @@ from ml_model import (
     runtime_dependency_issues,
 )
 from news_feed import SentimentSignal, load_sentiment
+import position_tracker
 
 try:  # Optional monitoring utilities; keep analysis resilient if absent.
     from reports.trade_journal import record_signal_event
@@ -5375,41 +5376,24 @@ def _resolve_asset_value(config_map: Any, asset: str, default: int) -> int:
 def _load_manual_positions_from_file(
     positions_path: str, treat_missing_file_as_flat: bool
 ) -> Dict[str, Any]:
-    path = Path(positions_path)
-    if not path.is_absolute():
-        path = Path.cwd() / path
-    if not path.exists():
-        return {} if treat_missing_file_as_flat else {}
-    payload = load_json(str(path)) or {}
-    return payload if isinstance(payload, dict) else {}
+    return position_tracker.load_positions(positions_path, treat_missing_file_as_flat)
 
 
 def _manual_position_state(
     asset: str,
     stability_config: Dict[str, Any],
+    now_dt: datetime,
     manual_positions: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     tracking_cfg = stability_config.get("manual_position_tracking") or {}
-    enabled = bool(tracking_cfg.get("enabled"))
-    treat_missing = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
     if manual_positions is None:
         positions_path = tracking_cfg.get("positions_file") or "config/manual_positions.json"
+        treat_missing = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
         manual_positions = _load_manual_positions_from_file(
             positions_path, treat_missing
         )
-    asset_positions = manual_positions if isinstance(manual_positions, dict) else {}
-    entry = asset_positions.get(asset) if isinstance(asset_positions, dict) else None
-    side_raw = None
-    if isinstance(entry, dict):
-        side_raw = str(entry.get("side") or "").strip().lower()
-    side_map = {"long": "buy", "short": "sell"}
-    entry_side = side_map.get(side_raw)
-    return {
-        "tracking_enabled": enabled,
-        "has_position": entry_side is not None,
-        "is_flat": entry_side is None,
-        "side": entry_side,
-    }
+    manual_positions = manual_positions if isinstance(manual_positions, dict) else {}
+    return position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt)
 
 
 def _load_signal_state(path: Path, history_window: int) -> Dict[str, Any]:
@@ -5469,9 +5453,9 @@ def apply_signal_stability_layer(
 ) -> Dict[str, Any]:
     config = stability_config or _resolve_signal_stability_config()
     stability_enabled = bool(config.get("enabled", False))
-
-    manual_state = _manual_position_state(asset, config, manual_positions)
     now_dt = parse_utc_timestamp(analysis_timestamp) or datetime.now(timezone.utc)
+
+    manual_state = _manual_position_state(asset, config, now_dt, manual_positions)
     direction_map = {"buy": "buy", "sell": "sell"}
     exit_direction_map = {"long": "buy", "short": "sell"}
     entry_side = direction_map.get(str(decision or "").lower())
@@ -5502,10 +5486,20 @@ def apply_signal_stability_layer(
             notify["reason"] = "no_open_position_tracked"
         elif intent == "entry" and manual_state["tracking_enabled"] and manual_state["has_position"]:
             notify["reason"] = "position_already_open"
+        elif intent == "entry" and manual_state["tracking_enabled"] and manual_state.get("cooldown_active"):
+            notify["reason"] = "cooldown_active"
+            notify["cooldown_until_utc"] = manual_state.get("cooldown_until_utc")
         else:
             notify["reason"] = "non_actionable"
     else:
         notify["reason"] = "actionable"
+
+    payload["position_state"] = {
+        "side": manual_state.get("side"),
+        "has_position": manual_state.get("has_position"),
+        "cooldown_active": manual_state.get("cooldown_active"),
+        "cooldown_until_utc": manual_state.get("cooldown_until_utc"),
+    }
 
     if not stability_enabled:
         payload["intent"] = intent
@@ -14012,6 +14006,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
