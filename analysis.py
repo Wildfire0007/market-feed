@@ -5442,7 +5442,7 @@ def _format_manual_position_note(
     if tp2 is not None:
         details.append(f"TP2: {tp2}")
 
-     detail_suffix = " (" + ", ".join(details) + ")" if details else ""
+    detail_suffix = " (" + ", ".join(details) + ")" if details else ""
     return f"Pozíciómenedzsment: aktív {side_txt} pozíció{detail_suffix}"
 
 
@@ -14285,6 +14285,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
