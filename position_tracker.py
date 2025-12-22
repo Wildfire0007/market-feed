@@ -18,34 +18,23 @@ from typing import Any, Dict, Optional, Tuple
 def _find_repo_root(start: Optional[Path] = None) -> Path:
     """Locate repository root by walking upwards until markers are found."""
 
-    def _search(path: Path) -> Optional[Path]:
-        while True:
-            if (path / ".git").is_dir() or (path / "public").is_dir():
-                return path
-            if path.parent == path:
-                return None
-            path = path.parent
+    start_path = start or Path(__file__).resolve()
+    cursor = start_path if start_path.is_dir() else start_path.parent
 
-    candidates = []
-    if start:
-        candidates.append(start)
-    candidates.extend([Path(__file__).resolve().parent, Path.cwd().resolve()])
-
-    for candidate in candidates:
-        resolved_candidate = candidate if candidate.is_dir() else candidate.parent
-        root = _search(resolved_candidate)
-        if root:
-            return root
-
-    return Path.cwd().resolve()
+    while True:
+        if (cursor / ".git").is_dir() or (cursor / "public").is_dir():
+            return cursor
+        if cursor.parent == cursor:
+            return cursor
+        cursor = cursor.parent   
 
 
-def resolve_repo_path(path: str) -> Path:
+def resolve_repo_path(path: str, start: Optional[Path] = None) -> Path:
     candidate = Path(path)
     if candidate.is_absolute():
         return candidate
 
-    repo_root = _find_repo_root()
+    repo_root = _find_repo_root(start=start)
     return (repo_root / candidate).resolve()
 
 
@@ -82,7 +71,7 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
 
     positions = data if isinstance(data, dict) else {}
     print(
-        "[manual_positions] positions_file=%s entries=%d"
+        "[manual_positions] resolved positions_file=%s entries=%d"
         % (resolved, len(positions)),
         flush=True,
     )
