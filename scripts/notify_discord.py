@@ -447,9 +447,14 @@ def build_mobile_embed_for_asset(
     p_score = signal_data.get("probability_raw", 0) if isinstance(signal_data, dict) else 0
     spot = (signal_data.get("spot") or {}).get("price") if isinstance(signal_data, dict) else None
     ts_raw = signal_data.get("retrieved_at_utc") if isinstance(signal_data, dict) else None
-    entry_diag = signal_data.get("entry_diagnostics") if isinstance(signal_data, dict) else {}
-    position_diag = signal_data.get("position_diagnostics") if isinstance(signal_data, dict) else {}
+    entry_diag_raw = signal_data.get("entry_diagnostics") if isinstance(signal_data, dict) else {}
+    entry_diag = entry_diag_raw if isinstance(entry_diag_raw, dict) else {}
 
+    position_diag_raw = (
+        signal_data.get("position_diagnostics") if isinstance(signal_data, dict) else {}
+    )
+    position_diag = position_diag_raw if isinstance(position_diag_raw, dict) else {}
+  
     try:
         dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
         local_time = dt.astimezone(HB_TZ).strftime("%H:%M")
