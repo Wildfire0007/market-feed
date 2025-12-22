@@ -52,6 +52,7 @@ from reports.pipeline_monitor import (
     compute_run_timing_deltas,
     load_pipeline_payload,
 )
+import position_tracker
 
 LOGGER = logging.getLogger("market_feed.notify")
 ensure_json_stream_handler(LOGGER, static_fields={"component": "notify"})
@@ -123,34 +124,14 @@ def _signal_stability_config() -> Dict[str, Any]:
     return cfg if isinstance(cfg, dict) else {}
 
 
-@lru_cache(maxsize=4)
-def _load_manual_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
-    resolved = Path(path)
-    if not resolved.is_absolute():
-        resolved = Path.cwd() / resolved
-    if not resolved.exists():
-        return {} if treat_missing_as_flat else {}
-    try:
-        data = json.loads(resolved.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
+def _resolve_asset_value(config_map: Any, asset: str, default: int) -> int:
+    if isinstance(config_map, dict):
+        try:
+            return int(config_map.get(asset, config_map.get("default", default)))
+        except (TypeError, ValueError):
+            return int(default)
+    return int(default)
 
-
-def _manual_position_state(asset: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
-    tracking_cfg = (cfg.get("manual_position_tracking") or {})
-    enabled = bool(tracking_cfg.get("enabled"))
-    if not enabled:
-        return {"tracking_enabled": False, "has_position": True}
-    positions_path = tracking_cfg.get("positions_file") or "config/manual_positions.json"
-    treat_missing = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
-    positions = _load_manual_positions(positions_path, treat_missing)
-    entry = positions.get(asset) if isinstance(positions, dict) else None
-    side = str(entry.get("side") or "").strip().lower() if isinstance(entry, dict) else ""
-    return {
-        "tracking_enabled": True,
-        "has_position": side in {"long", "short"},
-    }
 
 # ---- Mobil-optimalizált kártyák segédfüggvényei ----
 HB_TZ = timezone.utc  # Alapértelmezés, ha nincs pytz
@@ -419,6 +400,64 @@ def classify_setup(p_score: float, gates: Dict[str, Any], decision: str) -> Dict
     }
 
 
+def resolve_setup_grade_for_signal(signal_data: Dict[str, Any], decision: str) -> Optional[str]:
+    if not isinstance(signal_data, dict):
+        return None
+
+    raw_grade = signal_data.get("setup_grade")
+    if isinstance(raw_grade, str) and raw_grade.strip().upper() in {"A", "B", "C", "X", "-"}:
+        return raw_grade.strip().upper()
+
+    classification = signal_data.get("setup_classification")
+    if isinstance(classification, str):
+        text = classification.strip().upper()
+        if text.startswith("A SETUP"):
+            return "A"
+        if text.startswith("B SETUP"):
+            return "B"
+        if text.startswith("C SETUP"):
+            return "C"
+
+    try:
+        p_score = float(signal_data.get("probability_raw", 0) or 0)
+    except Exception:
+        p_score = 0.0
+    gates_for_setup = signal_data.get("gates") or {}
+    setup_meta = classify_setup(p_score, gates_for_setup if isinstance(gates_for_setup, dict) else {}, decision)
+    grade = setup_meta.get("grade") if isinstance(setup_meta, dict) else None
+    if isinstance(grade, str) and grade.strip() in {"A", "B", "C"}:
+        return grade.strip()
+    return None
+
+
+def extract_trade_levels(signal_data: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    if not isinstance(signal_data, dict):
+        return None, None, None
+
+    trade_block = signal_data.get("trade") or {}
+    levels_block = signal_data.get("levels") or {}
+
+    entry = signal_data.get("entry")
+    if entry is None and isinstance(trade_block, dict):
+        entry = trade_block.get("entry")
+    if entry is None and isinstance(levels_block, dict):
+        entry = levels_block.get("entry")
+
+    sl = signal_data.get("sl")
+    if sl is None and isinstance(trade_block, dict):
+        sl = trade_block.get("sl")
+    if sl is None and isinstance(levels_block, dict):
+        sl = levels_block.get("sl")
+
+    tp2 = signal_data.get("tp2")
+    if tp2 is None and isinstance(trade_block, dict):
+        tp2 = trade_block.get("tp2")
+    if tp2 is None and isinstance(levels_block, dict):
+        tp2 = levels_block.get("tp2")
+
+    return entry, sl, tp2
+
+
 def build_mobile_embed_for_asset(
     asset: str,
     state: Dict[str, Any],
@@ -502,7 +541,28 @@ def build_mobile_embed_for_asset(
     status_icon = "⚪"
 
     decision_upper = (decision or "").upper()
+    notify_meta = signal_data.get("notify") if isinstance(signal_data, dict) else {}
+    notify_reason = notify_meta.get("reason") if isinstance(notify_meta, dict) else None
+    position_state = signal_data.get("position_state") if isinstance(signal_data, dict) else {}
     intent = (signal_data or {}).get("intent")
+    reason_override: Optional[str] = None
+    if notify_reason == "position_already_open":
+        side_label = None
+        side = (position_state or {}).get("side") if isinstance(position_state, dict) else None
+        if isinstance(side, str):
+            side_label = "LONG" if side.lower() == "buy" else "SHORT" if side.lower() == "sell" else None
+        reason_override = f"NO NEW ENTRY — position open ({side_label or 'OPEN'})"
+    elif notify_reason == "cooldown_active":
+        cd_until = None
+        if isinstance(notify_meta, dict):
+            cd_until = notify_meta.get("cooldown_until_utc")
+        if not cd_until and isinstance(position_state, dict):
+            cd_until = position_state.get("cooldown_until_utc")
+        reason_override = (
+            f"COOLDOWN — no entry until {cd_until}" if cd_until else "COOLDOWN — no entry"
+        )
+    elif notify_reason == "no_open_position_tracked" and intent in {"hard_exit", "manage_position"}:
+        reason_override = "NO MGMT — no open position tracked"
     if decision_upper == "BUY":
         status_text = "LONG"
         color = COLORS["LONG"]
@@ -521,6 +581,12 @@ def build_mobile_embed_for_asset(
         color = COLORS["WAIT"]
         status_icon = "🟡"
 
+    if reason_override:
+        status_text = reason_override
+        status_icon = "⛔"
+        color = COLORS.get("NO", color)
+        decision_upper = "NO ENTRY"
+      
     intent_header = None
     if intent == "entry" and decision_upper in {"BUY", "SELL"}:
         intent_header = f"🚀 ENTRY ({decision_upper})"
@@ -535,6 +601,9 @@ def build_mobile_embed_for_asset(
         status_icon = "🧭"
         color = COLORS.get("WAIT", COLORS["NO"])
 
+    if reason_override:
+        intent_header = reason_override
+      
     mode_hu = "Bázis" if "core" in str(mode).lower() else "Lendület"
 
     title = f"{_get_emoji(asset)} {asset}"  # csak eszköz azonosító a push értesítés vágásának elkerülésére
@@ -590,9 +659,14 @@ def build_mobile_embed_for_asset(
     if setup_info["grade"] in {"A", "B", "C"} and setup_direction:
         direction_suffix = f" ({setup_direction.upper()})"
 
-    lines.append(
-        f"{status_icon} {decision_upper or 'NINCS'} • {setup_info['grade']} setup{direction_suffix} • {setup_info['action']}"
-    )
+    if reason_override:
+        lines.append(
+            f"{status_icon} Signal context: {(decision or 'NINCS').upper()} • {setup_info['grade']} setup{direction_suffix} • {setup_info['action']}"
+        )
+    else:
+        lines.append(
+            f"{status_icon} {decision_upper or 'NINCS'} • {setup_info['grade']} setup{direction_suffix} • {setup_info['action']}"
+        )
     
     # Spot ár és idő
     lines.append(f"💵 {format_price(spot, asset)} • 🕒 {local_time}")
@@ -2572,7 +2646,14 @@ def main():
     state = load_state()
     meta  = state.get("_meta", {})
     signal_stability_cfg = _signal_stability_config()
-
+    tracking_cfg = (signal_stability_cfg.get("manual_position_tracking") or {})
+    manual_tracking_enabled = bool(tracking_cfg.get("enabled"))
+    positions_path = tracking_cfg.get("positions_file") or "config/manual_positions.json"
+    treat_missing_positions = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
+    manual_positions = position_tracker.load_positions(positions_path, treat_missing_positions)
+    cooldown_map = tracking_cfg.get("post_exit_cooldown_minutes") or {}
+    cooldown_default = 30
+  
     analysis_summary = load(f"{PUBLIC_DIR}/analysis_summary.json") or {}
     run_id = run_meta.get("run_id") or os.getenv("GITHUB_RUN_ID")
     last_analysis_utc = analysis_summary.get("generated_utc") or meta.get("last_analysis_utc")
@@ -2599,16 +2680,46 @@ def main():
     bud_key = bud_hh_key(bud_dt)
 
     per_asset_sigs = {}
-    per_asset_is_stable = {}    
+    per_asset_is_stable = {}
     watcher_embeds: List[Dict[str, Any]] = []
+    auto_close_embeds: List[Dict[str, Any]] = []
 
     for asset in ASSETS:
         sig = load(f"{PUBLIC_DIR}/{asset}/signal.json")
         if not sig:
             sig = (analysis_summary.get("assets") or {}).get(asset)
         if not sig:
-            sig = {"asset": asset, "signal": "no entry", "probability": 0}        
+            sig = {"asset": asset, "signal": "no entry", "probability": 0} 
         per_asset_sigs[asset] = sig
+
+        manual_state = position_tracker.compute_state(
+            asset, tracking_cfg, manual_positions, now_dt
+        )
+        if isinstance(sig, dict):
+            sig.setdefault("position_state", manual_state)
+
+        spot_price, _ = spot_from_sig_or_file(asset, sig)
+        if manual_state.get("has_position"):
+            changed, reason, manual_positions = position_tracker.check_close_by_levels(
+                asset,
+                manual_positions,
+                spot_price,
+                now_dt,
+                _resolve_asset_value(cooldown_map, asset, cooldown_default),
+            )
+            if changed:
+                manual_state = position_tracker.compute_state(
+                    asset, tracking_cfg, manual_positions, now_dt
+                )
+                reason_label = "SL hit" if reason == "sl_hit" else "TP2 hit" if reason == "tp2_hit" else str(reason)
+                auto_close_embeds.append(
+                    {
+                        "title": f"{_get_emoji(asset)} {asset} — POSITION CLOSED (AUTO)",
+                        "description": f"Reason: {reason_label}\nSpot: {format_price(spot_price, asset)}\nTime: {to_utc_iso(now_dt)}",
+                        "color": COLORS.get("NO", 0x95A5A6),
+                    }
+                )
+                position_tracker.save_positions_atomic(positions_path, manual_positions)
 
         # --- stabilitás számítása ---
         mode_current = gates_mode(sig)
@@ -2639,12 +2750,23 @@ def main():
 
         notify_meta = sig.get("notify") if isinstance(sig, dict) else {}
         intent = sig.get("intent") if isinstance(sig, dict) else None
-        manual_state = _manual_position_state(asset, signal_stability_cfg)
-        if intent in {"manage_position", "hard_exit"} and manual_state.get("tracking_enabled"):
+        if manual_tracking_enabled and intent in {"manage_position", "hard_exit"}:
             if not manual_state.get("has_position"):
                 notify_meta = dict(notify_meta or {})
                 notify_meta["should_notify"] = False
                 notify_meta["reason"] = "no_open_position_tracked"
+                sig["notify"] = notify_meta
+        if manual_tracking_enabled and intent == "entry":
+            if manual_state.get("cooldown_active"):
+                notify_meta = dict(notify_meta or {})
+                notify_meta.setdefault("should_notify", False)
+                notify_meta.setdefault("reason", "cooldown_active")
+                notify_meta.setdefault("cooldown_until_utc", manual_state.get("cooldown_until_utc"))
+                sig["notify"] = notify_meta
+            elif manual_state.get("has_position"):
+                notify_meta = dict(notify_meta or {})
+                notify_meta.setdefault("should_notify", False)
+                notify_meta.setdefault("reason", "position_already_open")
                 sig["notify"] = notify_meta
         should_notify = True
         if isinstance(notify_meta, dict):
@@ -2733,6 +2855,26 @@ def main():
                     mode=mode_current,
                 )
                 mark_heartbeat(meta, bud_key, now_iso)
+                if (
+                    manual_tracking_enabled
+                    and intent == "entry"
+                    and eff in ("buy", "sell")
+                ):
+                    setup_grade = resolve_setup_grade_for_signal(sig, eff)
+                    if setup_grade in {"A", "B"}:
+                        entry_level, sl_level, tp2_level = extract_trade_levels(sig)
+                        manual_positions = position_tracker.open_position(
+                            asset,
+                            side="long" if eff == "buy" else "short",
+                            entry=entry_level,
+                            sl=sl_level,
+                            tp2=tp2_level,
+                            opened_at_utc=now_iso,
+                            positions=manual_positions,
+                        )
+                        position_tracker.save_positions_atomic(
+                            positions_path, manual_positions
+                        )
             elif send_kind == "invalidate":
                 st = update_asset_send_state(
                     st,
@@ -2742,6 +2884,20 @@ def main():
                     mode=None,
                 )
                 mark_heartbeat(meta, bud_key, now_iso)
+
+            if manual_tracking_enabled and intent == "hard_exit":
+                manual_positions = position_tracker.close_position(
+                    asset,
+                    reason="hard_exit",
+                    closed_at_utc=now_iso,
+                    cooldown_minutes=_resolve_asset_value(
+                        cooldown_map, asset, cooldown_default
+                    ),
+                    positions=manual_positions,
+                )
+                position_tracker.save_positions_atomic(
+                    positions_path, manual_positions
+                )
 
         state[asset] = st
 
@@ -2797,6 +2953,7 @@ def main():
 
     live_embeds = [asset_embeds[a] for a in ASSETS if asset_channels.get(a) == "live"]
     management_embeds = list(watcher_embeds)
+    management_embeds.extend(auto_close_embeds)
     market_scan_embeds = [
         asset_embeds[a]
         for a in ASSETS
