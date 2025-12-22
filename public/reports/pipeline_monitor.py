@@ -255,6 +255,92 @@ def _hash_file(path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _load_json(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+            return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _derive_status_from_summary(summary: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    assets = summary.get("assets") if isinstance(summary, dict) else None
+    if not isinstance(assets, dict) or not assets:
+        return None
+
+    normalized_assets: Dict[str, Any] = {}
+    asset_health: List[bool] = []
+
+    for asset, payload in assets.items():
+        if not isinstance(payload, dict):
+            continue
+
+        asset_ok = payload.get("ok")
+        if isinstance(asset_ok, bool):
+            asset_health.append(asset_ok)
+
+        asset_entry = {
+            "ok": asset_ok is not False,
+            "signal": payload.get("signal")
+            or payload.get("decision")
+            or payload.get("state")
+            or "no entry",
+        }
+
+        prob_stack = payload.get("probability_stack")
+        if isinstance(prob_stack, dict):
+            latency = prob_stack.get("latest_latency_seconds") or prob_stack.get("latency_seconds")
+            expected = prob_stack.get("expected_latency_seconds")
+            if latency is not None:
+                asset_entry["latency_seconds"] = latency
+            if expected is not None:
+                asset_entry["expected_latency_seconds"] = expected
+
+        asset_notes = payload.get("notes") if isinstance(payload.get("notes"), list) else []
+        if asset_notes:
+            asset_entry["notes"] = asset_notes
+
+        normalized_assets[str(asset)] = asset_entry
+
+    if not normalized_assets:
+        return None
+
+    summary_ok = summary.get("ok") if isinstance(summary.get("ok"), bool) else None
+    if summary_ok is None and asset_health:
+        summary_ok = all(asset_health)
+
+    return {
+        "ok": bool(summary_ok),
+        "status": "ok" if summary_ok is not False else "error",
+        "generated_utc": summary.get("generated_utc"),
+        "assets": normalized_assets,
+        "notes": summary.get("notes") if isinstance(summary.get("notes"), list) else [],
+    }
+
+
+def ensure_status_snapshot(public_dir: Path = PUBLIC_DIR) -> Optional[Path]:
+    """Create ``status.json`` from the analysis summary when missing."""
+
+    status_path = Path(public_dir) / "status.json"
+    if status_path.exists():
+        return status_path
+
+    summary_path = Path(public_dir) / "analysis_summary.json"
+    summary = _load_json(summary_path)
+    if summary is None:
+        return None
+
+    status_payload = _derive_status_from_summary(summary)
+    if status_payload is None:
+        return None
+
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    with status_path.open("w", encoding="utf-8") as handle:
+        json.dump(status_payload, handle, ensure_ascii=False, indent=2)
+    return status_path
+
+
 def collect_artifact_hashes(paths: Optional[Iterable[Path]] = None) -> Dict[str, Any]:
     """Return a mapping of artefact path to hash/size metadata."""
 
@@ -535,6 +621,7 @@ def finalize_analysis_run(
     _record_execution_order(payload, analysis_started=started, trading_completed=trading_completed)
     payload["analysis"] = analysis_meta
     payload["updated_utc"] = _to_iso(_now())
+    ensure_status_snapshot(PUBLIC_DIR)
     payload["artifacts"] = {
         "hashes": collect_artifact_hashes(),
         "updated_utc": _to_iso(_now()),
