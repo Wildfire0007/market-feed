@@ -2744,7 +2744,7 @@ def main():
     signal_stability_cfg = _signal_stability_config()
     tracking_cfg = (signal_stability_cfg.get("manual_position_tracking") or {})
     manual_tracking_enabled = bool(tracking_cfg.get("enabled"))
-    positions_path = tracking_cfg.get("positions_file") or "config/manual_positions.json"
+    positions_path = tracking_cfg.get("positions_file") or "public/_manual_positions.json"
     treat_missing_positions = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
     manual_positions = position_tracker.load_positions(positions_path, treat_missing_positions)
     cooldown_map = tracking_cfg.get("post_exit_cooldown_minutes") or {}
