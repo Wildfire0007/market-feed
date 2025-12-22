@@ -3,6 +3,74 @@ import datetime
 import position_tracker
 
 
+def test_open_position_sets_has_position_true():
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    opened_at = "2025-01-01T11:00:00Z"
+
+    manual_positions = position_tracker.open_position(
+        "BTCUSD", "buy", 100.5, 95.0, 120.0, opened_at, positions={}
+    )
+
+    state = position_tracker.compute_state(
+        "BTCUSD", {"enabled": True}, manual_positions, now_dt
+    )
+
+    assert state["has_position"] is True
+    assert state["is_flat"] is False
+    assert state["side"] == "buy"
+
+
+def test_close_position_sets_cooldown_state():
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    opened_at = "2025-01-01T11:00:00Z"
+    closed_at = "2025-01-01T12:05:00Z"
+    manual_positions = position_tracker.open_position(
+        "BTCUSD", "buy", 100.5, 95.0, 120.0, opened_at, positions={}
+    )
+
+    cooled_positions = position_tracker.close_position(
+        "BTCUSD",
+        reason="hard_exit",
+        closed_at_utc=closed_at,
+        cooldown_minutes=30,
+        positions=manual_positions,
+    )
+
+    state = position_tracker.compute_state(
+        "BTCUSD", {"enabled": True}, cooled_positions, now_dt
+    )
+
+    assert state["cooldown_active"] is True
+    assert state["has_position"] is False
+
+
+def test_cooldown_expiry_returns_to_flat_state():
+    opened_at = "2025-01-01T11:00:00Z"
+    closed_at = "2025-01-01T12:00:00Z"
+    manual_positions = position_tracker.open_position(
+        "BTCUSD", "buy", 100.5, 95.0, 120.0, opened_at, positions={}
+    )
+
+    cooled_positions = position_tracker.close_position(
+        "BTCUSD",
+        reason="tp2_hit",
+        closed_at_utc=closed_at,
+        cooldown_minutes=30,
+        positions=manual_positions,
+    )
+
+    after_cooldown = datetime.datetime(
+        2025, 1, 1, 12, 45, tzinfo=datetime.timezone.utc
+    )
+    state = position_tracker.compute_state(
+        "BTCUSD", {"enabled": True}, cooled_positions, after_cooldown
+    )
+
+    assert state["cooldown_active"] is False
+    assert state["has_position"] is False
+    assert state["is_flat"] is True
+
+
 def test_open_position_sets_side_and_clears_cooldown():
     opened_at = "2025-01-01T00:00:00Z"
     positions = {"BTCUSD": {"side": None, "cooldown_until_utc": "2025-01-02T00:00:00Z"}}
