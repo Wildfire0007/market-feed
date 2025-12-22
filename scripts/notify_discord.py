@@ -2748,7 +2748,7 @@ def main():
     treat_missing_positions = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
     manual_positions = position_tracker.load_positions(positions_path, treat_missing_positions)
     cooldown_map = tracking_cfg.get("post_exit_cooldown_minutes") or {}
-    cooldown_default = 30
+    cooldown_default = 20
   
     analysis_summary = load(f"{PUBLIC_DIR}/analysis_summary.json") or {}
     run_id = run_meta.get("run_id") or os.getenv("GITHUB_RUN_ID")
@@ -2815,11 +2815,18 @@ def main():
                         "color": COLORS.get("NO", 0x95A5A6),
                     }
                 )
+                LOGGER.debug(
+                    "CLOSE state transition %s reason=%s cooldown_until=%s",
+                    asset,
+                    reason,
+                    manual_state.get("cooldown_until_utc"),
+                )
                 position_tracker.save_positions_atomic(positions_path, manual_positions)
 
         # --- stabilitás számítása ---
         mode_current = gates_mode(sig)
         eff = decision_of(sig)  # 'buy' | 'sell' | 'no entry'
+        setup_grade = resolve_setup_grade_for_signal(sig, eff)
 
         st = state.get(asset, {
             "last": None, "count": 0,
@@ -2951,27 +2958,7 @@ def main():
                     cooldown_minutes=cooldown_minutes,
                     mode=mode_current,
                 )
-                mark_heartbeat(meta, bud_key, now_iso)
-                if (
-                    manual_tracking_enabled
-                    and intent == "entry"
-                    and eff in ("buy", "sell")
-                ):
-                    setup_grade = resolve_setup_grade_for_signal(sig, eff)
-                    if setup_grade in {"A", "B"}:
-                        entry_level, sl_level, tp2_level = extract_trade_levels(sig)
-                        manual_positions = position_tracker.open_position(
-                            asset,
-                            side="long" if eff == "buy" else "short",
-                            entry=entry_level,
-                            sl=sl_level,
-                            tp2=tp2_level,
-                            opened_at_utc=now_iso,
-                            positions=manual_positions,
-                        )
-                        position_tracker.save_positions_atomic(
-                            positions_path, manual_positions
-                        )
+                mark_heartbeat(meta, bud_key, now_iso)                
             elif send_kind == "invalidate":
                 st = update_asset_send_state(
                     st,
@@ -2982,19 +2969,67 @@ def main():
                 )
                 mark_heartbeat(meta, bud_key, now_iso)
 
-            if manual_tracking_enabled and intent == "hard_exit":
-                manual_positions = position_tracker.close_position(
-                    asset,
-                    reason="hard_exit",
-                    closed_at_utc=now_iso,
-                    cooldown_minutes=_resolve_asset_value(
-                        cooldown_map, asset, cooldown_default
-                    ),
-                    positions=manual_positions,
-                )
-                position_tracker.save_positions_atomic(
-                    positions_path, manual_positions
-                )
+            positions_changed = False
+        if (
+            manual_tracking_enabled
+            and intent == "hard_exit"
+            and manual_state.get("has_position")
+        ):
+            manual_positions = position_tracker.close_position(
+                asset,
+                reason="hard_exit",
+                closed_at_utc=now_iso,
+                cooldown_minutes=_resolve_asset_value(
+                    cooldown_map, asset, cooldown_default
+                ),
+                positions=manual_positions,
+            )
+            manual_state = position_tracker.compute_state(
+                asset, tracking_cfg, manual_positions, now_dt
+            )
+            LOGGER.debug(
+                "CLOSE state transition %s reason=%s cooldown_until=%s",
+                asset,
+                "hard_exit",
+                manual_state.get("cooldown_until_utc"),
+            )
+            positions_changed = True
+
+        if (
+            manual_tracking_enabled
+            and intent == "entry"
+            and manual_state.get("is_flat")
+            and bool((notify_meta or {}).get("should_notify", True))
+            and setup_grade in {"A", "B"}
+            and eff in ("buy", "sell")
+        ):
+            entry_level, sl_level, tp2_level = extract_trade_levels(sig)
+            manual_positions = position_tracker.open_position(
+                asset,
+                side="long" if eff == "buy" else "short",
+                entry=entry_level,
+                sl=sl_level,
+                tp2=tp2_level,
+                opened_at_utc=now_iso,
+                positions=manual_positions,
+            )
+            manual_state = position_tracker.compute_state(
+                asset, tracking_cfg, manual_positions, now_dt
+            )
+            LOGGER.debug(
+                "OPEN state transition %s %s entry=%s sl=%s tp2=%s opened_at=%s",
+                asset,
+                eff,
+                entry_level,
+                sl_level,
+                tp2_level,
+                now_iso,
+            )
+            positions_changed = True
+
+        if positions_changed:
+            position_tracker.save_positions_atomic(positions_path, manual_positions)
+            sig["position_state"] = manual_state
 
         state[asset] = st
 
