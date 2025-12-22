@@ -3057,7 +3057,7 @@ def main():
                 )
                 mark_heartbeat(meta, bud_key, now_iso)
 
-            positions_changed = False
+        positions_changed = False
         if (
             manual_tracking_enabled
             and intent == "hard_exit"
