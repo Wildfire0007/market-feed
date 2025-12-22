@@ -106,6 +106,101 @@ class ManualPositionFlowTests(unittest.TestCase):
         assert notify.get("reason") == "cooldown_active"
         assert notify.get("should_notify") is False
 
+def test_entry_and_hard_exit_drive_position_lifecycle(self) -> None:
+        now = datetime.now(timezone.utc)
+        now_iso = self._now_iso()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            positions_path = Path(tmpdir) / "positions.json"
+            stability_cfg = {
+                "enabled": False,
+                "manual_position_tracking": {
+                    "enabled": True,
+                    "positions_file": str(positions_path),
+                    "treat_missing_file_as_flat": True,
+                    "post_exit_cooldown_minutes": {"default": 15},
+                },
+            }
+
+            entry_payload = {
+                "asset": "BTCUSD",
+                "signal": "buy",
+                "setup_grade": "A",
+                "notify": {"should_notify": True},
+                "reasons": [],
+            }
+
+            analysis.apply_signal_stability_layer(
+                "BTCUSD",
+                entry_payload,
+                decision="buy",
+                action_plan=None,
+                exit_signal=None,
+                gates_missing=[],
+                analysis_timestamp=now_iso,
+                outdir=Path(tmpdir),
+                stability_config=stability_cfg,
+            )
+
+            positions_after_entry = position_tracker.load_positions(
+                str(positions_path), True
+            )
+            manual_state = position_tracker.compute_state(
+                "BTCUSD",
+                stability_cfg["manual_position_tracking"],
+                positions_after_entry,
+                now,
+            )
+            assert manual_state["has_position"] is True
+
+            analysis.apply_signal_stability_layer(
+                "BTCUSD",
+                {"asset": "BTCUSD", "signal": "no entry"},
+                decision="no entry",
+                action_plan=None,
+                exit_signal={"state": "hard_exit"},
+                gates_missing=[],
+                analysis_timestamp=now_iso,
+                outdir=Path(tmpdir),
+                stability_config=stability_cfg,
+                manual_positions=positions_after_entry,
+            )
+
+            positions_after_exit = position_tracker.load_positions(
+                str(positions_path), True
+            )
+            cooldown_state = position_tracker.compute_state(
+                "BTCUSD",
+                stability_cfg["manual_position_tracking"],
+                positions_after_exit,
+                now,
+            )
+            assert cooldown_state["cooldown_active"] is True
+            assert cooldown_state["has_position"] is False
+
+            cooldown_payload = {
+                "asset": "BTCUSD",
+                "signal": "buy",
+                "setup_grade": "A",
+                "notify": {"should_notify": True},
+                "reasons": [],
+            }
+            cooldown_result = analysis.apply_signal_stability_layer(
+                "BTCUSD",
+                cooldown_payload,
+                decision="buy",
+                action_plan=None,
+                exit_signal=None,
+                gates_missing=[],
+                analysis_timestamp=now_iso,
+                outdir=Path(tmpdir),
+                stability_config=stability_cfg,
+                manual_positions=positions_after_exit,
+            )
+
+            notify_meta = cooldown_result.get("notify") or {}
+            assert notify_meta.get("should_notify") is False
+            assert notify_meta.get("reason") == "cooldown_active"
+            
 
 if __name__ == "__main__":
     import pytest
