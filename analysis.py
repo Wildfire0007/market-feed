@@ -5396,6 +5396,56 @@ def _manual_position_state(
     return position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt)
 
 
+def _extract_tracked_levels(
+    asset: str,
+    manual_state: Dict[str, Any],
+    manual_positions: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Return normalized levels for the manually tracked position (if any)."""
+
+    source = manual_state.get("position") if isinstance(manual_state, dict) else None
+    if not isinstance(source, dict) and isinstance(manual_positions, dict):
+        candidate = manual_positions.get(asset)
+        source = candidate if isinstance(candidate, dict) else None
+
+    if not isinstance(source, dict):
+        return {}
+
+    return {
+        key: source.get(key)
+        for key in ("entry", "sl", "tp2", "opened_at_utc", "side")
+        if source.get(key) is not None
+    }
+
+
+def _format_manual_position_note(
+    asset: str, manual_state: Dict[str, Any], tracked_levels: Dict[str, Any]
+) -> Optional[str]:
+    if not manual_state.get("has_position"):
+        return None
+
+    side = (manual_state.get("side") or tracked_levels.get("side") or "").lower()
+    side_txt = "long" if side in {"buy", "long"} else "short" if side in {"sell", "short"} else "open"
+
+    opened_at = tracked_levels.get("opened_at_utc") or manual_state.get("opened_at_utc")
+    entry = tracked_levels.get("entry") or manual_state.get("entry")
+    sl = tracked_levels.get("sl") or manual_state.get("sl")
+    tp2 = tracked_levels.get("tp2") or manual_state.get("tp2")
+
+    details: List[str] = []
+    if opened_at:
+        details.append(f"opened_at: {opened_at}")
+    if entry is not None:
+        details.append(f"Entry: {entry}")
+    if sl is not None:
+        details.append(f"SL: {sl}")
+    if tp2 is not None:
+        details.append(f"TP2: {tp2}")
+
+    detail_suffix = " (" + ", ".join(details) + ")" if details else ""
+    return f"Pozíciómenedzsment: aktív {side_txt} pozíció{detail_suffix}"
+
+
 def _load_signal_state(path: Path, history_window: int) -> Dict[str, Any]:
     state = load_json(str(path)) or {}
     if not isinstance(state, dict):
@@ -5456,6 +5506,7 @@ def apply_signal_stability_layer(
     now_dt = parse_utc_timestamp(analysis_timestamp) or datetime.now(timezone.utc)
 
     manual_state = _manual_position_state(asset, config, now_dt, manual_positions)
+    tracked_levels = _extract_tracked_levels(asset, manual_state, manual_positions)
     direction_map = {"buy": "buy", "sell": "sell"}
     exit_direction_map = {"long": "buy", "short": "sell"}
     entry_side = direction_map.get(str(decision or "").lower())
@@ -5495,11 +5546,28 @@ def apply_signal_stability_layer(
         notify["reason"] = "actionable"
 
     payload["position_state"] = {
+        "tracking_enabled": manual_state.get("tracking_enabled"),
         "side": manual_state.get("side"),
         "has_position": manual_state.get("has_position"),
         "cooldown_active": manual_state.get("cooldown_active"),
         "cooldown_until_utc": manual_state.get("cooldown_until_utc"),
+        "opened_at_utc": manual_state.get("opened_at_utc"),
+        "entry": manual_state.get("entry"),
+        "sl": manual_state.get("sl"),
+        "tp2": manual_state.get("tp2"),
     }
+    if tracked_levels:
+        payload["tracked_levels"] = tracked_levels
+
+    manual_note = _format_manual_position_note(asset, manual_state, tracked_levels)
+    if manual_note:
+        payload["position_management"] = manual_note
+        reasons = payload.get("reasons") if isinstance(payload, dict) else None
+        if isinstance(reasons, list):
+            if manual_note not in reasons:
+                reasons.append(manual_note)
+        elif isinstance(payload, dict):
+            payload["reasons"] = [manual_note]
 
     if not stability_enabled:
         payload["intent"] = intent
@@ -14006,6 +14074,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
