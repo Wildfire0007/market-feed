@@ -104,6 +104,7 @@ def compute_state(
     tracking_enabled = bool((cfg or {}).get("enabled"))
     if not tracking_enabled:
         return {
+            "enabled": False,
             "tracking_enabled": False,
             "has_position": False,
             "is_flat": True,
@@ -138,6 +139,7 @@ def compute_state(
     tp2_level = asset_entry.get("tp2") if isinstance(asset_entry, dict) else None
 
     return {
+        "enabled": tracking_enabled,
         "tracking_enabled": tracking_enabled,
         "has_position": has_position,
         "is_flat": is_flat,
