@@ -14218,24 +14218,6 @@ def main():
     summary["entry_counts"] = _build_entry_count_summary(asset_results)
     save_json(os.path.join(PUBLIC_DIR, "analysis_summary.json"), summary)
 
-    analysis_completed_at = datetime.now(timezone.utc)
-    if finalize_analysis_run:
-        try:
-            duration_seconds = max(
-                (analysis_completed_at - analysis_started_at).total_seconds(),
-                0.0,
-            )
-            finalize_analysis_run(
-                completed_at=analysis_completed_at,
-                duration_seconds=duration_seconds,
-            )
-            LOGGER.info(
-                "Analysis run completed in %.1f seconds",
-                duration_seconds,
-            )
-        except Exception as exc:
-            LOGGER.warning("Failed to finalize analysis pipeline metrics: %s", exc)
-
     html = "<!doctype html><meta charset='utf-8'><title>Analysis Summary</title>"
     html += "<h1>Analysis Summary (TD-only)</h1>"
     html += "<pre>" + json.dumps(summary, ensure_ascii=False, indent=2) + "</pre>"
@@ -14272,6 +14254,24 @@ def main():
     except Exception:
         pass
 
+    analysis_completed_at = datetime.now(timezone.utc)
+    if finalize_analysis_run:
+        try:
+            duration_seconds = max(
+                (analysis_completed_at - analysis_started_at).total_seconds(),
+                0.0,
+            )
+            finalize_analysis_run(
+                completed_at=analysis_completed_at,
+                duration_seconds=duration_seconds,
+            )
+            LOGGER.info(
+                "Analysis run completed in %.1f seconds",
+                duration_seconds,
+            )
+        except Exception as exc:
+            LOGGER.warning("Failed to finalize analysis pipeline metrics: %s", exc)
+
     data_gap_assets = [
         asset
         for asset, payload in (summary.get("assets") or {}).items()
@@ -14285,6 +14285,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
