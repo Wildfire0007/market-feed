@@ -175,6 +175,51 @@ def test_finalize_analysis_records_artifact_hashes(tmp_path, monkeypatch):
     assert hashes[str(artifact_a)]["size"] == 2
 
 
+def test_finalize_analysis_rebuilds_missing_status(tmp_path, monkeypatch):
+    public_dir = tmp_path / "public"
+    monitoring_dir = public_dir / "monitoring"
+    monitor_path = monitoring_dir / "pipeline_timing.json"
+    summary_path = public_dir / "analysis_summary.json"
+
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "generated_utc": "2024-01-01T00:00:00Z",
+                "assets": {"EURUSD": {"ok": True, "signal": "buy"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status_path = public_dir / "status.json"
+    assert not status_path.exists()
+
+    monkeypatch.setattr(pipeline_monitor, "PUBLIC_DIR", public_dir)
+    monkeypatch.setattr(pipeline_monitor, "MONITOR_DIR", monitoring_dir)
+    monkeypatch.setattr(pipeline_monitor, "PIPELINE_MONITOR_PATH", monitor_path)
+    monkeypatch.setattr(pipeline_monitor, "PIPELINE_LOG_PATH", monitoring_dir / "pipeline.log")
+    monkeypatch.setattr(
+        pipeline_monitor,
+        "DEFAULT_ARTIFACTS",
+        (summary_path, status_path, monitor_path),
+    )
+
+    pipeline_monitor.record_analysis_run(
+        started_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        path=monitor_path,
+    )
+    payload = pipeline_monitor.finalize_analysis_run(
+        completed_at=datetime(2024, 1, 1, 0, 10, tzinfo=timezone.utc),
+        path=monitor_path,
+    )
+
+    hashes = payload.get("artifacts", {}).get("hashes", {})
+    assert status_path.exists()
+    assert hashes[str(status_path)] is not None
+
+
 def test_compute_run_timing_deltas_handles_missing_sections():
     payload = {
         "run": {"started_at_utc": "2024-01-01T00:00:00Z", "captured_at_utc": "2024-01-01T00:01:00Z"},
