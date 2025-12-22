@@ -320,20 +320,38 @@ def _derive_status_from_summary(summary: Dict[str, Any]) -> Optional[Dict[str, A
 
 
 def ensure_status_snapshot(public_dir: Path = PUBLIC_DIR) -> Optional[Path]:
-    """Create ``status.json`` from the analysis summary when missing."""
+    """Create or refresh ``status.json`` from the analysis summary."""
 
-    status_path = Path(public_dir) / "status.json"
-    if status_path.exists():
-        return status_path
-
+    status_path = Path(public_dir) / "status.json"    
     summary_path = Path(public_dir) / "analysis_summary.json"
+    
     summary = _load_json(summary_path)
     if summary is None:
-        return None
+        return status_path if status_path.exists() else None
 
     status_payload = _derive_status_from_summary(summary)
     if status_payload is None:
-        return None
+        return status_path if status_path.exists() else None
+
+    existing_status = _load_json(status_path)
+    summary_ts = _parse_iso(summary.get("generated_utc")) if isinstance(summary, dict) else None
+    status_ts = (
+        _parse_iso(existing_status.get("generated_utc"))
+        if isinstance(existing_status, dict)
+        else None
+    )
+
+    needs_rebuild = existing_status is None or not isinstance(
+        existing_status.get("assets") if isinstance(existing_status, dict) else None, dict
+    )
+
+    if not needs_rebuild and summary_ts is not None:
+        needs_rebuild = status_ts is None or summary_ts > status_ts
+    if not needs_rebuild and summary_path.exists() and status_path.exists():
+        needs_rebuild = summary_path.stat().st_mtime > status_path.stat().st_mtime
+
+    if not needs_rebuild:
+        return status_path
 
     status_path.parent.mkdir(parents=True, exist_ok=True)
     with status_path.open("w", encoding="utf-8") as handle:
