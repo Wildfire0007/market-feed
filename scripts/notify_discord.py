@@ -603,7 +603,11 @@ def build_mobile_embed_for_asset(
     notify_reason = notify_meta.get("reason") if isinstance(notify_meta, dict) else None
     position_state = signal_data.get("position_state") if isinstance(signal_data, dict) else {}
     intent = (signal_data or {}).get("intent")
+    has_tracked_position = bool(position_state.get("has_position"))
+    cooldown_active = bool(position_state.get("cooldown_active"))
+    cooldown_until = position_state.get("cooldown_until_utc") if isinstance(position_state, dict) else None
     reason_override: Optional[str] = None
+    entry_block_reason: Optional[str] = None
     if notify_reason == "position_already_open":
         side_label = None
         side = (position_state or {}).get("side") if isinstance(position_state, dict) else None
@@ -640,28 +644,44 @@ def build_mobile_embed_for_asset(
         status_icon = "🟡"
 
     if reason_override:
-        status_text = reason_override
-        status_icon = "⛔"
-        color = COLORS.get("NO", color)
+        entry_block_reason = reason_override
         decision_upper = "NO ENTRY"
       
-    intent_header = None
-    if intent == "entry" and decision_upper in {"BUY", "SELL"}:
-        intent_header = f"🚀 ENTRY ({decision_upper})"
-    elif intent == "hard_exit":
-        intent_header = "⛔ HARD EXIT (close now)"
+    entry_status_text = status_text
+    entry_status_icon = status_icon
+    entry_color = color
+
+    primary_header = None
+    if intent == "hard_exit":
+        primary_header = "⛔ HARD EXIT — tracked pozíció zárása (assumed)"
         status_text = "HARD EXIT"
         status_icon = "⛔"
         color = COLORS.get("SHORT", COLORS["NO"])
-    elif intent == "manage_position":
-        intent_header = "🧭 MANAGE POSITION (scale out / tighten stop)"
-        status_text = "MENEDZSMENT"
-        status_icon = "🧭"
+    elif cooldown_active:
+        primary_header = "⏳ COOLDOWN"
+        status_text = "COOLDOWN"
+        status_icon = "⏳"
         color = COLORS.get("WAIT", COLORS["NO"])
-
-    if reason_override:
-        intent_header = reason_override
-      
+    elif has_tracked_position or intent == "manage_position":
+        primary_header = "🧭 AKTÍV POZÍCIÓ / MENEDZSMENT"
+        status_text = "AKTÍV POZÍCIÓ"
+        status_icon = "🧭"
+        side_label = None
+        side = (position_state or {}).get("side") if isinstance(position_state, dict) else None
+        if isinstance(side, str):
+            side_lower = side.lower()
+            side_label = "LONG" if side_lower == "buy" else "SHORT" if side_lower == "sell" else None
+        if side_label == "LONG":
+            color = COLORS.get("LONG", color)
+        elif side_label == "SHORT":
+            color = COLORS.get("SHORT", color)
+        else:
+            color = COLORS.get("WAIT", color)
+    elif intent == "entry" and decision_upper in {"BUY", "SELL"}:
+        primary_header = f"🚀 ENTRY ({decision_upper})"
+    elif reason_override:
+        primary_header = reason_override      
+          
     mode_hu = "Bázis" if "core" in str(mode).lower() else "Lendület"
 
     title = f"{_get_emoji(asset)} {asset}"  # csak eszköz azonosító a push értesítés vágásának elkerülésére
@@ -674,7 +694,6 @@ def build_mobile_embed_for_asset(
     elif kind == "heartbeat":
         event_suffix = " • ℹ️ Állapot"
 
-    line_status = f"{status_icon} **{status_text}** • Mód: {mode_hu}{event_suffix}"
     p_bar = draw_progress_bar(p_score)
     line_score = f"📊 `{p_bar}` {int(p_score)}%"
     line_price = f"💵 {format_price(spot, asset)} • 🕒 {local_time}"
@@ -713,94 +732,160 @@ def build_mobile_embed_for_asset(
         rr = signal_data.get("rr")
   
     # --- Mobil + pszicho struktúra (7–8 sor) ---
-    lines = []
-    if intent_header:
-        lines.append(intent_header)
+    tracked_entry = tracked_levels.get("entry") or entry
+    tracked_sl = tracked_levels.get("sl") or sl
+    tracked_tp1 = tracked_levels.get("tp1") or tp1
+    tracked_tp2 = tracked_levels.get("tp2") or tp2
+    opened_at = tracked_levels.get("opened_at_utc") or position_state.get("opened_at_utc")
 
-    # TLDR döntés + setup
+    lines: List[str] = []
+    entry_lines: List[str] = []
+   
     grade_emoji = "🟢" if setup_info["grade"] == "A" else "🟡" if setup_info["grade"] == "B" else "⚪"
     setup_direction = resolve_setup_direction(signal_data, decision_upper)
     direction_suffix = ""
     if setup_info["grade"] in {"A", "B", "C"} and setup_direction:
         direction_suffix = f" ({setup_direction.upper()})"
 
-    if reason_override:
+    if primary_header:
+        lines.append(primary_header)
+
+    # Fő blokk (pozíció/cooldown/entry)
+    if intent == "hard_exit":
+        hard_exit_reasons = translate_reasons(position_diag.get("reasons") or []) if isinstance(position_diag, dict) else None
+        lines.append(f"{status_icon} HARD EXIT — tracked pozíció zárása (assumed)")
+        if hard_exit_reasons:
+            lines.append(f"Ok: {hard_exit_reasons}")
+        if cooldown_until:
+            lines.append(f"Cooldown indul: {cooldown_until}")
+        lines.append(line_price)
+        lines.append(line_score)
+    elif cooldown_active:
+        lines.append(f"{status_icon} COOLDOWN — új belépők tiltva")
+        if cooldown_until:
+            lines.append(f"Lejár: {cooldown_until}")
+        lines.append(line_price)
+        if regime_line:
+            lines.append(regime_line)
+        lines.append(line_score)
+    elif has_tracked_position:
+        side_label = side_label if "side_label" in locals() else None
+        if not side_label:
+            side_label = "OPEN"
+        lines.append(f"{status_icon} {status_text} — {side_label}")
+        level_parts = [
+            f"SL {format_price(tracked_sl, asset) if tracked_sl is not None else '-'}",
+            f"TP1 {format_price(tracked_tp1, asset) if tracked_tp1 is not None else '-'}",
+            f"TP2 {format_price(tracked_tp2, asset) if tracked_tp2 is not None else '-'}",
+        ]
         lines.append(
-            f"{status_icon} Signal context: {(decision or 'NINCS').upper()} • {setup_info['grade']} setup{direction_suffix} • {setup_info['action']}"
+            f"Nyitva: {opened_at or '-'} • " + " • ".join(level_parts)
         )
+        if position_note:
+            lines.append(f"🧭 {position_note}")
+        lines.append(line_price)
+        if regime_line:
+            lines.append(regime_line)
+        lines.append(line_score)
     else:
         lines.append(
-            f"{status_icon} {decision_upper or 'NINCS'} • {setup_info['grade']} setup{direction_suffix} • {setup_info['action']}"
+            f"{entry_status_icon} {decision_upper or 'NINCS'} • {setup_info['grade']} setup{direction_suffix} • {setup_info['action']}"
+        )    
+    lines.append(line_price)
+        if regime_line:
+            lines.append(regime_line)
+        if decision_upper in {"BUY", "SELL"} and all(v is not None for v in (entry, sl, tp1, tp2)):
+            rr_txt = f"RR≈`{rr}`" if rr is not None else ""
+            lines.append(
+                f"🎯 Belépő `{format_price(entry, asset)}` • SL `{format_price(sl, asset)}` • TP1 `{format_price(tp1, asset)}` • TP2 `{format_price(tp2, asset)}` • {rr_txt}".strip(
+                    " • "
+                )
+            )
+        if position_note:
+            lines.append(f"🧭 {position_note}")
+        if intent in {"hard_exit", "manage_position"}:
+            pos_state = position_diag.get("state") if isinstance(position_diag, dict) else None
+            pos_severity = position_diag.get("severity") if isinstance(position_diag, dict) else None
+            diag_parts: List[str] = []
+            if pos_state:
+                diag_parts.append(str(pos_state))
+            if pos_severity:
+                diag_parts.append(f"súlyosság: {pos_severity}")
+            if diag_parts:
+                lines.append(f"🧭 Pozíció diagnosztika: {' • '.join(diag_parts)}")
+            pos_reasons = position_diag.get("reasons") if isinstance(position_diag, dict) else []
+            if pos_reasons:
+                reasons_hu = translate_reasons([str(reason) for reason in pos_reasons])
+                lines.append(f"➤ Okok: {reasons_hu}")
+
+        if isinstance(entry_diag, dict):
+            entry_missing = entry_diag.get("missing") or []
+        else:
+            entry_missing = []
+        gates_missing = entry_missing if intent == "entry" else []
+        if gates_missing and entry_status_text != "NINCS BELÉPŐ":
+            reasons = translate_reasons(gates_missing)
+            lines.append(f"🧠 Figyelem: {reasons}")
+        lines.append(line_score)
+        if entry_status_text == "NINCS BELÉPŐ" and intent == "entry":
+            if gates_missing:
+                reasons_hu = translate_reasons(gates_missing)
+                lines.append(f"⛔ Blokkolók: {reasons_hu}")
+
+    # Új belépők blokk pozíció vagy cooldown mellett
+    if has_tracked_position or cooldown_active:
+        if isinstance(entry_diag, dict):
+            entry_missing = entry_diag.get("missing") or []
+        else:
+            entry_missing = []
+        gates_missing = entry_missing if intent == "entry" else []
+
+        entry_lines.append("➕ ÚJ BELÉPŐK")
+        if cooldown_active:
+            cd_line = f"⏳ Cooldown aktív — új belépők tiltva"
+            if cooldown_until:
+                cd_line = f"{cd_line} (eddig: {cooldown_until})"
+            entry_lines.append(cd_line)
+        elif has_tracked_position:
+            entry_lines.append("⛔ Új belépők tiltva: aktív tracked pozíció, kivárás új trade-re.")
+        if entry_block_reason and entry_block_reason not in entry_lines:
+            entry_lines.append(entry_block_reason)
+        entry_lines.append(
+            f"{entry_status_icon} {entry_status_text} • {setup_info['grade']} setup{direction_suffix} • {setup_info['action']}"
         )
-    
-    # Spot ár és idő
-    lines.append(f"💵 {format_price(spot, asset)} • 🕒 {local_time}")
-
-    if regime_line:
-        lines.append(regime_line)
-
-    # Entry/SL/TP1/TP2/RR blokk
-    if decision_upper in {"BUY", "SELL"} and all(v is not None for v in (entry, sl, tp1, tp2)):
-        rr_txt = f"RR≈`{rr}`" if rr is not None else ""
-        lines.append(f"🎯 Belépő `{format_price(entry, asset)}` • SL `{format_price(sl, asset)}` • TP1 `{format_price(tp1, asset)}` • TP2 `{format_price(tp2, asset)}` • {rr_txt}".strip(" • "))
-
-    # Pozíciómenedzsment
-    if position_note:
-        lines.append(f"🧭 {position_note}")
-
-    if intent in {"hard_exit", "manage_position"}:
-        pos_state = position_diag.get("state") if isinstance(position_diag, dict) else None
-        pos_severity = position_diag.get("severity") if isinstance(position_diag, dict) else None
-        diag_parts: List[str] = []
-        if pos_state:
-            diag_parts.append(str(pos_state))
-        if pos_severity:
-            diag_parts.append(f"súlyosság: {pos_severity}")
-        if diag_parts:
-            lines.append(f"🧭 Pozíció diagnosztika: {' • '.join(diag_parts)}")
-        pos_reasons = position_diag.get("reasons") if isinstance(position_diag, dict) else []
-        if pos_reasons:
-            reasons_hu = translate_reasons([str(reason) for reason in pos_reasons])
-            lines.append(f"➤ Okok: {reasons_hu}")
-          
-    # Dinamikus setup komment vagy megjegyzés
-    if isinstance(entry_diag, dict):
-        entry_missing = entry_diag.get("missing") or []
-    else:
-        entry_missing = []
-    gates_missing = entry_missing if intent == "entry" else []
-    if gates_missing and status_text != "NINCS BELÉPŐ":
-        reasons = translate_reasons(gates_missing)
-        lines.append(f"🧠 Figyelem: {reasons}")
-
-    # P-score vizuálisan
-    score_display = (
-        position_diag.get("p_score_used")
-        if intent in {"hard_exit", "manage_position"}
-        else entry_diag.get("p_score_used")
-    )
-    if score_display is None:
-        score_display = p_score
-    p_bar = draw_progress_bar(score_display)
-    try:
-        score_text = int(score_display)
-    except Exception:
-        score_text = score_display
-    lines.append(f"📊 P: `{p_bar}` {score_text}%")
-
-    # Entry tiltás, ha van
-    if status_text == "NINCS BELÉPŐ" and intent == "entry":
-        if gates_missing:
+        entry_lines.append(line_price)
+        if regime_line:
+            entry_lines.append(regime_line)
+        if decision_upper in {"BUY", "SELL"} and all(v is not None for v in (entry, sl, tp1, tp2)):
+            rr_txt = f"RR≈`{rr}`" if rr is not None else ""
+            entry_lines.append(
+                f"🎯 Belépő `{format_price(entry, asset)}` • SL `{format_price(sl, asset)}` • TP1 `{format_price(tp1, asset)}` • TP2 `{format_price(tp2, asset)}` • {rr_txt}".strip(
+                    " • "
+                )
+            )
+        if gates_missing and entry_status_text != "NINCS BELÉPŐ":
+            reasons = translate_reasons(gates_missing)
+            entry_lines.append(f"🧠 Figyelem: {reasons}")
+        entry_lines.append(line_score)
+        if entry_status_text == "NINCS BELÉPŐ" and intent == "entry" and gates_missing:
             reasons_hu = translate_reasons(gates_missing)
-            lines.append(f"⛔ Blokkolók: {reasons_hu}")
+            entry_lines.append(f"⛔ Blokkolók: {reasons_hu}")
 
-    # Final description
+    if entry_lines:
+        if lines:
+            lines.append("")
+        lines.extend(entry_lines)
+   
     description = "\n".join(lines)
+
+    final_color = color
+    if not (has_tracked_position or cooldown_active or intent == "hard_exit"):
+        final_color = entry_color if entry_status_text != "NINCS BELÉPŐ" else setup_info["color"]
 
     return {
         "title": title,
         "description": description,
-        "color": color if status_text != "NINCS BELÉPŐ" else setup_info["color"],
+        "color": final_color,
     }
   
 # ---- Debounce / stabilitás / cooldown ----
@@ -2928,6 +3013,9 @@ def main():
             send_kind = "normal"
             display_stable = True
 
+        if send_kind == "invalidate" and manual_state.get("has_position"):
+            send_kind = None
+          
         # --- embed + állapot frissítés ---
         if send_kind:
             embed = build_mobile_embed_for_asset(
