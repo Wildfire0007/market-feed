@@ -2138,13 +2138,19 @@ class ActivePositionWatcher:
         self.asset_order = tuple(dynamic_assets)
 
     # -------------------- helpers --------------------
-    def run(self) -> List[Dict[str, Any]]:
+    def run(self, allowed_assets: Optional[Iterable[str]] = None) -> List[Dict[str, Any]]:
         self.latest_cards = {}
         self.changed_assets = set()
         self.embeds = []
+        allowed_keys = None
+        if allowed_assets is not None:
+            allowed_keys = {normalize_asset_key(x) for x in allowed_assets if x}
         for asset in self.asset_order:
             embed = self._evaluate_asset(asset)
             if embed:
+                if allowed_keys is not None and normalize_asset_key(asset) not in allowed_keys:
+                    LOGGER.info("watcher suppressed: %s no manual position", asset)
+                    continue
                 self.embeds.append(embed)
         if self.updated_state:
             save_active_position_state(self.state_cache)
@@ -2864,6 +2870,7 @@ def main():
     per_asset_is_stable = {}
     watcher_embeds: List[Dict[str, Any]] = []
     auto_close_embeds: List[Dict[str, Any]] = []
+    manual_open_assets: Set[str] = set()
 
     for asset in ASSETS:
         sig = load(f"{PUBLIC_DIR}/{asset}/signal.json")
@@ -3121,6 +3128,9 @@ def main():
 
         state[asset] = st
 
+        if manual_tracking_enabled and manual_state.get("has_position"):
+            manual_open_assets.add(asset)
+
     watcher = ActivePositionWatcher(
         _build_active_watcher_config(),
         tdstatus=tdstatus,
@@ -3129,7 +3139,9 @@ def main():
         manual_positions=manual_positions,
         manual_tracking_cfg=tracking_cfg,
     )
-    watcher_embeds = watcher.run()
+    watcher_embeds = watcher.run(
+        allowed_assets=manual_open_assets if manual_tracking_enabled else None
+    )
 
     # --- Heartbeat: MINDEN órában, ha az órában még nem ment ki event ---
     heartbeat_due = last_heartbeat_prev != bud_key
