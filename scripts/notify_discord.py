@@ -680,7 +680,14 @@ def build_mobile_embed_for_asset(
     elif intent == "entry" and decision_upper in {"BUY", "SELL"}:
         primary_header = f"🚀 ENTRY ({decision_upper})"
     elif reason_override:
-        primary_header = reason_override      
+        primary_header = reason_override
+
+    if intent == "hard_exit":
+        entry_status_text = "HARD EXIT"
+        entry_status_icon = "⛔"
+    elif intent == "manage_position":
+        entry_status_text = "MENEDZSMENT"
+        entry_status_icon = "🧭"
           
     mode_hu = "Bázis" if "core" in str(mode).lower() else "Lendület"
 
@@ -738,6 +745,27 @@ def build_mobile_embed_for_asset(
     tracked_tp2 = tracked_levels.get("tp2") or tp2
     opened_at = tracked_levels.get("opened_at_utc") or position_state.get("opened_at_utc")
 
+    position_levels = tracked_levels or _tracked_levels_from_manual_positions(
+        asset, manual_positions
+    )
+    position_entry = position_levels.get("entry") or position_state.get("entry")
+    position_sl = position_levels.get("sl") or position_state.get("sl")
+    position_tp1 = position_levels.get("tp1") or position_state.get("tp1")
+    position_tp2 = position_levels.get("tp2") or position_state.get("tp2")
+
+    position_levels_line = None
+    position_level_parts: List[str] = []
+    if position_entry is not None:
+        position_level_parts.append(f"entry `{format_price(position_entry, asset)}`")
+    if position_sl is not None:
+        position_level_parts.append(f"SL `{format_price(position_sl, asset)}`")
+    if position_tp1 is not None:
+        position_level_parts.append(f"TP1 `{format_price(position_tp1, asset)}`")
+    if position_tp2 is not None:
+        position_level_parts.append(f"TP2 `{format_price(position_tp2, asset)}`")
+    if position_level_parts:
+        position_levels_line = "🧭 Position levels: " + " • ".join(position_level_parts)
+      
     lines: List[str] = []
     entry_lines: List[str] = []
    
@@ -756,6 +784,8 @@ def build_mobile_embed_for_asset(
         lines.append(f"{status_icon} HARD EXIT — tracked pozíció zárása (assumed)")
         if hard_exit_reasons:
             lines.append(f"Ok: {hard_exit_reasons}")
+        if position_levels_line:
+            lines.append(position_levels_line)
         if cooldown_until:
             lines.append(f"Cooldown indul: {cooldown_until}")
         lines.append(line_price)
@@ -781,6 +811,8 @@ def build_mobile_embed_for_asset(
         lines.append(
             f"Nyitva: {opened_at or '-'} • " + " • ".join(level_parts)
         )
+        if intent in {"hard_exit", "manage_position"} and position_levels_line:
+            lines.append(position_levels_line)
         if position_note:
             lines.append(f"🧭 {position_note}")
         lines.append(line_price)
@@ -794,7 +826,11 @@ def build_mobile_embed_for_asset(
         lines.append(line_price)
         if regime_line:
             lines.append(regime_line)
-        if decision_upper in {"BUY", "SELL"} and all(v is not None for v in (entry, sl, tp1, tp2)):
+        if (
+            intent == "entry"
+            and decision_upper in {"BUY", "SELL"}
+            and all(v is not None for v in (entry, sl, tp1, tp2))
+        ):
             rr_txt = f"RR≈`{rr}`" if rr is not None else ""
             lines.append(
                 f"🎯 Belépő `{format_price(entry, asset)}` • SL `{format_price(sl, asset)}` • TP1 `{format_price(tp1, asset)}` • TP2 `{format_price(tp2, asset)}` • {rr_txt}".strip(
@@ -856,7 +892,11 @@ def build_mobile_embed_for_asset(
         entry_lines.append(line_price)
         if regime_line:
             entry_lines.append(regime_line)
-        if decision_upper in {"BUY", "SELL"} and all(v is not None for v in (entry, sl, tp1, tp2)):
+        if (
+            intent == "entry"
+            and decision_upper in {"BUY", "SELL"}
+            and all(v is not None for v in (entry, sl, tp1, tp2))
+        ):
             rr_txt = f"RR≈`{rr}`" if rr is not None else ""
             entry_lines.append(
                 f"🎯 Belépő `{format_price(entry, asset)}` • SL `{format_price(sl, asset)}` • TP1 `{format_price(tp1, asset)}` • TP2 `{format_price(tp2, asset)}` • {rr_txt}".strip(
