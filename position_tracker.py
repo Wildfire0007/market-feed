@@ -68,11 +68,16 @@ def compute_state(
     if not tracking_enabled:
         return {
             "tracking_enabled": False,
-            "has_position": True,
+            "has_position": False,
             "is_flat": True,
             "side": None,
             "cooldown_active": False,
             "cooldown_until_utc": None,
+            "opened_at_utc": None,
+            "entry": None,
+            "sl": None,
+            "tp2": None,
+            "position": None,
         }
 
     asset_entry = positions.get(asset) if isinstance(positions, dict) else None
@@ -90,6 +95,10 @@ def compute_state(
 
     has_position = bool(side) and not cooldown_active
     is_flat = not side and not cooldown_active
+    opened_at = asset_entry.get("opened_at_utc") if isinstance(asset_entry, dict) else None
+    entry_level = asset_entry.get("entry") if isinstance(asset_entry, dict) else None
+    sl_level = asset_entry.get("sl") if isinstance(asset_entry, dict) else None
+    tp2_level = asset_entry.get("tp2") if isinstance(asset_entry, dict) else None
 
     return {
         "tracking_enabled": tracking_enabled,
@@ -98,6 +107,11 @@ def compute_state(
         "side": side,
         "cooldown_active": cooldown_active,
         "cooldown_until_utc": _to_utc_iso(cooldown_until) if cooldown_until else None,
+        "opened_at_utc": opened_at,
+        "entry": entry_level,
+        "sl": sl_level,
+        "tp2": tp2_level,
+        "position": deepcopy(asset_entry) if isinstance(asset_entry, dict) else None,
     }
 
 
