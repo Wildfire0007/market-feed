@@ -5387,7 +5387,7 @@ def _manual_position_state(
 ) -> Dict[str, Any]:
     tracking_cfg = stability_config.get("manual_position_tracking") or {}
     if manual_positions is None:
-        positions_path = tracking_cfg.get("positions_file") or "config/manual_positions.json"
+        positions_path = tracking_cfg.get("positions_file") or "public/_manual_positions.json"
         treat_missing = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
         manual_positions = _load_manual_positions_from_file(
             positions_path, treat_missing
@@ -14074,6 +14074,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
