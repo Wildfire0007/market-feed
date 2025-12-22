@@ -82,33 +82,41 @@ EMA21_SLOPE_MIN = 0.0008  # 0.08%
 ATR_TRAIL_MIN_ABS = 0.15
 
 ACTIVE_POSITION_STATE_PATH = f"{PUBLIC_DIR}/_active_position_state.json"
-ACTIVE_WATCHER_CONFIG = {
-    "common": {
-        "ema21_slope_min_abs": 0.0008,
-        "atr_trail_k": (0.6, 1.0),
-        "bos_tf": "5m",
-        "rollover_warn_gmt": "21:00",
-        "rollover_window_min": 20,
-        "send_on_state_change_only": True,
+
+# Baseline watcher overrides; extended with every configured asset at runtime.
+_ACTIVE_WATCHER_OVERRIDES = {
+    "USOIL": {
+        "invalid_buffer_abs": 0.15,
+        "atr_rel_min_5m": 0.0007,
+        "event": {
+            "name": "EIA WPSR",
+            "schedule": "Szerda 10:30 ET",
+            "pre_window_min": 60,
+        },
     },
-    "assets": {
-        "USOIL": {
-            "invalid_buffer_abs": 0.15,
-            "atr_rel_min_5m": 0.0007,
-            "event": {
-                "name": "EIA WPSR",
-                "schedule": "Szerda 10:30 ET",
-                "pre_window_min": 60,
-            },
-        },
-        "GOLD_CFD": {
-            "invalid_buffer_abs": 2.0,
-            "atr_rel_min_5m": 0.0007,
-            "event": None,
-        },
+    "GOLD_CFD": {
+        "invalid_buffer_abs": 2.0,
+        "atr_rel_min_5m": 0.0007,
+        "event": None,
     },
 }
 
+
+def _build_active_watcher_config() -> Dict[str, Any]:
+    assets_cfg = {asset.upper(): {} for asset in ASSETS}
+    assets_cfg.update(_ACTIVE_WATCHER_OVERRIDES)
+    return {
+        "common": {
+            "ema21_slope_min_abs": 0.0008,
+            "atr_trail_k": (0.6, 1.0),
+            "bos_tf": "5m",
+            "rollover_warn_gmt": "21:00",
+            "rollover_window_min": 20,
+            "send_on_state_change_only": True,
+        },
+        "assets": assets_cfg,
+    }
+  
 EXIT_DEDUP_MINUTES_BY_ASSET = {
     "EURUSD": 30,
 }
@@ -200,6 +208,51 @@ def _translate_market_closed_reason(reason: Optional[str]) -> str:
 
  
 
+
+
+def _tracked_levels_from_manual_positions(
+    asset: str, manual_positions: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    entry = None
+    if isinstance(manual_positions, dict):
+        candidate = manual_positions.get(asset)
+        entry = candidate if isinstance(candidate, dict) else None
+    if not isinstance(entry, dict):
+        return {}
+    return {
+        key: entry.get(key)
+        for key in ("entry", "sl", "tp2", "opened_at_utc", "side")
+        if entry.get(key) is not None
+    }
+
+
+def _format_manual_position_line(
+    asset: str, position_state: Dict[str, Any], tracked_levels: Dict[str, Any]
+) -> Optional[str]:
+    if not position_state.get("has_position"):
+        return None
+
+    side = (position_state.get("side") or tracked_levels.get("side") or "").lower()
+    side_txt = "long" if side in {"buy", "long"} else "short" if side in {"sell", "short"} else "open"
+
+    entry = tracked_levels.get("entry") or position_state.get("entry")
+    sl = tracked_levels.get("sl") or position_state.get("sl")
+    tp2 = tracked_levels.get("tp2") or position_state.get("tp2")
+    opened_at = tracked_levels.get("opened_at_utc") or position_state.get("opened_at_utc")
+
+    parts: List[str] = []
+    if opened_at:
+        parts.append(f"opened_at: {opened_at}")
+    if entry is not None:
+        parts.append(f"Entry {format_price(entry, asset)}")
+    if sl is not None:
+        parts.append(f"SL {format_price(sl, asset)}")
+    if tp2 is not None:
+        parts.append(f"TP2 {format_price(tp2, asset)}")
+
+    suffix = " — " + " • ".join(parts) if parts else ""
+    return f"Pozíciómenedzsment: aktív {side_txt} pozíció{suffix}"
+  
 def draw_progress_bar(value: float, length: int = 10) -> str:
     """ASCII sáv: [■■■■■■■□□□]"""
 
@@ -469,6 +522,7 @@ def build_mobile_embed_for_asset(
     is_invalidate: bool,
     *,
     kind: str = "normal",
+    manual_positions: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Mobil-optimalizált kereskedési kártya."""
 
@@ -493,6 +547,10 @@ def build_mobile_embed_for_asset(
         signal_data.get("position_diagnostics") if isinstance(signal_data, dict) else {}
     )
     position_diag = position_diag_raw if isinstance(position_diag_raw, dict) else {}
+    tracked_levels = (
+        signal_data.get("tracked_levels") if isinstance(signal_data, dict) else {}
+    )
+    tracked_levels = tracked_levels if isinstance(tracked_levels, dict) else {}
   
     try:
         dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
@@ -638,6 +696,13 @@ def build_mobile_embed_for_asset(
         if isinstance(raw_note, str):
             raw_note = raw_note.strip()
         position_note = raw_note
+        if not position_note and position_state.get("has_position"):
+            fallback_levels = tracked_levels or _tracked_levels_from_manual_positions(
+                asset, manual_positions
+            )
+            position_note = _format_manual_position_line(
+                asset, position_state, fallback_levels
+            )
 
     entry = sl = tp1 = tp2 = rr = None
     if isinstance(signal_data, dict):
@@ -1959,6 +2024,8 @@ class ActivePositionWatcher:
         tdstatus: Dict[str, Dict[str, Any]],
         signals: Dict[str, Dict[str, Any]],
         now: Optional[datetime] = None,
+        manual_positions: Optional[Dict[str, Any]] = None,
+        manual_tracking_cfg: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.config = config or {}
         self.config_common = self.config.get("common", {})
@@ -1966,19 +2033,31 @@ class ActivePositionWatcher:
         self.tdstatus = tdstatus or {}
         self.signals = signals or {}
         self.now = now or datetime.now(timezone.utc)
+        self.manual_positions = manual_positions if isinstance(manual_positions, dict) else {}
+        self.manual_tracking_cfg = manual_tracking_cfg or (
+            _signal_stability_config().get("manual_position_tracking") or {}
+        )
         self.anchor_state = load_anchor_state()
         self.state_cache = load_active_position_state()
         self.updated_state = False
         self.embeds: List[Dict[str, Any]] = []
         self.latest_cards: Dict[str, Dict[str, Any]] = {}
         self.changed_assets: Set[str] = set()
+        dynamic_assets: List[str] = list(self.ASSET_ORDER)
+        for asset in sorted(self.manual_positions.keys()):
+            if asset not in dynamic_assets:
+                dynamic_assets.append(asset)
+        for asset in sorted((self.config_assets or {}).keys()):
+            if asset not in dynamic_assets:
+                dynamic_assets.append(asset)
+        self.asset_order = tuple(dynamic_assets)
 
     # -------------------- helpers --------------------
     def run(self) -> List[Dict[str, Any]]:
         self.latest_cards = {}
         self.changed_assets = set()
         self.embeds = []
-        for asset in self.ASSET_ORDER:
+        for asset in self.asset_order:
             embed = self._evaluate_asset(asset)
             if embed:
                 self.embeds.append(embed)
@@ -2084,7 +2163,24 @@ class ActivePositionWatcher:
     def _evaluate_asset(self, asset: str) -> Optional[Dict[str, Any]]:
         cfg = self._asset_config(asset)
         status = self._tdstatus(asset)
+        manual_state: Dict[str, Any] = {}
+        try:
+            manual_state = position_tracker.compute_state(
+                asset, self.manual_tracking_cfg, self.manual_positions, self.now
+            )
+        except Exception:
+            manual_state = {}
+          
         has_open = bool(status.get("has_open_position")) and bool((status.get("side") or "").strip())
+        if manual_state.get("has_position"):
+            has_open = True
+        if not has_open and manual_state.get("cooldown_active"):
+            self.latest_cards.pop(asset, None)
+            return None
+        side_override = manual_state.get("side") if isinstance(manual_state, dict) else None
+        if side_override:
+            status = dict(status or {})
+            status["side"] = side_override
         prev_entry = self._state_cache_entry(asset)
 
         if not has_open:
@@ -2837,6 +2933,7 @@ def main():
                 is_flip=send_kind == "flip",
                 is_invalidate=send_kind == "invalidate",
                 kind=send_kind,
+                manual_positions=manual_positions,
             )
             asset_embeds[asset] = embed
             channel = classify_signal_channel(eff, send_kind, display_stable)
@@ -2902,10 +2999,12 @@ def main():
         state[asset] = st
 
     watcher = ActivePositionWatcher(
-        ACTIVE_WATCHER_CONFIG,
+        _build_active_watcher_config(),
         tdstatus=tdstatus,
         signals=per_asset_sigs,
         now=datetime.now(timezone.utc),
+        manual_positions=manual_positions,
+        manual_tracking_cfg=tracking_cfg,
     )
     watcher_embeds = watcher.run()
 
@@ -2936,7 +3035,8 @@ def main():
                     is_stable=is_stable,
                     is_flip=False,
                     is_invalidate=False,
-                    kind="heartbeat",                   
+                    kind="heartbeat",
+                    manual_positions=manual_positions,                  
                 )
                 asset_channels.setdefault(asset, "market_scan")
                 heartbeat_added = True
