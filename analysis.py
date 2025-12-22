@@ -5442,8 +5442,127 @@ def _format_manual_position_note(
     if tp2 is not None:
         details.append(f"TP2: {tp2}")
 
-    detail_suffix = " (" + ", ".join(details) + ")" if details else ""
+     detail_suffix = " (" + ", ".join(details) + ")" if details else ""
     return f"Pozíciómenedzsment: aktív {side_txt} pozíció{detail_suffix}"
+
+
+def _extract_spot_price(payload: Dict[str, Any]) -> Optional[float]:
+    """Best-effort spot price lookup from the analysis payload."""
+
+    for key in ("spot_price", "current_price", "price"):
+        try:
+            value = payload.get(key)
+        except Exception:
+            value = None
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+
+    spot_block = payload.get("spot") if isinstance(payload, dict) else None
+    if isinstance(spot_block, dict):
+        for key in ("price", "price_usd"):
+            try:
+                value = spot_block.get(key)
+            except Exception:
+                value = None
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _resolve_post_exit_cooldown_minutes(
+    config: Dict[str, Any], asset: str, default: int = 20
+) -> int:
+    cooldown_map = (config.get("post_exit_cooldown_minutes") or {})
+    return _resolve_asset_value(cooldown_map, asset, default)
+
+
+def _resolve_setup_grade(signal_data: Dict[str, Any], decision: str) -> Optional[str]:
+    if not isinstance(signal_data, dict):
+        return None
+
+    raw_grade = signal_data.get("setup_grade")
+    if isinstance(raw_grade, str) and raw_grade.strip().upper() in {"A", "B", "C", "X", "-"}:
+        return raw_grade.strip().upper()
+
+    classification = signal_data.get("setup_classification")
+    if isinstance(classification, str):
+        text = classification.strip().upper()
+        if text.startswith("A SETUP"):
+            return "A"
+        if text.startswith("B SETUP"):
+            return "B"
+        if text.startswith("C SETUP"):
+            return "C"
+
+    try:
+        p_score = float(signal_data.get("probability_raw", 0) or 0)
+    except Exception:
+        p_score = 0.0
+
+    gates_for_setup = signal_data.get("gates") or {}
+    missing = gates_for_setup.get("missing", []) if isinstance(gates_for_setup, dict) else []
+    is_active_signal = (decision or "").lower() in {"buy", "sell"}
+    if p_score >= 80 and is_active_signal:
+        return "A"
+
+    soft_blockers = {"atr", "bias", "regime", "choppy"}
+    is_soft_blocked = bool(missing) and all(m in soft_blockers for m in missing)
+    if p_score >= 30:
+        if is_active_signal or is_soft_blocked:
+            return "B"
+
+    if p_score >= 25:
+        return "C"
+    return None
+
+
+def _extract_trade_levels(signal_data: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    if not isinstance(signal_data, dict):
+        return None, None, None
+
+    trade_block = signal_data.get("trade") or {}
+    levels_block = signal_data.get("levels") or {}
+
+    entry = signal_data.get("entry")
+    if entry is None and isinstance(trade_block, dict):
+        entry = trade_block.get("entry")
+    if entry is None and isinstance(levels_block, dict):
+        entry = levels_block.get("entry")
+
+    sl = signal_data.get("sl")
+    if sl is None and isinstance(trade_block, dict):
+        sl = trade_block.get("sl")
+    if sl is None and isinstance(levels_block, dict):
+        sl = levels_block.get("sl")
+
+    tp2 = signal_data.get("tp2")
+    if tp2 is None and isinstance(trade_block, dict):
+        tp2 = trade_block.get("tp2")
+    if tp2 is None and isinstance(levels_block, dict):
+        tp2 = levels_block.get("tp2")
+
+    try:
+        entry = float(entry) if entry is not None else None
+    except (TypeError, ValueError):
+        entry = None
+    try:
+        sl = float(sl) if sl is not None else None
+    except (TypeError, ValueError):
+        sl = None
+    try:
+        tp2 = float(tp2) if tp2 is not None else None
+    except (TypeError, ValueError):
+        tp2 = None
+
+    return entry, sl, tp2
 
 
 def _load_signal_state(path: Path, history_window: int) -> Dict[str, Any]:
@@ -5504,8 +5623,42 @@ def apply_signal_stability_layer(
     config = stability_config or _resolve_signal_stability_config()
     stability_enabled = bool(config.get("enabled", False))
     now_dt = parse_utc_timestamp(analysis_timestamp) or datetime.now(timezone.utc)
+    tracking_cfg = config.get("manual_position_tracking") or {}
+    positions_path = tracking_cfg.get("positions_file") or "public/_manual_positions.json"
+    treat_missing = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
+    if manual_positions is None:
+        manual_positions = _load_manual_positions_from_file(positions_path, treat_missing)
+    manual_positions = manual_positions if isinstance(manual_positions, dict) else {}
 
-    manual_state = _manual_position_state(asset, config, now_dt, manual_positions)
+    manual_state = position_tracker.compute_state(
+        asset, tracking_cfg, manual_positions, now_dt
+    )
+    cooldown_minutes = _resolve_post_exit_cooldown_minutes(
+        tracking_cfg, asset, default=20
+    )
+
+    if manual_state.get("tracking_enabled") and manual_state.get("has_position"):
+        spot_price = _extract_spot_price(payload)
+        changed, reason, manual_positions = position_tracker.check_close_by_levels(
+            asset,
+            manual_positions,
+            spot_price,
+            now_dt,
+            cooldown_minutes,
+        )
+        if changed:
+            position_tracker.save_positions_atomic(positions_path, manual_positions)
+            _load_manual_positions_from_file.cache_clear()
+            manual_state = position_tracker.compute_state(
+                asset, tracking_cfg, manual_positions, now_dt
+            )
+            LOGGER.debug(
+                "CLOSE state transition %s reason=%s cooldown_until=%s",
+                asset,
+                reason,
+                manual_state.get("cooldown_until_utc"),
+            )
+
     tracked_levels = _extract_tracked_levels(asset, manual_state, manual_positions)
     direction_map = {"buy": "buy", "sell": "sell"}
     exit_direction_map = {"long": "buy", "short": "sell"}
@@ -5545,6 +5698,142 @@ def apply_signal_stability_layer(
     else:
         notify["reason"] = "actionable"
 
+    if stability_enabled:
+        flip_cfg = config.get("flip_flop_guard") or {}
+        min_bars_map = flip_cfg.get("min_bars_same_direction_before_flip") or {}
+        history_window = max(
+            1,
+            max(
+                [
+                    int(value)
+                    for value in min_bars_map.values()
+                    if isinstance(value, (int, float))
+                ]
+                or [1]
+            ),
+        )
+        state_path = outdir / "signal_state.json"
+        state = _load_signal_state(state_path, history_window)
+        _update_entry_history(state, entry_side, history_window)
+
+        if actionable and intent == "entry":
+            cooldown_cfg = (config.get("cooldowns") or {}).get(
+                "min_minutes_between_entry_notifications", {}
+            )
+            min_between = _resolve_asset_value(cooldown_cfg, asset, 0)
+            last_intent = state.get("last_notified_intent")
+            last_ts = parse_utc_timestamp(state.get("last_notified_at_utc"))
+            if (
+                last_intent == "entry"
+                and last_ts
+                and now_dt - last_ts < timedelta(minutes=min_between)
+            ):
+                notify["should_notify"] = False
+                notify["reason"] = "entry_cooldown_active"
+                notify["cooldown_until_utc"] = to_utc_iso(
+                    last_ts + timedelta(minutes=min_between)
+                )
+
+            hard_exit_cd = parse_utc_timestamp(state.get("hard_exit_cooldown_until_utc"))
+            hard_exit_side = state.get("hard_exit_side")
+            if hard_exit_cd and now_dt < hard_exit_cd:
+                if not hard_exit_side or (entry_side and entry_side != hard_exit_side):
+                    notify["should_notify"] = False
+                    notify["reason"] = "hard_exit_cooldown_active"
+                    notify["cooldown_until_utc"] = to_utc_iso(hard_exit_cd)
+
+            if notify["should_notify"] and flip_cfg.get("enabled", False):
+                last_side = state.get("last_notified_side")
+                required = _resolve_asset_value(min_bars_map, asset, history_window)
+                streak = _trailing_streak(state.get("entry_direction_history", []), entry_side)
+                if last_side in {"buy", "sell"} and entry_side and entry_side != last_side:
+                    if streak < required:
+                        notify["should_notify"] = False
+                        notify["reason"] = "flip_flop_guard"
+
+        if notify["should_notify"] and config.get("only_notify_on_state_change", False):
+            last_intent = state.get("last_notified_intent")
+            last_side = state.get("last_notified_side")
+            if intent == last_intent and (intent != "entry" or entry_side == last_side):
+                notify["should_notify"] = False
+                notify["reason"] = "no_state_change"
+
+        if notify["should_notify"]:
+            state["last_notified_intent"] = intent
+            state["last_notified_side"] = entry_side or exit_side
+            state["last_notified_at_utc"] = to_utc_iso(now_dt)
+            if intent == "hard_exit":
+                cd_cfg = (config.get("cooldowns") or {}).get(
+                    "min_minutes_after_hard_exit", {}
+                )
+                min_after_exit = _resolve_asset_value(cd_cfg, asset, 0)
+                state["hard_exit_side"] = exit_side or entry_side
+                state["hard_exit_cooldown_until_utc"] = to_utc_iso(
+                    now_dt + timedelta(minutes=min_after_exit)
+                )
+        _save_signal_state(state_path, state)
+
+    positions_changed = False
+    if (
+        manual_state.get("tracking_enabled")
+        and intent == "hard_exit"
+        and manual_state.get("has_position")
+    ):
+        manual_positions = position_tracker.close_position(
+            asset,
+            reason="hard_exit",
+            closed_at_utc=to_utc_iso(now_dt),
+            cooldown_minutes=cooldown_minutes,
+            positions=manual_positions,
+        )
+        positions_changed = True
+        LOGGER.debug(
+            "CLOSE state transition %s reason=%s cooldown_until=%s",
+            asset,
+            "hard_exit",
+            manual_positions.get(asset, {}).get("cooldown_until_utc")
+            if isinstance(manual_positions, dict)
+            else None,
+        )
+
+    if (
+        manual_state.get("tracking_enabled")
+        and manual_state.get("is_flat")
+        and intent == "entry"
+        and notify.get("should_notify")
+        and entry_side in {"buy", "sell"}
+    ):
+        setup_grade = _resolve_setup_grade(payload, decision)
+        if setup_grade in {"A", "B"}:
+            entry_level, sl_level, tp2_level = _extract_trade_levels(payload)
+            manual_positions = position_tracker.open_position(
+                asset,
+                side="long" if entry_side == "buy" else "short",
+                entry=entry_level,
+                sl=sl_level,
+                tp2=tp2_level,
+                opened_at_utc=to_utc_iso(now_dt),
+                positions=manual_positions,
+            )
+            positions_changed = True
+            LOGGER.debug(
+                "OPEN state transition %s %s entry=%s sl=%s tp2=%s opened_at=%s",
+                asset,
+                entry_side,
+                entry_level,
+                sl_level,
+                tp2_level,
+                to_utc_iso(now_dt),
+            )
+
+    if positions_changed:
+        position_tracker.save_positions_atomic(positions_path, manual_positions)
+        _load_manual_positions_from_file.cache_clear()
+        manual_state = position_tracker.compute_state(
+            asset, tracking_cfg, manual_positions, now_dt
+        )
+        tracked_levels = _extract_tracked_levels(asset, manual_state, manual_positions)
+
     payload["position_state"] = {
         "tracking_enabled": manual_state.get("tracking_enabled"),
         "side": manual_state.get("side"),
@@ -5568,84 +5857,6 @@ def apply_signal_stability_layer(
                 reasons.append(manual_note)
         elif isinstance(payload, dict):
             payload["reasons"] = [manual_note]
-
-    if not stability_enabled:
-        payload["intent"] = intent
-        payload["actionable"] = bool(actionable)
-        payload["notify"] = notify
-        return payload
-
-    flip_cfg = config.get("flip_flop_guard") or {}
-    min_bars_map = flip_cfg.get("min_bars_same_direction_before_flip") or {}
-    history_window = max(
-        1,
-        max(
-            [
-                int(value)
-                for value in min_bars_map.values()
-                if isinstance(value, (int, float))
-            ]
-            or [1]
-        ),
-    )
-    state_path = outdir / "signal_state.json"
-    state = _load_signal_state(state_path, history_window)
-    _update_entry_history(state, entry_side, history_window)
-
-    if actionable and intent == "entry":
-        cooldown_cfg = (config.get("cooldowns") or {}).get(
-            "min_minutes_between_entry_notifications", {}
-        )
-        min_between = _resolve_asset_value(cooldown_cfg, asset, 0)
-        last_intent = state.get("last_notified_intent")
-        last_ts = parse_utc_timestamp(state.get("last_notified_at_utc"))
-        if (
-            last_intent == "entry"
-            and last_ts
-            and now_dt - last_ts < timedelta(minutes=min_between)
-        ):
-            notify["should_notify"] = False
-            notify["reason"] = "entry_cooldown_active"
-            notify["cooldown_until_utc"] = to_utc_iso(
-                last_ts + timedelta(minutes=min_between)
-            )
-
-        hard_exit_cd = parse_utc_timestamp(state.get("hard_exit_cooldown_until_utc"))
-        hard_exit_side = state.get("hard_exit_side")
-        if hard_exit_cd and now_dt < hard_exit_cd:
-            if not hard_exit_side or (entry_side and entry_side != hard_exit_side):
-                notify["should_notify"] = False
-                notify["reason"] = "hard_exit_cooldown_active"
-                notify["cooldown_until_utc"] = to_utc_iso(hard_exit_cd)
-
-        if notify["should_notify"] and flip_cfg.get("enabled", False):
-            last_side = state.get("last_notified_side")
-            required = _resolve_asset_value(min_bars_map, asset, history_window)
-            streak = _trailing_streak(state.get("entry_direction_history", []), entry_side)
-            if last_side in {"buy", "sell"} and entry_side and entry_side != last_side:
-                if streak < required:
-                    notify["should_notify"] = False
-                    notify["reason"] = "flip_flop_guard"
-
-    if notify["should_notify"] and config.get("only_notify_on_state_change", False):
-        last_intent = state.get("last_notified_intent")
-        last_side = state.get("last_notified_side")
-        if intent == last_intent and (intent != "entry" or entry_side == last_side):
-            notify["should_notify"] = False
-            notify["reason"] = "no_state_change"
-
-    if notify["should_notify"]:
-        state["last_notified_intent"] = intent
-        state["last_notified_side"] = entry_side or exit_side
-        state["last_notified_at_utc"] = to_utc_iso(now_dt)
-        if intent == "hard_exit":
-            cd_cfg = (config.get("cooldowns") or {}).get("min_minutes_after_hard_exit", {})
-            min_after_exit = _resolve_asset_value(cd_cfg, asset, 0)
-            state["hard_exit_side"] = exit_side or entry_side
-            state["hard_exit_cooldown_until_utc"] = to_utc_iso(
-                now_dt + timedelta(minutes=min_after_exit)
-            )
-    _save_signal_state(state_path, state)
 
     payload["intent"] = intent
     payload["actionable"] = bool(actionable)
@@ -14074,6 +14285,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
