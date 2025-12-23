@@ -12,14 +12,22 @@ import logging
 import os
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from logging_utils import ensure_json_stream_handler
+from logging_utils import ensure_json_file_handler, ensure_json_stream_handler
 
 
 LOGGER = logging.getLogger("manual_positions")
 ensure_json_stream_handler(LOGGER, static_fields={"component": "manual_positions"})
+
+_AUDIT_CONTEXT: Dict[str, Any] = {
+    "source": None,
+    "run_id": None,
+    "tz_name": "Europe/Budapest",
+}
+_FILE_LOGGER_ATTACHED = False
 
 
 def _find_repo_root(start: Optional[Path] = None) -> Path:
@@ -64,6 +72,71 @@ def _to_utc_iso(dt: datetime) -> str:
     return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def set_audit_context(source: str, run_id: str, tz_name: str = "Europe/Budapest") -> None:
+    """Configure audit context fields for downstream log entries."""
+
+    _AUDIT_CONTEXT["source"] = source
+    _AUDIT_CONTEXT["run_id"] = run_id
+    _AUDIT_CONTEXT["tz_name"] = tz_name or "Europe/Budapest"
+    _maybe_attach_file_handler()
+
+
+def _audit_fields(now_dt_utc: datetime) -> Dict[str, Any]:
+    tz = ZoneInfo(str(_AUDIT_CONTEXT.get("tz_name") or "Europe/Budapest"))
+    ts_utc = now_dt_utc.astimezone(timezone.utc)
+    ts_local = now_dt_utc.astimezone(tz)
+    return {
+        "ts_utc": _to_utc_iso(ts_utc),
+        "ts_budapest": ts_local.replace(microsecond=0).isoformat(),
+        "source": _AUDIT_CONTEXT.get("source"),
+        "run_id": _AUDIT_CONTEXT.get("run_id"),
+        "component": "manual_positions",
+    }
+
+
+def _audit_log(message: str, *, event: str, now_dt: Optional[datetime] = None, **fields: Any) -> None:
+    now_dt = now_dt or datetime.now(timezone.utc)
+    payload = {**_audit_fields(now_dt), **fields, "event": event}
+    LOGGER.info(message, extra=payload)
+
+
+def log_audit_event(message: str, *, event: str, **fields: Any) -> None:
+    """Public helper so callers emit audit logs with consistent fields."""
+
+    _audit_log(message, event=event, **fields)
+
+
+def _should_log_to_file() -> bool:
+    flag = os.getenv("MANUAL_POS_AUDIT_TO_FILE")
+    if flag is not None:
+        return str(flag).strip().lower() in {"1", "true", "yes", "on"}
+
+    cfg_path = resolve_repo_path("config/analysis_settings.json")
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        return bool(cfg.get("manual_pos_audit_to_file", False))
+    except Exception:
+        return False
+
+
+def _maybe_attach_file_handler() -> None:
+    global _FILE_LOGGER_ATTACHED
+    if _FILE_LOGGER_ATTACHED:
+        return
+    if not _should_log_to_file():
+        return
+
+    try:
+        path = resolve_repo_path("public/_manual_positions_audit.jsonl")
+        ensure_json_file_handler(
+            LOGGER, path, static_fields={"component": "manual_positions"}
+        )
+        _FILE_LOGGER_ATTACHED = True
+    except Exception:
+        # Best-effort; keep pipeline running even if audit file logging fails.
+        _FILE_LOGGER_ATTACHED = False
+
+
 def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
     resolved = resolve_repo_path(path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -77,13 +150,11 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
         data = {}
 
     positions = data if isinstance(data, dict) else {}
-    LOGGER.info(
+    _audit_log(
         "positions loaded",
-        extra={
-            "event": "load_positions",
-            "positions_file": str(resolved),
-            "entries": len(positions),
-        },
+        event="LOAD_POSITIONS",
+        positions_file=str(resolved),
+        entries=len(positions),       
     )
     return positions
 
@@ -94,29 +165,25 @@ def save_positions_atomic(path: str, data: Dict[str, Any]) -> None:
     payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
     tmp_path = resolved.with_suffix(resolved.suffix + ".tmp")
     tmp_path.write_text(payload + "\n", encoding="utf-8")
-    LOGGER.info(
+    _audit_log(
         "persisting positions to disk",
-        extra={
-            "event": "save_positions_atomic",
-            "positions_file": str(resolved),
-            "tmp_file": str(tmp_path),
-            "entries": len(data),
-            "assets": sorted(data.keys()),
-        },
+        event="SAVE_BEGIN",
+        positions_file=str(resolved),
+        tmp_file=str(tmp_path),
+        entries=len(data),
+        assets=sorted(data.keys()),
     )
     os.replace(tmp_path, resolved)
 
     stat = resolved.stat()
     mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
-    LOGGER.info(
+    _audit_log(
         "positions saved",
-        extra={
-            "event": "save_positions_atomic",
-            "positions_file": str(resolved),
-            "size": stat.st_size,
-            "mtime": mtime,
-            "entries": len(data),
-        },
+        event="SAVE_COMMIT",
+        positions_file=str(resolved),
+        size=stat.st_size,
+        mtime=mtime,
+        entries=len(data),
     )
 
 
@@ -202,21 +269,19 @@ def open_position(
         "close_reason": None,
         "cooldown_until_utc": None,
     }
-    LOGGER.info(
+    _audit_log(
         "open_position applied",
-        extra={
-            "event": "open_position",
-            "asset": asset,
-            "requested_side": side,
-            "normalized_side": norm_side,
-            "entry": entry,
-            "sl": sl,
-            "tp2": tp2,
-            "opened_at_utc": opened_at_utc,
-            "previous_position": previous_entry,
-            "updated_position": deepcopy(updated.get(asset)),
-            "positions_count": len(updated),
-        },
+        event="OPEN_APPLIED",
+        asset=asset,
+        requested_side=side,
+        normalized_side=norm_side,
+        entry=entry,
+        sl=sl,
+        tp2=tp2,
+        opened_at_utc=opened_at_utc,
+        previous_position=previous_entry,
+        updated_position=deepcopy(updated.get(asset)),
+        positions_count=len(updated),
     )
     return updated
 
@@ -245,6 +310,16 @@ def close_position(
         }
     )
     updated[asset] = entry
+    _audit_log(
+        "close_position applied",
+        event="CLOSE_APPLIED",
+        asset=asset,
+        reason=reason,
+        closed_at_utc=closed_at_utc,
+        cooldown_until_utc=entry.get("cooldown_until_utc"),
+        previous_position=positions.get(asset) if isinstance(positions, dict) else None,
+        updated_position=deepcopy(entry),
+    )
     return updated
 
 
@@ -296,6 +371,13 @@ def check_close_by_levels(
         closed_at_utc=_to_utc_iso(now_dt),
         cooldown_minutes=cooldown_minutes,
         positions=positions,
+    )
+    _audit_log(
+        "auto close triggered by levels",
+        event="AUTO_CLOSE_BY_LEVELS",
+        asset=asset,
+        reason=reason,
+        spot_price=spot_price,
     )
     return True, reason, updated
   
