@@ -1146,40 +1146,62 @@ def _collect_channel_embeds(
     heartbeat_snapshots: List[Dict[str, Any]],
     gate_embed: Optional[Dict[str, Any]],
     pipeline_embed: Optional[Dict[str, Any]],
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    live_embeds = [
-        asset_embeds[a]
+) -> Tuple[
+    List[Tuple[Optional[str], Dict[str, Any]]],
+    List[Tuple[Optional[str], Dict[str, Any]]],
+    List[Tuple[Optional[str], Dict[str, Any]]],
+]:
+    live_embeds: List[Tuple[Optional[str], Dict[str, Any]]] = [
+        (a, asset_embeds[a])
         for a in ASSETS
         if a in asset_embeds and asset_channels.get(a) == "live"
     ]
 
-    management_embeds = list(watcher_embeds)
-    management_embeds.extend(auto_close_embeds)
+    management_embeds: List[Tuple[Optional[str], Dict[str, Any]]] = [
+        (None, embed) for embed in watcher_embeds
+    ]
+    management_embeds.extend((None, embed) for embed in auto_close_embeds)
     management_embeds.extend(
-        asset_embeds[a]
+        (a, asset_embeds[a])
         for a in ASSETS
         if a in asset_embeds and asset_channels.get(a) == "management"
     )
 
-    market_scan_embeds = [
-        asset_embeds[a]
+    market_scan_embeds: List[Tuple[Optional[str], Dict[str, Any]]] = [
+        (a, asset_embeds[a])
         for a in ASSETS
         if a in asset_embeds and asset_channels.get(a, "market_scan") == "market_scan"
     ]
-    market_scan_embeds.extend(heartbeat_snapshots)
+    market_scan_embeds.extend((None, embed) for embed in heartbeat_snapshots)
     if gate_embed:
-        market_scan_embeds.append(gate_embed)
+        market_scan_embeds.append((None, gate_embed))
     if pipeline_embed:
-        market_scan_embeds.append(pipeline_embed)
+        market_scan_embeds.append((None, pipeline_embed))
 
     return live_embeds, management_embeds, market_scan_embeds
 
 
-def post_batches(hook: str, content: str, embeds: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Küldjünk 10-es csomagokban az embedeket egy webhookra."""
+DEFAULT_EMBED_BATCH_SIZE = max(1, int_env("DISCORD_EMBED_BATCH_SIZE", 10))
+
+
+def _empty_dispatch_result(error: Optional[str] = None) -> Dict[str, Any]:
+    return {
+        "attempted": False,
+        "success": False,
+        "http_status": None,
+        "error": error,
+        "message_id": None,
+        "batch_results": [],
+    }
+
+
+def post_batches(
+    hook: str, content: str, embeds: List[Dict[str, Any]], *, batch_size: int = DEFAULT_EMBED_BATCH_SIZE
+) -> Dict[str, Any]:
+    """Küldjünk csomagokban az embedeket egy webhookra."""
 
     if not hook:
-        return {"attempted": False, "success": False, "http_status": None, "error": "missing_webhook"}
+        return _empty_dispatch_result("missing_webhook")
     now = time.time()
     cooldown_until = _WEBHOOK_COOLDOWN_UNTIL.get(hook)
     if cooldown_until and now < cooldown_until:
@@ -1187,12 +1209,7 @@ def post_batches(hook: str, content: str, embeds: List[Dict[str, Any]]) -> Dict[
             "notify_webhook_cooldown_active",
             extra={"hook": hook[:32], "retry_at_epoch": cooldown_until},
         )
-        return {
-            "attempted": False,
-            "success": False,
-            "http_status": None,
-            "error": "cooldown_active",
-        }
+        return _empty_dispatch_result("cooldown_active")
 
     def _sleep_with_cap(delay: float) -> None:
         time.sleep(min(delay, NETWORK_BACKOFF_CAP))
@@ -1207,15 +1224,19 @@ def post_batches(hook: str, content: str, embeds: List[Dict[str, Any]]) -> Dict[
                     pass
         return min(NETWORK_BACKOFF_CAP, NETWORK_BACKOFF_BASE * (2 ** (attempt - 1)))
        
-    batches = [embeds[i : i + 10] for i in range(0, len(embeds), 10)]
-    result: Dict[str, Any] = {
-        "attempted": False,
-        "success": False,
-        "http_status": None,
-        "error": None,
-        "message_id": None,
-    }
-    for batch in batches:
+    batches = [embeds[i : i + batch_size] for i in range(0, len(embeds), batch_size)]
+    batch_results: List[Dict[str, Any]] = []
+
+    for idx, batch in enumerate(batches):
+        result: Dict[str, Any] = {
+            "attempted": False,
+            "success": False,
+            "http_status": None,
+            "error": None,
+            "message_id": None,
+            "batch_index": idx,
+            "embed_count": len(batch),
+        }
         last_error: Optional[Exception] = None
         for attempt in range(1, NETWORK_RETRIES + 1):
             try:
@@ -1257,8 +1278,54 @@ def post_batches(hook: str, content: str, embeds: List[Dict[str, Any]]) -> Dict[
                 result["error"] = str(last_error)
         if not result.get("success"):
             result["success"] = False
+        batch_results.append(result)
 
-    return result
+    attempted_any = any(result.get("attempted") for result in batch_results)
+    success_all = bool(batch_results) and all(result.get("success") for result in batch_results)
+    return {
+        "attempted": attempted_any,
+        "success": success_all,
+        "http_status": batch_results[-1]["http_status"] if batch_results else None,
+        "error": batch_results[-1]["error"] if batch_results else None,
+        "message_id": None,
+        "batch_results": batch_results,
+    }
+
+
+def _chunk_pairs(items: List[Tuple[Any, Any]], size: int) -> List[List[Tuple[Any, Any]]]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def _map_batch_results_to_assets(
+    asset_embed_pairs: List[Tuple[Optional[str], Dict[str, Any]]],
+    dispatch_result: Dict[str, Any],
+    *,
+    batch_size: int,
+) -> Dict[str, Dict[str, Any]]:
+    """Return per-asset dispatch results based on their batch outcome."""
+
+    if not asset_embed_pairs:
+        return {}
+
+    batch_results = dispatch_result.get("batch_results") or []
+    batches = _chunk_pairs(asset_embed_pairs, batch_size)
+
+    dispatch_by_asset: Dict[str, Dict[str, Any]] = {}
+    for idx, batch in enumerate(batches):
+        batch_result = batch_results[idx] if idx < len(batch_results) else {
+            "attempted": False,
+            "success": False,
+            "http_status": None,
+            "error": "missing_batch_result",
+            "message_id": None,
+            "batch_index": idx,
+            "embed_count": len(batch),
+        }
+        for asset, _ in batch:
+            if asset:
+                dispatch_by_asset[asset] = batch_result
+
+    return dispatch_by_asset
        
 def build_entry_gate_summary_embed() -> Optional[Dict[str, Any]]:
     """Return a compact embed with top entry gate elutasítási okok."""
@@ -2068,6 +2135,7 @@ def _apply_and_persist_manual_transitions(
             )
         except Exception as exc:
             commit_result["exception"] = repr(exc)
+            commit_result.setdefault("positions_file", positions_path)
             if intent == "entry":
                 position_tracker.log_audit_event(
                     "entry commit result",
@@ -2081,11 +2149,10 @@ def _apply_and_persist_manual_transitions(
                     entries_after_save=commit_result.get("entries_after_save"),
                     positions_file=positions_path,
                     written_bytes=None,
-                )
-            raise
+                )            
         sig["position_state"] = manual_state
 
-    if positions_changed and entry_opened:
+    if positions_changed and entry_opened and commit_result.get("committed"):
         position_tracker.log_audit_event(
             "entry open committed",
             event="OPEN_COMMIT",
@@ -4042,23 +4109,39 @@ def main():
 
     dispatched = False
     dispatch_results_by_asset: Dict[str, Dict[str, Any]] = {}
-    for channel, (hook, embeds) in channel_payloads.items():
-        if not embeds:
+    for channel, (hook, asset_embed_pairs) in channel_payloads.items():
+        if not asset_embed_pairs:
             continue
         content = f"**{title}**\n{headers[channel]}"
+        embeds_only = [embed for _, embed in asset_embed_pairs]
         try:
-            dispatch_result = post_batches(hook, content, embeds)
+            dispatch_result = post_batches(
+                hook, content, embeds_only, batch_size=DEFAULT_EMBED_BATCH_SIZE
+            )
+            asset_dispatch_results = _map_batch_results_to_assets(
+                asset_embed_pairs,
+                dispatch_result,
+                batch_size=DEFAULT_EMBED_BATCH_SIZE,
+            )
+            dispatch_results_by_asset.update(asset_dispatch_results)
+
+            dispatched = dispatched or any(
+                batch.get("success") for batch in dispatch_result.get("batch_results", [])
+            )
+          
             for asset, record in asset_send_records.items():
                 if record.get("channel") != channel:
                     continue
-                dispatch_results_by_asset[asset] = dispatch_result
+                asset_result = asset_dispatch_results.get(asset) or _empty_dispatch_result(
+                    "asset_not_dispatched"
+                )
                 enriched = dict(record)
                 enriched.update(
                     {
-                        "dispatch_attempted": dispatch_result.get("attempted"),
-                        "dispatch_success": dispatch_result.get("success"),
-                        "http_status": dispatch_result.get("http_status"),
-                        "dispatch_error": dispatch_result.get("error"),
+                        "dispatch_attempted": asset_result.get("attempted"),
+                        "dispatch_success": asset_result.get("success"),
+                        "http_status": asset_result.get("http_status"),
+                        "dispatch_error": asset_result.get("error"),
                     }
                 )
                 position_tracker.log_audit_event(
@@ -4068,15 +4151,13 @@ def main():
                 )
                 entry_record = entry_audit_records.get(asset)
                 if entry_record and record.get("intent") == "entry":
-                    entry_record.dispatch_attempted = bool(dispatch_result.get("attempted"))
-                    entry_record.dispatch_success = bool(dispatch_result.get("success"))
-                    entry_record.dispatch_status = dispatch_result.get("http_status")
-                    entry_record.dispatch_error = dispatch_result.get("error")
+                    entry_record.dispatch_attempted = bool(asset_result.get("attempted"))
+                    entry_record.dispatch_success = bool(asset_result.get("success"))
+                    entry_record.dispatch_status = asset_result.get("http_status")
+                    entry_record.dispatch_error = asset_result.get("error")
                     entry_record.channel = channel
-                    entry_record.message_id = dispatch_result.get("message_id")
-                    entry_record.log_dispatch_result()
-            if dispatch_result.get("success"):
-                dispatched = True
+                    entry_record.message_id = asset_result.get("message_id")
+                    entry_record.log_dispatch_result()            
         except Exception as e:
             print(f"Discord notify FAILED ({channel}):", e)
 
