@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from datetime import date, datetime, timezone, timedelta
@@ -5666,6 +5667,7 @@ def apply_signal_stability_layer(
     exit_side = exit_direction_map.get(
         str((exit_signal or {}).get("direction") or "").lower()
     )
+    setup_grade = _resolve_setup_grade(payload, decision)
 
     intent = "standby"
     actionable = False
@@ -5774,6 +5776,7 @@ def apply_signal_stability_layer(
         _save_signal_state(state_path, state)
 
     positions_changed = False
+    entry_opened = False
     if (
         manual_state.get("tracking_enabled")
         and intent == "hard_exit"
@@ -5796,16 +5799,37 @@ def apply_signal_stability_layer(
             else None,
         )
 
-    if (
+    open_conditions_met = (
         manual_state.get("tracking_enabled")
         and manual_state.get("is_flat")
         and intent == "entry"
         and notify.get("should_notify")
         and entry_side in {"buy", "sell"}
-    ):
-        setup_grade = _resolve_setup_grade(payload, decision)
+    )
+    if open_conditions_met:
         if setup_grade in {"A", "B"}:
             entry_level, sl_level, tp2_level = _extract_trade_levels(payload)
+            position_tracker.log_audit_event(
+                "entry open attempt",
+                event="OPEN_ATTEMPT",
+                asset=asset,
+                intent=intent,
+                decision=decision,
+                entry_side=entry_side,
+                setup_grade=setup_grade,
+                actionable=bool(actionable),
+                stable=bool(stability_enabled),
+                gates_missing=list(gates_missing),
+                notify_should_notify=bool(notify.get("should_notify")),
+                notify_reason=notify.get("reason"),
+                cooldown_until_utc=notify.get("cooldown_until_utc"),
+                manual_tracking_enabled=manual_state.get("tracking_enabled"),
+                manual_has_position=manual_state.get("has_position"),
+                manual_cooldown_active=manual_state.get("cooldown_active"),
+                entry_level=entry_level,
+                sl=sl_level,
+                tp2=tp2_level,
+            )
             manual_positions = position_tracker.open_position(
                 asset,
                 side="long" if entry_side == "buy" else "short",
@@ -5816,6 +5840,7 @@ def apply_signal_stability_layer(
                 positions=manual_positions,
             )
             positions_changed = True
+            entry_opened = True
             LOGGER.debug(
                 "OPEN state transition %s %s entry=%s sl=%s tp2=%s opened_at=%s",
                 asset,
@@ -5825,6 +5850,38 @@ def apply_signal_stability_layer(
                 tp2_level,
                 to_utc_iso(now_dt),
             )
+    elif intent == "entry":
+        suppression_reason = notify.get("reason") or "notified_blocked"
+        if not manual_state.get("tracking_enabled"):
+            suppression_reason = "tracking_disabled"
+        elif manual_state.get("has_position"):
+            suppression_reason = "position_already_open"
+        elif manual_state.get("cooldown_active"):
+            suppression_reason = "cooldown_active"
+        elif entry_side not in {"buy", "sell"}:
+            suppression_reason = "invalid_entry_side"
+        elif setup_grade not in {"A", "B"}:
+            suppression_reason = "setup_grade_filtered"
+        position_tracker.log_audit_event(
+            "entry suppressed",
+            event="ENTRY_SUPPRESSED",
+            asset=asset,
+            intent=intent,
+            decision=decision,
+            entry_side=entry_side,
+            setup_grade=setup_grade,
+            actionable=bool(actionable),
+            stable=bool(stability_enabled),
+            gates_missing=list(gates_missing),
+            notify_should_notify=bool(notify.get("should_notify")),
+            notify_reason=notify.get("reason"),
+            cooldown_until_utc=notify.get("cooldown_until_utc")
+            or manual_state.get("cooldown_until_utc"),
+            manual_tracking_enabled=manual_state.get("tracking_enabled"),
+            manual_has_position=manual_state.get("has_position"),
+            manual_cooldown_active=manual_state.get("cooldown_active"),
+            suppression_reason=suppression_reason,
+        )
 
     if positions_changed:
         position_tracker.save_positions_atomic(positions_path, manual_positions)
@@ -5833,6 +5890,22 @@ def apply_signal_stability_layer(
             asset, tracking_cfg, manual_positions, now_dt
         )
         tracked_levels = _extract_tracked_levels(asset, manual_state, manual_positions)
+
+        if entry_opened:
+            entry_level, sl_level, tp2_level = _extract_trade_levels(payload)
+            position_tracker.log_audit_event(
+                "entry open committed",
+                event="OPEN_COMMIT",
+                asset=asset,
+                intent=intent,
+                decision=decision,
+                entry_side=entry_side,
+                setup_grade=setup_grade,
+                entry=entry_level,
+                sl=sl_level,
+                tp2=tp2_level,
+                positions_file=positions_path,
+            )
 
     payload["position_state"] = {
         "tracking_enabled": manual_state.get("tracking_enabled"),
@@ -13862,6 +13935,8 @@ def _ensure_trading_preconditions(analysis_started_at: datetime) -> Optional[dat
 
 
 def main():
+    run_id = str(uuid4())
+    position_tracker.set_audit_context(source="analysis", run_id=run_id)
     analysis_started_at = datetime.now(timezone.utc)
     pipeline_log_path = None
     if get_pipeline_log_path:
@@ -14285,6 +14360,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
