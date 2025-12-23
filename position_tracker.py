@@ -7,6 +7,7 @@ share the same behavior.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -163,7 +164,7 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
     return positions
 
 
-def save_positions_atomic(path: str, data: Dict[str, Any]) -> None:
+def save_positions_atomic(path: str, data: Dict[str, Any]) -> Dict[str, Any]:
     resolved = resolve_repo_path(path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
@@ -189,6 +190,33 @@ def save_positions_atomic(path: str, data: Dict[str, Any]) -> None:
         mtime=mtime,
         entries=len(data),
     )
+
+    return {
+        "positions_file": str(resolved),
+        "size": stat.st_size,
+        "mtime": mtime,
+        "written_bytes": len(payload.encode("utf-8")) + 1,  # account for trailing newline
+        "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
+    }
+
+
+def positions_file_snapshot(path: str) -> Dict[str, Any]:
+    """Return size/mtime/sha256 for diagnostics; never raises."""
+
+    resolved = resolve_repo_path(path)
+    payload: Dict[str, Any] = {"positions_file": str(resolved)}
+    try:
+        stat = resolved.stat()
+        payload.update(
+            {
+                "size": stat.st_size,
+                "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
+            }
+        )
+    except Exception as exc:  # pragma: no cover - defensive guard
+        payload["error"] = str(exc)
+    return payload
 
 
 def compute_state(
