@@ -6,13 +6,18 @@ import scripts.notify_discord as notify_discord
 
 
 def test_management_channel_routing_excludes_market_scan(monkeypatch):
-    monkeypatch.setattr(notify_discord, "ASSETS", ["BTCUSD", "ETHUSD"])  # deterministic order
-
+    # use traded assets only
+    monkeypatch.setattr(
+        notify_discord,
+        "ASSETS",
+        ["BTCUSD", "XAGUSD", "GOLD_CFD", "USOIL", "NVDA", "EURUSD"],  # deterministic order
+    )
+    
     asset_embeds = {
         "BTCUSD": {"title": "btc"},
-        "ETHUSD": {"title": "eth"},
+        "XAGUSD": {"title": "xag"},
     }
-    asset_channels = {"BTCUSD": "management", "ETHUSD": "market_scan"}
+    asset_channels = {"BTCUSD": "management", "XAGUSD": "market_scan"}
 
     live, management, market_scan = notify_discord._collect_channel_embeds(
         asset_embeds=asset_embeds,
@@ -59,7 +64,7 @@ def test_hard_exit_embed_uses_closed_state(tmp_path):
     positions_path = str(tmp_path / "positions.json")
     open_commits = set()
 
-    manual_positions, manual_state, _, _ = notify_discord._apply_and_persist_manual_transitions(
+    manual_positions, manual_state, _, _, _ = notify_discord._apply_and_persist_manual_transitions(
         asset="BTCUSD",
         intent="hard_exit",
         decision="no entry",
