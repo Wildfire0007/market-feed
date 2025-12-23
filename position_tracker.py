@@ -8,11 +8,18 @@ share the same behavior.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+
+from logging_utils import ensure_json_stream_handler
+
+
+LOGGER = logging.getLogger("manual_positions")
+ensure_json_stream_handler(LOGGER, static_fields={"component": "manual_positions"})
 
 
 def _find_repo_root(start: Optional[Path] = None) -> Path:
@@ -70,10 +77,13 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
         data = {}
 
     positions = data if isinstance(data, dict) else {}
-    print(
-        "[manual_positions] resolved positions_file=%s entries=%d"
-        % (resolved, len(positions)),
-        flush=True,
+    LOGGER.info(
+        "positions loaded",
+        extra={
+            "event": "load_positions",
+            "positions_file": str(resolved),
+            "entries": len(positions),
+        },
     )
     return positions
 
@@ -84,14 +94,29 @@ def save_positions_atomic(path: str, data: Dict[str, Any]) -> None:
     payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
     tmp_path = resolved.with_suffix(resolved.suffix + ".tmp")
     tmp_path.write_text(payload + "\n", encoding="utf-8")
+    LOGGER.info(
+        "persisting positions to disk",
+        extra={
+            "event": "save_positions_atomic",
+            "positions_file": str(resolved),
+            "tmp_file": str(tmp_path),
+            "entries": len(data),
+            "assets": sorted(data.keys()),
+        },
+    )
     os.replace(tmp_path, resolved)
 
     stat = resolved.stat()
     mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
-    print(
-        "[manual_positions] saved positions_file=%s size=%d mtime=%s"
-        % (resolved, stat.st_size, mtime),
-        flush=True,
+    LOGGER.info(
+        "positions saved",
+        extra={
+            "event": "save_positions_atomic",
+            "positions_file": str(resolved),
+            "size": stat.st_size,
+            "mtime": mtime,
+            "entries": len(data),
+        },
     )
 
 
@@ -166,6 +191,7 @@ def open_position(
     side_map = {"buy": "long", "sell": "short", "long": "long", "short": "short"}
     norm_side = side_map.get(str(side or "").lower())
     updated = deepcopy(positions) if isinstance(positions, dict) else {}
+    previous_entry = deepcopy(updated.get(asset)) if isinstance(updated.get(asset), dict) else None
     updated[asset] = {
         "side": norm_side,
         "opened_at_utc": opened_at_utc,
@@ -176,6 +202,22 @@ def open_position(
         "close_reason": None,
         "cooldown_until_utc": None,
     }
+    LOGGER.info(
+        "open_position applied",
+        extra={
+            "event": "open_position",
+            "asset": asset,
+            "requested_side": side,
+            "normalized_side": norm_side,
+            "entry": entry,
+            "sl": sl,
+            "tp2": tp2,
+            "opened_at_utc": opened_at_utc,
+            "previous_position": previous_entry,
+            "updated_position": deepcopy(updated.get(asset)),
+            "positions_count": len(updated),
+        },
+    )
     return updated
 
 
