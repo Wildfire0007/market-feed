@@ -30,7 +30,7 @@ ENV:
 
 import os, json, sys, logging, requests, time
 from uuid import uuid4
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from copy import deepcopy
 from pathlib import Path
 from functools import lru_cache
@@ -101,6 +101,162 @@ _ACTIVE_WATCHER_OVERRIDES = {
         "event": None,
     },
 }
+
+
+@dataclass
+class EntryAuditRecord:
+    asset: str
+    intent: str
+    decision: str
+    setup_grade: str
+    stable: bool
+    send_kind: Optional[str]
+    should_notify: bool
+    manual_state: Dict[str, Any]
+    manual_tracking_enabled: bool
+    can_write_positions: bool
+    state_loaded: bool
+    positions_file: str
+    gates_missing: Iterable[str]
+    notify_reason: Optional[str]
+    display_stable: bool
+    entry_opened: bool = False
+    positions_changed: bool = False
+    commit_result: Dict[str, Any] = field(default_factory=dict)
+    dispatch_attempted: bool = False
+    dispatch_success: bool = False
+    dispatch_status: Optional[int] = None
+    dispatch_error: Optional[str] = None
+    channel: Optional[str] = None
+    message_id: Optional[str] = None
+
+    def manual_state_snapshot(self) -> Dict[str, Any]:
+        state = self.manual_state or {}
+        return {
+            "has_position": state.get("has_position"),
+            "is_flat": state.get("is_flat"),
+            "cooldown_active": state.get("cooldown_active"),
+            "cooldown_until_utc": state.get("cooldown_until_utc"),
+            "side": state.get("side"),
+            "tracking_enabled": state.get("tracking_enabled"),
+        }
+
+    def log_candidate(self) -> None:
+        position_tracker.log_audit_event(
+            "entry candidate",
+            event="ENTRY_CANDIDATE",
+            asset=self.asset,
+            intent=self.intent,
+            decision=self.decision,
+            setup_grade=self.setup_grade,
+            stable=bool(self.stable),
+            send_kind=self.send_kind,
+            should_notify=bool(self.should_notify),
+            manual_state=self.manual_state_snapshot(),
+            manual_tracking_enabled=self.manual_tracking_enabled,
+            can_write_positions=self.can_write_positions,
+            state_loaded=self.state_loaded,
+            positions_file=self.positions_file,
+            gates_missing=list(self.gates_missing),
+            notify_reason=self.notify_reason,
+            display_stable=bool(self.display_stable),
+        )
+
+    def log_dispatch_result(self) -> None:
+        position_tracker.log_audit_event(
+            "entry dispatch result",
+            event="ENTRY_DISPATCH_RESULT",
+            asset=self.asset,
+            intent=self.intent,
+            decision=self.decision,
+            send_kind=self.send_kind,
+            attempted=bool(self.dispatch_attempted),
+            success=bool(self.dispatch_success),
+            http_status=self.dispatch_status,
+            error=self.dispatch_error,
+            channel=self.channel,
+            message_id=self.message_id,
+        )
+
+    def _commit_reason(self) -> str:
+        if self.dispatch_attempted and not self.dispatch_success:
+            return "dispatch_failed"
+        if not self.dispatch_attempted:
+            return "dispatch_not_attempted"
+        if not self.can_write_positions:
+            return "writer_read_only"
+        if not self.state_loaded:
+            return "state_not_loaded"
+        if not (self.manual_state or {}).get("is_flat", False):
+            return "not_flat"
+
+        gating_ok = (
+            self.manual_tracking_enabled
+            and self.should_notify
+            and self.setup_grade in {"A", "B"}
+            and self.decision in {"buy", "sell"}
+            and self.send_kind in {"normal", "flip"}
+            and self.stable
+            and self.display_stable
+        )
+        if not gating_ok:
+            return "gating_failed"
+
+        if self.commit_result.get("exception"):
+            return "commit_exception"
+        if self.commit_result.get("committed"):
+            return "commit_ok"
+        return "gating_failed"
+
+    def log_commit_decision(self) -> None:
+        reason = self._commit_reason()
+        will_commit = reason == "commit_ok"
+        payload = {
+            "asset": self.asset,
+            "intent": self.intent,
+            "decision": self.decision,
+            "setup_grade": self.setup_grade,
+            "stable": bool(self.stable),
+            "send_kind": self.send_kind,
+            "should_notify": bool(self.should_notify),
+            "manual_state": self.manual_state_snapshot(),
+            "manual_tracking_enabled": self.manual_tracking_enabled,
+            "can_write_positions": self.can_write_positions,
+            "state_loaded": self.state_loaded,
+            "positions_file": self.positions_file,
+            "gates_missing": list(self.gates_missing),
+            "commit_reason": reason,
+            "will_commit": will_commit,
+            "entries_after_save": self.commit_result.get("entries_after_save"),
+            "dispatch_attempted": self.dispatch_attempted,
+            "dispatch_success": self.dispatch_success,
+            "http_status": self.dispatch_status,
+            "commit_exception": self.commit_result.get("exception"),
+        }
+        position_tracker.log_audit_event("entry commit decision", event="ENTRY_COMMIT_DECISION", **payload)
+
+        if self.dispatch_success and not will_commit and reason != "dispatch_failed":
+            position_tracker.log_audit_event(
+                "entry dispatched but not committed",
+                event="ENTRY_DISPATCHED_BUT_NOT_COMMITTED",
+                **payload,
+            )
+
+    def log_commit_result(self) -> None:
+        position_tracker.log_audit_event(
+            "entry commit result",
+            event="ENTRY_COMMIT_RESULT",
+            asset=self.asset,
+            intent=self.intent,
+            decision=self.decision,
+            send_kind=self.send_kind,
+            committed=bool(self.commit_result.get("committed")),
+            exception=self.commit_result.get("exception"),
+            entries_after_save=self.commit_result.get("entries_after_save"),
+            positions_file=self.positions_file,
+            written_bytes=self.commit_result.get("written_bytes"),
+            positions_snapshot=self.commit_result.get("positions_snapshot"),
+        )
 
 
 def _build_active_watcher_config() -> Dict[str, Any]:
@@ -1023,11 +1179,11 @@ def _collect_channel_embeds(
     return live_embeds, management_embeds, market_scan_embeds
 
 
-def post_batches(hook: str, content: str, embeds: List[Dict[str, Any]]) -> None:
+def post_batches(hook: str, content: str, embeds: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Küldjünk 10-es csomagokban az embedeket egy webhookra."""
 
     if not hook:
-        return
+        return {"attempted": False, "success": False, "http_status": None, "error": "missing_webhook"}
     now = time.time()
     cooldown_until = _WEBHOOK_COOLDOWN_UNTIL.get(hook)
     if cooldown_until and now < cooldown_until:
@@ -1035,7 +1191,12 @@ def post_batches(hook: str, content: str, embeds: List[Dict[str, Any]]) -> None:
             "notify_webhook_cooldown_active",
             extra={"hook": hook[:32], "retry_at_epoch": cooldown_until},
         )
-        return
+        return {
+            "attempted": False,
+            "success": False,
+            "http_status": None,
+            "error": "cooldown_active",
+        }
 
     def _sleep_with_cap(delay: float) -> None:
         time.sleep(min(delay, NETWORK_BACKOFF_CAP))
@@ -1051,39 +1212,57 @@ def post_batches(hook: str, content: str, embeds: List[Dict[str, Any]]) -> None:
         return min(NETWORK_BACKOFF_CAP, NETWORK_BACKOFF_BASE * (2 ** (attempt - 1)))
       
     batches = [embeds[i : i + 10] for i in range(0, len(embeds), 10)]
+    result: Dict[str, Any] = {
+        "attempted": False,
+        "success": False,
+        "http_status": None,
+        "error": None,
+        "message_id": None,
+    }
     for batch in batches:
         last_error: Optional[Exception] = None
         for attempt in range(1, NETWORK_RETRIES + 1):
             try:
                 r = requests.post(hook, json={"content": content, "embeds": batch}, timeout=20)
+                result["http_status"] = r.status_code
+                result["attempted"] = True
                 r.raise_for_status()
+                result["success"] = True
                 break
             except requests.HTTPError as exc:  # pragma: no cover - exercised via RequestException
                 last_error = exc
-                status = exc.response.status_code if exc.response else None
+                result["http_status"] = exc.response.status_code if exc.response else None
+                result["attempted"] = True
+                result["error"] = str(exc)
                 delay = _retry_delay(attempt, exc.response)
                 LOGGER.warning(
                     "notify_webhook_http_error",
-                    extra={"status": status, "attempt": attempt, "delay": delay},
+                    extra={"status": result["http_status"], "attempt": attempt, "delay": delay},
                 )
-                if status == 429:
+                if result["http_status"] == 429:
                     _WEBHOOK_COOLDOWN_UNTIL[hook] = time.time() + NETWORK_COOLDOWN_MIN * 60
                 if attempt == NETWORK_RETRIES:
-                    raise
+                    break
                 _sleep_with_cap(delay)
             except requests.RequestException as exc:
                 last_error = exc
+                result["attempted"] = True
+                result["error"] = str(exc)
                 delay = _retry_delay(attempt, None)
                 LOGGER.warning(
                     "notify_webhook_network_error",
                     extra={"attempt": attempt, "delay": delay, "error": str(exc)},
                 )
                 if attempt == NETWORK_RETRIES:
-                    raise
+                    break
                 _sleep_with_cap(delay)
         else:
             if last_error:
-                raise last_error
+                result["error"] = str(last_error)
+        if not result.get("success"):
+            result["success"] = False
+
+    return result
       
 def build_entry_gate_summary_embed() -> Optional[Dict[str, Any]]:
     """Return a compact embed with top entry gate elutasítási okok."""
@@ -1826,30 +2005,88 @@ def _apply_and_persist_manual_transitions(
     tp2_level: Optional[float],
     open_commits_this_run: Set[str],
     sig: Dict[str, Any],
-) -> Tuple[Dict[str, Any], Dict[str, Any], bool, bool]:
-    manual_positions, manual_state, positions_changed, entry_opened = _apply_manual_position_transitions(
-        asset=asset,
-        intent=intent,
-        decision=decision,
-        setup_grade=setup_grade,
-        notify_meta=notify_meta,
-        signal_payload=signal_payload,
-        manual_tracking_enabled=manual_tracking_enabled,
-        can_write_positions=can_write_positions,
-        manual_state=manual_state,
-        manual_positions=manual_positions,
-        tracking_cfg=tracking_cfg,
-        now_dt=now_dt,
-        now_iso=now_iso,
-        send_kind=send_kind,
-        display_stable=display_stable,
-        missing_list=missing_list,
-        cooldown_map=cooldown_map,
-        cooldown_default=cooldown_default,
-    )
+) -> Tuple[Dict[str, Any], Dict[str, Any], bool, bool, Dict[str, Any]]:
+    commit_result: Dict[str, Any] = {
+        "committed": False,
+        "exception": None,
+        "entries_after_save": len(manual_positions) if isinstance(manual_positions, dict) else 0,
+        "positions_file": positions_path,
+        "written_bytes": None,
+        "positions_snapshot": None,
+        "positions_changed": False,
+        "entry_opened": False,
+    }
+    try:
+        manual_positions, manual_state, positions_changed, entry_opened = _apply_manual_position_transitions(
+            asset=asset,
+            intent=intent,
+            decision=decision,
+            setup_grade=setup_grade,
+            notify_meta=notify_meta,
+            signal_payload=signal_payload,
+            manual_tracking_enabled=manual_tracking_enabled,
+            can_write_positions=can_write_positions,
+            manual_state=manual_state,
+            manual_positions=manual_positions,
+            tracking_cfg=tracking_cfg,
+            now_dt=now_dt,
+            now_iso=now_iso,
+            send_kind=send_kind,
+            display_stable=display_stable,
+            missing_list=missing_list,
+            cooldown_map=cooldown_map,
+            cooldown_default=cooldown_default,
+        )
+    except Exception as exc:
+        commit_result["exception"] = repr(exc)
+        if intent == "entry":
+            position_tracker.log_audit_event(
+                "entry commit result",
+                event="ENTRY_COMMIT_RESULT",
+                asset=asset,
+                intent=intent,
+                decision=decision,
+                send_kind=send_kind,
+                committed=False,
+                exception=repr(exc),
+                entries_after_save=commit_result.get("entries_after_save"),
+                positions_file=positions_path,
+                written_bytes=None,
+            )
+        raise
+
+    commit_result["positions_changed"] = positions_changed
+    commit_result["entry_opened"] = entry_opened
 
     if positions_changed:
-        position_tracker.save_positions_atomic(positions_path, manual_positions)
+        try:
+            save_meta = position_tracker.save_positions_atomic(positions_path, manual_positions)
+            commit_result.update(
+                {
+                    "committed": True,
+                    "entries_after_save": len(manual_positions),
+                    "positions_snapshot": save_meta,
+                    "positions_file": (save_meta or {}).get("positions_file", positions_path),
+                    "written_bytes": (save_meta or {}).get("written_bytes"),
+                }
+            )
+        except Exception as exc:
+            commit_result["exception"] = repr(exc)
+            if intent == "entry":
+                position_tracker.log_audit_event(
+                    "entry commit result",
+                    event="ENTRY_COMMIT_RESULT",
+                    asset=asset,
+                    intent=intent,
+                    decision=decision,
+                    send_kind=send_kind,
+                    committed=False,
+                    exception=repr(exc),
+                    entries_after_save=commit_result.get("entries_after_save"),
+                    positions_file=positions_path,
+                    written_bytes=None,
+                )
+            raise
         sig["position_state"] = manual_state
 
     if positions_changed and entry_opened:
@@ -1869,7 +2106,34 @@ def _apply_and_persist_manual_transitions(
         )
         open_commits_this_run.add(asset)
 
-    return manual_positions, manual_state, positions_changed, entry_opened
+    if intent == "entry":
+        if commit_result.get("committed") and not commit_result.get("positions_snapshot"):
+            commit_result["positions_snapshot"] = position_tracker.positions_file_snapshot(positions_path)
+        position_tracker.log_audit_event(
+            "entry commit result",
+            event="ENTRY_COMMIT_RESULT",
+            asset=asset,
+            intent=intent,
+            decision=decision,
+            send_kind=send_kind,
+            committed=bool(commit_result.get("committed")),
+            exception=commit_result.get("exception"),
+            entries_after_save=commit_result.get("entries_after_save"),
+            positions_file=commit_result.get("positions_file", positions_path),
+            written_bytes=commit_result.get("written_bytes"),
+            positions_snapshot=commit_result.get("positions_snapshot"),
+        )
+        if commit_result.get("positions_snapshot"):
+            position_tracker.log_audit_event(
+                "positions file snapshot",
+                event="POSITIONS_FILE_SNAPSHOT",
+                asset=asset,
+                intent=intent,
+                positions_file=commit_result.get("positions_file", positions_path),
+                snapshot=commit_result.get("positions_snapshot"),
+            )
+
+    return manual_positions, manual_state, positions_changed, entry_opened, commit_result
 
 
 def _archive_last_sent_entries(entries: List[Dict[str, Any]]) -> None:
@@ -3150,11 +3414,23 @@ def main():
     manual_tracking_enabled = bool(tracking_cfg.get("enabled"))
     positions_path = tracking_cfg.get("positions_file") or "public/_manual_positions.json"
     treat_missing_positions = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
-    manual_positions = position_tracker.load_positions(positions_path, treat_missing_positions)
+    positions_state_loaded = True
+    try:
+        manual_positions = position_tracker.load_positions(positions_path, treat_missing_positions)
+    except Exception as exc:  # pragma: no cover - defensive
+        positions_state_loaded = False
+        manual_positions = {}
+        position_tracker.log_audit_event(
+            "manual positions load failed",
+            event="LOAD_POSITIONS_FAILED",
+            positions_file=positions_path,
+            exception=repr(exc),
+        )
     cooldown_map = tracking_cfg.get("post_exit_cooldown_minutes") or {}
     cooldown_default = 20
     open_commits_this_run: Set[str] = set()
     manual_states: Dict[str, Any] = {}
+    entry_audit_records: Dict[str, EntryAuditRecord] = {}
   
     analysis_summary = load(f"{PUBLIC_DIR}/analysis_summary.json") or {}
     run_id = run_meta.get("run_id") or os.getenv("GITHUB_RUN_ID")
@@ -3369,6 +3645,27 @@ def main():
         if send_kind == "invalidate" and manual_state.get("has_position"):
             send_kind = None
 
+        if intent == "entry" and asset not in entry_audit_records:
+            entry_record = EntryAuditRecord(
+                asset=asset,
+                intent=intent,
+                decision=eff,
+                setup_grade=setup_grade,
+                stable=bool(display_stable),
+                send_kind=send_kind,
+                should_notify=should_notify,
+                manual_state=deepcopy(manual_state),
+                manual_tracking_enabled=manual_tracking_enabled,
+                can_write_positions=can_write_positions,
+                state_loaded=positions_state_loaded,
+                positions_file=positions_path,
+                gates_missing=missing_list,
+                notify_reason=(notify_meta or {}).get("reason"),
+                display_stable=bool(display_stable),
+            )
+            entry_audit_records[asset] = entry_record
+            entry_record.log_candidate()
+
         if send_kind is None and intent == "entry":
             suppression_reason = (notify_meta or {}).get("reason")
             if suppression_reason is None:
@@ -3404,7 +3701,7 @@ def main():
         entry_opened = False
 
         if intent in {"entry", "hard_exit", "manage_position"}:
-            manual_positions, manual_state, positions_changed, entry_opened = _apply_and_persist_manual_transitions(
+            manual_positions, manual_state, positions_changed, entry_opened, commit_result = _apply_and_persist_manual_transitions(
                 asset=asset,
                 intent=intent,
                 decision=eff,
@@ -3430,6 +3727,12 @@ def main():
                 open_commits_this_run=open_commits_this_run,
                 sig=sig,
             )
+            entry_record = entry_audit_records.get(asset)
+            if entry_record:
+                entry_record.positions_changed = positions_changed
+                entry_record.entry_opened = entry_opened
+                entry_record.commit_result = commit_result
+                entry_record.send_kind = send_kind
             if isinstance(sig, dict):
                 sig["position_state"] = manual_state
           
@@ -3610,19 +3913,41 @@ def main():
             continue
         content = f"**{title}**\n{headers[channel]}"
         try:
-            post_batches(hook, content, embeds)
+            dispatch_result = post_batches(hook, content, embeds)
             for asset, record in asset_send_records.items():
                 if record.get("channel") != channel:
                     continue
+                enriched = dict(record)
+                enriched.update(
+                    {
+                        "dispatch_attempted": dispatch_result.get("attempted"),
+                        "dispatch_success": dispatch_result.get("success"),
+                        "http_status": dispatch_result.get("http_status"),
+                        "dispatch_error": dispatch_result.get("error"),
+                    }
+                )
                 position_tracker.log_audit_event(
                     "Discord dispatch completed",
                     event="DISCORD_SEND",
-                    **record,
+                    **enriched,
                 )
-            dispatched = True
+                entry_record = entry_audit_records.get(asset)
+                if entry_record and record.get("intent") == "entry":
+                    entry_record.dispatch_attempted = bool(dispatch_result.get("attempted"))
+                    entry_record.dispatch_success = bool(dispatch_result.get("success"))
+                    entry_record.dispatch_status = dispatch_result.get("http_status")
+                    entry_record.dispatch_error = dispatch_result.get("error")
+                    entry_record.channel = channel
+                    entry_record.message_id = dispatch_result.get("message_id")
+                    entry_record.log_dispatch_result()
+            if dispatch_result.get("success"):
+                dispatched = True
         except Exception as e:
             print(f"Discord notify FAILED ({channel}):", e)
 
+    for record in entry_audit_records.values():
+        record.log_commit_decision()
+      
     if dispatched:
         print("Discord notify OK.")
     
