@@ -310,20 +310,12 @@ except Exception:
     pass
 
 ASSET_EMOJIS = {
-    "EURUSD": "💶",
-    "USDJPY": "💴",
-    "GBPUSD": "💷",
-    "BTCUSD": "🚀",
-    "ETHUSD": "💎",
-    "GOLD_CFD": "🥇",
-    "XAUUSD": "🥇",
+    "EURUSD": "💶",    
+    "BTCUSD": "🚀",   
+    "GOLD_CFD": "🥇",   
     "XAGUSD": "🥈",
-    "USOIL": "🛢️",
-    "WTI": "🛢️",
-    "NVDA": "🤖",
-    "TSLA": "🚗",
-    "SPX500": "📈",
-    "NAS100": "💻",
+    "USOIL": "🛢️",    
+    "NVDA": "🤖",    
 }
 
 COLORS = {
