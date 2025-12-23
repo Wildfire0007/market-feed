@@ -1,10 +1,3 @@
- (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
-diff --git a/tests/test_entry_batch_dispatch.py b/tests/test_entry_batch_dispatch.py
-new file mode 100644
-index 0000000000000000000000000000000000000000..9750849d7695c47a92cfe99112ee75594455bc5f
---- /dev/null
- b/tests/test_entry_batch_dispatch.py
-@@ -0,0 1,232 @@
 from datetime import datetime, timezone
 
 import position_tracker
