@@ -63,7 +63,7 @@ def test_cli_prefers_entry_gate_logs(tmp_path, capsys):
     logs_dir = tmp_path / "public" / "debug" / "entry_gates"
     logs_dir.mkdir(parents=True)
     log_payload = [
-        {"symbol": "ethusd", "timestamp": "2024-08-05T19:10:00Z", "reasons": ["spread_gate"]},
+        {"symbol": "eurusd", "timestamp": "2024-08-05T19:10:00Z", "reasons": ["spread_gate"]},
         {"symbol": "btcusd", "timestamp": "2024-08-05T01:05:00Z", "reasons": []},
     ]
     log_lines = "\n".join(json.dumps(item) for item in log_payload)
@@ -85,7 +85,7 @@ def test_cli_prefers_entry_gate_logs(tmp_path, capsys):
     assert "Analysing" not in captured.err  # ensure fallback message absent
 
     summary = json.loads(output_path.read_text(encoding="utf-8"))
-    assert summary["ETHUSD"]["total_candidates"] == 1
-    assert summary["ETHUSD"]["total_rejected"] == 1
-    assert summary["ETHUSD"]["by_reason"] == {"spread_gate": 1}
+    assert summary["EURUSD"]["total_candidates"] == 1
+    assert summary["EURUSD"]["total_rejected"] == 1
+    assert summary["EURUSD"]["by_reason"] == {"spread_gate": 1}
     assert summary["BTCUSD"]["total_rejected"] == 0
