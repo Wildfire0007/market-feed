@@ -2155,16 +2155,19 @@ def _finalize_entry_commit(
     open_commits_this_run: Set[str],
 ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     entry_record: EntryAuditRecord = pending["audit"]
-    entry_record.dispatch_attempted = bool(dispatch_result.get("attempted"))
-    entry_record.dispatch_success = bool(dispatch_result.get("success"))
+    dispatch_attempted = dispatch_result.get("attempted")
+    if dispatch_attempted is None:
+        dispatch_attempted = True
+    entry_record.dispatch_attempted = bool(dispatch_attempted)
+    entry_record.dispatch_success = bool(dispatch_result.get("success", False))
     entry_record.dispatch_status = dispatch_result.get("http_status")
     entry_record.dispatch_error = dispatch_result.get("error")
     entry_record.channel = pending.get("channel")
     entry_record.message_id = dispatch_result.get("message_id")
 
-    if not entry_record.dispatch_attempted or not entry_record.dispatch_success:
+    if not entry_record.dispatch_success:
         entry_record.commit_result = {"committed": False}
-        entry_record.commit_reason_override = "dispatch_failed" if entry_record.dispatch_attempted else None
+        entry_record.commit_reason_override = "dispatch_failed"
         manual_state = position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt)
         return manual_positions, manual_state, entry_record.commit_result
 
@@ -3619,3 +3622,500 @@ def main():
             "last_sent": None,
             "last_sent_decision": None,
             "last_sent_mode": None
+            "last_sent_known": False,
+            "cooldown_until": None,
+        })
+
+        if eff == st.get("last"):
+            st["count"] = int(st.get("count", 0)) + 1
+        else:
+            st["last"]  = eff
+            st["count"] = 1
+
+        missing_list = ((sig.get("gates") or {}).get("missing") or [])
+        core_bos_pending = (mode_current == "core") and ("bos5m" in missing_list)
+
+        is_stable = st["count"] >= STABILITY_RUNS
+        display_stable = is_stable and not core_bos_pending
+        per_asset_is_stable[asset] = display_stable
+        is_actionable_now = (eff in ("buy","sell")) and is_stable and not core_bos_pending
+
+        notify_meta = sig.get("notify") if isinstance(sig, dict) else {}
+        intent = sig.get("intent") if isinstance(sig, dict) else None
+        if manual_tracking_enabled and intent in {"manage_position", "hard_exit"}:
+            if not manual_state.get("has_position"):
+                notify_meta = dict(notify_meta or {})
+                notify_meta["should_notify"] = False
+                notify_meta["reason"] = "no_open_position_tracked"
+                sig["notify"] = notify_meta
+        if manual_tracking_enabled and intent == "entry":
+            if manual_state.get("cooldown_active"):
+                notify_meta = dict(notify_meta or {})
+                notify_meta.setdefault("should_notify", False)
+                notify_meta.setdefault("reason", "cooldown_active")
+                notify_meta.setdefault("cooldown_until_utc", manual_state.get("cooldown_until_utc"))
+                sig["notify"] = notify_meta
+            elif manual_state.get("has_position"):
+                notify_meta = dict(notify_meta or {})
+                notify_meta.setdefault("should_notify", False)
+                notify_meta.setdefault("reason", "position_already_open")
+                sig["notify"] = notify_meta
+        should_notify = True
+        if isinstance(notify_meta, dict):
+            should_notify = bool(notify_meta.get("should_notify", True))
+        if not should_notify:
+            if intent == "entry":
+                position_tracker.log_audit_event(
+                    "entry suppressed before notify dispatch",
+                    event="ENTRY_SUPPRESSED",
+                    asset=asset,
+                    intent=intent,
+                    decision=eff,
+                    entry_side=eff if eff in {"buy", "sell"} else None,
+                    setup_grade=setup_grade,
+                    stable=bool(display_stable),
+                    gates_missing=missing_list,
+                    notify_should_notify=False,
+                    notify_reason=(notify_meta or {}).get("reason"),
+                    manual_tracking_enabled=manual_tracking_enabled,
+                    manual_has_position=manual_state.get("has_position"),
+                    manual_cooldown_active=manual_state.get("cooldown_active"),
+                    cooldown_until_utc=manual_state.get("cooldown_until_utc"),
+                    suppression_reason=(notify_meta or {}).get("reason") or "notify_blocked",
+                    send_kind=None,
+                )
+            state[asset] = st
+            per_asset_sigs[asset] = sig
+            per_asset_is_stable[asset] = display_stable
+            continue
+
+        cooldown_until_iso = st.get("cooldown_until")
+        cooldown_active = False
+        if COOLDOWN_MIN > 0 and cooldown_until_iso:
+            cooldown_active = now_ep < iso_to_epoch(cooldown_until_iso)
+        if force_send:
+            cooldown_active = False
+
+        prev_sent_decision = st.get("last_sent_decision")
+        flip_cd_min = _flip_cooldown_minutes(asset)
+        last_sent_iso = st.get("last_sent")
+        flip_cd_active = False
+        age_sec: Optional[int] = None
+        if (
+            flip_cd_min > 0
+            and last_sent_iso
+            and prev_sent_decision in ("buy", "sell")
+            and eff in ("buy", "sell")
+            and eff != prev_sent_decision
+        ):
+            age_sec = now_ep - iso_to_epoch(last_sent_iso)
+            if age_sec >= 0 and age_sec < flip_cd_min * 60:
+                flip_cd_active = True
+
+        # --- küldési döntés ---
+        send_kind = None  # None | "normal" | "invalidate" | "flip"
+
+        if is_actionable_now:
+            if prev_sent_decision in ("buy","sell"):
+                if eff != prev_sent_decision:
+                    if flip_cd_active:
+                        print(f"notify: flip suppressed by cooldown ({asset}) age_sec={age_sec} cd_min={flip_cd_min}")
+                        send_kind = None
+                    else:
+                        send_kind = "flip"
+                else:
+                    if not cooldown_active:
+                        send_kind = "normal"
+            else:
+                if not cooldown_active:
+                    send_kind = "normal"
+        else:
+            if prev_sent_decision in ("buy","sell") and eff == "no entry" and is_stable:
+                send_kind = "invalidate"
+
+        if send_kind is None and intent in {"hard_exit", "manage_position"}:
+            send_kind = "normal"
+            display_stable = True
+
+        if send_kind == "invalidate" and manual_state.get("has_position"):
+            send_kind = None
+
+        if intent == "entry" and asset not in entry_audit_records:
+            entry_record = EntryAuditRecord(
+                asset=asset,
+                intent=intent,
+                decision=eff,
+                setup_grade=setup_grade,
+                stable=bool(display_stable),
+                send_kind=send_kind,
+                should_notify=should_notify,
+                manual_state=deepcopy(manual_state),
+                manual_tracking_enabled=manual_tracking_enabled,
+                can_write_positions=can_write_positions,
+                state_loaded=positions_state_loaded,
+                positions_file=positions_path,
+                gates_missing=missing_list,
+                notify_reason=(notify_meta or {}).get("reason"),
+                display_stable=bool(display_stable),
+            )
+            entry_audit_records[asset] = entry_record
+            entry_record.log_candidate()
+
+        if send_kind is None and intent == "entry":
+            suppression_reason = (notify_meta or {}).get("reason")
+            if suppression_reason is None:
+                if not is_actionable_now:
+                    suppression_reason = "not_actionable"
+                elif cooldown_active:
+                    suppression_reason = "cooldown_active"
+                elif flip_cd_active:
+                    suppression_reason = "flip_cooldown_active"
+                else:
+                    suppression_reason = "send_kind_none"
+            position_tracker.log_audit_event(
+                "entry suppressed by dispatcher",
+                event="ENTRY_SUPPRESSED",
+                asset=asset,
+                intent=intent,
+                decision=eff,
+                entry_side=eff if eff in {"buy", "sell"} else None,
+                setup_grade=setup_grade,
+                stable=bool(display_stable),
+                gates_missing=missing_list,
+                notify_should_notify=should_notify,
+                notify_reason=(notify_meta or {}).get("reason"),
+                manual_tracking_enabled=manual_tracking_enabled,
+                manual_has_position=manual_state.get("has_position"),
+                manual_cooldown_active=manual_state.get("cooldown_active"),
+                cooldown_until_utc=manual_state.get("cooldown_until_utc"),
+                suppression_reason=suppression_reason,
+                send_kind=None,
+            )
+
+        positions_changed = False
+        entry_opened = False
+
+        attempt_entry_dispatch = False
+        if intent == "entry":
+            attempt_entry_dispatch = (
+                send_kind in {"normal", "flip"}
+                and display_stable
+                and setup_grade in {"A", "B"}
+                and should_notify
+                and manual_state.get("is_flat")
+                and manual_tracking_enabled
+                and can_write_positions
+                and positions_state_loaded
+            )
+            if not attempt_entry_dispatch:
+                reason = "gating_failed"
+                if not manual_state.get("is_flat"):
+                    reason = "not_flat"
+                elif not can_write_positions:
+                    reason = "writer_read_only"
+                elif not positions_state_loaded:
+                    reason = "state_not_loaded"
+                entry_record = entry_audit_records.get(asset)
+                if entry_record:
+                    entry_record.commit_reason_override = reason
+                    entry_record.commit_result = {"committed": False}
+                    entry_record.send_kind = send_kind
+                send_kind = None
+        if intent in {"hard_exit", "manage_position"}:
+            manual_positions, manual_state, positions_changed, entry_opened, commit_result = _apply_and_persist_manual_transitions(
+                asset=asset,
+                intent=intent,
+                decision=eff,
+                setup_grade=setup_grade,
+                notify_meta=notify_meta,
+                signal_payload=sig,
+                manual_tracking_enabled=manual_tracking_enabled,
+                can_write_positions=can_write_positions,
+                manual_state=manual_state,
+                manual_positions=manual_positions,
+                tracking_cfg=tracking_cfg,
+                now_dt=now_dt,
+                now_iso=now_iso,
+                send_kind=send_kind,
+                display_stable=display_stable,
+                missing_list=missing_list,
+                cooldown_map=cooldown_map,
+                cooldown_default=cooldown_default,
+                positions_path=positions_path,
+                entry_level=entry_level,
+                sl_level=sl_level,
+                tp2_level=tp2_level,
+                open_commits_this_run=open_commits_this_run,
+                sig=sig,
+            )
+            entry_record = entry_audit_records.get(asset)
+            if entry_record:
+                entry_record.positions_changed = positions_changed
+                entry_record.entry_opened = entry_opened
+                entry_record.commit_result = commit_result
+                entry_record.send_kind = send_kind
+            if isinstance(sig, dict):
+                sig["position_state"] = manual_state
+          
+        # --- embed + állapot frissítés ---
+        if send_kind and (intent != "entry" or attempt_entry_dispatch):
+            channel = classify_signal_channel(eff, send_kind, display_stable)
+            if intent in {"hard_exit", "manage_position"}:
+                channel = "management"
+            embed = build_mobile_embed_for_asset(
+                asset,
+                state,
+                sig,
+                eff,
+                mode_current,
+                display_stable,
+                is_flip=send_kind == "flip",
+                is_invalidate=send_kind == "invalidate",
+                kind=send_kind,
+                manual_positions=manual_positions,
+                include_manual_position=channel != "market_scan",
+            )
+            asset_embeds[asset] = embed            
+            asset_channels[asset] = channel
+            asset_send_records[asset] = {
+                "asset": asset,
+                "channel": channel,
+                "send_kind": send_kind,
+                "intent": intent,
+                "decision": eff,
+                "setup_grade": setup_grade,
+                "stable": bool(display_stable),
+                "entry_level": entry_level,
+                "sl": sl_level,
+                "tp2": tp2_level,
+                "manual_tracking_enabled": manual_tracking_enabled,
+                "manual_has_position": manual_state.get("has_position"),
+                "manual_cooldown_active": manual_state.get("cooldown_active"),
+                "cooldown_until_utc": manual_state.get("cooldown_until_utc"),
+                "notify_should_notify": bool((notify_meta or {}).get("should_notify", True)),
+                "notify_reason": (notify_meta or {}).get("reason"),
+            }
+            if intent == "entry" and attempt_entry_dispatch:
+                pending_entry_commits[asset] = {
+                    "intent": intent,
+                    "decision": eff,
+                    "setup_grade": setup_grade,
+                    "entry_side": eff,
+                    "send_kind": send_kind,
+                    "display_stable": display_stable,
+                    "notify_meta": notify_meta,
+                    "manual_state_pre": deepcopy(manual_state),
+                    "manual_tracking_enabled": manual_tracking_enabled,
+                    "can_write_positions": can_write_positions,
+                    "state_loaded": positions_state_loaded,
+                    "levels": {
+                        "entry": entry_level,
+                        "sl": sl_level,
+                        "tp2": tp2_level,
+                    },
+                    "gates_missing": missing_list,
+                    "signal_payload": deepcopy(sig) if isinstance(sig, dict) else {},
+                    "audit": entry_audit_records.get(asset),
+                    "channel": channel,
+                }
+            if send_kind in ("normal","flip"):
+                cooldown_minutes = COOLDOWN_MIN
+                if COOLDOWN_MIN > 0 and mode_current == "momentum":
+                    cooldown_minutes = MOMENTUM_COOLDOWN_MIN
+                st = update_asset_send_state(
+                    st,
+                    decision=eff,
+                    now=datetime.fromtimestamp(now_ep, tz=timezone.utc),
+                    cooldown_minutes=cooldown_minutes,
+                    mode=mode_current,
+                )
+                mark_heartbeat(meta, bud_key, now_iso)
+            elif send_kind == "invalidate":
+                st = update_asset_send_state(
+                    st,
+                    decision="no entry",
+                    now=datetime.fromtimestamp(now_ep, tz=timezone.utc),
+                    cooldown_minutes=0,
+                    mode=None,
+                )
+                mark_heartbeat(meta, bud_key, now_iso)                   
+
+        manual_states[asset] = manual_state
+
+        state[asset] = st
+
+        if manual_tracking_enabled and manual_state.get("has_position"):
+            manual_open_assets.add(asset)
+
+    audit_path = position_tracker.resolve_repo_path("public/_manual_positions_audit.jsonl")
+    prior_open_commits = _load_prior_open_commits(audit_path)
+    for asset, mstate in manual_states.items():
+        if (
+            mstate.get("has_position")
+            and asset not in open_commits_this_run
+            and asset not in prior_open_commits
+        ):
+            position_tracker.log_audit_event(
+                "manual position missing OPEN_COMMIT",
+                event="INCONSISTENT_STATE",
+                asset=asset,
+                opened_at_utc=mstate.get("opened_at_utc"),
+                positions_file=positions_path,
+            )
+          
+    watcher = ActivePositionWatcher(
+        _build_active_watcher_config(),
+        tdstatus=tdstatus,
+        signals=per_asset_sigs,
+        now=datetime.now(timezone.utc),
+        manual_positions=manual_positions,
+        manual_tracking_cfg=tracking_cfg,
+    )
+    watcher_embeds = watcher.run(
+        allowed_assets=manual_open_assets if manual_tracking_enabled else None
+    )
+
+    # --- Heartbeat: MINDEN órában, ha az órában még nem ment ki event ---
+    heartbeat_due = last_heartbeat_prev != bud_key
+    if not heartbeat_due:
+        last_hb_dt = parse_utc(last_heartbeat_iso)
+        if last_hb_dt is None:
+            heartbeat_due = True
+        else:
+            delta = now_dt - last_hb_dt
+            if delta < timedelta(0) or delta >= timedelta(minutes=HEARTBEAT_STALE_MIN):
+                heartbeat_due = True
+    want_heartbeat = force_heartbeat or heartbeat_due
+    heartbeat_added = False
+    heartbeat_snapshots: List[Dict[str, Any]] = []
+    if want_heartbeat:
+        for asset in ASSETS:
+            sig = per_asset_sigs.get(asset) or {"asset": asset, "signal": "no entry", "probability": 0}
+            is_stable = per_asset_is_stable.get(asset, True)        
+            if asset not in asset_embeds:
+                asset_embeds[asset] = build_mobile_embed_for_asset(
+                    asset,
+                    state,
+                    sig,
+                    decision_of(sig),
+                    gates_mode(sig),
+                    is_stable=is_stable,
+                    is_flip=False,
+                    is_invalidate=False,
+                    kind="heartbeat",
+                    manual_positions=manual_positions,
+                    include_manual_position=False,                  
+                )
+                asset_channels.setdefault(asset, "market_scan")
+                heartbeat_added = True
+
+        heartbeat_snapshots = watcher.snapshot_embeds(exclude=watcher.changed_assets)
+        if heartbeat_snapshots:
+            heartbeat_added = True
+
+        if heartbeat_added:
+            mark_heartbeat(meta, bud_key, now_iso)
+
+    state["_meta"] = meta
+    save_state(state)
+    
+    gate_embed = build_entry_gate_summary_embed()
+  
+    pipeline_embed = build_pipeline_diag_embed(now=now_dt)
+  
+    live_embeds, management_embeds, market_scan_embeds = _collect_channel_embeds(
+        asset_embeds=asset_embeds,
+        asset_channels=asset_channels,
+        watcher_embeds=watcher_embeds,
+        auto_close_embeds=auto_close_embeds,
+        heartbeat_snapshots=heartbeat_snapshots,
+        gate_embed=gate_embed,
+        pipeline_embed=pipeline_embed,
+    )
+
+    if not (live_embeds or management_embeds or market_scan_embeds):
+        print("Discord notify: nothing to send.")
+        return
+
+    bud_str = bud_time_str(bud_dt)
+    title  = f"📣 eToro-Riasztás • Budapest: {bud_str}"
+    headers = {
+        "live": "Aktív BUY/SELL jelek (#🚨-live-signals)",
+        "management": "Pozíció menedzsment / zárás (#💼-management)",
+        "market_scan": "Piaci státusz, várakozás (#📊-market-scan)",
+    }
+
+    channel_payloads = {
+        "live": (webhooks.get("live"), live_embeds),
+        "management": (webhooks.get("management"), management_embeds),
+        "market_scan": (webhooks.get("market_scan"), market_scan_embeds),
+    }
+
+    dispatched = False
+    dispatch_results_by_asset: Dict[str, Dict[str, Any]] = {}
+    for channel, (hook, embeds) in channel_payloads.items():
+        if not embeds:
+            continue
+        content = f"**{title}**\n{headers[channel]}"
+        try:
+            dispatch_result = post_batches(hook, content, embeds)
+            for asset, record in asset_send_records.items():
+                if record.get("channel") != channel:
+                    continue
+                dispatch_results_by_asset[asset] = dispatch_result
+                enriched = dict(record)
+                enriched.update(
+                    {
+                        "dispatch_attempted": dispatch_result.get("attempted"),
+                        "dispatch_success": dispatch_result.get("success"),
+                        "http_status": dispatch_result.get("http_status"),
+                        "dispatch_error": dispatch_result.get("error"),
+                    }
+                )
+                position_tracker.log_audit_event(
+                    "Discord dispatch completed",
+                    event="DISCORD_SEND",
+                    **enriched,
+                )
+                entry_record = entry_audit_records.get(asset)
+                if entry_record and record.get("intent") == "entry":
+                    entry_record.dispatch_attempted = bool(dispatch_result.get("attempted"))
+                    entry_record.dispatch_success = bool(dispatch_result.get("success"))
+                    entry_record.dispatch_status = dispatch_result.get("http_status")
+                    entry_record.dispatch_error = dispatch_result.get("error")
+                    entry_record.channel = channel
+                    entry_record.message_id = dispatch_result.get("message_id")
+                    entry_record.log_dispatch_result()
+            if dispatch_result.get("success"):
+                dispatched = True
+        except Exception as e:
+            print(f"Discord notify FAILED ({channel}):", e)
+
+    for asset, pending in pending_entry_commits.items():
+        dispatch_result = dispatch_results_by_asset.get(asset, {})
+        manual_positions, manual_state, commit_result = _finalize_entry_commit(
+            asset,
+            pending,
+            dispatch_result,
+            manual_positions=manual_positions,
+            tracking_cfg=tracking_cfg,
+            now_dt=now_dt,
+            now_iso=now_iso,
+            cooldown_map=cooldown_map,
+            cooldown_default=cooldown_default,
+            positions_path=positions_path,
+            open_commits_this_run=open_commits_this_run,
+        )
+        manual_states[asset] = manual_state
+        entry_record = pending.get("audit")
+        if entry_record:
+            entry_record.commit_result = commit_result
+          
+    for record in entry_audit_records.values():
+        record.log_commit_decision()
+      
+    if dispatched:
+        print("Discord notify OK.")
+    
+if __name__ == "__main__":
+    main()
