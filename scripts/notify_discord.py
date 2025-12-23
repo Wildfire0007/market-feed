@@ -2914,6 +2914,7 @@ def main():
     watcher_embeds: List[Dict[str, Any]] = []
     auto_close_embeds: List[Dict[str, Any]] = []
     manual_open_assets: Set[str] = set()
+    asset_send_records: Dict[str, Dict[str, Any]] = {}
 
     for asset in ASSETS:
         sig = load(f"{PUBLIC_DIR}/{asset}/signal.json")
@@ -2928,6 +2929,14 @@ def main():
         )
         if isinstance(sig, dict):
             sig.setdefault("position_state", manual_state)
+
+        entry_level: Optional[float] = None
+        sl_level: Optional[float] = None
+        tp2_level: Optional[float] = None
+        try:
+            entry_level, sl_level, tp2_level = extract_trade_levels(sig)
+        except Exception:
+            entry_level, sl_level, tp2_level = None, None, None
 
         spot_price, _ = spot_from_sig_or_file(asset, sig)
         if manual_state.get("has_position"):
@@ -3136,6 +3145,24 @@ def main():
             if intent in {"hard_exit", "manage_position"}:
                 channel = "management"
             asset_channels[asset] = channel
+            asset_send_records[asset] = {
+                "asset": asset,
+                "channel": channel,
+                "send_kind": send_kind,
+                "intent": intent,
+                "decision": eff,
+                "setup_grade": setup_grade,
+                "stable": bool(display_stable),
+                "entry_level": entry_level,
+                "sl": sl_level,
+                "tp2": tp2_level,
+                "manual_tracking_enabled": manual_tracking_enabled,
+                "manual_has_position": manual_state.get("has_position"),
+                "manual_cooldown_active": manual_state.get("cooldown_active"),
+                "cooldown_until_utc": manual_state.get("cooldown_until_utc"),
+                "notify_should_notify": bool((notify_meta or {}).get("should_notify", True)),
+                "notify_reason": (notify_meta or {}).get("reason"),
+            }
             if send_kind in ("normal","flip"):
                 cooldown_minutes = COOLDOWN_MIN
                 if COOLDOWN_MIN > 0 and mode_current == "momentum":
@@ -3361,6 +3388,14 @@ def main():
         content = f"**{title}**\n{headers[channel]}"
         try:
             post_batches(hook, content, embeds)
+            for asset, record in asset_send_records.items():
+                if record.get("channel") != channel:
+                    continue
+                position_tracker.log_audit_event(
+                    "Discord dispatch completed",
+                    event="DISCORD_SEND",
+                    **record,
+                )
             dispatched = True
         except Exception as e:
             print(f"Discord notify FAILED ({channel}):", e)
