@@ -2,6 +2,9 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any
+import json
+import logging
+from datetime import datetime, timezone
 
 import position_tracker
 
@@ -74,3 +77,29 @@ def test_entry_suppressed_logging(capfd, monkeypatch):
     assert last.get("suppression_reason") == "cooldown_active"
     assert last.get("source") == "test"
     assert last.get("run_id") == "R2"
+
+
+def test_audit_includes_github_run_id(capfd, monkeypatch):
+    monkeypatch.setenv("MANUAL_POS_AUDIT_TO_FILE", "0")
+    monkeypatch.setenv("GITHUB_RUN_ID", "123456")
+    position_tracker.set_audit_context(source="test", run_id="R3")
+    buffer: List[Dict[str, Any]] = []
+    handler = _ListHandler(buffer)
+    position_tracker.LOGGER.addHandler(handler)
+
+    position_tracker.log_audit_event(
+        "entry suppressed",
+        event="ENTRY_SUPPRESSED",
+        asset="XAGUSD",
+        intent="entry",
+        decision="buy",
+        suppression_reason="cooldown_active",
+    )
+
+    position_tracker.LOGGER.removeHandler(handler)
+
+    captured = capfd.readouterr()
+    merged = captured.out + captured.err
+    entries = _parse_lines(merged)
+    entries.extend(buffer)
+    assert any(entry.get("gh_run_id") == "123456" for entry in entries)
