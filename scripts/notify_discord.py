@@ -123,6 +123,7 @@ class EntryAuditRecord:
     entry_opened: bool = False
     positions_changed: bool = False
     commit_result: Dict[str, Any] = field(default_factory=dict)
+    commit_reason_override: Optional[str] = None
     dispatch_attempted: bool = False
     dispatch_success: bool = False
     dispatch_status: Optional[int] = None
@@ -179,10 +180,10 @@ class EntryAuditRecord:
         )
 
     def _commit_reason(self) -> str:
+        if self.commit_reason_override:
+            return self.commit_reason_override
         if self.dispatch_attempted and not self.dispatch_success:
-            return "dispatch_failed"
-        if not self.dispatch_attempted:
-            return "dispatch_not_attempted"
+            return "dispatch_failed"       
         if not self.can_write_positions:
             return "writer_read_only"
         if not self.state_loaded:
@@ -201,6 +202,9 @@ class EntryAuditRecord:
         )
         if not gating_ok:
             return "gating_failed"
+
+        if not self.dispatch_attempted:
+            return "dispatch_not_attempted"
 
         if self.commit_result.get("exception"):
             return "commit_exception"
@@ -2136,6 +2140,93 @@ def _apply_and_persist_manual_transitions(
     return manual_positions, manual_state, positions_changed, entry_opened, commit_result
 
 
+def _finalize_entry_commit(
+    asset: str,
+    pending: Dict[str, Any],
+    dispatch_result: Dict[str, Any],
+    *,
+    manual_positions: Dict[str, Any],
+    tracking_cfg: Dict[str, Any],
+    now_dt: datetime,
+    now_iso: str,
+    cooldown_map: Dict[str, Any],
+    cooldown_default: int,
+    positions_path: str,
+    open_commits_this_run: Set[str],
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    entry_record: EntryAuditRecord = pending["audit"]
+    entry_record.dispatch_attempted = bool(dispatch_result.get("attempted"))
+    entry_record.dispatch_success = bool(dispatch_result.get("success"))
+    entry_record.dispatch_status = dispatch_result.get("http_status")
+    entry_record.dispatch_error = dispatch_result.get("error")
+    entry_record.channel = pending.get("channel")
+    entry_record.message_id = dispatch_result.get("message_id")
+
+    if not entry_record.dispatch_attempted or not entry_record.dispatch_success:
+        entry_record.commit_result = {"committed": False}
+        entry_record.commit_reason_override = "dispatch_failed" if entry_record.dispatch_attempted else None
+        manual_state = position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt)
+        return manual_positions, manual_state, entry_record.commit_result
+
+    notify_meta = pending.get("notify_meta") or {}
+    notify_should_notify = bool(notify_meta.get("should_notify", True))
+    manual_state_pre = pending.get("manual_state_pre") or {}
+
+    def _fail(reason: str) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+        entry_record.commit_reason_override = reason
+        entry_record.commit_result = {"committed": False}
+        manual_state = position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt)
+        return manual_positions, manual_state, entry_record.commit_result
+
+    if not pending.get("can_write_positions", False):
+        return _fail("writer_read_only")
+    if not pending.get("state_loaded", False):
+        return _fail("state_not_loaded")
+    if not manual_state_pre.get("is_flat", False):
+        return _fail("not_flat")
+    if pending.get("send_kind") not in {"normal", "flip"}:
+        return _fail("gating_failed")
+    if not pending.get("display_stable"):
+        return _fail("gating_failed")
+    if pending.get("setup_grade") not in {"A", "B"}:
+        return _fail("gating_failed")
+    if not notify_should_notify:
+        return _fail("gating_failed")
+
+    manual_state = position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt)
+    manual_positions, manual_state, positions_changed, entry_opened, commit_result = _apply_and_persist_manual_transitions(
+        asset=asset,
+        intent="entry",
+        decision=pending.get("decision"),
+        setup_grade=pending.get("setup_grade"),
+        notify_meta=pending.get("notify_meta"),
+        signal_payload=pending.get("signal_payload") or {},
+        manual_tracking_enabled=pending.get("manual_tracking_enabled", False),
+        can_write_positions=pending.get("can_write_positions", False),
+        manual_state=manual_state,
+        manual_positions=manual_positions,
+        tracking_cfg=tracking_cfg,
+        now_dt=now_dt,
+        now_iso=now_iso,
+        send_kind=pending.get("send_kind"),
+        display_stable=bool(pending.get("display_stable")),
+        missing_list=pending.get("gates_missing") or [],
+        cooldown_map=cooldown_map,
+        cooldown_default=cooldown_default,
+        positions_path=positions_path,
+        entry_level=(pending.get("levels") or {}).get("entry"),
+        sl_level=(pending.get("levels") or {}).get("sl"),
+        tp2_level=(pending.get("levels") or {}).get("tp2"),
+        open_commits_this_run=open_commits_this_run,
+        sig=pending.get("signal_payload") or {},
+    )
+
+    entry_record.positions_changed = positions_changed
+    entry_record.entry_opened = entry_opened
+    entry_record.commit_result = commit_result
+    return manual_positions, manual_state, commit_result
+
+
 def _archive_last_sent_entries(entries: List[Dict[str, Any]]) -> None:
     if not entries:
         return
@@ -3431,6 +3522,7 @@ def main():
     open_commits_this_run: Set[str] = set()
     manual_states: Dict[str, Any] = {}
     entry_audit_records: Dict[str, EntryAuditRecord] = {}
+    pending_entry_commits: Dict[str, Dict[str, Any]] = {}
   
     analysis_summary = load(f"{PUBLIC_DIR}/analysis_summary.json") or {}
     run_id = run_meta.get("run_id") or os.getenv("GITHUB_RUN_ID")
@@ -3700,7 +3792,33 @@ def main():
         positions_changed = False
         entry_opened = False
 
-        if intent in {"entry", "hard_exit", "manage_position"}:
+        attempt_entry_dispatch = False
+        if intent == "entry":
+            attempt_entry_dispatch = (
+                send_kind in {"normal", "flip"}
+                and display_stable
+                and setup_grade in {"A", "B"}
+                and should_notify
+                and manual_state.get("is_flat")
+                and manual_tracking_enabled
+                and can_write_positions
+                and positions_state_loaded
+            )
+            if not attempt_entry_dispatch:
+                reason = "gating_failed"
+                if not manual_state.get("is_flat"):
+                    reason = "not_flat"
+                elif not can_write_positions:
+                    reason = "writer_read_only"
+                elif not positions_state_loaded:
+                    reason = "state_not_loaded"
+                entry_record = entry_audit_records.get(asset)
+                if entry_record:
+                    entry_record.commit_reason_override = reason
+                    entry_record.commit_result = {"committed": False}
+                    entry_record.send_kind = send_kind
+                send_kind = None
+        if intent in {"hard_exit", "manage_position"}:
             manual_positions, manual_state, positions_changed, entry_opened, commit_result = _apply_and_persist_manual_transitions(
                 asset=asset,
                 intent=intent,
@@ -3737,7 +3855,7 @@ def main():
                 sig["position_state"] = manual_state
           
         # --- embed + állapot frissítés ---
-        if send_kind:
+        if send_kind and (intent != "entry" or attempt_entry_dispatch):
             channel = classify_signal_channel(eff, send_kind, display_stable)
             if intent in {"hard_exit", "manage_position"}:
                 channel = "management"
@@ -3774,6 +3892,29 @@ def main():
                 "notify_should_notify": bool((notify_meta or {}).get("should_notify", True)),
                 "notify_reason": (notify_meta or {}).get("reason"),
             }
+            if intent == "entry" and attempt_entry_dispatch:
+                pending_entry_commits[asset] = {
+                    "intent": intent,
+                    "decision": eff,
+                    "setup_grade": setup_grade,
+                    "entry_side": eff,
+                    "send_kind": send_kind,
+                    "display_stable": display_stable,
+                    "notify_meta": notify_meta,
+                    "manual_state_pre": deepcopy(manual_state),
+                    "manual_tracking_enabled": manual_tracking_enabled,
+                    "can_write_positions": can_write_positions,
+                    "state_loaded": positions_state_loaded,
+                    "levels": {
+                        "entry": entry_level,
+                        "sl": sl_level,
+                        "tp2": tp2_level,
+                    },
+                    "gates_missing": missing_list,
+                    "signal_payload": deepcopy(sig) if isinstance(sig, dict) else {},
+                    "audit": entry_audit_records.get(asset),
+                    "channel": channel,
+                }
             if send_kind in ("normal","flip"):
                 cooldown_minutes = COOLDOWN_MIN
                 if COOLDOWN_MIN > 0 and mode_current == "momentum":
@@ -3908,6 +4049,7 @@ def main():
     }
 
     dispatched = False
+    dispatch_results_by_asset: Dict[str, Dict[str, Any]] = {}
     for channel, (hook, embeds) in channel_payloads.items():
         if not embeds:
             continue
@@ -3917,6 +4059,7 @@ def main():
             for asset, record in asset_send_records.items():
                 if record.get("channel") != channel:
                     continue
+                dispatch_results_by_asset[asset] = dispatch_result
                 enriched = dict(record)
                 enriched.update(
                     {
@@ -3945,6 +4088,26 @@ def main():
         except Exception as e:
             print(f"Discord notify FAILED ({channel}):", e)
 
+    for asset, pending in pending_entry_commits.items():
+        dispatch_result = dispatch_results_by_asset.get(asset, {})
+        manual_positions, manual_state, commit_result = _finalize_entry_commit(
+            asset,
+            pending,
+            dispatch_result,
+            manual_positions=manual_positions,
+            tracking_cfg=tracking_cfg,
+            now_dt=now_dt,
+            now_iso=now_iso,
+            cooldown_map=cooldown_map,
+            cooldown_default=cooldown_default,
+            positions_path=positions_path,
+            open_commits_this_run=open_commits_this_run,
+        )
+        manual_states[asset] = manual_state
+        entry_record = pending.get("audit")
+        if entry_record:
+            entry_record.commit_result = commit_result
+          
     for record in entry_audit_records.values():
         record.log_commit_decision()
       
