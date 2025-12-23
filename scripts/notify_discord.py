@@ -984,6 +984,44 @@ def classify_signal_channel(decision: str, kind: str, is_stable: bool) -> str:
     return "market_scan"
 
 
+def _collect_channel_embeds(
+    *,
+    asset_embeds: Dict[str, Dict[str, Any]],
+    asset_channels: Dict[str, str],
+    watcher_embeds: List[Dict[str, Any]],
+    auto_close_embeds: List[Dict[str, Any]],
+    heartbeat_snapshots: List[Dict[str, Any]],
+    gate_embed: Optional[Dict[str, Any]],
+    pipeline_embed: Optional[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    live_embeds = [
+        asset_embeds[a]
+        for a in ASSETS
+        if a in asset_embeds and asset_channels.get(a) == "live"
+    ]
+
+    management_embeds = list(watcher_embeds)
+    management_embeds.extend(auto_close_embeds)
+    management_embeds.extend(
+        asset_embeds[a]
+        for a in ASSETS
+        if a in asset_embeds and asset_channels.get(a) == "management"
+    )
+
+    market_scan_embeds = [
+        asset_embeds[a]
+        for a in ASSETS
+        if a in asset_embeds and asset_channels.get(a, "market_scan") == "market_scan"
+    ]
+    market_scan_embeds.extend(heartbeat_snapshots)
+    if gate_embed:
+        market_scan_embeds.append(gate_embed)
+    if pipeline_embed:
+        market_scan_embeds.append(pipeline_embed)
+
+    return live_embeds, management_embeds, market_scan_embeds
+
+
 def post_batches(hook: str, content: str, embeds: List[Dict[str, Any]]) -> None:
     """Küldjünk 10-es csomagokban az embedeket egy webhookra."""
 
@@ -1760,7 +1798,79 @@ def _apply_manual_position_transitions(
 
     return manual_positions, manual_state, positions_changed, entry_opened
   
-  
+
+def _apply_and_persist_manual_transitions(
+    *,
+    asset: str,
+    intent: str,
+    decision: str,
+    setup_grade: str,
+    notify_meta: Optional[Dict[str, Any]],
+    signal_payload: Dict[str, Any],
+    manual_tracking_enabled: bool,
+    can_write_positions: bool,
+    manual_state: Dict[str, Any],
+    manual_positions: Dict[str, Any],
+    tracking_cfg: Dict[str, Any],
+    now_dt: datetime,
+    now_iso: str,
+    send_kind: Optional[str],
+    display_stable: bool,
+    missing_list: Iterable[str],
+    cooldown_map: Dict[str, Any],
+    cooldown_default: int,
+    positions_path: str,
+    entry_level: Optional[float],
+    sl_level: Optional[float],
+    tp2_level: Optional[float],
+    open_commits_this_run: Set[str],
+    sig: Dict[str, Any],
+) -> Tuple[Dict[str, Any], Dict[str, Any], bool, bool]:
+    manual_positions, manual_state, positions_changed, entry_opened = _apply_manual_position_transitions(
+        asset=asset,
+        intent=intent,
+        decision=decision,
+        setup_grade=setup_grade,
+        notify_meta=notify_meta,
+        signal_payload=signal_payload,
+        manual_tracking_enabled=manual_tracking_enabled,
+        can_write_positions=can_write_positions,
+        manual_state=manual_state,
+        manual_positions=manual_positions,
+        tracking_cfg=tracking_cfg,
+        now_dt=now_dt,
+        now_iso=now_iso,
+        send_kind=send_kind,
+        display_stable=display_stable,
+        missing_list=missing_list,
+        cooldown_map=cooldown_map,
+        cooldown_default=cooldown_default,
+    )
+
+    if positions_changed:
+        position_tracker.save_positions_atomic(positions_path, manual_positions)
+        sig["position_state"] = manual_state
+
+    if positions_changed and entry_opened:
+        position_tracker.log_audit_event(
+            "entry open committed",
+            event="OPEN_COMMIT",
+            asset=asset,
+            intent=intent,
+            decision=decision,
+            entry_side=decision,
+            setup_grade=setup_grade,
+            entry=entry_level,
+            sl=sl_level,
+            tp2=tp2_level,
+            positions_file=positions_path,
+            send_kind=send_kind,
+        )
+        open_commits_this_run.add(asset)
+
+    return manual_positions, manual_state, positions_changed, entry_opened
+
+
 def _archive_last_sent_entries(entries: List[Dict[str, Any]]) -> None:
     if not entries:
         return
@@ -3288,6 +3398,37 @@ def main():
                 suppression_reason=suppression_reason,
                 send_kind=None,
             )
+
+        positions_changed = False
+        entry_opened = False
+
+        if intent in {"hard_exit", "manage_position"}:
+            manual_positions, manual_state, positions_changed, entry_opened = _apply_and_persist_manual_transitions(
+                asset=asset,
+                intent=intent,
+                decision=eff,
+                setup_grade=setup_grade,
+                notify_meta=notify_meta,
+                signal_payload=sig,
+                manual_tracking_enabled=manual_tracking_enabled,
+                can_write_positions=can_write_positions,
+                manual_state=manual_state,
+                manual_positions=manual_positions,
+                tracking_cfg=tracking_cfg,
+                now_dt=now_dt,
+                now_iso=now_iso,
+                send_kind=send_kind,
+                display_stable=display_stable,
+                missing_list=missing_list,
+                cooldown_map=cooldown_map,
+                cooldown_default=cooldown_default,
+                positions_path=positions_path,
+                entry_level=entry_level,
+                sl_level=sl_level,
+                tp2_level=tp2_level,
+                open_commits_this_run=open_commits_this_run,
+                sig=sig,
+            )
           
         # --- embed + állapot frissítés ---
         if send_kind:
@@ -3337,7 +3478,7 @@ def main():
                     cooldown_minutes=cooldown_minutes,
                     mode=mode_current,
                 )
-                mark_heartbeat(meta, bud_key, now_iso)                
+                mark_heartbeat(meta, bud_key, now_iso)
             elif send_kind == "invalidate":
                 st = update_asset_send_state(
                     st,
@@ -3348,48 +3489,33 @@ def main():
                 )
                 mark_heartbeat(meta, bud_key, now_iso)
 
-        manual_positions, manual_state, positions_changed, entry_opened = _apply_manual_position_transitions(
-            asset=asset,
-            intent=intent,
-            decision=eff,
-            setup_grade=setup_grade,
-            notify_meta=notify_meta,
-            signal_payload=sig,
-            manual_tracking_enabled=manual_tracking_enabled,
-            can_write_positions=can_write_positions,
-            manual_state=manual_state,
-            manual_positions=manual_positions,
-            tracking_cfg=tracking_cfg,
-            now_dt=now_dt,
-            now_iso=now_iso,
-            send_kind=send_kind,
-            display_stable=display_stable,
-            missing_list=missing_list,
-            cooldown_map=cooldown_map,
-            cooldown_default=cooldown_default,
-        )
-
-        if positions_changed:
-            position_tracker.save_positions_atomic(positions_path, manual_positions)
-            sig["position_state"] = manual_state
-
-        if positions_changed and entry_opened:
-            entry_level, sl_level, tp2_level = extract_trade_levels(sig)
-            position_tracker.log_audit_event(
-                "entry open committed",
-                event="OPEN_COMMIT",
+        if intent not in {"hard_exit", "manage_position"}:
+            manual_positions, manual_state, positions_changed, entry_opened = _apply_and_persist_manual_transitions(
                 asset=asset,
                 intent=intent,
-                decision=eff,
-                entry_side=eff,
+                decision=eff,            
                 setup_grade=setup_grade,
-                entry=entry_level,
-                sl=sl_level,
-                tp2=tp2_level,
-                positions_file=positions_path,
+                notify_meta=notify_meta,
+                signal_payload=sig,
+                manual_tracking_enabled=manual_tracking_enabled,
+                can_write_positions=can_write_positions,
+                manual_state=manual_state,
+                manual_positions=manual_positions,
+                tracking_cfg=tracking_cfg,
+                now_dt=now_dt,
+                now_iso=now_iso,
                 send_kind=send_kind,
-            )
-            open_commits_this_run.add(asset)
+                display_stable=display_stable,
+                missing_list=missing_list,
+                cooldown_map=cooldown_map,
+                cooldown_default=cooldown_default,
+                positions_path=positions_path,
+                entry_level=entry_level,
+                sl_level=sl_level,
+                tp2_level=tp2_level,
+                open_commits_this_run=open_commits_this_run,
+                sig=sig,
+            )            
 
         manual_states[asset] = manual_state
 
@@ -3468,23 +3594,20 @@ def main():
 
     state["_meta"] = meta
     save_state(state)
-
-    live_embeds = [asset_embeds[a] for a in ASSETS if asset_channels.get(a) == "live"]
-    management_embeds = list(watcher_embeds)
-    management_embeds.extend(auto_close_embeds)
-    market_scan_embeds = [
-        asset_embeds[a]
-        for a in ASSETS
-        if a in asset_embeds and asset_channels.get(a, "market_scan") != "live"
-    ]
-    market_scan_embeds.extend(heartbeat_snapshots)
+    
     gate_embed = build_entry_gate_summary_embed()
-    if gate_embed:
-        market_scan_embeds.append(gate_embed)
-
+  
     pipeline_embed = build_pipeline_diag_embed(now=now_dt)
-    if pipeline_embed:
-        market_scan_embeds.append(pipeline_embed)
+  
+    live_embeds, management_embeds, market_scan_embeds = _collect_channel_embeds(
+        asset_embeds=asset_embeds,
+        asset_channels=asset_channels,
+        watcher_embeds=watcher_embeds,
+        auto_close_embeds=auto_close_embeds,
+        heartbeat_snapshots=heartbeat_snapshots,
+        gate_embed=gate_embed,
+        pipeline_embed=pipeline_embed,
+    )
 
     if not (live_embeds or management_embeds or market_scan_embeds):
         print("Discord notify: nothing to send.")
