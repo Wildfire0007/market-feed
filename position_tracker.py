@@ -85,14 +85,18 @@ def _audit_fields(now_dt_utc: datetime) -> Dict[str, Any]:
     tz = ZoneInfo(str(_AUDIT_CONTEXT.get("tz_name") or "Europe/Budapest"))
     ts_utc = now_dt_utc.astimezone(timezone.utc)
     ts_local = now_dt_utc.astimezone(tz)
-    return {
+    fields: Dict[str, Any] = {
         "ts_utc": _to_utc_iso(ts_utc),
         "ts_budapest": ts_local.replace(microsecond=0).isoformat(),
         "source": _AUDIT_CONTEXT.get("source"),
         "run_id": _AUDIT_CONTEXT.get("run_id"),
         "component": "manual_positions",
     }
-
+    gh_run_id = os.getenv("GITHUB_RUN_ID")
+    if gh_run_id:
+        fields["gh_run_id"] = gh_run_id
+    return fields
+    
 
 def _audit_log(message: str, *, event: str, now_dt: Optional[datetime] = None, **fields: Any) -> None:
     now_dt = now_dt or datetime.now(timezone.utc)
