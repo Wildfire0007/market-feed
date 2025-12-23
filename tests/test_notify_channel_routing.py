@@ -29,9 +29,13 @@ def test_management_channel_routing_excludes_market_scan(monkeypatch):
         pipeline_embed=None,
     )
 
-    assert asset_embeds["BTCUSD"] in management
-    assert asset_embeds["BTCUSD"] not in market_scan
-    assert not live
+    management_embeds = [embed for _, embed in management]
+    market_scan_embeds = [embed for _, embed in market_scan]
+    live_embeds = [embed for _, embed in live]
+
+    assert asset_embeds["BTCUSD"] in management_embeds
+    assert asset_embeds["BTCUSD"] not in market_scan_embeds
+    assert not live_embeds
 
 
 def test_hard_exit_embed_uses_closed_state(tmp_path):
