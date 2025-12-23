@@ -2155,16 +2155,19 @@ def _finalize_entry_commit(
     open_commits_this_run: Set[str],
 ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     entry_record: EntryAuditRecord = pending["audit"]
-    entry_record.dispatch_attempted = bool(dispatch_result.get("attempted"))
-    entry_record.dispatch_success = bool(dispatch_result.get("success"))
+    dispatch_attempted = dispatch_result.get("attempted")
+    if dispatch_attempted is None:
+        dispatch_attempted = True
+    entry_record.dispatch_attempted = bool(dispatch_attempted)
+    entry_record.dispatch_success = bool(dispatch_result.get("success", False))
     entry_record.dispatch_status = dispatch_result.get("http_status")
     entry_record.dispatch_error = dispatch_result.get("error")
     entry_record.channel = pending.get("channel")
     entry_record.message_id = dispatch_result.get("message_id")
 
-    if not entry_record.dispatch_attempted or not entry_record.dispatch_success:
+    if not entry_record.dispatch_success:
         entry_record.commit_result = {"committed": False}
-        entry_record.commit_reason_override = "dispatch_failed" if entry_record.dispatch_attempted else None
+        entry_record.commit_reason_override = "dispatch_failed"
         manual_state = position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt)
         return manual_positions, manual_state, entry_record.commit_result
 
