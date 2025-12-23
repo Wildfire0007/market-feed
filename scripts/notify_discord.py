@@ -1604,6 +1604,161 @@ def _default_asset_state() -> Dict[str, Any]:
     return dict(DEFAULT_ASSET_STATE)
 
 
+def _load_prior_open_commits(audit_path: Path) -> Set[str]:
+    try:
+        lines = audit_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return set()
+
+    assets: Set[str] = set()
+    for line in lines:
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(payload, dict) and payload.get("event") == "OPEN_COMMIT":
+            asset = payload.get("asset")
+            if asset:
+                assets.add(str(asset))
+    return assets
+
+
+def _apply_manual_position_transitions(
+    *,
+    asset: str,
+    intent: str,
+    decision: str,
+    setup_grade: str,
+    notify_meta: Optional[Dict[str, Any]],
+    signal_payload: Dict[str, Any],
+    manual_tracking_enabled: bool,
+    can_write_positions: bool,
+    manual_state: Dict[str, Any],
+    manual_positions: Dict[str, Any],
+    tracking_cfg: Dict[str, Any],
+    now_dt: datetime,
+    now_iso: str,
+    send_kind: str,
+    display_stable: bool,
+    missing_list: Iterable[str],
+    cooldown_map: Dict[str, Any],
+    cooldown_default: int,
+) -> Tuple[Dict[str, Any], Dict[str, Any], bool, bool]:
+    positions_changed = False
+    entry_opened = False
+
+    if (
+        manual_tracking_enabled
+        and can_write_positions
+        and intent == "hard_exit"
+        and manual_state.get("has_position")
+    ):
+        manual_positions = position_tracker.close_position(
+            asset,
+            reason="hard_exit",
+            closed_at_utc=now_iso,
+            cooldown_minutes=_resolve_asset_value(cooldown_map, asset, cooldown_default),
+            positions=manual_positions,
+        )
+        manual_state = position_tracker.compute_state(
+            asset, tracking_cfg, manual_positions, now_dt
+        )
+        LOGGER.debug(
+            "CLOSE state transition %s reason=%s cooldown_until=%s",
+            asset,
+            "hard_exit",
+            manual_state.get("cooldown_until_utc"),
+        )
+        positions_changed = True
+
+    if (
+        manual_tracking_enabled
+        and can_write_positions
+        and intent == "entry"
+        and manual_state.get("is_flat")
+        and bool((notify_meta or {}).get("should_notify", True))
+        and setup_grade in {"A", "B"}
+        and decision in ("buy", "sell")
+    ):
+        entry_level, sl_level, tp2_level = extract_trade_levels(signal_payload)
+        position_tracker.log_audit_event(
+            "entry open attempt",
+            event="OPEN_ATTEMPT",
+            asset=asset,
+            intent=intent,
+            decision=decision,
+            entry_side=decision,
+            setup_grade=setup_grade,
+            stable=bool(display_stable),
+            gates_missing=missing_list,
+            notify_should_notify=bool((notify_meta or {}).get("should_notify", True)),
+            notify_reason=(notify_meta or {}).get("reason"),
+            manual_tracking_enabled=manual_tracking_enabled,
+            manual_has_position=manual_state.get("has_position"),
+            manual_cooldown_active=manual_state.get("cooldown_active"),
+            entry_level=entry_level,
+            sl=sl_level,
+            tp2=tp2_level,
+            send_kind=send_kind,
+        )
+        manual_positions = position_tracker.open_position(
+            asset,
+            side="long" if decision == "buy" else "short",
+            entry=entry_level,
+            sl=sl_level,
+            tp2=tp2_level,
+            opened_at_utc=now_iso,
+            positions=manual_positions,
+        )
+        manual_state = position_tracker.compute_state(
+            asset, tracking_cfg, manual_positions, now_dt
+        )
+        LOGGER.debug(
+            "OPEN state transition %s %s entry=%s sl=%s tp2=%s opened_at=%s",
+            asset,
+            decision,
+            entry_level,
+            sl_level,
+            tp2_level,
+            now_iso,
+        )
+        positions_changed = True
+        entry_opened = True
+    elif (
+        manual_tracking_enabled
+        and not can_write_positions
+        and intent == "entry"
+        and manual_state.get("is_flat")
+        and bool((notify_meta or {}).get("should_notify", True))
+        and setup_grade in {"A", "B"}
+        and decision in ("buy", "sell")
+    ):
+        entry_level, sl_level, tp2_level = extract_trade_levels(signal_payload)
+        position_tracker.log_audit_event(
+            "entry suppressed: notify is read-only",
+            event="ENTRY_SUPPRESSED",
+            asset=asset,
+            intent=intent,
+            decision=decision,
+            entry_side=decision,
+            setup_grade=setup_grade,
+            stable=bool(display_stable),
+            gates_missing=missing_list,
+            notify_should_notify=bool((notify_meta or {}).get("should_notify", True)),
+            notify_reason=(notify_meta or {}).get("reason"),
+            manual_tracking_enabled=manual_tracking_enabled,
+            manual_has_position=manual_state.get("has_position"),
+            manual_cooldown_active=manual_state.get("cooldown_active"),
+            entry_level=entry_level,
+            sl=sl_level,
+            tp2=tp2_level,
+            send_kind=send_kind,
+            suppression_reason="writer_is_analysis",
+        )
+
+    return manual_positions, manual_state, positions_changed, entry_opened
+  
+  
 def _archive_last_sent_entries(entries: List[Dict[str, Any]]) -> None:
     if not entries:
         return
@@ -2877,12 +3032,16 @@ def main():
     meta  = state.get("_meta", {})
     signal_stability_cfg = _signal_stability_config()
     tracking_cfg = (signal_stability_cfg.get("manual_position_tracking") or {})
+    manual_writer = str(tracking_cfg.get("writer") or "notify").lower()
+    can_write_positions = manual_writer == "notify"
     manual_tracking_enabled = bool(tracking_cfg.get("enabled"))
     positions_path = tracking_cfg.get("positions_file") or "public/_manual_positions.json"
     treat_missing_positions = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
     manual_positions = position_tracker.load_positions(positions_path, treat_missing_positions)
     cooldown_map = tracking_cfg.get("post_exit_cooldown_minutes") or {}
     cooldown_default = 20
+    open_commits_this_run: Set[str] = set()
+    manual_states: Dict[str, Any] = {}
   
     analysis_summary = load(f"{PUBLIC_DIR}/analysis_summary.json") or {}
     run_id = run_meta.get("run_id") or os.getenv("GITHUB_RUN_ID")
@@ -3185,85 +3344,26 @@ def main():
                 )
                 mark_heartbeat(meta, bud_key, now_iso)
 
-        positions_changed = False
-        entry_opened = False
-        if (
-            manual_tracking_enabled
-            and intent == "hard_exit"
-            and manual_state.get("has_position")
-        ):
-            manual_positions = position_tracker.close_position(
-                asset,
-                reason="hard_exit",
-                closed_at_utc=now_iso,
-                cooldown_minutes=_resolve_asset_value(
-                    cooldown_map, asset, cooldown_default
-                ),
-                positions=manual_positions,
-            )
-            manual_state = position_tracker.compute_state(
-                asset, tracking_cfg, manual_positions, now_dt
-            )
-            LOGGER.debug(
-                "CLOSE state transition %s reason=%s cooldown_until=%s",
-                asset,
-                "hard_exit",
-                manual_state.get("cooldown_until_utc"),
-            )
-            positions_changed = True
-
-        if (
-            manual_tracking_enabled
-            and intent == "entry"
-            and manual_state.get("is_flat")
-            and bool((notify_meta or {}).get("should_notify", True))
-            and setup_grade in {"A", "B"}
-            and eff in ("buy", "sell")
-        ):
-            entry_level, sl_level, tp2_level = extract_trade_levels(sig)
-            position_tracker.log_audit_event(
-                "entry open attempt",
-                event="OPEN_ATTEMPT",
-                asset=asset,
-                intent=intent,
-                decision=eff,
-                entry_side=eff,
-                setup_grade=setup_grade,
-                stable=bool(display_stable),
-                gates_missing=missing_list,
-                notify_should_notify=bool((notify_meta or {}).get("should_notify", True)),
-                notify_reason=(notify_meta or {}).get("reason"),
-                manual_tracking_enabled=manual_tracking_enabled,
-                manual_has_position=manual_state.get("has_position"),
-                manual_cooldown_active=manual_state.get("cooldown_active"),
-                entry_level=entry_level,
-                sl=sl_level,
-                tp2=tp2_level,
-                send_kind=send_kind,
-            )
-            manual_positions = position_tracker.open_position(
-                asset,
-                side="long" if eff == "buy" else "short",
-                entry=entry_level,
-                sl=sl_level,
-                tp2=tp2_level,
-                opened_at_utc=now_iso,
-                positions=manual_positions,
-            )
-            manual_state = position_tracker.compute_state(
-                asset, tracking_cfg, manual_positions, now_dt
-            )
-            LOGGER.debug(
-                "OPEN state transition %s %s entry=%s sl=%s tp2=%s opened_at=%s",
-                asset,
-                eff,
-                entry_level,
-                sl_level,
-                tp2_level,
-                now_iso,
-            )
-            positions_changed = True
-            entry_opened = True
+        manual_positions, manual_state, positions_changed, entry_opened = _apply_manual_position_transitions(
+            asset=asset,
+            intent=intent,
+            decision=eff,
+            setup_grade=setup_grade,
+            notify_meta=notify_meta,
+            signal_payload=sig,
+            manual_tracking_enabled=manual_tracking_enabled,
+            can_write_positions=can_write_positions,
+            manual_state=manual_state,
+            manual_positions=manual_positions,
+            tracking_cfg=tracking_cfg,
+            now_dt=now_dt,
+            now_iso=now_iso,
+            send_kind=send_kind,
+            display_stable=display_stable,
+            missing_list=missing_list,
+            cooldown_map=cooldown_map,
+            cooldown_default=cooldown_default,
+        )
 
         if positions_changed:
             position_tracker.save_positions_atomic(positions_path, manual_positions)
@@ -3285,12 +3385,31 @@ def main():
                 positions_file=positions_path,
                 send_kind=send_kind,
             )
+            open_commits_this_run.add(asset)
+
+        manual_states[asset] = manual_state
 
         state[asset] = st
 
         if manual_tracking_enabled and manual_state.get("has_position"):
             manual_open_assets.add(asset)
 
+    audit_path = position_tracker.resolve_repo_path("public/_manual_positions_audit.jsonl")
+    prior_open_commits = _load_prior_open_commits(audit_path)
+    for asset, mstate in manual_states.items():
+        if (
+            mstate.get("has_position")
+            and asset not in open_commits_this_run
+            and asset not in prior_open_commits
+        ):
+            position_tracker.log_audit_event(
+                "manual position missing OPEN_COMMIT",
+                event="INCONSISTENT_STATE",
+                asset=asset,
+                opened_at_utc=mstate.get("opened_at_utc"),
+                positions_file=positions_path,
+            )
+          
     watcher = ActivePositionWatcher(
         _build_active_watcher_config(),
         tdstatus=tdstatus,
