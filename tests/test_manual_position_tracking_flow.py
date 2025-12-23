@@ -118,6 +118,7 @@ class ManualPositionFlowTests(unittest.TestCase):
                 "enabled": False,
                 "manual_position_tracking": {
                     "enabled": True,
+                    "writer": "analysis",
                     "positions_file": str(positions_path),
                     "treat_missing_file_as_flat": True,
                     "post_exit_cooldown_minutes": {"default": 15},
@@ -299,7 +300,99 @@ class ManualPositionFlowTests(unittest.TestCase):
         assert "OPEN_ATTEMPT" in event_kinds
         assert "OPEN_COMMIT" in event_kinds
 
+    def test_manual_entry_requires_stable_send_kind(self) -> None:
+        now = datetime.now(timezone.utc)
+        now_iso = self._now_iso()
+        tracking_cfg = {"enabled": True}
+        manual_positions: dict = {}
+        manual_state = position_tracker.compute_state(
+            "BTCUSD", tracking_cfg, manual_positions, now
+        )
 
+        with mock.patch.object(position_tracker, "open_position") as open_mock, \
+            mock.patch.object(position_tracker, "log_audit_event") as audit_mock:
+            manual_positions, manual_state, positions_changed, entry_opened = notify_discord._apply_manual_position_transitions(
+                asset="BTCUSD",
+                intent="entry",
+                decision="buy",
+                setup_grade="A",
+                notify_meta={"should_notify": True},
+                signal_payload={"entry": 101.0, "sl": 99.0, "tp2": 110.0},
+                manual_tracking_enabled=True,
+                can_write_positions=True,
+                manual_state=manual_state,
+                manual_positions=manual_positions,
+                tracking_cfg=tracking_cfg,
+                now_dt=now,
+                now_iso=now_iso,
+                send_kind=None,
+                display_stable=False,
+                missing_list=[],
+                cooldown_map={},
+                cooldown_default=20,
+            )
+
+        open_mock.assert_not_called()
+        audit_mock.assert_not_called()
+        assert positions_changed is False
+        assert entry_opened is False
+
+    def test_open_commit_not_emitted_without_send_kind(self) -> None:
+        now = datetime.now(timezone.utc)
+        now_iso = self._now_iso()
+        tracking_cfg = {"enabled": True}
+        manual_positions: dict = {}
+        manual_state = position_tracker.compute_state(
+            "BTCUSD", tracking_cfg, manual_positions, now
+        )
+        sig = {"entry": 101.0, "sl": 99.0, "tp2": 110.0}
+
+        events = []
+
+        def _capture(message: str, *, event: str, **fields: object) -> None:
+            events.append(event)
+
+        manual_positions, manual_state, positions_changed, entry_opened = notify_discord._apply_manual_position_transitions(
+            asset="BTCUSD",
+            intent="entry",
+            decision="buy",
+            setup_grade="A",
+            notify_meta={"should_notify": True},
+            signal_payload=sig,
+            manual_tracking_enabled=True,
+            can_write_positions=True,
+            manual_state=manual_state,
+            manual_positions=manual_positions,
+            tracking_cfg=tracking_cfg,
+            now_dt=now,
+            now_iso=now_iso,
+            send_kind=None,
+            display_stable=True,
+            missing_list=[],
+            cooldown_map={},
+            cooldown_default=20,
+        )
+
+        if positions_changed and entry_opened:
+            entry_level, sl_level, tp2_level = notify_discord.extract_trade_levels(sig)
+            _capture(
+                "entry open committed",
+                event="OPEN_COMMIT",
+                asset="BTCUSD",
+                intent="entry",
+                decision="buy",
+                entry_side="buy",
+                setup_grade="A",
+                entry=entry_level,
+                sl=sl_level,
+                tp2=tp2_level,
+                positions_file="/tmp/ignore.json",
+                send_kind=None,
+            )
+
+        assert positions_changed is False
+        assert entry_opened is False
+        assert "OPEN_COMMIT" not in events
 if __name__ == "__main__":
     import pytest
 
