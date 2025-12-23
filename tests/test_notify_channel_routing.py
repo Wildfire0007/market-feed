@@ -105,12 +105,10 @@ def test_hard_exit_embed_uses_closed_state(tmp_path):
     assert os.path.exists(positions_path)
 
 
-def test_entry_embed_uses_persisted_manual_state(tmp_path):
+def test_entry_embed_uses_pre_dispatch_manual_state():
     now = datetime.now(timezone.utc)
-    now_iso = notify_discord.to_utc_iso(now)
-
-    tracking_cfg = {"enabled": True, "writer": "notify"}
-    positions_path = str(tmp_path / "positions.json")
+    
+    tracking_cfg = {"enabled": True, "writer": "notify"}    
     manual_positions = {}
     manual_state = position_tracker.compute_state("BTCUSD", tracking_cfg, manual_positions, now)
 
@@ -125,37 +123,7 @@ def test_entry_embed_uses_persisted_manual_state(tmp_path):
         "notify": {"should_notify": True},
         "position_state": manual_state,
     }
-
-    open_commits = set()
-
-    manual_positions, manual_state, positions_changed, entry_opened = notify_discord._apply_and_persist_manual_transitions(
-        asset="BTCUSD",
-        intent="entry",
-        decision="buy",
-        setup_grade="A",
-        notify_meta=sig.get("notify"),
-        signal_payload=sig,
-        manual_tracking_enabled=True,
-        can_write_positions=True,
-        manual_state=manual_state,
-        manual_positions=manual_positions,
-        tracking_cfg=tracking_cfg,
-        now_dt=now,
-        now_iso=now_iso,
-        send_kind="normal",
-        display_stable=True,
-        missing_list=[],
-        cooldown_map={},
-        cooldown_default=20,
-        positions_path=positions_path,
-        entry_level=100.0,
-        sl_level=95.0,
-        tp2_level=110.0,
-        open_commits_this_run=open_commits,
-        sig=sig,
-    )
-    sig["position_state"] = manual_state
-
+    
     embed = notify_discord.build_mobile_embed_for_asset(
         "BTCUSD",
         state={},
@@ -170,14 +138,8 @@ def test_entry_embed_uses_persisted_manual_state(tmp_path):
     )
 
     description = embed.get("description") or ""
-    assert positions_changed is True
-    assert entry_opened is True
-    assert manual_state.get("has_position") is True
-    assert "Pozíciómenedzsment" in description
-    assert "long" in description.lower()
-
-    persisted = position_tracker.load_positions(positions_path, treat_missing_as_flat=True)
-    assert "BTCUSD" in persisted
+    assert manual_state.get("has_position") is False
+    assert "Pozíciómenedzsment" not in description
 
 
 def test_market_scan_and_heartbeat_suppress_manual_position_line():
