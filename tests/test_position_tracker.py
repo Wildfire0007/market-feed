@@ -96,14 +96,14 @@ def test_cooldown_expiry_returns_to_flat_state():
 def test_compute_state_disabled_never_sets_cooldown_active():
     now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
     positions = {
-        "ETHUSD": {
+        "EURUSD": {
             "side": None,
             "cooldown_until_utc": "2025-01-01T12:10:00Z",
         }
     }
 
     state = position_tracker.compute_state(
-        "ETHUSD", {"enabled": False}, positions, now_dt
+        "EURUSD", {"enabled": False}, positions, now_dt
     )
 
     assert state["tracking_enabled"] is False
