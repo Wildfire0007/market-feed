@@ -1679,6 +1679,8 @@ def _apply_manual_position_transitions(
         and bool((notify_meta or {}).get("should_notify", True))
         and setup_grade in {"A", "B"}
         and decision in ("buy", "sell")
+        and send_kind in {"normal", "flip"}
+        and display_stable
     ):
         entry_level, sl_level, tp2_level = extract_trade_levels(signal_payload)
         position_tracker.log_audit_event(
@@ -3087,7 +3089,7 @@ def main():
             asset, tracking_cfg, manual_positions, now_dt
         )
         if isinstance(sig, dict):
-            sig.setdefault("position_state", manual_state)
+            sig["position_state"] = manual_state
 
         entry_level: Optional[float] = None
         sl_level: Optional[float] = None
@@ -3125,6 +3127,8 @@ def main():
                     manual_state.get("cooldown_until_utc"),
                 )
                 position_tracker.save_positions_atomic(positions_path, manual_positions)
+                if isinstance(sig, dict):
+                    sig["position_state"] = manual_state
 
         # --- stabilitás számítása ---
         mode_current = gates_mode(sig)
