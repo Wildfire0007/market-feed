@@ -5625,12 +5625,14 @@ def apply_signal_stability_layer(
     stability_enabled = bool(config.get("enabled", False))
     now_dt = parse_utc_timestamp(analysis_timestamp) or datetime.now(timezone.utc)
     tracking_cfg = config.get("manual_position_tracking") or {}
+    manual_writer = str(tracking_cfg.get("writer") or "notify").lower()
+    analysis_can_write = manual_writer == "analysis"
     positions_path = tracking_cfg.get("positions_file") or "public/_manual_positions.json"
     treat_missing = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
     if manual_positions is None:
         manual_positions = _load_manual_positions_from_file(positions_path, treat_missing)
     manual_positions = manual_positions if isinstance(manual_positions, dict) else {}
-
+  
     manual_state = position_tracker.compute_state(
         asset, tracking_cfg, manual_positions, now_dt
     )
@@ -5638,7 +5640,7 @@ def apply_signal_stability_layer(
         tracking_cfg, asset, default=20
     )
 
-    if manual_state.get("tracking_enabled") and manual_state.get("has_position"):
+    if analysis_can_write and manual_state.get("tracking_enabled") and manual_state.get("has_position"):
         spot_price = _extract_spot_price(payload)
         changed, reason, manual_positions = position_tracker.check_close_by_levels(
             asset,
@@ -5777,7 +5779,7 @@ def apply_signal_stability_layer(
 
     positions_changed = False
     entry_opened = False
-    if (
+    if analysis_can_write and (
         manual_state.get("tracking_enabled")
         and intent == "hard_exit"
         and manual_state.get("has_position")
@@ -5806,7 +5808,7 @@ def apply_signal_stability_layer(
         and notify.get("should_notify")
         and entry_side in {"buy", "sell"}
     )
-    if open_conditions_met:
+    if analysis_can_write and open_conditions_met:
         if setup_grade in {"A", "B"}:
             entry_level, sl_level, tp2_level = _extract_trade_levels(payload)
             position_tracker.log_audit_event(
@@ -5862,6 +5864,8 @@ def apply_signal_stability_layer(
             suppression_reason = "invalid_entry_side"
         elif setup_grade not in {"A", "B"}:
             suppression_reason = "setup_grade_filtered"
+        elif open_conditions_met and not analysis_can_write:
+            suppression_reason = "writer_is_notify"
         position_tracker.log_audit_event(
             "entry suppressed",
             event="ENTRY_SUPPRESSED",
@@ -14360,6 +14364,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
