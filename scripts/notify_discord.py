@@ -524,6 +524,7 @@ def build_mobile_embed_for_asset(
     *,
     kind: str = "normal",
     manual_positions: Optional[Dict[str, Any]] = None,
+    include_manual_position: bool = True,
 ) -> Dict[str, Any]:
     """Mobil-optimalizált kereskedési kártya."""
 
@@ -711,7 +712,7 @@ def build_mobile_embed_for_asset(
 
     # Pozíciómenedzsment
     position_note = None
-    if isinstance(signal_data, dict):
+    if include_manual_position and isinstance(signal_data, dict):
         raw_note = signal_data.get("position_management")
         if not raw_note:
             pm_reasons = signal_data.get("reasons")
@@ -3402,7 +3403,7 @@ def main():
         positions_changed = False
         entry_opened = False
 
-        if intent in {"hard_exit", "manage_position"}:
+        if intent in {"entry", "hard_exit", "manage_position"}:
             manual_positions, manual_state, positions_changed, entry_opened = _apply_and_persist_manual_transitions(
                 asset=asset,
                 intent=intent,
@@ -3429,9 +3430,14 @@ def main():
                 open_commits_this_run=open_commits_this_run,
                 sig=sig,
             )
+            if isinstance(sig, dict):
+                sig["position_state"] = manual_state
           
         # --- embed + állapot frissítés ---
         if send_kind:
+            channel = classify_signal_channel(eff, send_kind, display_stable)
+            if intent in {"hard_exit", "manage_position"}:
+                channel = "management"
             embed = build_mobile_embed_for_asset(
                 asset,
                 state,
@@ -3443,11 +3449,9 @@ def main():
                 is_invalidate=send_kind == "invalidate",
                 kind=send_kind,
                 manual_positions=manual_positions,
+                include_manual_position=channel != "market_scan",
             )
-            asset_embeds[asset] = embed
-            channel = classify_signal_channel(eff, send_kind, display_stable)
-            if intent in {"hard_exit", "manage_position"}:
-                channel = "management"
+            asset_embeds[asset] = embed            
             asset_channels[asset] = channel
             asset_send_records[asset] = {
                 "asset": asset,
@@ -3487,35 +3491,7 @@ def main():
                     cooldown_minutes=0,
                     mode=None,
                 )
-                mark_heartbeat(meta, bud_key, now_iso)
-
-        if intent not in {"hard_exit", "manage_position"}:
-            manual_positions, manual_state, positions_changed, entry_opened = _apply_and_persist_manual_transitions(
-                asset=asset,
-                intent=intent,
-                decision=eff,            
-                setup_grade=setup_grade,
-                notify_meta=notify_meta,
-                signal_payload=sig,
-                manual_tracking_enabled=manual_tracking_enabled,
-                can_write_positions=can_write_positions,
-                manual_state=manual_state,
-                manual_positions=manual_positions,
-                tracking_cfg=tracking_cfg,
-                now_dt=now_dt,
-                now_iso=now_iso,
-                send_kind=send_kind,
-                display_stable=display_stable,
-                missing_list=missing_list,
-                cooldown_map=cooldown_map,
-                cooldown_default=cooldown_default,
-                positions_path=positions_path,
-                entry_level=entry_level,
-                sl_level=sl_level,
-                tp2_level=tp2_level,
-                open_commits_this_run=open_commits_this_run,
-                sig=sig,
-            )            
+                mark_heartbeat(meta, bud_key, now_iso)                   
 
         manual_states[asset] = manual_state
 
@@ -3580,7 +3556,8 @@ def main():
                     is_flip=False,
                     is_invalidate=False,
                     kind="heartbeat",
-                    manual_positions=manual_positions,                  
+                    manual_positions=manual_positions,
+                    include_manual_position=False,                  
                 )
                 asset_channels.setdefault(asset, "market_scan")
                 heartbeat_added = True
