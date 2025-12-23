@@ -14,11 +14,12 @@ def test_entry_event_persists_and_is_reloaded():
         positions_path = Path(tmpdir) / "public" / "_manual_positions.json"
         stability_cfg = {
             "enabled": False,
-            "manual_position_tracking": {
-                "enabled": True,
-                "positions_file": str(positions_path),
-                "treat_missing_file_as_flat": True,
-                "post_exit_cooldown_minutes": {"default": 15},
+                "manual_position_tracking": {
+                    "enabled": True,
+                    "writer": "analysis",
+                    "positions_file": str(positions_path),
+                    "treat_missing_file_as_flat": True,
+                    "post_exit_cooldown_minutes": {"default": 15},
             },
         }
 
