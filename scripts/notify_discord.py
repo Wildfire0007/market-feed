@@ -2155,19 +2155,16 @@ def _finalize_entry_commit(
     open_commits_this_run: Set[str],
 ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     entry_record: EntryAuditRecord = pending["audit"]
-    dispatch_attempted = dispatch_result.get("attempted")
-    if dispatch_attempted is None:
-        dispatch_attempted = True
-    entry_record.dispatch_attempted = bool(dispatch_attempted)
-    entry_record.dispatch_success = bool(dispatch_result.get("success", False))
+    entry_record.dispatch_attempted = bool(dispatch_result.get("attempted"))
+    entry_record.dispatch_success = bool(dispatch_result.get("success"))
     entry_record.dispatch_status = dispatch_result.get("http_status")
     entry_record.dispatch_error = dispatch_result.get("error")
     entry_record.channel = pending.get("channel")
     entry_record.message_id = dispatch_result.get("message_id")
 
-    if not entry_record.dispatch_success:
+    if not entry_record.dispatch_attempted or not entry_record.dispatch_success:
         entry_record.commit_result = {"committed": False}
-        entry_record.commit_reason_override = "dispatch_failed"
+        entry_record.commit_reason_override = "dispatch_failed" if entry_record.dispatch_attempted else None
         manual_state = position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt)
         return manual_positions, manual_state, entry_record.commit_result
 
@@ -3621,7 +3618,7 @@ def main():
             "last": None, "count": 0,
             "last_sent": None,
             "last_sent_decision": None,
-            "last_sent_mode": None
+            "last_sent_mode": None,
             "last_sent_known": False,
             "cooldown_until": None,
         })
@@ -3856,7 +3853,7 @@ def main():
                 entry_record.send_kind = send_kind
             if isinstance(sig, dict):
                 sig["position_state"] = manual_state
-          
+           
         # --- embed + állapot frissítés ---
         if send_kind and (intent != "entry" or attempt_entry_dispatch):
             channel = classify_signal_channel(eff, send_kind, display_stable)
@@ -3938,7 +3935,7 @@ def main():
                     cooldown_minutes=0,
                     mode=None,
                 )
-                mark_heartbeat(meta, bud_key, now_iso)                   
+                mark_heartbeat(meta, bud_key, now_iso)                    
 
         manual_states[asset] = manual_state
 
@@ -3962,7 +3959,7 @@ def main():
                 opened_at_utc=mstate.get("opened_at_utc"),
                 positions_file=positions_path,
             )
-          
+           
     watcher = ActivePositionWatcher(
         _build_active_watcher_config(),
         tdstatus=tdstatus,
@@ -4020,9 +4017,9 @@ def main():
     save_state(state)
     
     gate_embed = build_entry_gate_summary_embed()
-  
+   
     pipeline_embed = build_pipeline_diag_embed(now=now_dt)
-  
+   
     live_embeds, management_embeds, market_scan_embeds = _collect_channel_embeds(
         asset_embeds=asset_embeds,
         asset_channels=asset_channels,
@@ -4110,10 +4107,10 @@ def main():
         entry_record = pending.get("audit")
         if entry_record:
             entry_record.commit_result = commit_result
-          
+           
     for record in entry_audit_records.values():
         record.log_commit_decision()
-      
+       
     if dispatched:
         print("Discord notify OK.")
     
