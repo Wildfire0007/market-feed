@@ -29,6 +29,7 @@ ENV:
 """
 
 import os, json, sys, logging, requests, time
+from uuid import uuid4
 from dataclasses import dataclass
 from copy import deepcopy
 from pathlib import Path
@@ -2806,6 +2807,8 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
 # ---------------- főlogika ----------------
 
 def main():
+    audit_run_id = str(uuid4())
+    position_tracker.set_audit_context(source="notify", run_id=audit_run_id)
     run_meta = {
         "run_id": os.getenv("GITHUB_RUN_ID"),
         "run_attempt": os.getenv("GITHUB_RUN_ATTEMPT"),
@@ -3007,6 +3010,26 @@ def main():
         if isinstance(notify_meta, dict):
             should_notify = bool(notify_meta.get("should_notify", True))
         if not should_notify:
+            if intent == "entry":
+                position_tracker.log_audit_event(
+                    "entry suppressed before notify dispatch",
+                    event="ENTRY_SUPPRESSED",
+                    asset=asset,
+                    intent=intent,
+                    decision=eff,
+                    entry_side=eff if eff in {"buy", "sell"} else None,
+                    setup_grade=setup_grade,
+                    stable=bool(display_stable),
+                    gates_missing=missing_list,
+                    notify_should_notify=False,
+                    notify_reason=(notify_meta or {}).get("reason"),
+                    manual_tracking_enabled=manual_tracking_enabled,
+                    manual_has_position=manual_state.get("has_position"),
+                    manual_cooldown_active=manual_state.get("cooldown_active"),
+                    cooldown_until_utc=manual_state.get("cooldown_until_utc"),
+                    suppression_reason=(notify_meta or {}).get("reason") or "notify_blocked",
+                    send_kind=None,
+                )
             state[asset] = st
             per_asset_sigs[asset] = sig
             per_asset_is_stable[asset] = display_stable
@@ -3062,6 +3085,37 @@ def main():
 
         if send_kind == "invalidate" and manual_state.get("has_position"):
             send_kind = None
+
+        if send_kind is None and intent == "entry":
+            suppression_reason = (notify_meta or {}).get("reason")
+            if suppression_reason is None:
+                if not is_actionable_now:
+                    suppression_reason = "not_actionable"
+                elif cooldown_active:
+                    suppression_reason = "cooldown_active"
+                elif flip_cd_active:
+                    suppression_reason = "flip_cooldown_active"
+                else:
+                    suppression_reason = "send_kind_none"
+            position_tracker.log_audit_event(
+                "entry suppressed by dispatcher",
+                event="ENTRY_SUPPRESSED",
+                asset=asset,
+                intent=intent,
+                decision=eff,
+                entry_side=eff if eff in {"buy", "sell"} else None,
+                setup_grade=setup_grade,
+                stable=bool(display_stable),
+                gates_missing=missing_list,
+                notify_should_notify=should_notify,
+                notify_reason=(notify_meta or {}).get("reason"),
+                manual_tracking_enabled=manual_tracking_enabled,
+                manual_has_position=manual_state.get("has_position"),
+                manual_cooldown_active=manual_state.get("cooldown_active"),
+                cooldown_until_utc=manual_state.get("cooldown_until_utc"),
+                suppression_reason=suppression_reason,
+                send_kind=None,
+            )
           
         # --- embed + állapot frissítés ---
         if send_kind:
@@ -3105,6 +3159,7 @@ def main():
                 mark_heartbeat(meta, bud_key, now_iso)
 
         positions_changed = False
+        entry_opened = False
         if (
             manual_tracking_enabled
             and intent == "hard_exit"
@@ -3139,6 +3194,26 @@ def main():
             and eff in ("buy", "sell")
         ):
             entry_level, sl_level, tp2_level = extract_trade_levels(sig)
+            position_tracker.log_audit_event(
+                "entry open attempt",
+                event="OPEN_ATTEMPT",
+                asset=asset,
+                intent=intent,
+                decision=eff,
+                entry_side=eff,
+                setup_grade=setup_grade,
+                stable=bool(display_stable),
+                gates_missing=missing_list,
+                notify_should_notify=bool((notify_meta or {}).get("should_notify", True)),
+                notify_reason=(notify_meta or {}).get("reason"),
+                manual_tracking_enabled=manual_tracking_enabled,
+                manual_has_position=manual_state.get("has_position"),
+                manual_cooldown_active=manual_state.get("cooldown_active"),
+                entry_level=entry_level,
+                sl=sl_level,
+                tp2=tp2_level,
+                send_kind=send_kind,
+            )
             manual_positions = position_tracker.open_position(
                 asset,
                 side="long" if eff == "buy" else "short",
@@ -3161,10 +3236,28 @@ def main():
                 now_iso,
             )
             positions_changed = True
+            entry_opened = True
 
         if positions_changed:
             position_tracker.save_positions_atomic(positions_path, manual_positions)
             sig["position_state"] = manual_state
+
+        if positions_changed and entry_opened:
+            entry_level, sl_level, tp2_level = extract_trade_levels(sig)
+            position_tracker.log_audit_event(
+                "entry open committed",
+                event="OPEN_COMMIT",
+                asset=asset,
+                intent=intent,
+                decision=eff,
+                entry_side=eff,
+                setup_grade=setup_grade,
+                entry=entry_level,
+                sl=sl_level,
+                tp2=tp2_level,
+                positions_file=positions_path,
+                send_kind=send_kind,
+            )
 
         state[asset] = st
 
