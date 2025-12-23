@@ -1,27 +1,57 @@
-import json
-import logging
+import os
 from datetime import datetime, timezone
 
 import position_tracker
-from scripts import notify_discord as nd
+import scripts.notify_discord as notify_discord
 
 
-class _BufferHandler(logging.Handler):
-    def __init__(self):
-        super().__init__()
-        self.records = []
+def _base_pending(asset: str, manual_state: dict, signal_payload: dict, entry_record: notify_discord.EntryAuditRecord):
+    return {
+        "intent": "entry",
+        "decision": "buy",
+        "setup_grade": "A",
+        "entry_side": "buy",
+        "send_kind": "normal",
+        "display_stable": True,
+        "notify_meta": signal_payload.get("notify"),
+        "manual_state_pre": manual_state,
+        "manual_tracking_enabled": True,
+        "can_write_positions": True,
+        "state_loaded": True,
+        "levels": {"entry": 100.0, "sl": 95.0, "tp2": 110.0},
+        "gates_missing": [],
+        "signal_payload": signal_payload,
+        "audit": entry_record,
+        "channel": "live",
+    }
 
-    def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover - simple collector
-        self.records.append(record.__dict__)
 
+def test_entry_commit_blocked_until_dispatch_success(tmp_path):
+    now = datetime.now(timezone.utc)
+    now_iso = notify_discord.to_utc_iso(now)
+    positions_path = tmp_path / "positions.json"
+    tracking_cfg = {
+        "enabled": True,
+        "writer": "notify",
+        "positions_file": str(positions_path),
+        "treat_missing_file_as_flat": True,
+    }
 
-def _collect_events(handler: _BufferHandler, event_name: str):
-    return [rec for rec in handler.records if rec.get("event") == event_name]
+    manual_positions = {}
+    manual_state = position_tracker.compute_state("BTCUSD", tracking_cfg, manual_positions, now)
+    sig = {
+        "asset": "BTCUSD",
+        "signal": "buy",
+        "intent": "entry",
+        "setup_grade": "A",
+        "entry": 100.0,
+        "sl": 95.0,
+        "tp2": 110.0,
+        "notify": {"should_notify": True},
+    }
 
-
-def _build_entry_record(asset: str, manual_state: dict, positions_file: str, can_write: bool) -> nd.EntryAuditRecord:
-    return nd.EntryAuditRecord(
-        asset=asset,
+    entry_record = notify_discord.EntryAuditRecord(
+        asset="BTCUSD",
         intent="entry",
         decision="buy",
         setup_grade="A",
@@ -30,148 +60,167 @@ def _build_entry_record(asset: str, manual_state: dict, positions_file: str, can
         should_notify=True,
         manual_state=manual_state,
         manual_tracking_enabled=True,
-        can_write_positions=can_write,
+        can_write_positions=True,
         state_loaded=True,
-        positions_file=positions_file,
+        positions_file=str(positions_path),
         gates_missing=[],
         notify_reason=None,
         display_stable=True,
     )
 
+    pending = _base_pending("BTCUSD", manual_state, sig, entry_record)
+    dispatch_result = {"attempted": True, "success": False, "http_status": 500, "error": "boom"}
 
-def test_entry_dispatch_without_commit(monkeypatch, tmp_path):
-    monkeypatch.setenv("MANUAL_POS_AUDIT_TO_FILE", "0")
-    position_tracker.set_audit_context(source="test", run_id="RUN_NO_COMMIT")
-    handler = _BufferHandler()
-    position_tracker.LOGGER.addHandler(handler)
-
-    positions_path = tmp_path / "manual_positions.json"
-    positions_path.write_text("{}\n", encoding="utf-8")
-    manual_positions = position_tracker.load_positions(str(positions_path), True)
-    tracking_cfg = {"enabled": True}
-    now_dt = datetime.now(timezone.utc)
-    manual_state = position_tracker.compute_state("BTCUSD", tracking_cfg, manual_positions, now_dt)
-
-    record = _build_entry_record("BTCUSD", manual_state, str(positions_path), can_write=False)
-    record.log_candidate()
-
-    signal_payload = {"trade": {"entry": 100.0, "sl": 90.0, "tp2": 120.0}}
-    manual_positions, manual_state, positions_changed, entry_opened, commit_result = nd._apply_and_persist_manual_transitions(
-        asset="BTCUSD",
-        intent="entry",
-        decision="buy",
-        setup_grade="A",
-        notify_meta={"should_notify": True},
-        signal_payload=signal_payload,
-        manual_tracking_enabled=True,
-        can_write_positions=False,
-        manual_state=manual_state,
+    manual_positions, manual_state_after, commit_result = notify_discord._finalize_entry_commit(
+        "BTCUSD",
+        pending,
+        dispatch_result,
         manual_positions=manual_positions,
         tracking_cfg=tracking_cfg,
-        now_dt=now_dt,
-        now_iso=position_tracker._to_utc_iso(now_dt),
-        send_kind="normal",
-        display_stable=True,
-        missing_list=[],
+        now_dt=now,
+        now_iso=now_iso,
         cooldown_map={},
-        cooldown_default=0,
+        cooldown_default=20,
         positions_path=str(positions_path),
-        entry_level=None,
-        sl_level=None,
-        tp2_level=None,
         open_commits_this_run=set(),
-        sig={},
     )
-    record.positions_changed = positions_changed
-    record.entry_opened = entry_opened
-    record.commit_result = commit_result
 
-    record.dispatch_attempted = True
-    record.dispatch_success = True
-    record.dispatch_status = 204
-    record.channel = "live"
-    record.log_dispatch_result()
-    record.log_commit_decision()
-
-    dispatch_events = _collect_events(handler, "ENTRY_DISPATCH_RESULT")
-    assert dispatch_events
-    assert dispatch_events[-1]["success"] is True
-
-    decision_events = _collect_events(handler, "ENTRY_COMMIT_DECISION")
-    assert decision_events
-    assert decision_events[-1]["will_commit"] is False
-    assert decision_events[-1]["commit_reason"] == "writer_read_only"
-
-    assert json.loads(positions_path.read_text()) == {}
-
-    position_tracker.LOGGER.removeHandler(handler)
+    assert manual_state_after.get("has_position") is False
+    assert not commit_result.get("committed")
+    assert entry_record._commit_reason() == "dispatch_failed"
+    assert not os.path.exists(positions_path)
+    assert manual_positions == {}
 
 
-def test_entry_commit_success(monkeypatch, tmp_path):
-    monkeypatch.setenv("MANUAL_POS_AUDIT_TO_FILE", "0")
-    position_tracker.set_audit_context(source="test", run_id="RUN_COMMIT_OK")
-    handler = _BufferHandler()
-    position_tracker.LOGGER.addHandler(handler)
+def test_entry_commit_persists_after_dispatch_success(tmp_path):
+    now = datetime.now(timezone.utc)
+    now_iso = notify_discord.to_utc_iso(now)
+    positions_path = tmp_path / "positions.json"
+    tracking_cfg = {
+        "enabled": True,
+        "writer": "notify",
+        "positions_file": str(positions_path),
+        "treat_missing_file_as_flat": True,
+    }
 
-    positions_path = tmp_path / "manual_positions.json"
-    positions_path.write_text("{}\n", encoding="utf-8")
-    manual_positions = position_tracker.load_positions(str(positions_path), True)
-    tracking_cfg = {"enabled": True}
-    now_dt = datetime.now(timezone.utc)
-    manual_state = position_tracker.compute_state("BTCUSD", tracking_cfg, manual_positions, now_dt)
+    manual_positions = {}
+    manual_state = position_tracker.compute_state("BTCUSD", tracking_cfg, manual_positions, now)
+    sig = {
+        "asset": "BTCUSD",
+        "signal": "buy",
+        "intent": "entry",
+        "setup_grade": "A",
+        "entry": 100.0,
+        "sl": 95.0,
+        "tp2": 110.0,
+        "notify": {"should_notify": True},
+    }
 
-    record = _build_entry_record("BTCUSD", manual_state, str(positions_path), can_write=True)
-    record.log_candidate()
-
-    signal_payload = {"trade": {"entry": 100.0, "sl": 90.0, "tp2": 120.0}}
-    manual_positions, manual_state, positions_changed, entry_opened, commit_result = nd._apply_and_persist_manual_transitions(
+    entry_record = notify_discord.EntryAuditRecord(
         asset="BTCUSD",
         intent="entry",
         decision="buy",
         setup_grade="A",
-        notify_meta={"should_notify": True},
-        signal_payload=signal_payload,
+        stable=True,
+        send_kind="normal",
+        should_notify=True,
+        manual_state=manual_state,
         manual_tracking_enabled=True,
         can_write_positions=True,
-        manual_state=manual_state,
+        state_loaded=True,
+        positions_file=str(positions_path),
+        gates_missing=[],
+        notify_reason=None,
+        display_stable=True,
+    )
+
+    pending = _base_pending("BTCUSD", manual_state, sig, entry_record)
+    dispatch_result = {"attempted": True, "success": True, "http_status": 204, "error": None}
+
+    manual_positions, manual_state_after, commit_result = notify_discord._finalize_entry_commit(
+        "BTCUSD",
+        pending,
+        dispatch_result,
         manual_positions=manual_positions,
         tracking_cfg=tracking_cfg,
-        now_dt=now_dt,
-        now_iso=position_tracker._to_utc_iso(now_dt),
-        send_kind="normal",
-        display_stable=True,
-        missing_list=[],
+        now_dt=now,
+        now_iso=now_iso,
         cooldown_map={},
-        cooldown_default=0,
+        cooldown_default=20,
         positions_path=str(positions_path),
-        entry_level=None,
-        sl_level=None,
-        tp2_level=None,
         open_commits_this_run=set(),
-        sig={},
     )
-    record.positions_changed = positions_changed
-    record.entry_opened = entry_opened
-    record.commit_result = commit_result
 
-    record.dispatch_attempted = True
-    record.dispatch_success = True
-    record.dispatch_status = 204
-    record.channel = "live"
-    record.log_dispatch_result()
-    record.log_commit_decision()
+    assert commit_result.get("committed") is True
+    assert manual_state_after.get("has_position") is True
+    persisted = position_tracker.load_positions(str(positions_path), treat_missing_as_flat=True)
+    assert "BTCUSD" in persisted
+    assert entry_record._commit_reason() == "commit_ok"
 
-    decision_events = _collect_events(handler, "ENTRY_COMMIT_DECISION")
-    assert decision_events
-    assert decision_events[-1]["will_commit"] is True
-    assert decision_events[-1]["commit_reason"] == "commit_ok"
 
-    commit_results = _collect_events(handler, "ENTRY_COMMIT_RESULT")
-    assert commit_results
-    assert commit_results[-1]["committed"] is True
+def test_entry_commit_handles_missing_dispatch_result(tmp_path):
+    now = datetime.now(timezone.utc)
+    now_iso = notify_discord.to_utc_iso(now)
+    positions_path = tmp_path / "positions.json"
+    tracking_cfg = {
+        "enabled": True,
+        "writer": "notify",
+        "positions_file": str(positions_path),
+        "treat_missing_file_as_flat": True,
+    }
 
-    content = json.loads(positions_path.read_text())
-    assert "BTCUSD" in content
-    assert content["BTCUSD"].get("side") == "long"
+    manual_positions = {}
+    manual_state = position_tracker.compute_state("BTCUSD", tracking_cfg, manual_positions, now)
+    sig = {
+        "asset": "BTCUSD",
+        "signal": "buy",
+        "intent": "entry",
+        "setup_grade": "A",
+        "entry": 100.0,
+        "sl": 95.0,
+        "tp2": 110.0,
+        "notify": {"should_notify": True},
+    }
 
-    position_tracker.LOGGER.removeHandler(handler)
+    entry_record = notify_discord.EntryAuditRecord(
+        asset="BTCUSD",
+        intent="entry",
+        decision="buy",
+        setup_grade="A",
+        stable=True,
+        send_kind="normal",
+        should_notify=True,
+        manual_state=manual_state,
+        manual_tracking_enabled=True,
+        can_write_positions=True,
+        state_loaded=True,
+        positions_file=str(positions_path),
+        gates_missing=[],
+        notify_reason=None,
+        display_stable=True,
+    )
+
+    pending = _base_pending("BTCUSD", manual_state, sig, entry_record)
+    dispatch_result = {}
+
+    manual_positions, manual_state_after, commit_result = notify_discord._finalize_entry_commit(
+        "BTCUSD",
+        pending,
+        dispatch_result,
+        manual_positions=manual_positions,
+        tracking_cfg=tracking_cfg,
+        now_dt=now,
+        now_iso=now_iso,
+        cooldown_map={},
+        cooldown_default=20,
+        positions_path=str(positions_path),
+        open_commits_this_run=set(),
+    )
+
+    assert entry_record.dispatch_attempted is True
+    assert entry_record.dispatch_success is False
+    assert manual_state_after.get("has_position") is False
+    assert not commit_result.get("committed")
+    assert entry_record._commit_reason() == "dispatch_failed"
+    assert not os.path.exists(positions_path)
+    assert manual_positions == {}
