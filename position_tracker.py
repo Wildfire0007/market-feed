@@ -176,8 +176,8 @@ def save_positions_atomic(path: str, data: Dict[str, Any]) -> Dict[str, Any]:
     resolved = resolve_repo_path(path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
-    tmp_path = resolved.with_suffix(resolved.suffix  ".tmp")
-    tmp_path.write_text(payload  "\n", encoding="utf-8")
+    tmp_path = resolved.with_suffix(resolved.suffix + ".tmp")
+    tmp_path.write_text(payload + "\n", encoding="utf-8")
     _audit_log(
         "persisting positions to disk",
         event="SAVE_BEGIN",
@@ -203,7 +203,7 @@ def save_positions_atomic(path: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "positions_file": str(resolved),
         "size": stat.st_size,
         "mtime": mtime,
-        "written_bytes": len(payload.encode("utf-8"))  1,  # account for trailing newline
+        "written_bytes": len(payload.encode("utf-8")) + 1,  # account for trailing newline
         "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
     }
 
@@ -336,7 +336,7 @@ def close_position(
     updated = deepcopy(positions) if isinstance(positions, dict) else {}
     entry = updated.get(asset) if isinstance(updated, dict) else None
     cooldown_dt = _parse_utc_timestamp(closed_at_utc) or datetime.now(timezone.utc)
-    cooldown_until = cooldown_dt  timedelta(minutes=max(0, int(cooldown_minutes)))
+    cooldown_until = cooldown_dt + timedelta(minutes=max(0, int(cooldown_minutes)))
 
     if not isinstance(entry, dict):
         entry = {"side": None}
