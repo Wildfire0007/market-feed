@@ -14,8 +14,8 @@ name: TD Full Pipeline (5m)
 
 permissions:
   contents: write
-  
-concurrency:  
+
+concurrency:
   group: manual-positions-${{ github.ref }}
   cancel-in-progress: true
 
@@ -45,15 +45,15 @@ jobs:
       - name: Sync default branch
         run: |
           git fetch origin main
-          git reset --hard origin/main      
-      
+          git reset --hard origin/main
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
           cache-dependency-path: requirements.lock
-          
+
       - name: Restore Python virtualenv cache
         id: cache-venv
         uses: actions/cache@v4
@@ -88,7 +88,7 @@ jobs:
       # anything stale from a previous workflow run.
       - name: Run Trading.py (pull all OHLC  spot)
         run: .venv/bin/python Trading.py
-        
+
       - name: Sync pipeline artifacts into public (before analysis)
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.force_public_sync != 'false'
         env:
@@ -118,7 +118,7 @@ jobs:
             raise SystemExit("Missing public/.sync-metadata.json after sync")
 
           metadata = json.loads(meta_path.read_text())
-          
+
           expected_run_id = os.environ.get("EXPECTED_RUN_ID")
           if not expected_run_id:
             raise SystemExit("EXPECTED_RUN_ID environment variable missing")
@@ -136,7 +136,7 @@ jobs:
 
           print("Verified public sync metadata", metadata)
           PY
-          
+
       - name: Ensure manual position state is available for analysis
         env:
           PUBLIC_BASE_URL: ${{ env.PUBLIC_BASE_URL }}
@@ -150,7 +150,7 @@ jobs:
             echo "manual positions fallback created"
           fi
           curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true
- 
+
       - name: Upload pipeline artifact bundle
         uses: actions/upload-artifact@v4
         with:
@@ -158,18 +158,18 @@ jobs:
           path: |
             data
             reports
-            
+
       - name: Verify model exists & loadable
         run: .venv/bin/python scripts/check_ml_readiness.py BTCUSD
 
       - name: Run analysis (ML disabled)
         run: |
           .venv/bin/python analysis.py
-               
+
       - name: Generate latency monitoring snapshot
         run: |
           .venv/bin/python scripts/check_latency_sources.py --output public/monitoring/data_latency.json --pretty
-                           
+
       - name: Commit and push refreshed public outputs
         if: github.ref == 'refs/heads/main'
         run: |
@@ -186,7 +186,7 @@ jobs:
           fi
           git commit -m "Auto-update analysis outputs (public/) [skip ci]"
           git push origin main
-          
+
       - name: Upload analysis outputs
         uses: actions/upload-artifact@v4
         with:
@@ -204,14 +204,14 @@ jobs:
       id-token: write
     environment:
       name: github-pages
-    steps:     
+    steps:
       - name: Deploy public folder to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
   notify:
     name: 3) Discord értesítő
     needs:
-      - trading_and_analysis     
+      - trading_and_analysis
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -255,14 +255,14 @@ jobs:
               echo "STATE_LOADED=0" >> $GITHUB_ENV
           fi
           curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true
-                    
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
           cache-dependency-path: requirements.lock
-          
+
       - name: Restore Python virtualenv cache
         id: cache-venv
         uses: actions/cache@v4
