@@ -893,7 +893,7 @@ def _parse_utc_timestamp(value: str) -> Optional[datetime]:
     try:
         ts = value.strip()
         if ts.endswith("Z"):
-            ts = ts[:-1]  "00:00"
+            ts = ts[:-1] + "+00:00"
         dt = datetime.fromisoformat(ts)
     except Exception:
         try:
@@ -942,7 +942,7 @@ def _load_macro_lockout_windows() -> Dict[str, List[Dict[str, Any]]]:
                 except (TypeError, ValueError):
                     post = 0
                 start = ts_release - timedelta(seconds=pre)
-                end = ts_release  timedelta(seconds=post)
+                end = ts_release + timedelta(seconds=post)
                 label = (
                     event.get("label")
                     or event.get("event")
@@ -1434,7 +1434,7 @@ def _render_entry_gate_chart(stats: Dict[str, Any]) -> None:
                     continue
                 for reason in item.get("missing") or item.get("precision_hiany") or []:
                     reason_text = str(reason)
-                    reason_counts[reason_text] = reason_counts.get(reason_text, 0)  1
+                    reason_counts[reason_text] = reason_counts.get(reason_text, 0) + 1
             total = sum(reason_counts.values()) or 1
             for reason, count in sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0])):
                 pct = (count / total) * 100.0
@@ -1622,7 +1622,7 @@ def _build_entry_count_summary(
 
     def _bump(day_key: str, asset_key: str) -> None:
         asset_bucket = counts_by_day.setdefault(day_key, {})
-        asset_bucket[asset_key] = asset_bucket.get(asset_key, 0)  1
+        asset_bucket[asset_key] = asset_bucket.get(asset_key, 0) + 1
 
     if journal_path.exists():
         try:
@@ -1658,7 +1658,7 @@ def _build_entry_count_summary(
     totals: Dict[str, int] = {}
     for _, assets in counts_by_day.items():
         for asset_key, count in assets.items():
-            totals[asset_key] = totals.get(asset_key, 0)  count
+            totals[asset_key] = totals.get(asset_key, 0) + count
 
     return {
         "generated_utc": nowiso(),
@@ -1690,7 +1690,7 @@ def time_of_day_bucket(now_utc: Optional[datetime]) -> str:
         now_utc = datetime.now(timezone.utc)
     if now_utc.tzinfo is None:
         now_utc = now_utc.replace(tzinfo=timezone.utc)
-    minute = now_utc.hour * 60  now_utc.minute
+    minute = now_utc.hour * 60 + now_utc.minute
     return _btc_time_of_day_bucket(minute)
 
 
@@ -1824,7 +1824,7 @@ def ensure_closed_candles(df: pd.DataFrame,
     if not isinstance(idx, pd.DatetimeIndex):
         return df.copy()
 
-    cutoff = now  timedelta(seconds=max(tolerance_seconds, 0))
+    cutoff = now + timedelta(seconds=max(tolerance_seconds, 0))
     mask = idx <= cutoff
 
     if mask.all():
@@ -1862,8 +1862,8 @@ def session_windows_utc(asset: str) -> Tuple[
 def _min_of_day(hour: int, minute: int) -> int:
     """Return minutes from midnight, clamped to the valid daily range."""
 
-    total = hour * 60  minute
-    return max(0, min(total, 23 * 60  59))
+    total = hour * 60 + minute
+    return max(0, min(total, 23 * 60 + 59))
 
 
 def in_any_window_utc(windows: Optional[List[Tuple[int, int, int, int]]], h: int, m: int) -> bool:
@@ -1903,13 +1903,13 @@ def _convert_rule_minute_to_utc(
             rule_date, dtime(minute // 60, minute % 60, tzinfo=source_tz)
         )
         utc_dt = local_dt.astimezone(timezone.utc)
-        return utc_dt.hour * 60  utc_dt.minute
+        return utc_dt.hour * 60 + utc_dt.minute
     except Exception:
         return minute
 
 
 def format_utc_minute(minute: int) -> str:
-    minute = max(0, min(23 * 60  59, minute))
+    minute = max(0, min(23 * 60 + 59, minute))
     return f"{minute // 60:02d}:{minute % 60:02d}"
 
 
@@ -1967,7 +1967,7 @@ def next_session_open(asset: str, now: Optional[datetime] = None) -> Optional[da
         entry_windows = [(0, 0, 23, 59)]
 
     for day_offset in range(0, 8):
-        day = (now  timedelta(days=day_offset)).date()
+        day = (now + timedelta(days=day_offset)).date()
         if weekdays and day.weekday() not in weekdays:
             continue
 
@@ -1989,7 +1989,7 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
     now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     h, m = now_utc.hour, now_utc.minute
     now_budapest = now_utc.astimezone(BUDAPEST_TIMEZONE)
-    minute_of_day = h * 60  m
+    minute_of_day = h * 60 + m
     entry_windows, monitor_windows = session_windows_utc(asset)
     monitor_ok = in_any_window_utc(monitor_windows, h, m)
     entry_window_ok = in_any_window_utc(entry_windows, h, m)
@@ -2025,7 +2025,7 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
     sunday_open_local: Optional[List[str]] = None
     if sunday_open is not None:
         sunday_open_local = convert_minutes_to_local_range(
-            sunday_open, (sunday_open  1) % (24 * 60), tz=BUDAPEST_TIMEZONE
+            sunday_open, (sunday_open + 1) % (24 * 60), tz=BUDAPEST_TIMEZONE
         )
     if sunday_open is not None and now_utc.weekday() == 6 and minute_of_day < sunday_open:
         monitor_ok = False
@@ -2368,7 +2368,7 @@ def translate_severity(value: Optional[str]) -> Optional[str]:
 def short_text(text: str, limit: int = 160) -> str:
     if len(text) <= limit:
         return text
-    return text[: limit - 1].rstrip()  "…"
+    return text[: limit - 1].rstrip() + "…"
 
 
 def build_action_plan(
@@ -2862,7 +2862,7 @@ def build_action_plan(
         summary_parts.append(
             short_text(
                 f"{severity_label.capitalize() if severity_label else 'Exit'} jelzés: {state_display}"
-                 (f" ({direction})" if direction else "")
+                 + (f" ({direction})" if direction else "")
             )
         )
         exit_actions = exit_signal.get("actions") or []
@@ -2894,7 +2894,7 @@ def build_action_plan(
             else:
                 base = f"Hajtsd végre a(z) {action_type} műveletet"
             if extra_parts:
-                base = " ("  ", ".join(extra_parts)  ")"
+                base = f"{base} ({', '.join(extra_parts)})"
             return base
 
         for action in exit_actions:
@@ -2945,8 +2945,8 @@ def build_action_plan(
         summary_parts.append(short_text(summary_text))
         stop_instruction = (
             "Stop-loss szint: "
-             format_price_compact(sl)
-             (" (long)" if decision == "buy" else " (short)")
+             + format_price_compact(sl)
+             + (" (long)" if decision == "buy" else " (short)")
         )
         add_step(
             "risk",
@@ -3014,7 +3014,7 @@ def build_action_plan(
         arming_since = None
     precision_timeout_triggered = False
     timeout_minutes = 10
-    runtime_bucket["events"] = int(runtime_bucket.get("events", 0))  1
+    runtime_bucket["events"] = int(runtime_bucket.get("events", 0)) + 1
     runtime_bucket.setdefault("hits_ready", 0)
     runtime_bucket.setdefault("hits_arming", 0)
     runtime_bucket.setdefault("hits_soft_block", 0)
@@ -3028,20 +3028,20 @@ def build_action_plan(
         if runtime_bucket.get("last_state") != "precision_ready":
             runtime_bucket["ready_since"] = now_runtime
         runtime_bucket["last_state"] = "precision_ready"
-        runtime_bucket["hits_ready"] = int(runtime_bucket.get("hits_ready", 0))  1
+        runtime_bucket["hits_ready"] = int(runtime_bucket.get("hits_ready", 0)) + 1
         runtime_bucket.pop("arming_since", None)
     elif precision_state == "precision_arming":
         if runtime_bucket.get("last_state") != "precision_arming":
             runtime_bucket["arming_since"] = now_runtime
         runtime_bucket["last_state"] = "precision_arming"
-        runtime_bucket["hits_arming"] = int(runtime_bucket.get("hits_arming", 0))  1
+        runtime_bucket["hits_arming"] = int(runtime_bucket.get("hits_arming", 0)) + 1
         runtime_bucket.pop("ready_since", None)
     else:
         runtime_bucket["last_state"] = precision_state
         runtime_bucket.pop("ready_since", None)
         runtime_bucket.pop("arming_since", None)
         if precision_state == "precision_soft_block":
-            runtime_bucket["hits_soft_block"] = int(runtime_bucket.get("hits_soft_block", 0))  1
+            runtime_bucket["hits_soft_block"] = int(runtime_bucket.get("hits_soft_block", 0)) + 1  1
     if precision_timeout_triggered and isinstance(entry_thresholds, dict):
         entry_thresholds["precision_timeout"] = {"minutes": timeout_minutes}
     precision_gate_snapshot = entry_thresholds_meta.get("precision_gate_state")
@@ -3220,12 +3220,12 @@ def derive_position_management_note(
     if anchor_active and bias in {"long", "short"} and anchor_bias != bias:
         base = (
             prefix
-             f"aktív {anchor_bias} pozíció a jelenlegi bias ({bias}) ellen → defenzív menedzsment, részleges zárás vagy szoros SL"
+             + f"aktív {anchor_bias} pozíció a jelenlegi bias ({bias}) ellen → defenzív menedzsment, részleges zárás vagy szoros SL"
         )
         det = deterioration_messages()
         if det:
-            base = " — "  "; ".join(det)
-        return base  hint_suffix, None
+            base = base + " — " + "; ".join(det)
+        return base + hint_suffix, None
 
     direction = anchor_bias or bias
     base_message: Optional[str]
@@ -3277,7 +3277,7 @@ def derive_position_management_note(
         if price is None or not np.isfinite(price) or current_price_val is None:
             return False
         if side == "long":
-            return current_price_val <= price  tolerance
+            return current_price_val <= price - tolerance
         if side == "short":
             return current_price_val >= price - tolerance
         return False
@@ -3298,13 +3298,13 @@ def derive_position_management_note(
 
     if exit_reasons:
         det = deterioration_messages()
-        message = prefix  (
+        message = prefix + (
             f"aktív {anchor_bias} pozíció invalidálódott → hard exit szükséges"
         )
-        message = " ("  "; ".join(exit_reasons)  ")"
+        message += " (" + "; ".join(exit_reasons) + ")"
         if det:
-            message = " — "  "; ".join(det)
-        message = hint_suffix
+            message += " — " + "; ".join(det)
+        message += hint_suffix
         exit_signal = {
             "state": "hard_exit",
             "severity": "critical",
@@ -3427,7 +3427,7 @@ def derive_position_management_note(
         and (strong_reversal or profit_guard_trigger)
         and (profit_risk or pscore_collapse)
     ):
-        context_parts = list(dict.fromkeys(reversal_reasons  profit_reasons))
+        context_parts = list(dict.fromkeys(reversal_reasons + profit_reasons))
         if not context_parts and pscore_collapse and current_p_score is not None:
             context_parts.append(f"P-score {current_p_score:.0f}")
         exit_actions: List[Dict[str, Any]] = []
@@ -3444,11 +3444,11 @@ def derive_position_management_note(
             f"aktív {anchor_bias} pozíció piros jelzésben → {exit_phrase}"
         )
         if context_parts:
-            message = " ("  "; ".join(context_parts)  ")"
+            message += " (" + "; ".join(context_parts) + ")"
         det = deterioration_messages()
         if det:
-            message = " — "  "; ".join(det)
-        message = hint_suffix
+            message += " — " + "; ".join(det)
+        message += hint_suffix
         exit_signal = {
             "state": exit_state,
             "severity": "high" if exit_state == "hard_exit" else "elevated",
@@ -3692,9 +3692,9 @@ def derive_position_management_note(
         if initial_risk_abs is not None and np.isfinite(initial_risk_abs):
             exit_signal["initial_risk_abs"] = initial_risk_abs
         if trail_reasons:
-            base_message = " — Exit jelzés: "  "; ".join(trail_reasons)
+            base_message = " — Exit jelzés: " + "; ".join(trail_reasons)
 
-    return (prefix  base_message  hint_suffix, exit_signal) if base_message else (None, exit_signal)
+    return (prefix + base_message + hint_suffix, exit_signal) if base_message else (None, exit_signal)
 
 def atr_low_threshold(asset: str) -> float:
     h, m = now_utctime_hm()
@@ -3949,9 +3949,9 @@ def get_precision_flow_rules(asset: str) -> Dict[str, float]:
     imbalance_th = ORDER_FLOW_IMBALANCE_TH * scale
     pressure_th = ORDER_FLOW_PRESSURE_TH * scale
 
-    imbalance_margin = 1.0  (PRECISION_FLOW_IMBALANCE_MARGIN - 1.0) * scale
+    imbalance_margin = 1.0 + (PRECISION_FLOW_IMBALANCE_MARGIN - 1.0) * scale
     imbalance_margin = max(PRECISION_FLOW_MARGIN_MIN, imbalance_margin)
-    pressure_margin = 1.0  (PRECISION_FLOW_PRESSURE_MARGIN - 1.0) * scale
+    pressure_margin = 1.0 + (PRECISION_FLOW_PRESSURE_MARGIN - 1.0) * scale
     pressure_margin = max(PRECISION_FLOW_MARGIN_MIN, pressure_margin)
 
     strength_floor = PRECISION_FLOW_STRENGTH_BASE * (1.0 - 0.25 * overshoot_ratio)
@@ -3986,7 +3986,7 @@ def parse_hhmm(value: str) -> Optional[int]:
         return None
     try:
         hour, minute = value.split(":", 1)
-        return int(hour) * 60  int(minute)
+        return int(hour) * 60 + int(minute)
     except Exception:
         return None
 
@@ -3996,7 +3996,7 @@ def in_utc_range(now_utc: datetime, start: str, end: str) -> bool:
     end_min = parse_hhmm(end)
     if start_min is None or end_min is None:
         return False
-    minute_now = now_utc.hour * 60  now_utc.minute
+    minute_now = now_utc.hour * 60 + now_utc.minute
     if start_min <= end_min:
         return start_min <= minute_now < end_min
     # Átívelés éjfélen
@@ -4158,7 +4158,7 @@ def compute_btcusd_intraday_watch(
         price_30 = safe_float(df_1m["close"].iloc[-30])
         roc_30_pct = abs(_percent_change(price, price_30) or 0.0)
         if roc_thresholds:
-            tiers = list(roc_thresholds)  [roc_thresholds[-1]  1]
+            tiers = list(roc_thresholds) + [roc_thresholds[-1] + 1]
             if roc_30_pct >= tiers[2]:
                 speed_score = 24
             elif roc_30_pct >= tiers[1]:
@@ -4225,9 +4225,9 @@ def compute_btcusd_intraday_watch(
     applied_sentiment = 0.0
     if sentiment_points:
         applied_sentiment = max(-base_comms, min(sentiment_points, 10.0 - base_comms))
-    comms = max(0.0, min(12.0, base_comms  applied_sentiment))
+    comms = max(0.0, min(12.0, base_comms + applied_sentiment))
 
-    total_score = speed_score  vol_score  range_score  comms
+    total_score = speed_score + vol_score + range_score + comms
     crypto_score = int(round(max(0.0, min(100.0, total_score))))
     band = intervention_band(crypto_score, config.get("irs_bands", {}))
 
@@ -5442,7 +5442,7 @@ def _format_manual_position_note(
     if tp2 is not None:
         details.append(f"TP2: {tp2}")
 
-    detail_suffix = " ("  ", ".join(details)  ")" if details else ""
+    detail_suffix = " (" + ", ".join(details) + ")" if details else ""
     return f"Pozíciómenedzsment: aktív {side_txt} pozíció{detail_suffix}"
 
 
@@ -5734,7 +5734,7 @@ def apply_signal_stability_layer(
                 notify["should_notify"] = False
                 notify["reason"] = "entry_cooldown_active"
                 notify["cooldown_until_utc"] = to_utc_iso(
-                    last_ts  timedelta(minutes=min_between)
+                    last_ts + timedelta(minutes=min_between)
                 )
 
             hard_exit_cd = parse_utc_timestamp(state.get("hard_exit_cooldown_until_utc"))
@@ -5772,7 +5772,7 @@ def apply_signal_stability_layer(
                 min_after_exit = _resolve_asset_value(cd_cfg, asset, 0)
                 state["hard_exit_side"] = exit_side or entry_side
                 state["hard_exit_cooldown_until_utc"] = to_utc_iso(
-                    now_dt  timedelta(minutes=min_after_exit)
+                    now_dt + timedelta(minutes=min_after_exit)
                 )
         _save_signal_state(state_path, state)
 
@@ -5973,8 +5973,8 @@ def update_latency_profile(outdir: str, latency_seconds: Optional[int]) -> None:
     data = load_latency_profile(outdir)
     ema_delay = float(data.get("ema_delay", latency_seconds))
     alpha = data.get("alpha", 0.15)
-    ema_delay = (1 - alpha) * ema_delay  alpha * float(latency_seconds)
-    payload = {"ema_delay": ema_delay, "alpha": alpha, "samples": int(data.get("samples", 0))  1}
+    ema_delay = (1 - alpha) * ema_delay + alpha * float(latency_seconds)
+    payload = {"ema_delay": ema_delay, "alpha": alpha, "samples": int(data.get("samples", 0)) + 1}
     save_json(profile_path, payload)
 
 
@@ -14363,83 +14363,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
