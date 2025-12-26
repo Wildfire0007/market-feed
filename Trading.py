@@ -181,10 +181,10 @@ _FINNHUB_SESSION.headers.update({"User-Agent": "market-feed/finnhub-fallback/1.0
 # values are intentionally generous – if every symbol is stale we still return
 # the least-delayed payload instead of failing the pipeline.
 SERIES_FRESHNESS_LIMITS = {
-    "1min": 180.0 + 240.0,  # 1m candle + 4m tolerance
-    "5min": 300.0 + 900.0,  # 5m candle + 15m tolerance
-    "1h": 3600.0 + 5400.0,  # 1h candle + 90m tolerance
-    "4h": 4 * 3600.0 + 21600.0,  # 4h candle + 6h tolerance
+    "1min": 180.0  240.0,  # 1m candle  4m tolerance
+    "5min": 300.0  900.0,  # 5m candle  15m tolerance
+    "1h": 3600.0  5400.0,  # 1h candle  90m tolerance
+    "4h": 4 * 3600.0  21600.0,  # 4h candle  6h tolerance
 }
 try:
     from config.analysis_settings import (
@@ -320,7 +320,7 @@ class TokenBucketLimiter:
         delta = now - self.updated
         if delta <= 0:
             return
-        self.tokens = min(self.capacity, self.tokens + delta * self.rate_per_second)
+        self.tokens = min(self.capacity, self.tokens  delta * self.rate_per_second)
         self.updated = now
 
     def wait(self) -> None:
@@ -701,7 +701,7 @@ def _apply_status_profile_metadata(
     if isinstance(status_note, str) and status_note.strip():
         payload["status_note"] = status_note.strip()
 
-_BASE_REQUESTS_PER_ASSET = 1 + len(SERIES_FETCH_PLAN)
+_BASE_REQUESTS_PER_ASSET = 1  len(SERIES_FETCH_PLAN)
 _BASE_REQUESTS_TOTAL = len(ASSETS) * _BASE_REQUESTS_PER_ASSET
 _DEFAULT_HTTP_BUDGET = max(1, TD_REQUESTS_PER_MINUTE - _BASE_REQUESTS_TOTAL)
 REALTIME_HTTP_BUDGET_TOTAL = max(
@@ -866,7 +866,7 @@ CLIENT_ERROR_STATUS_CODES: Set[Optional[int]] = {
 # ─────────────────────────────── Segédek ─────────────────────────────────
 
 def now_utc() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("00:00", "Z")
 
 def _parse_iso_utc(value: Any) -> Optional[datetime]:
     if not value:
@@ -885,7 +885,7 @@ def _parse_iso_utc(value: Any) -> Optional[datetime]:
         if not candidate:
             return None
         if candidate.endswith("Z"):
-            candidate = candidate[:-1] + "+00:00"
+            candidate = candidate[:-1]  "00:00"
         try:
             parsed = datetime.fromisoformat(candidate)
         except ValueError:
@@ -911,9 +911,9 @@ def update_system_heartbeat(out_dir: str) -> None:
 def save_json(path: str, obj: Dict[str, Any]) -> None:
     target = Path(path)
     ensure_dir(str(target.parent))
-    tmp_path = target.with_suffix(target.suffix + ".tmp")
+    tmp_path = target.with_suffix(target.suffix  ".tmp")
 
-    # ENV flags (defaults: fast + safe enough for CI)
+    # ENV flags (defaults: fast  safe enough for CI)
     durable_flag = os.getenv("TD_DURABLE_WRITES", "0").strip().lower() in {"1", "true", "yes", "on"}
     skip_unchanged_flag = (
         os.getenv("TD_SKIP_UNCHANGED_KLINES_WRITES", "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -1082,7 +1082,7 @@ def _reuse_previous_spot(adir: str, payload: Dict[str, Any], freshness_limit: fl
     if reason:
         reused["fallback_reason"] = str(reason)
     reused.setdefault("freshness_limit_seconds", freshness_limit)
-    reused["fallback_reuse_count"] = reuse_count + 1
+    reused["fallback_reuse_count"] = reuse_count  1
     return reused
 
 
@@ -1366,7 +1366,7 @@ def _reuse_previous_series_payload(
     reason = payload.get("error") or payload.get("message")
     if reason:
         reused["fallback_reason"] = str(reason)
-    reused["fallback_reuse_count"] = reuse_count + 1
+    reused["fallback_reuse_count"] = reuse_count  1
     return reused
 
 
@@ -1546,7 +1546,7 @@ def _refresh_series_if_stale(
             attempt_memory=attempt_memory,
             raise_on_all_client_errors=True,
         )
-        attempts_made += 1
+        attempts_made = 1
         if not isinstance(refreshed, dict) or not refreshed.get("ok"):
             continue
         refreshed_latency = _coerce_float(refreshed.get("latency_seconds"))
@@ -1786,7 +1786,7 @@ def td_get(path: str, **params) -> Dict[str, Any]:
     last_error: Optional[Exception] = None
     last_status: Optional[int] = None
     cached_response = _get_cached_td_response(path, params)
-    for attempt in range(1, TD_MAX_RETRIES + 1):
+    for attempt in range(1, TD_MAX_RETRIES  1):
         TD_RATE_LIMITER.wait()
         response: Optional[requests.Response] = None
         try:
@@ -2362,7 +2362,7 @@ def _maybe_use_secondary_series(
     return fallback
 def td_time_series(symbol: str, interval: str, outputsize: int = 500,
                    exchange: Optional[str] = None, order: str = "desc") -> Dict[str, Any]:
-    """Hibatűrő time_series (hiba esetén ok:false + üres values)."""
+    """Hibatűrő time_series (hiba esetén ok:false  üres values)."""
 
     cache_key = (symbol, interval, exchange or "", int(outputsize), order or "desc")
     if cache_key in _SERIES_CACHE:
@@ -2489,7 +2489,7 @@ def td_quote(symbol: str, exchange: Optional[str] = None) -> Dict[str, Any]:
     }
 
 def td_last_close(symbol: str, interval: str = "5min", exchange: Optional[str] = None) -> Tuple[Optional[float], Optional[str]]:
-    """Idősorból az utolsó gyertya close + időpont (UTC ISO)."""
+    """Idősorból az utolsó gyertya close  időpont (UTC ISO)."""
     params = {
         "symbol": symbol,
         "interval": interval,
@@ -2552,7 +2552,7 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
 
     source = "twelvedata:quote"
     if fallback_used:
-        source = "twelvedata:quote+time_series_fallback"
+        source = "twelvedata:quotetime_series_fallback"
 
     result: Dict[str, Any] = {
         "asset": symbol,
@@ -2594,7 +2594,7 @@ def _extract_field(payload: Any, path: str) -> Optional[Any]:
         while '[' in segment:
             bracket = segment.find('[')
             attr = segment[:bracket]
-            remainder = segment[bracket + 1:]
+            remainder = segment[bracket  1:]
             if attr:
                 if not isinstance(current, dict):
                     return None
@@ -2612,7 +2612,7 @@ def _extract_field(payload: Any, path: str) -> Optional[Any]:
             if index >= len(current) or index < -len(current):
                 return None
             current = current[index]
-            segment = remainder[end + 1:]
+            segment = remainder[end  1:]
             if not segment:
                 break
         if segment:
@@ -2645,7 +2645,7 @@ def _collect_http_frames(
                 quote = td_quote(symbol, exchange)
             except TDError as exc:
                 if exc.status_code in {400, 404}:
-                    consecutive_client_errors += 1
+                    consecutive_client_errors = 1
                     if force and consecutive_client_errors >= 2 and not frames:
                         abort_reason = f"client_error_{exc.status_code or 'unknown'}"
                         LOGGER.info(
@@ -2688,7 +2688,7 @@ def _collect_http_frames(
         if len(frames) >= sample_cap:
             break
         if not cycle_success:
-            failure_cycles += 1
+            failure_cycles = 1
             if not frames and failure_cycles >= max_failures:
                 break
         else:
@@ -2833,7 +2833,7 @@ def _collect_realtime_spot_impl(
         duration = min(duration, http_duration)
         if interval > 0:
             expected_cycles = max(1, int(math.ceil(http_duration / interval)))
-            http_max_samples = max(1, min(http_max_samples, expected_cycles + 1))
+            http_max_samples = max(1, min(http_max_samples, expected_cycles  1))
 
     # Forced realtime collection (pl. spot fallback) should be quick – if we
     # cannot rely on the websocket path we fall back to a much shorter HTTP
@@ -2859,7 +2859,7 @@ def _collect_realtime_spot_impl(
     ws_attempted = False
     http_attempted = False
 
-    deadline = time.time() + duration
+    deadline = time.time()  duration
     if use_ws:
         ws_attempted = True
         frames = _collect_ws_frames(asset, symbol_cycle, deadline)
@@ -2869,7 +2869,7 @@ def _collect_realtime_spot_impl(
     if not frames:
         remaining = max(0.0, deadline - time.time())
         if remaining > 0:
-            deadline_http = time.time() + remaining
+            deadline_http = time.time()  remaining
             http_attempted = True
             frames, abort_reason = _collect_http_frames(
                 symbol_cycle,
@@ -2890,7 +2890,7 @@ def _collect_realtime_spot_impl(
                 attempted.append("websocket")
             if http_attempted:
                 attempted.append("http")
-        transport_display = "+".join(attempted) if attempted else "none"
+        transport_display = "".join(attempted) if attempted else "none"
         LOGGER.info(
             "Realtime spot unavailable for %s transport=%s abort_reason=%s forced=%s",
             asset,
@@ -3465,7 +3465,7 @@ def try_symbols(
                     "used_exchange": exch,
                 }
                 continue
-        attempts_made += 1
+        attempts_made = 1
         try:
             result = fetch_fn(sym, exch)
         except TDError as exc:
@@ -3666,7 +3666,7 @@ def fetch_with_freshness(
         and result.get("freshness_violation")
         and retries < max_refreshes
     ):
-        retries += 1
+        retries = 1
         time.sleep(max(TD_RATE_LIMITER.current_delay, 0.2))
         result = try_symbols(
             attempts,
@@ -3687,14 +3687,14 @@ def fetch_with_freshness(
 def ema(series: List[Optional[float]], period: int) -> List[Optional[float]]:
     if not series or period <= 1:
         return [None] * len(series)
-    k = 2.0 / (period + 1.0)
+    k = 2.0 / (period  1.0)
     out: List[Optional[float]] = []
     prev: Optional[float] = None
     for v in series:
         if v is None:
             out.append(prev)
             continue
-        prev = v if prev is None else v * k + prev * (1.0 - k)
+        prev = v if prev is None else v * k  prev * (1.0 - k)
         out.append(prev)
     return out
 
@@ -3975,6 +3975,17 @@ def _reset_out_dir_if_requested(out_dir: str, logger: logging.Logger) -> None:
     if not RESET_PUBLIC_ON_TRADING_START:
         return
 
+    manual_state_snapshots = []
+    out_dir_path = Path(out_dir)
+
+    for state_name in ("_manual_positions.json", "_manual_positions_audit.jsonl"):
+        state_path = out_dir_path / state_name
+        try:
+            if state_path.exists():
+                manual_state_snapshots.append((state_name, state_path.read_bytes()))
+        except Exception as exc:
+            logger.warning("Failed to snapshot manual state before reset (%s): %s", state_path, exc)
+
     try:
         shutil.rmtree(out_dir)
         logger.info("Reset public artefacts before trading run: %s", out_dir)
@@ -3984,6 +3995,19 @@ def _reset_out_dir_if_requested(out_dir: str, logger: logging.Logger) -> None:
         logger.warning("Failed to reset public artefacts (%s): %s", out_dir, exc)
 
     ensure_dir(out_dir)
+
+    for state_name, snapshot in manual_state_snapshots:
+        try:
+            target = out_dir_path / state_name
+            ensure_dir(str(target.parent))
+            target.write_bytes(snapshot)
+            logger.info(
+                "Restored manual positions artefact after reset: %s (%d bytes)",
+                target,
+                len(snapshot),
+            )
+        except Exception as exc:
+            logger.warning("Failed to restore manual state after reset (%s): %s", state_name, exc)
 
 
 def main():
@@ -4068,6 +4092,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
