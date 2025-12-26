@@ -408,7 +408,7 @@ def _format_manual_position_line(
     if tp2 is not None:
         parts.append(f"TP2 {format_price(tp2, asset)}")
 
-    suffix = " — "  " • ".join(parts) if parts else ""
+    suffix = " — " + " • ".join(parts) if parts else ""
     return f"Pozíciómenedzsment: aktív {side_txt} pozíció{suffix}"
    
 def draw_progress_bar(value: float, length: int = 10) -> str:
@@ -417,10 +417,10 @@ def draw_progress_bar(value: float, length: int = 10) -> str:
     try:
         pct = max(0.0, min(1.0, float(value) / 100.0))
         filled = int(round(length * pct))
-        inner = "■" * filled  "□" * (length - filled)
+        inner = ("■" * filled) + ("□" * (length - filled))
         return f"[{inner}]"
     except Exception:
-        return "["  ("□" * length)  "]"
+        return "[" + ("□" * length) + "]"
 
 
 def format_price(val: Any, asset: str) -> str:
@@ -1229,7 +1229,7 @@ def post_batches(
                     pass
         return min(NETWORK_BACKOFF_CAP, NETWORK_BACKOFF_BASE * (2 ** (attempt - 1)))
        
-    batches = [embeds[i : i  batch_size] for i in range(0, len(embeds), batch_size)]
+    batches = [embeds[i : i + batch_size] for i in range(0, len(embeds), batch_size)]
     batch_results: List[Dict[str, Any]] = []
 
     for idx, batch in enumerate(batches):
@@ -1243,7 +1243,7 @@ def post_batches(
             "embed_count": len(batch),
         }
         last_error: Optional[Exception] = None
-        for attempt in range(1, NETWORK_RETRIES  1):
+        for attempt in range(1, NETWORK_RETRIES + 1):
             try:
                 r = requests.post(hook, json={"content": content, "embeds": batch}, timeout=20)
                 result["http_status"] = r.status_code
@@ -1262,7 +1262,7 @@ def post_batches(
                     extra={"status": result["http_status"], "attempt": attempt, "delay": delay},
                 )
                 if result["http_status"] == 429:
-                    _WEBHOOK_COOLDOWN_UNTIL[hook] = time.time()  NETWORK_COOLDOWN_MIN * 60
+                    _WEBHOOK_COOLDOWN_UNTIL[hook] = time.time() + NETWORK_COOLDOWN_MIN * 60
                 if attempt == NETWORK_RETRIES:
                     break
                 _sleep_with_cap(delay)
@@ -1298,7 +1298,7 @@ def post_batches(
 
 
 def _chunk_pairs(items: List[Tuple[Any, Any]], size: int) -> List[List[Tuple[Any, Any]]]:
-    return [items[i : i  size] for i in range(0, len(items), size)]
+    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 def _map_batch_results_to_assets(
@@ -1356,8 +1356,8 @@ def build_entry_gate_summary_embed() -> Optional[Dict[str, Any]]:
                     reject_count = 1
                 for reason in reasons:
                     txt = str(reason)
-                    reason_counts[txt] = reason_counts.get(txt, 0)  1
-                    asset_reason_counts[txt] = asset_reason_counts.get(txt, 0)  1
+                    reason_counts[txt] = reason_counts.get(txt, 0) + 1
+                    asset_reason_counts[txt] = asset_reason_counts.get(txt, 0) + 1
 
             if reject_count:
                 top_reasons = sorted(asset_reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:2]
@@ -1608,7 +1608,7 @@ def draw_progress_bar(value, min_val=0, max_val=100, length=10):
         pct = max(0.0, min(1.0, pct))
         filled = int(round(length * pct))
         # ■ karakter a teli, □ az üres részre
-        bar = "■" * filled  "□" * (length - filled)
+        bar = ("■" * filled) + ("□" * (length - filled))
         return bar
     except:
         return "□" * length
@@ -1684,7 +1684,7 @@ def update_asset_send_state(
     st["last_sent_known"] = True
 
     if cooldown_minutes and cooldown_minutes > 0:
-        st["cooldown_until"] = to_utc_iso(now  timedelta(minutes=cooldown_minutes))
+        st["cooldown_until"] = to_utc_iso(now + timedelta(minutes=cooldown_minutes))
     else:
         st["cooldown_until"] = None
 
@@ -1840,10 +1840,10 @@ def next_eia_release(now: Optional[datetime] = None) -> Optional[datetime]:
         days_ahead = (9 - weekday) % 7  # next Wednesday
         if days_ahead == 0:
             days_ahead = 7
-        release_date = (ny_now  timedelta(days=days_ahead)).date()
+        release_date = (ny_now + timedelta(days=days_ahead)).date()
     else:
         days_ahead = (2 - weekday)
-        release_date = (ny_now  timedelta(days=days_ahead)).date()
+        release_date = (ny_now + timedelta(days=days_ahead)).date()
 
     event_ny = datetime.combine(
         release_date,
@@ -2158,7 +2158,7 @@ def _apply_and_persist_manual_transitions(
         if commit_result.get("committed") and not commit_result.get("positions_snapshot"):
             commit_result["positions_snapshot"] = position_tracker.positions_file_snapshot(positions_path)
 
-      verification_positions: Dict[str, Any] = manual_positions if isinstance(manual_positions, dict) else {}
+    verification_positions: Dict[str, Any] = manual_positions if isinstance(manual_positions, dict) else {}
 
     if intent == "entry" and positions_changed and entry_opened and commit_result.get("committed"):
         try:
@@ -2406,7 +2406,7 @@ def _sanitize_last_sent(
 
     if parsed is not None and parsed_reason is None:
         now = now or datetime.now(timezone.utc)
-        future_threshold = now  timedelta(minutes=LAST_SENT_FUTURE_GRACE_MIN)
+        future_threshold = now + timedelta(minutes=LAST_SENT_FUTURE_GRACE_MIN)
         stale_threshold = now - timedelta(days=LAST_SENT_RETENTION_DAYS)
 
         if parsed > future_threshold:
@@ -3020,7 +3020,7 @@ class ActivePositionWatcher:
         except ValueError:
             return False
         base = self.now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
-        candidates = [base, base  timedelta(days=1), base - timedelta(days=1)]
+        candidates = [base, base + timedelta(days=1), base - timedelta(days=1)]
         for cand in candidates:
             diff = abs((self.now - cand).total_seconds()) / 60.0
             if diff <= window:
@@ -3166,7 +3166,7 @@ class ActivePositionWatcher:
             anchor_parts.append(f"@ {fmt_num(anchor_price_display, digits=2)}")
         if size is not None:
             anchor_parts.append(f"size {fmt_num(size, digits=2)}")
-        anchor_value = f"{anchor_side.upper()}"  (" "  " • ".join(anchor_parts) if anchor_parts else "")
+        anchor_value = f"{anchor_side.upper()}" + (" " + " • ".join(anchor_parts) if anchor_parts else "")
 
         if invalid_level is not None:
             invalid_text = f"{fmt_num(invalid_level, digits=2)} (1h close{exit_arrow} ⇒ EXIT)"
@@ -3744,9 +3744,9 @@ def main():
         })
 
         if eff == st.get("last"):
-            st["count"] = int(st.get("count", 0))  1
+            st["count"] = int(st.get("count", 0)) + 1
         else:
-            st["last"]  = eff
+            st["last"] = eff
             st["count"] = 1
 
         missing_list = ((sig.get("gates") or {}).get("missing") or [])
