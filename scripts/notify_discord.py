@@ -712,7 +712,7 @@ def build_mobile_embed_for_asset(
     tracked_levels = tracked_levels if isinstance(tracked_levels, dict) else {}
    
     try:
-        dt = datetime.fromisoformat(str(ts_raw).replace("Z", "00:00"))
+        dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
         local_time = dt.astimezone(HB_TZ).strftime("%H:%M")
     except Exception:
         local_time = "--:--"
