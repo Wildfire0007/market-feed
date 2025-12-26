@@ -34,6 +34,7 @@ jobs:
       DISABLE_ML_PROBABILITY: "1"
       ML_PROBABILITY_MANUAL_OVERRIDE: "1"
       RESET_PUBLIC_ON_TRADING_START: "1"
+      PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -135,7 +136,21 @@ jobs:
 
           print("Verified public sync metadata", metadata)
           PY
-
+          
+      - name: Ensure manual position state is available for analysis
+        env:
+          PUBLIC_BASE_URL: ${{ env.PUBLIC_BASE_URL }}
+        run: |
+          set -euo pipefail
+          mkdir -p public
+          if curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions.json?ts=${GITHUB_RUN_ID}" -o public/_manual_positions.json; then
+            echo "manual positions restored from public"
+          else
+            echo '{}' > public/_manual_positions.json
+            echo "manual positions fallback created"
+          fi
+          curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true
+ 
       - name: Upload pipeline artifact bundle
         uses: actions/upload-artifact@v4
         with:
@@ -221,6 +236,12 @@ jobs:
           rm -rf public
           mkdir -p public
 
+      - name: Download analysis outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: analysis-public
+          path: public
+
       - name: Bootstrap manual positions from published state
         env:
           PUBLIC_BASE_URL: ${{ env.PUBLIC_BASE_URL }}
@@ -234,13 +255,7 @@ jobs:
               echo "STATE_LOADED=0" >> $GITHUB_ENV
           fi
           curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true
-
-      - name: Download analysis outputs
-        uses: actions/download-artifact@v4
-        with:
-          name: analysis-public
-          path: public
-               
+                    
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -287,6 +302,76 @@ jobs:
         run: |
           ls -la public/_manual_positions.json || true
           wc -c public/_manual_positions.json || true
+
+      - name: Verify manual position state and audit integrity
+        if: always()
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          positions_path = Path("public/_manual_positions.json")
+          audit_path = Path("public/_manual_positions_audit.jsonl")
+
+          if not positions_path.exists():
+              raise SystemExit("manual positions file missing")
+
+          digest = hashlib.sha256(positions_path.read_bytes()).hexdigest()
+          size = positions_path.stat().st_size
+          print(f"manual_positions sha256={digest} bytes={size}")
+
+          audit_lines = []
+          if audit_path.exists():
+              audit_lines = audit_path.read_text().splitlines()
+              print("---- audit tail (last 30 lines) ----")
+              for line in audit_lines[-30:]:
+                  print(line)
+          else:
+              print("audit file missing — will treat as empty")
+
+          dispatch_success = False
+          had_dispatch = False
+          current_run = os.getenv("GITHUB_RUN_ID")
+          for raw in audit_lines:
+              try:
+                  evt = json.loads(raw)
+              except Exception:
+                  continue
+              if evt.get("event") == "ENTRY_DISPATCH_RESULT":
+                  if current_run and str(evt.get("gh_run_id") or "") not in {str(current_run), str(evt.get("run_id"))}:
+                      continue
+                  had_dispatch = True
+                  if evt.get("success") is True:
+                      dispatch_success = True
+
+          if dispatch_success:
+              try:
+                  positions = json.loads(positions_path.read_text())
+              except Exception:
+                  positions = None
+
+              has_entries = isinstance(positions, dict) and any(
+                  isinstance(v, dict) and v for v in positions.values()
+              )
+
+              if not has_entries:
+                  raise SystemExit(
+                      "ENTRY dispatch succeeded but manual_positions.json is empty"
+                  )
+
+          if not had_dispatch:
+              print("No ENTRY_DISPATCH_RESULT events recorded in audit log")
+          PY
+
+      - name: Mirror manual positions into config directory
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p config
+          cp public/_manual_positions.json config/manual_positions.json
 
       - name: Publish manual position artifacts
         uses: actions/upload-pages-artifact@v3
