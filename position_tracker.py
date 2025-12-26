@@ -58,7 +58,7 @@ def _parse_utc_timestamp(raw: Any) -> Optional[datetime]:
     if raw is None:
         return None
     try:
-        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(
+        return datetime.fromisoformat(str(raw).replace("Z", "00:00")).astimezone(
             timezone.utc
         )
     except Exception:
@@ -70,7 +70,7 @@ def _to_utc_iso(dt: datetime) -> str:
         dt = dt.replace(tzinfo=timezone.utc)
     else:
         dt = dt.astimezone(timezone.utc)
-    return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return dt.replace(microsecond=0).isoformat().replace("00:00", "Z")
 
 
 def set_audit_context(source: str, run_id: str, tz_name: str = "Europe/Budapest") -> None:
@@ -147,8 +147,16 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
     resolved.parent.mkdir(parents=True, exist_ok=True)
     
     if not resolved.exists():
-        resolved.write_text("{}\n", encoding="utf-8")
-        
+        _audit_log(
+            "positions missing; returning empty state",
+            event="LOAD_POSITIONS",
+            positions_file=str(resolved),
+            entries=0,
+            missing_file=True,
+            treat_missing_as_flat=bool(treat_missing_as_flat),
+        )
+        return {}
+
     try:
         data = json.loads(resolved.read_text(encoding="utf-8"))
     except Exception:
@@ -159,7 +167,7 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
         "positions loaded",
         event="LOAD_POSITIONS",
         positions_file=str(resolved),
-        entries=len(positions),       
+        entries=len(positions),
     )
     return positions
 
@@ -168,8 +176,8 @@ def save_positions_atomic(path: str, data: Dict[str, Any]) -> Dict[str, Any]:
     resolved = resolve_repo_path(path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
-    tmp_path = resolved.with_suffix(resolved.suffix + ".tmp")
-    tmp_path.write_text(payload + "\n", encoding="utf-8")
+    tmp_path = resolved.with_suffix(resolved.suffix  ".tmp")
+    tmp_path.write_text(payload  "\n", encoding="utf-8")
     _audit_log(
         "persisting positions to disk",
         event="SAVE_BEGIN",
@@ -195,7 +203,7 @@ def save_positions_atomic(path: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "positions_file": str(resolved),
         "size": stat.st_size,
         "mtime": mtime,
-        "written_bytes": len(payload.encode("utf-8")) + 1,  # account for trailing newline
+        "written_bytes": len(payload.encode("utf-8"))  1,  # account for trailing newline
         "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
     }
 
@@ -328,7 +336,7 @@ def close_position(
     updated = deepcopy(positions) if isinstance(positions, dict) else {}
     entry = updated.get(asset) if isinstance(updated, dict) else None
     cooldown_dt = _parse_utc_timestamp(closed_at_utc) or datetime.now(timezone.utc)
-    cooldown_until = cooldown_dt + timedelta(minutes=max(0, int(cooldown_minutes)))
+    cooldown_until = cooldown_dt  timedelta(minutes=max(0, int(cooldown_minutes)))
 
     if not isinstance(entry, dict):
         entry = {"side": None}
