@@ -6095,7 +6095,7 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     roll_up = pd.Series(up, index=series.index).rolling(period).mean()
     roll_down = pd.Series(down, index=series.index).rolling(period).mean()
     rs = roll_up / (roll_down.replace(0, np.nan))
-    r = 100 - (100 / (1  rs))
+    r = 100 - (100 / (1 + rs))
     return r.bfill().fillna(50.0)
 
 def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -6110,10 +6110,10 @@ def volume_ratio(df: pd.DataFrame, recent: int, baseline: int) -> Optional[float
     if df.empty or "volume" not in df.columns:
         return None
     vol = df["volume"].astype(float)
-    if len(vol) < recent  baseline:
+    if len(vol) < recent + baseline:
         return None
     recent_slice = vol.iloc[-recent:]
-    baseline_slice = vol.iloc[-(recent  baseline):-recent]
+    baseline_slice = vol.iloc[-(recent + baseline):-recent]
     baseline_mean = baseline_slice.mean()
     if not np.isfinite(baseline_mean) or baseline_mean <= 0:
         return None
@@ -6145,7 +6145,7 @@ def compute_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
     atr_series = tr.ewm(span=period, adjust=False).mean()
     plus_di = 100.0 * pd.Series(plus_dm, index=df.index).ewm(span=period, adjust=False).mean() / atr_series
     minus_di = 100.0 * pd.Series(minus_dm, index=df.index).ewm(span=period, adjust=False).mean() / atr_series
-    di_sum = (plus_di  minus_di).replace(0.0, np.nan)
+    di_sum = (plus_di + minus_di).replace(0.0, np.nan)
     dx = (plus_di - minus_di).abs() / di_sum * 100.0
     adx_series = dx.ewm(span=period, adjust=False).mean()
     return adx_series.bfill().dropna()
@@ -6268,7 +6268,7 @@ def compute_ofi_zscore(k1m: pd.DataFrame, window: int) -> Optional[float]:
         return None
     prices = k1m["close"].astype(float).copy()
     volumes = k1m["volume"].astype(float).copy()
-    if len(prices) < window  5:
+    if len(prices) < window + 5:
         return None
     price_delta = prices.diff().fillna(0.0)
     signed_volume = np.sign(price_delta) * volumes
@@ -6456,7 +6456,7 @@ def evaluate_news_lockout(asset: str, now: datetime) -> Tuple[bool, Optional[str
             break
         if 0 < delta_minutes < stabilisation_minutes:
             lockout = True
-            reason = (event.get("title") or event.get("name") or "High impact news")  " — stabilizáció"
+            reason = (event.get("title") or event.get("name") or "High impact news") + " — stabilizáció"
             break
     return lockout, reason
 
@@ -6510,7 +6510,7 @@ def compute_order_flow_metrics(
     signed_volume = np.sign(price_delta) * recent["volume"].fillna(0.0)
     buy_vol = signed_volume[signed_volume > 0].sum()
     sell_vol = -signed_volume[signed_volume < 0].sum()
-    total = buy_vol  sell_vol
+    total = buy_vol + sell_vol
     if total > 0:
         metrics["imbalance"] = float((buy_vol - sell_vol) / total)
 
@@ -6640,12 +6640,12 @@ def last_swing_levels(df: pd.DataFrame) -> Tuple[Optional[float], Optional[float
 
 def detect_sweep(df: pd.DataFrame, lookback: int = 24) -> Dict[str, bool]:
     out = {"sweep_high": False, "sweep_low": False}
-    if len(df) < lookback  2: return out
-    ref = df.iloc[-(lookback1):-1]
+    if len(df) < lookback + 2: return out
+    ref = df.iloc[-(lookback + 1):-1]
     last = df.iloc[-1]
     prev_max, prev_min = ref["high"].max(), ref["low"].min()
     if last["high"] > prev_max and last["close"] < prev_max: out["sweep_high"] = True
-    if last["low"]  < prev_min and last["close"] > prev_min: out["sweep_low"]  = True
+    if last["low"] < prev_min and last["close"] > prev_min: out["sweep_low"] = True
     return out
 
 def detect_bos(df: pd.DataFrame, direction: str) -> bool:
@@ -6662,9 +6662,9 @@ def detect_bos(df: pd.DataFrame, direction: str) -> bool:
 def broke_structure(df: pd.DataFrame, direction: str, lookback: Optional[int] = None) -> bool:
     """Egyszerű szerkezeti törés: utolsó high/low áttöri az előző N bar csúcsát/alját."""
     lb = lookback or DEFAULT_BOS_LOOKBACK
-    if df.empty or len(df) < lb  2:
+    if df.empty or len(df) < lb + 2:
         return False
-    ref = df.iloc[-(lb  1) : -1]
+    ref = df.iloc[-(lb + 1) : -1]
     last = df.iloc[-1]
     if direction == "long":
         return last["high"] > ref["high"].max()
@@ -6677,10 +6677,10 @@ def retest_level(df: pd.DataFrame, direction: str, lookback: Optional[int] = Non
     if df.empty or len(df) < 2:
         return False
     lb = lookback or DEFAULT_BOS_LOOKBACK
-    if len(df) < lb  1:
+    if len(df) < lb + 1:
         ref = df.iloc[:-1]
     else:
-        ref = df.iloc[-(lb  1) : -1]
+        ref = df.iloc[-(lb + 1) : -1]
     if ref.empty:
         return False
     last = df.iloc[-1]
@@ -6727,7 +6727,7 @@ def _recent_liquidity_levels(
 ) -> List[float]:
     if df.empty:
         return []
-    window = df.tail(max(lookback  5, 10))
+    window = df.tail(max(lookback + 5, 10))
     swings = find_swings(window, lb=1)
     levels: List[float] = []
     if direction == "buy":
@@ -7024,19 +7024,19 @@ def compute_precision_entry(
 
     if direction == "buy":
         stop_loss = entry_level - risk_buffer if entry_level is not None else None
-        tp1 = entry_level  risk_buffer * TP1_R if entry_level is not None else None
-        tp2 = entry_level  risk_buffer * TP2_R if entry_level is not None else None
+        tp1 = entry_level + risk_buffer * TP1_R if entry_level is not None else None
+        tp2 = entry_level + risk_buffer * TP2_R if entry_level is not None else None
         entry_window = (
             entry_level - risk_buffer * 0.4,
-            entry_level  risk_buffer * 0.2,
+            entry_level + risk_buffer * 0.2,
         ) if entry_level is not None else None
     else:
-        stop_loss = entry_level  risk_buffer if entry_level is not None else None
+        stop_loss = entry_level + risk_buffer if entry_level is not None else None
         tp1 = entry_level - risk_buffer * TP1_R if entry_level is not None else None
         tp2 = entry_level - risk_buffer * TP2_R if entry_level is not None else None
         entry_window = (
             entry_level - risk_buffer * 0.2,
-            entry_level  risk_buffer * 0.4,
+            entry_level + risk_buffer * 0.4,
         ) if entry_level is not None else None
 
     plan["risk"] = risk_buffer if np.isfinite(risk_buffer) else None
@@ -7108,7 +7108,7 @@ def compute_precision_entry(
                 trigger_state = "arming"
                 trigger_progress = max(trigger_progress, 0.85)
                 plan["trigger_reasons"].append("price inside window")
-            elif tolerance and price_val <= window_hi  tolerance:
+            elif tolerance and price_val <= window_hi + tolerance:
                 trigger_progress = max(trigger_progress, 0.7)
                 plan["trigger_reasons"].append("price near window")
         else:
@@ -7158,7 +7158,7 @@ def compute_precision_entry(
     except (TypeError, ValueError):
         flow_conf = 0.0
     plan["trigger_confidence"] = round(
-        min(1.0, (score_conf  flow_conf  plan["trigger_progress"]) / 3.0), 3
+        min(1.0, (score_conf + flow_conf + plan["trigger_progress"]) / 3.0), 3
     )
 
     if plan["trigger_reasons"]:
@@ -7195,13 +7195,13 @@ def compute_precision_entry(
 
 
 def ema_cross_recent(short: pd.Series, long: pd.Series, bars: int = MOMENTUM_BARS, direction: str = "long") -> bool:
-    if short.empty or long.empty or len(short) < bars  2 or len(long) < bars  2:
+    if short.empty or long.empty or len(short) < bars + 2 or len(long) < bars + 2:
         return False
     short = short.dropna()
     long = long.dropna()
-    if len(short) < bars  2 or len(long) < bars  2:
+    if len(short) < bars + 2 or len(long) < bars + 2:
         return False
-    for i in range(1, bars  1):
+    for i in range(1, bars + 1):
         idx_now = -i
         idx_prev = -i - 1
         try:
@@ -7248,13 +7248,13 @@ def fib_zone_ok(move_hi, move_lo, price_now,
     length = move_hi - move_lo
     if length == 0:
         return False
-    z1_long  = move_lo  low  * length
-    z2_long  = move_lo  high * length
+    z1_long = move_lo + low * length
+    z2_long = move_lo + high * length
     z1_short = move_hi - high * length
-    z2_short = move_hi - low  * length
+    z2_short = move_hi - low * length
     tol = max(float(tol_abs), abs(length) * float(tol_frac))
-    in_long  = min(z1_long,  z2_long ) - tol <= price_now <= max(z1_long,  z2_long )  tol
-    in_short = min(z1_short, z2_short) - tol <= price_now <= max(z1_short, z2_short)  tol
+    in_long = min(z1_long, z2_long) - tol <= price_now <= max(z1_long, z2_long) + tol
+    in_short = min(z1_short, z2_short) - tol <= price_now <= max(z1_short, z2_short) + tol
     return in_long or in_short
 
 def bias_from_emas(df: pd.DataFrame) -> str:
@@ -7274,7 +7274,7 @@ def ema_slope_ok(
 ) -> Tuple[bool, float, float]:
     """EMA21 relatív meredekség 1h-n: abs(ema_now - ema_prev)/price_now >= th."""
 
-    if df_1h.empty or len(df_1h) < period  lookback  1:
+    if df_1h.empty or len(df_1h) < period + lookback + 1:
         return False, 0.0, 0.0
 
     c = df_1h["close"]
@@ -7385,16 +7385,16 @@ def compute_dynamic_tp_profile(
                 rr_core = max(rr_core, rr_high_core)
                 rr_mom = max(rr_mom, rr_high_mom)
                 tp1_core = max(tp1_core, 1.9)
-                tp2_core = max(tp2_core, rr_core  0.6)
+                tp2_core = max(tp2_core, rr_core + 0.6)
                 tp1_mom = max(tp1_mom, 1.6)
-                tp2_mom = max(tp2_mom, rr_mom  0.4)
+                tp2_mom = max(tp2_mom, rr_mom + 0.4)
             elif low_rel > 0 and rel_atr <= low_rel:
                 rr_core = max(rr_low, min(rr_core, rr_low))
                 rr_mom = max(rr_low, min(rr_mom, rr_low))
                 tp1_core = max(tp1_core * 0.95, 1.2)
-                tp2_core = max(tp2_core * 0.95, tp1_core  0.3)
+                tp2_core = max(tp2_core * 0.95, tp1_core + 0.3)
                 tp1_mom = max(tp1_mom * 0.95, 1.1)
-                tp2_mom = max(tp2_mom * 0.95, tp1_mom  0.25)
+                tp2_mom = max(tp2_mom * 0.95, tp1_mom + 0.25)
 
     if current <= perc20:
         regime = "low_vol"
@@ -7424,7 +7424,7 @@ def compute_dynamic_tp_profile(
         if rel_atr < ATR_LOW_TH_ASSET.get(asset, ATR_LOW_TH_DEFAULT) * 0.8:
             regime = "compressed"
             tp1_core = max(tp1_core * 0.9, 1.1)
-            tp2_core = max(tp2_core * 0.9, tp1_core  0.3)
+            tp2_core = max(tp2_core * 0.9, tp1_core + 0.3)
 
     return {
         "core": {"tp1": float(tp1_core), "tp2": float(tp2_core), "rr": float(rr_core)},
@@ -7444,7 +7444,7 @@ def trading_day_bounds(now: datetime, tz: ZoneInfo = MARKET_TIMEZONE) -> Tuple[d
 
     local_now = now.astimezone(tz)
     start_local = datetime(local_now.year, local_now.month, local_now.day, tzinfo=tz)
-    end_local = start_local  timedelta(days=1)
+    end_local = start_local + timedelta(days=1)
     return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
 
@@ -7554,7 +7554,7 @@ def compute_intraday_profile(
         except (TypeError, ValueError, ZeroDivisionError):
             range_position = None
 
-    opening_end = min(now, day_start_utc  timedelta(minutes=OPENING_RANGE_MINUTES))
+    opening_end = min(now, day_start_utc + timedelta(minutes=OPENING_RANGE_MINUTES))
     opening_slice = intraday.loc[(intraday.index >= day_start_utc) & (intraday.index <= opening_end)]
     opening_high = safe_float(opening_slice["high"].max()) if not opening_slice.empty else None
     opening_low = safe_float(opening_slice["low"].min()) if not opening_slice.empty else None
@@ -8016,7 +8016,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 min(realtime_confidence, max(0.2, 1.0 - float(latency_avg) / latency_limit))
             )
         if realtime_transport == "websocket" and isinstance(samples, (int, float)) and samples >= 5:
-            realtime_confidence = float(min(1.0, realtime_confidence  0.05))
+            realtime_confidence = float(min(1.0, realtime_confidence + 0.05))
 
     display_spot = safe_float(spot_price)
     k1m_closed = ensure_closed_candles(k1m, now)
@@ -8304,10 +8304,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         if last_closed:
             latency_sec = int((now - last_closed).total_seconds())
             expected = expected_delays.get(key, 0)
-            if expected and latency_sec > expected  240:
+            if expected and latency_sec > expected + 240:
                 latency_flags.append(f"{key}: utolsó zárt gyertya {latency_sec//60} perc késésben van")
             tol = TF_STALE_TOLERANCE.get(key, 0)
-            if expected and tol and latency_sec > expected  tol:
+            if expected and tol and latency_sec > expected + tol:
                 stale_timeframes[key] = True
                 delay_min = latency_sec // 60
                 flag_msg = f"{key}: jelzés korlátozva {delay_min} perc késés miatt"
@@ -8450,7 +8450,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             latency_flags.append(relax_note)
             reasons.append(
                 "Relaxed latency guard: belépés engedélyezve kiterjesztett késleltetéssel"
-                 (f" (−{latency_penalty:.1f} P-score)" if latency_penalty else "")
+                 + (f" (−{latency_penalty:.1f} P-score)" if latency_penalty else "")
             )
             entry_thresholds_meta["latency_relaxation_used"] = True
 
@@ -9190,7 +9190,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         invalid_buffer_candidates.append(float(atr_half))
     invalid_buffer = max(invalid_buffer_candidates) if invalid_buffer_candidates else None
     invalid_level_sell = (
-        float(move_hi  invalid_buffer)
+        float(move_hi + invalid_buffer)
         if (move_hi is not None and invalid_buffer is not None)
         else None
     )
@@ -9753,7 +9753,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     if bias_gate_notes:
         reasons.extend(bias_gate_notes)
     if effective_bias != "neutral":
-        bias_strength = 1.0  (0.3 if bias_override_used else 0.0)
+        bias_strength = 1.0 + (0.3 if bias_override_used else 0.0)
         bias_points = 15.0 * bias_strength
         P = bias_points
         if bias_override_used:
@@ -9766,7 +9766,7 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     if regime_ok:
         ema_ratio = abs(regime_slope_signed) / max(1e-9, slope_threshold)
-        regime_points = 6.0  6.0 * min(2.5, ema_ratio)
+        regime_points = 6.0 + 6.0 * min(2.5, ema_ratio)
         P = regime_points
         reasons.append(f"EMA21 slope {ema_ratio:.2f}× küszöb ({regime_points:.1f})")
     else:
@@ -9841,7 +9841,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         if overlap_start <= minute_now <= overlap_end:
             time_penalty_total = overlap_penalty
             time_penalty_notes.append(f"London–NY overlap profil ({overlap_penalty:.1f})")
-    elif overlap_window > 0 and 720 - overlap_window <= minute_now <= 720  overlap_window:
+    elif overlap_window > 0 and 720 - overlap_window <= minute_now <= 720 + overlap_window:
         time_penalty_total = overlap_penalty
         time_penalty_notes.append(f"Overlap ablak penalty ({overlap_penalty:.1f})")
     if time_penalty_total:
@@ -9860,7 +9860,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     if not np.isnan(rel_atr) and atr_threshold > 0:
         atr_ratio = rel_atr / atr_threshold
     if atr_ok:
-        atr_points = 5.0  6.0 * min(3.0, atr_ratio)
+        atr_points = 5.0 + 6.0 * min(3.0, atr_ratio)
         P = atr_points
         reasons.append(f"ATR erősség {atr_ratio:.2f}× küszöb ({atr_points:.1f})")
     else:
@@ -10067,11 +10067,11 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     if ofi_zscore is not None and effective_bias in {"long", "short"} and OFI_Z_TRIGGER > 0:
         if effective_bias == "long" and ofi_zscore <= -OFI_Z_TRIGGER:
-            penalty = min(8.0, (abs(ofi_zscore) - OFI_Z_TRIGGER  1.0) * 3.0)
+            penalty = min(8.0, (abs(ofi_zscore) - OFI_Z_TRIGGER + 1.0) * 3.0)
             P -= penalty
             reasons.append(f"OFI toxikus long irányra (−{penalty:.1f})")
         elif effective_bias == "short" and ofi_zscore >= OFI_Z_TRIGGER:
-            penalty = min(8.0, (abs(ofi_zscore) - OFI_Z_TRIGGER  1.0) * 3.0)
+            penalty = min(8.0, (abs(ofi_zscore) - OFI_Z_TRIGGER + 1.0) * 3.0)
             P -= penalty
             reasons.append(f"OFI toxikus short irányra (−{penalty:.1f})")
 
@@ -10196,11 +10196,11 @@ def analyze(asset: str) -> Dict[str, Any]:
     nvda_close_window = False
     if asset == "NVDA":
         h, m = now_utctime_hm()
-        minute = h * 60  m
+        minute = h * 60 + m
         cash_start = _min_of_day(13, 30)
         cash_end = _min_of_day(20, 0)
         in_cash_session = cash_start <= minute <= cash_end
-        nvda_open_window = cash_start <= minute <= min(cash_end, cash_start  60)
+        nvda_open_window = cash_start <= minute <= min(cash_end, cash_start + 60)
         nvda_close_window = max(cash_start, cash_end - 30) <= minute <= cash_end
         high_atr_for_extended_hours = (
             not np.isnan(rel_atr)
@@ -10583,7 +10583,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         micro_ok = bool(btc_trigger_meta.get("bos_ok"))
         vwap_ok = bool(btc_trigger_meta.get("vwap_ok"))
         ofi_ok = bool(btc_trigger_meta.get("ofi_ok"))
-        satisfied_combo = int(micro_ok)  int(vwap_ok)  int(ofi_ok)
+        satisfied_combo = int(micro_ok) + int(vwap_ok) + int(ofi_ok)
         if effective_bias == "long":
             if micro_ok:
                 structure_notes.append("BTC mikro BOS long aktív")
@@ -10697,7 +10697,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             and P_val is not None
             and np.isfinite(p_min_val)
             and np.isfinite(P_val)
-            and P_val >= (p_min_val  6.0)
+            and P_val >= (p_min_val + 6.0)
         )
         good_vola = (
             rel_atr_val is not None
@@ -11198,7 +11198,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             entry_thresholds_meta["btc_position_meta"] = btc_position_meta
 
     if asset == "USOIL":
-        minute_now = analysis_now.hour * 60  analysis_now.minute
+        minute_now = analysis_now.hour * 60 + analysis_now.minute
         session_label = "asia"
         session_scale = 0.7
         if 12 * 60 <= minute_now < 21 * 60:
@@ -11909,16 +11909,16 @@ def analyze(asset: str) -> Dict[str, Any]:
             if risk < 0:
                 sl = entry - buf
                 risk = entry - sl
-            tp1 = entry  tp1_mult * risk
-            tp2 = entry  tp2_mult * risk
+            tp1 = entry + tp1_mult * risk
+            tp2 = entry + tp2_mult * risk
             tp1_dist = tp1 - entry
             ok_math = (sl < entry < tp1 <= tp2)
         else:
-            base_sl = hi5 if hi5 is not None else (entry  atr5_val)
-            sl = base_sl  buf
+            base_sl = hi5 if hi5 is not None else (entry + atr5_val)
+            sl = base_sl + buf
             risk = sl - entry
             if risk < 0:
-                sl = entry  buf
+                sl = entry + buf
                 risk = sl - entry
             tp1 = entry - tp1_mult * risk
             tp2 = entry - tp2_mult * risk
@@ -11937,12 +11937,12 @@ def analyze(asset: str) -> Dict[str, Any]:
                 if decision_side == "buy":
                     sl = entry - target_risk
                     risk = entry - sl
-                    tp1 = entry  tp1_mult * risk
-                    tp2 = entry  tp2_mult * risk
+                    tp1 = entry + tp1_mult * risk
+                    tp2 = entry + tp2_mult * risk
                     tp1_dist = tp1 - entry
                     ok_math = (sl < entry < tp1 <= tp2)
                 else:
-                    sl = entry  target_risk
+                    sl = entry + target_risk
                     risk = sl - entry
                     tp1 = entry - tp1_mult * risk
                     tp2 = entry - tp2_mult * risk
@@ -11972,12 +11972,12 @@ def analyze(asset: str) -> Dict[str, Any]:
                     if decision_side == "buy":
                         sl = entry - target_risk
                         risk = entry - sl
-                        tp1 = entry  tp1_mult * risk
-                        tp2 = entry  tp2_mult * risk
+                        tp1 = entry + tp1_mult * risk
+                        tp2 = entry + tp2_mult * risk
                         tp1_dist = tp1 - entry
                         ok_math = (sl < entry < tp1 <= tp2)
                     else:
-                        sl = entry  target_risk
+                        sl = entry + target_risk
                         risk = sl - entry
                         tp1 = entry - tp1_mult * risk
                         tp2 = entry - tp2_mult * risk
@@ -12002,12 +12002,12 @@ def analyze(asset: str) -> Dict[str, Any]:
                 if decision_side == "buy":
                     sl = entry - target_risk
                     risk = entry - sl
-                    tp1 = entry  tp1_mult * risk
-                    tp2 = entry  tp2_mult * risk
+                    tp1 = entry + tp1_mult * risk
+                    tp2 = entry + tp2_mult * risk
                     tp1_dist = tp1 - entry
                     ok_math = (sl < entry < tp1 <= tp2)
                 else:
-                    sl = entry  target_risk
+                    sl = entry + target_risk
                     risk = sl - entry
                     tp1 = entry - tp1_mult * risk
                     tp2 = entry - tp2_mult * risk
@@ -12028,7 +12028,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 sl = entry - risk_min
                 risk = entry - sl
             else:
-                sl = entry  risk_min
+                sl = entry + risk_min
                 risk = sl - entry
 
         risk = max(risk, 1e-6)
@@ -12040,9 +12040,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             min_stoploss_ok = False
 
         if decision_side == "buy":
-            tp1 = entry  tp1_mult * risk
-            tp2 = entry  tp2_mult * risk
-            rr  = (tp2 - entry) / risk
+            tp1 = entry + tp1_mult * risk
+            tp2 = entry + tp2_mult * risk
+            rr = (tp2 - entry) / risk
             tp1_dist = tp1 - entry
             ok_math = ok_math and (sl < entry < tp1 <= tp2)
             gross_pct = tp1_dist / entry
@@ -12116,7 +12116,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         tp_min_profit_pct = tp_min_pct
         overnight_days = estimate_overnight_days(asset, analysis_now)
         cost_round_pct, overnight_pct = compute_cost_components(asset, entry, overnight_days)
-        total_cost_pct = cost_mult * cost_round_pct  overnight_pct
+        total_cost_pct = cost_mult * cost_round_pct + overnight_pct
         net_pct = gross_pct - total_cost_pct
         tp1_net_pct_value = net_pct
 
@@ -12125,7 +12125,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         min_profit_abs = max(
             tp_min_abs_default,
             tp_min_pct * entry,
-            (cost_mult * cost_round_pct  overnight_pct) * entry,
+            (cost_mult * cost_round_pct + overnight_pct) * entry,
             atr5_min_mult * atr5_val,
         )
 
@@ -12167,9 +12167,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             if decision == "buy":
                 sl = anchor_level - stop_buffer
                 entry = price_for_calc
-                tp1 = anchor_level  band_width
+                tp1 = anchor_level + band_width
             else:
-                sl = anchor_level  stop_buffer
+                sl = anchor_level + stop_buffer
                 entry = price_for_calc
                 tp1 = anchor_level - band_width
             tp2 = tp1
@@ -12324,7 +12324,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                     slip_state = compute_slippage_state(decision, profile_slippage_limit)
                     if slip_state:
                         entry_thresholds_meta.setdefault("slippage_guard", {})["core"] = slip_state
-                        if slip_state["slip"] > slip_state["allowed"]  1e-9:
+                        if slip_state["slip"] > slip_state["allowed"] + 1e-9:
                             if "slippage_guard" not in missing:
                                 missing.append("slippage_guard")
                             slip_reason = (
@@ -12431,7 +12431,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                             sl_price,
                         )
                     else:
-                        no_chase_violation = slip > allowed_slip  1e-9
+                        no_chase_violation = slip > allowed_slip + 1e-9
                     slip_info = {
                         "slip": float(slip),
                         "allowed": float(allowed_slip),
@@ -12471,7 +12471,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                         )
                     if last_computed_risk is not None and entry is not None:
                         if decision == "buy":
-                            trail_price = entry  last_computed_risk * MOMENTUM_TRAIL_LOCK
+                            trail_price = entry + last_computed_risk * MOMENTUM_TRAIL_LOCK
                         else:
                             trail_price = entry - last_computed_risk * MOMENTUM_TRAIL_LOCK
                         momentum_trailing_plan = {
@@ -13217,7 +13217,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     combined_probability = P / 100.0
     if ml_probability is not None:
         combined_probability = min(
-            1.0, max(0.0, 0.6 * (P / 100.0)  0.4 * ml_probability)
+            1.0, max(0.0, 0.6 * (P / 100.0) + 0.4 * ml_probability)
         )
 
     ml_confidence_block = False
@@ -14066,8 +14066,8 @@ def main():
         summary["degraded_components"] = sorted(MISSING_OPTIONAL_DEPENDENCIES)
         degraded_note = (
             "Guardrail modulok hiányoznak: "
-             ", ".join(sorted(MISSING_OPTIONAL_DEPENDENCIES))
-             " — monitoring/precision/latency hook-ok fallback módot használnak."
+             + ", ".join(sorted(MISSING_OPTIONAL_DEPENDENCIES))
+             + " — monitoring/precision/latency hook-ok fallback módot használnak."
         )
         summary["troubleshooting"].append(degraded_note)
         summary["optional_dependency_issues"] = list(OPTIONAL_DEPENDENCY_ISSUES)
@@ -14194,7 +14194,7 @@ def main():
         reason_text = "; ".join(ml_disable_notes) if ml_disable_notes else "ismeretlen ok"
         summary["troubleshooting"].append(
             "ML valószínűség számítás ideiglenesen letiltva"
-             (f" ({reason_text})." if reason_text else ".")
+             + (f" ({reason_text})." if reason_text else ".")
         )
     worker_count = _determine_analysis_workers(asset_count)
     if worker_count > 1:
@@ -14297,8 +14297,8 @@ def main():
     save_json(os.path.join(PUBLIC_DIR, "analysis_summary.json"), summary)
 
     html = "<!doctype html><meta charset='utf-8'><title>Analysis Summary</title>"
-    html = "<h1>Analysis Summary (TD-only)</h1>"
-    html = "<pre>"  json.dumps(summary, ensure_ascii=False, indent=2)  "</pre>"
+    html += "<h1>Analysis Summary (TD-only)</h1>"
+    html += "<pre>" + json.dumps(summary, ensure_ascii=False, indent=2) + "</pre>"
     with open(os.path.join(PUBLIC_DIR, "analysis.html"), "w", encoding="utf-8") as f:
         f.write(html)
 
@@ -14363,3 +14363,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
