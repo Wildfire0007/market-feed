@@ -923,7 +923,7 @@ def build_mobile_embed_for_asset(
     if position_tp2 is not None:
         position_level_parts.append(f"TP2 `{format_price(position_tp2, asset)}`")
     if position_level_parts:
-        position_levels_line = "🧭 Position levels: "  " • ".join(position_level_parts)
+        position_levels_line = "🧭 Position levels: " + " • ".join(position_level_parts)
        
     lines: List[str] = []
     entry_lines: List[str] = []
@@ -968,7 +968,7 @@ def build_mobile_embed_for_asset(
             f"TP2 {format_price(tracked_tp2, asset) if tracked_tp2 is not None else '-'}",
         ]
         lines.append(
-            f"Nyitva: {opened_at or '-'} • "  " • ".join(level_parts)
+            f"Nyitva: {opened_at or '-'} • " + " • ".join(level_parts)
         )
         if intent in {"hard_exit", "manage_position"} and position_levels_line:
             lines.append(position_levels_line)
@@ -3486,7 +3486,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
        
         
     if dynamic_lines:
-        lines.append("⚙️ Dinamikus: "  " | ".join(dynamic_lines))
+        lines.append("⚙️ Dinamikus: " + " | ".join(dynamic_lines))
 
     if no_entry_reason:
         lines.append(no_entry_reason)
