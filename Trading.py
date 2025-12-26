@@ -866,7 +866,7 @@ CLIENT_ERROR_STATUS_CODES: Set[Optional[int]] = {
 # ─────────────────────────────── Segédek ─────────────────────────────────
 
 def now_utc() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("00:00", "Z")
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 def _parse_iso_utc(value: Any) -> Optional[datetime]:
     if not value:
@@ -4092,6 +4092,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
