@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--sources",
-        nargs="",
+        nargs="+",
         default=["data", "reports"],
         help="Source directories to copy into the public output",
     )
