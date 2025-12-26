@@ -3041,7 +3041,7 @@ def build_action_plan(
         runtime_bucket.pop("ready_since", None)
         runtime_bucket.pop("arming_since", None)
         if precision_state == "precision_soft_block":
-            runtime_bucket["hits_soft_block"] = int(runtime_bucket.get("hits_soft_block", 0)) + 1  1
+            runtime_bucket["hits_soft_block"] = int(runtime_bucket.get("hits_soft_block", 0)) + 1
     if precision_timeout_triggered and isinstance(entry_thresholds, dict):
         entry_thresholds["precision_timeout"] = {"minutes": timeout_minutes}
     precision_gate_snapshot = entry_thresholds_meta.get("precision_gate_state")
@@ -14363,4 +14363,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
