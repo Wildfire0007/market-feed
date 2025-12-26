@@ -181,10 +181,10 @@ _FINNHUB_SESSION.headers.update({"User-Agent": "market-feed/finnhub-fallback/1.0
 # values are intentionally generous – if every symbol is stale we still return
 # the least-delayed payload instead of failing the pipeline.
 SERIES_FRESHNESS_LIMITS = {
-    "1min": 180.0  240.0,  # 1m candle  4m tolerance
-    "5min": 300.0  900.0,  # 5m candle  15m tolerance
-    "1h": 3600.0  5400.0,  # 1h candle  90m tolerance
-    "4h": 4 * 3600.0  21600.0,  # 4h candle  6h tolerance
+    "1min": 240.0,  # 1m candle  4m tolerance
+    "5min": 900.0,  # 5m candle  15m tolerance
+    "1h": 5400.0,  # 1h candle  90m tolerance
+    "4h": 21600.0,  # 4h candle  6h tolerance
 }
 try:
     from config.analysis_settings import (
@@ -320,7 +320,7 @@ class TokenBucketLimiter:
         delta = now - self.updated
         if delta <= 0:
             return
-        self.tokens = min(self.capacity, self.tokens  delta * self.rate_per_second)
+        self.tokens = min(self.capacity, self.tokens + delta * self.rate_per_second)
         self.updated = now
 
     def wait(self) -> None:
@@ -701,7 +701,7 @@ def _apply_status_profile_metadata(
     if isinstance(status_note, str) and status_note.strip():
         payload["status_note"] = status_note.strip()
 
-_BASE_REQUESTS_PER_ASSET = 1  len(SERIES_FETCH_PLAN)
+_BASE_REQUESTS_PER_ASSET = 1 + len(SERIES_FETCH_PLAN)
 _BASE_REQUESTS_TOTAL = len(ASSETS) * _BASE_REQUESTS_PER_ASSET
 _DEFAULT_HTTP_BUDGET = max(1, TD_REQUESTS_PER_MINUTE - _BASE_REQUESTS_TOTAL)
 REALTIME_HTTP_BUDGET_TOTAL = max(
@@ -885,7 +885,7 @@ def _parse_iso_utc(value: Any) -> Optional[datetime]:
         if not candidate:
             return None
         if candidate.endswith("Z"):
-            candidate = candidate[:-1]  "00:00"
+            candidate = candidate[:-1] + "+00:00"
         try:
             parsed = datetime.fromisoformat(candidate)
         except ValueError:
@@ -911,7 +911,7 @@ def update_system_heartbeat(out_dir: str) -> None:
 def save_json(path: str, obj: Dict[str, Any]) -> None:
     target = Path(path)
     ensure_dir(str(target.parent))
-    tmp_path = target.with_suffix(target.suffix  ".tmp")
+    tmp_path = target.with_suffix(target.suffix + ".tmp")
 
     # ENV flags (defaults: fast  safe enough for CI)
     durable_flag = os.getenv("TD_DURABLE_WRITES", "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -1082,7 +1082,7 @@ def _reuse_previous_spot(adir: str, payload: Dict[str, Any], freshness_limit: fl
     if reason:
         reused["fallback_reason"] = str(reason)
     reused.setdefault("freshness_limit_seconds", freshness_limit)
-    reused["fallback_reuse_count"] = reuse_count  1
+    reused["fallback_reuse_count"] = reuse_count + 1
     return reused
 
 
@@ -1366,7 +1366,7 @@ def _reuse_previous_series_payload(
     reason = payload.get("error") or payload.get("message")
     if reason:
         reused["fallback_reason"] = str(reason)
-    reused["fallback_reuse_count"] = reuse_count  1
+    reused["fallback_reuse_count"] = reuse_count + 1
     return reused
 
 
@@ -1786,7 +1786,7 @@ def td_get(path: str, **params) -> Dict[str, Any]:
     last_error: Optional[Exception] = None
     last_status: Optional[int] = None
     cached_response = _get_cached_td_response(path, params)
-    for attempt in range(1, TD_MAX_RETRIES  1):
+    for attempt in range(1, TD_MAX_RETRIES + 1):
         TD_RATE_LIMITER.wait()
         response: Optional[requests.Response] = None
         try:
@@ -2594,7 +2594,7 @@ def _extract_field(payload: Any, path: str) -> Optional[Any]:
         while '[' in segment:
             bracket = segment.find('[')
             attr = segment[:bracket]
-            remainder = segment[bracket  1:]
+            remainder = segment[bracket + 1:]
             if attr:
                 if not isinstance(current, dict):
                     return None
@@ -2612,7 +2612,7 @@ def _extract_field(payload: Any, path: str) -> Optional[Any]:
             if index >= len(current) or index < -len(current):
                 return None
             current = current[index]
-            segment = remainder[end  1:]
+            segment = remainder[end + 1:]
             if not segment:
                 break
         if segment:
@@ -2833,7 +2833,7 @@ def _collect_realtime_spot_impl(
         duration = min(duration, http_duration)
         if interval > 0:
             expected_cycles = max(1, int(math.ceil(http_duration / interval)))
-            http_max_samples = max(1, min(http_max_samples, expected_cycles  1))
+            http_max_samples = max(1, min(http_max_samples, expected_cycles + 1))
 
     # Forced realtime collection (pl. spot fallback) should be quick – if we
     # cannot rely on the websocket path we fall back to a much shorter HTTP
@@ -2859,7 +2859,7 @@ def _collect_realtime_spot_impl(
     ws_attempted = False
     http_attempted = False
 
-    deadline = time.time()  duration
+    deadline = time.time() + duration
     if use_ws:
         ws_attempted = True
         frames = _collect_ws_frames(asset, symbol_cycle, deadline)
@@ -2869,7 +2869,7 @@ def _collect_realtime_spot_impl(
     if not frames:
         remaining = max(0.0, deadline - time.time())
         if remaining > 0:
-            deadline_http = time.time()  remaining
+            deadline_http = time.time() + remaining
             http_attempted = True
             frames, abort_reason = _collect_http_frames(
                 symbol_cycle,
@@ -3687,14 +3687,14 @@ def fetch_with_freshness(
 def ema(series: List[Optional[float]], period: int) -> List[Optional[float]]:
     if not series or period <= 1:
         return [None] * len(series)
-    k = 2.0 / (period  1.0)
+    k = 2.0 / (period + 1.0)
     out: List[Optional[float]] = []
     prev: Optional[float] = None
     for v in series:
         if v is None:
             out.append(prev)
             continue
-        prev = v if prev is None else v * k  prev * (1.0 - k)
+        prev = v if prev is None else v * k + prev * (1.0 - k)
         out.append(prev)
     return out
 
@@ -4092,6 +4092,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
