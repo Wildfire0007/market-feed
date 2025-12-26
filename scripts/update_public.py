@@ -15,14 +15,14 @@ import os
 from pathlib import Path
 import shutil
 import sys
-from typing import Iterable, List
+from typing import Dict, Iterable, List
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--sources",
-        nargs="+",
+        nargs="",
         default=["data", "reports"],
         help="Source directories to copy into the public output",
     )
@@ -67,6 +67,44 @@ def copy_sources(sources: Iterable[str], target_root: Path) -> List[str]:
     return copied
 
 
+def compute_sha256(data: bytes) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(data)
+    return hasher.hexdigest()
+
+
+def preserve_files(target_root: Path, filenames: Iterable[str]) -> Dict[str, bytes]:
+    preserved: Dict[str, bytes] = {}
+    for filename in filenames:
+        path = target_root / filename
+        if not path.exists() or not path.is_file():
+            continue
+
+        data = path.read_bytes()
+        preserved[filename] = data
+        print(
+            "Preserve",
+            filename,
+            f"size={len(data)}",
+            f"sha256={compute_sha256(data)}",
+        )
+
+    return preserved
+
+
+def restore_files(target_root: Path, preserved: Dict[str, bytes]) -> None:
+    for filename, data in preserved.items():
+        path = target_root / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        print(
+            "Restore",
+            filename,
+            f"size={len(data)}",
+            f"sha256={compute_sha256(data)}",
+        )
+
+
 def directory_checksum(directory: Path) -> str:
     """Compute a deterministic checksum of all files within a directory."""
 
@@ -103,7 +141,19 @@ def main() -> int:
     args = parse_args()
     target_root = Path(args.target).resolve()
 
+    preserved = preserve_files(
+        target_root,
+        (
+            "_manual_positions.json",
+            "_manual_positions_audit.jsonl",
+            "_active_position_state.json",
+        ),
+    )
+
     copied = copy_sources(args.sources, target_root)
+    if preserved:
+        restore_files(target_root, preserved)
+
     checksum = directory_checksum(target_root)
     write_metadata(target_root, args.run_id, args.commit, checksum, copied)
 
