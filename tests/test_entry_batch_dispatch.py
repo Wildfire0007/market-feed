@@ -45,6 +45,104 @@ def _make_entry_record(asset: str, manual_state: dict, positions_path: str) -> n
     )
 
 
+def test_successful_batch_dispatch_commits_all_assets(monkeypatch, tmp_path):
+    now = datetime.now(timezone.utc)
+    now_iso = notify_discord.to_utc_iso(now)
+    positions_path = tmp_path / "positions.json"
+
+    tracking_cfg = {
+        "enabled": True,
+        "writer": "notify",
+        "positions_file": str(positions_path),
+        "treat_missing_file_as_flat": True,
+    }
+
+    manual_positions: dict = {}
+    assets = ["BTCUSD", "ETHUSD", "XRPUSD"]
+
+    sig_template = {
+        "signal": "buy",
+        "intent": "entry",
+        "setup_grade": "A",
+        "entry": 100.0,
+        "sl": 95.0,
+        "tp2": 110.0,
+        "notify": {"should_notify": True},
+    }
+
+    pending_payloads = []
+    asset_embed_pairs = []
+    for asset in assets:
+        manual_state = position_tracker.compute_state(asset, tracking_cfg, manual_positions, now)
+        entry_record = _make_entry_record(asset, manual_state, str(positions_path))
+        signal_payload = {"asset": asset, **sig_template}
+        pending_payloads.append(
+            (
+                asset,
+                _base_pending(asset, manual_state, signal_payload, entry_record),
+            )
+        )
+        asset_embed_pairs.append((asset, {"title": asset}))
+
+    dispatch_result = {
+        "attempted": True,
+        "success": True,
+        "http_status": 204,
+        "error": None,
+        "message_id": None,
+        "batch_results": [
+            {
+                "attempted": True,
+                "success": True,
+                "http_status": 204,
+                "error": None,
+                "message_id": "msg-0",
+                "batch_index": 0,
+                "embed_count": 2,
+            },
+            {
+                "attempted": True,
+                "success": True,
+                "http_status": 204,
+                "error": None,
+                "message_id": "msg-1",
+                "batch_index": 1,
+                "embed_count": 1,
+            },
+        ],
+    }
+
+    asset_results = notify_discord._map_batch_results_to_assets(
+        asset_embed_pairs, dispatch_result, batch_size=2
+    )
+
+    open_commits: set = set()
+    for asset, pending in pending_payloads:
+        manual_positions, _, commit_result = notify_discord._finalize_entry_commit(
+            asset,
+            pending,
+            asset_results[asset],
+            manual_positions=manual_positions,
+            tracking_cfg=tracking_cfg,
+            now_dt=now,
+            now_iso=now_iso,
+            cooldown_map={},
+            cooldown_default=20,
+            positions_path=str(positions_path),
+            open_commits_this_run=open_commits,
+        )
+
+        assert commit_result.get("committed") is True
+        assert asset_results[asset]["success"] is True
+
+    persisted = position_tracker.load_positions(str(positions_path), treat_missing_as_flat=True)
+    assert set(persisted.keys()) == set(assets)
+    for asset in assets:
+        state = position_tracker.compute_state(asset, tracking_cfg, persisted, now)
+        assert state["has_position"] is True
+        assert state["side"] == "buy"
+
+
 def test_batch_failure_only_blocks_embeds_in_failed_batch(monkeypatch, tmp_path):
     now = datetime.now(timezone.utc)
     now_iso = notify_discord.to_utc_iso(now)
@@ -82,7 +180,7 @@ def test_batch_failure_only_blocks_embeds_in_failed_batch(monkeypatch, tmp_path)
     asset_pairs = [("BTCUSD", {"title": "btc"}), ("EURUSD", {"title": "eur"})]
 
     def fake_post_batches(hook, content, embeds, batch_size=10):
-        batches = [embeds[i : i + batch_size] for i in range(0, len(embeds), batch_size)]
+        batches = [embeds[i : i  batch_size] for i in range(0, len(embeds), batch_size)]
         batch_results = []
         for idx, batch in enumerate(batches):
             success = idx == 0
@@ -230,6 +328,3 @@ def test_commit_exception_after_dispatch_is_audited(monkeypatch, tmp_path):
     assert commit_result.get("exception") is not None
     assert manual_state_after.get("has_position") is True
     assert "ENTRY_DISPATCHED_BUT_NOT_COMMITTED" in events
- 
-EOF
-)
