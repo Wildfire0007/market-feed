@@ -15,13 +15,8 @@ on:
 permissions:
   contents: write
   
-concurrency:
-  # Allow manual dispatches to finish even if a scheduled run starts by
-  # separating the concurrency group based on the triggering event.
-  # Scheduled runs ("auto") still cancel their predecessors to avoid
-  # overlapping cron executions, while manual runs ("manual") can execute
-  # independently without being pre-empted by the cron trigger.
-  group: td-pipeline-${{ github.ref }}-${{ github.event_name == 'schedule' && 'auto' || 'manual' }}
+concurrency:  
+  group: manual-positions-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -90,7 +85,7 @@ jobs:
       # Trading always runs first. Public is synced immediately afterwards
       # so that analysis consumes the fresh trading artefacts instead of
       # anything stale from a previous workflow run.
-      - name: Run Trading.py (pull all OHLC + spot)
+      - name: Run Trading.py (pull all OHLC  spot)
         run: .venv/bin/python Trading.py
         
       - name: Sync pipeline artifacts into public (before analysis)
@@ -185,7 +180,7 @@ jobs:
   deploy_public:
     name: 2) Deploy refreshed public
     needs:
-      - trading_and_analysis
+      - notify
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -194,32 +189,21 @@ jobs:
       id-token: write
     environment:
       name: github-pages
-    steps:
-      - name: Download refreshed public artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: analysis-public
-          path: public
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: public
-
+    steps:     
       - name: Deploy public folder to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
   notify:
     name: 3) Discord értesítő
     needs:
-      - trading_and_analysis
-      - deploy_public
+      - trading_and_analysis     
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       DISCORD_COOLDOWN_MIN: ${{ secrets.DISCORD_COOLDOWN_MIN }}
       DISCORD_COOLDOWN_MOMENTUM_MIN: ${{ secrets.DISCORD_COOLDOWN_MOMENTUM_MIN }}
+      PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
     steps:
       - name: Checkout latest signals
         uses: actions/checkout@v4
@@ -236,6 +220,20 @@ jobs:
         run: |
           rm -rf public
           mkdir -p public
+
+      - name: Bootstrap manual positions from published state
+        env:
+          PUBLIC_BASE_URL: ${{ env.PUBLIC_BASE_URL }}
+        run: |
+          set -euo pipefail
+          mkdir -p public
+          if curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions.json?ts=${GITHUB_RUN_ID}" -o public/_manual_positions.json; then
+              echo "STATE_LOADED=1" >> $GITHUB_ENV
+          else
+              echo '{}' > public/_manual_positions.json
+              echo "STATE_LOADED=0" >> $GITHUB_ENV
+          fi
+          curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true
 
       - name: Download analysis outputs
         uses: actions/download-artifact@v4
@@ -272,9 +270,26 @@ jobs:
           echo "PATH=$PWD/.venv/bin:$PATH" >> $GITHUB_ENV
 
       - name: Run Discord notifier
+        env:
+          STATE_LOADED: ${{ env.STATE_LOADED }}
+          PUBLIC_BASE_URL: ${{ env.PUBLIC_BASE_URL }}
+          MANUAL_POS_AUDIT_TO_FILE: "1"
+          MANUAL_POS_AUDIT_FILE: public/_manual_positions_audit.jsonl
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             .venv/bin/python scripts/notify_discord.py --manual
           else
             .venv/bin/python scripts/notify_discord.py
           fi
+
+      - name: Show manual positions size
+        if: always()
+        run: |
+          ls -la public/_manual_positions.json || true
+          wc -c public/_manual_positions.json || true
+
+      - name: Publish manual position artifacts
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
