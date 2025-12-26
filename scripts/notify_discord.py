@@ -1595,7 +1595,10 @@ def bud_hh_key(dt=None) -> str:
 
 def bud_time_str(dt=None) -> str:
     dt = dt or bud_now()
-    return dt.strftime("%Y-%m-%d %H:%M ")  (dt.tzname() or "CET")
+    # Append the timezone abbreviation (or CET fallback) to the formatted time
+    # Explicit string concatenation avoids accidentally calling the string
+    # returned by strftime (which caused a TypeError in CI).
+    return dt.strftime("%Y-%m-%d %H:%M ") + (dt.tzname() or "CET")    
 
 def draw_progress_bar(value, min_val=0, max_val=100, length=10):
     """
