@@ -3,7 +3,7 @@
 analysis.py — TD-only intraday jelzésképző (lokális JSON-okból).
 Forrás: Trading.py által generált fájlok a public/<ASSET>/ alatt.
 Kimenet:
-  public/<ASSET>/signal.json      — "buy" / "sell" / "no entry" + okok
+  public/<ASSET>/signal.json      — "buy" / "sell" / "no entry"  okok
   public/analysis_summary.json    — összesített státusz
   public/analysis.html            — egyszerű HTML kivonat
 """
@@ -153,7 +153,7 @@ import numpy as np
 BTC_OFI_Z = {"trigger": 0.8, "strong": 1.0, "weakening": -0.4, "lookback_bars": 60}
 BTC_ADX_TREND_MIN = 20.0
 
-# ATR floor + napszak-percentilis (TOD = time-of-day buckets) – baseline/relaxed/suppressed
+# ATR floor  napszak-percentilis (TOD = time-of-day buckets) – baseline/relaxed/suppressed
 BTC_ATR_FLOOR_USD = {
     "baseline": 80.0,
     "relaxed": 80.0,
@@ -193,7 +193,6 @@ _BTC_NO_CHASE_LIMITS: Dict[str, float] = {}
 _PRECISION_RUNTIME: Dict[str, Dict[str, Any]] = {}
 
 # Precision pipeline alsó határ (ne blokkoljon túl korán)
-BTC_NO_CHASE_R = {"baseline": 0.25, "relaxed": 0.22, "intraday": 0.20, "suppressed": 0.18}
 BTC_PRECISION_SOFT_DELTA = 2.0
 
 
@@ -352,7 +351,7 @@ SETTINGS: Dict[str, Any] = load_config()
 
 
 def btc_rr_min_with_adx(profile: str, asset: str, adx_5m_val: float) -> Tuple[Optional[float], Dict[str, Any]]:
-    """Return BTC RR-min override + metadata based on 5m ADX regime."""
+    """Return BTC RR-min override  metadata based on 5m ADX regime."""
 
     if asset != "BTCUSD":
         return (None, {})
@@ -405,7 +404,7 @@ except NameError:  # pragma: no cover - stub fallback
 
 
 def btc_core_triggers_ok(asset: str, side: str) -> Tuple[bool, Dict[str, Any]]:
-    """BTC core: mikró-BOS (1m+retest), VWAP reclaim/reject (5m), OFI z-score (runtime) — EITHER-OF(2)."""
+    """BTC core: mikró-BOS (1mretest), VWAP reclaim/reject (5m), OFI z-score (runtime) — EITHER-OF(2)."""
 
     if asset != "BTCUSD" or side not in {"long", "short"}:
         return False, {"bos_ok": False, "vwap_ok": False, "ofi_ok": False, "ofi_z": None}
@@ -575,7 +574,7 @@ def btc_momentum_override(profile: str, asset: str, side: str, atr_ok: bool) -> 
         ofi_strong = z_value <= -ofi_strong_th
 
     if ema_ok and ofi_strong and atr_ok:
-        desc = f"ema9x21+ofi_z={z_value:.2f}" if np.isfinite(z_value) else "ema9x21+ofi"
+        desc = f"ema9x21ofi_z={z_value:.2f}" if np.isfinite(z_value) else "ema9x21ofi"
         return (True, rr_override, desc)
     return (False, None, "")
 
@@ -619,7 +618,7 @@ def btc_no_chase_violated(profile: str, entry_price: float, trigger_price: float
 def btc_gate_margins(asset: str, ctx) -> dict:
     """
     Számolja, mennyivel maradtunk el a belépési küszöböktől:
-    - ATR_gate: rel_atr vs atr_gate_th (érték + arány)
+    - ATR_gate: rel_atr vs atr_gate_th (érték  arány)
     - P-score:  P vs p_min
     - OFI:      |z| vs trigger
     - ADX:      adx vs trend_min
@@ -894,7 +893,7 @@ def _parse_utc_timestamp(value: str) -> Optional[datetime]:
     try:
         ts = value.strip()
         if ts.endswith("Z"):
-            ts = ts[:-1] + "+00:00"
+            ts = ts[:-1]  "00:00"
         dt = datetime.fromisoformat(ts)
     except Exception:
         try:
@@ -943,7 +942,7 @@ def _load_macro_lockout_windows() -> Dict[str, List[Dict[str, Any]]]:
                 except (TypeError, ValueError):
                     post = 0
                 start = ts_release - timedelta(seconds=pre)
-                end = ts_release + timedelta(seconds=post)
+                end = ts_release  timedelta(seconds=post)
                 label = (
                     event.get("label")
                     or event.get("event")
@@ -1098,7 +1097,7 @@ REFRESH_TIPS = (
     "CI/CD-ben kösd össze a Trading és Analysis futást: az analysis job csak a trading után induljon (needs: trading).",
     "A kliens kéréséhez adj cache-busting query paramot (pl. ?v=<timestamp>) és no-store cache-control fejlécet.",
     "Cloudflare Worker stale policy: 5m feedre állítsd 120s-re, hogy hamar átjöjjön az új jel.",
-    "A dashboard stabilizáló (2 azonos jel + 10 perc cooldown) lassíthatja a kártya frissítését — lazítsd, ha realtime kell."
+    "A dashboard stabilizáló (2 azonos jel  10 perc cooldown) lassíthatja a kártya frissítését — lazítsd, ha realtime kell."
 )
 LATENCY_PROFILE_FILENAME = "latency_profile.json"
 LATENCY_GUARD_STATE_FILENAME = "latency_guard_state.json"
@@ -1201,7 +1200,7 @@ def nowiso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def to_utc_iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("00:00", "Z")
 
 def parse_utc_timestamp(value: Any) -> Optional[datetime]:
     if not value:
@@ -1274,7 +1273,7 @@ def _normalize_realtime_meta(
             normalised["cleared_stale_meta"] = True
             if now_utc:
                 normalised["cleared_at_utc"] = now_utc.replace(microsecond=0).isoformat().replace(
-                    "+00:00", "Z"
+                    "00:00", "Z"
                 )
             normalised.setdefault("reason", "stale")
     return normalised
@@ -1435,7 +1434,7 @@ def _render_entry_gate_chart(stats: Dict[str, Any]) -> None:
                     continue
                 for reason in item.get("missing") or item.get("precision_hiany") or []:
                     reason_text = str(reason)
-                    reason_counts[reason_text] = reason_counts.get(reason_text, 0) + 1
+                    reason_counts[reason_text] = reason_counts.get(reason_text, 0)  1
             total = sum(reason_counts.values()) or 1
             for reason, count in sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0])):
                 pct = (count / total) * 100.0
@@ -1623,7 +1622,7 @@ def _build_entry_count_summary(
 
     def _bump(day_key: str, asset_key: str) -> None:
         asset_bucket = counts_by_day.setdefault(day_key, {})
-        asset_bucket[asset_key] = asset_bucket.get(asset_key, 0) + 1
+        asset_bucket[asset_key] = asset_bucket.get(asset_key, 0)  1
 
     if journal_path.exists():
         try:
@@ -1659,7 +1658,7 @@ def _build_entry_count_summary(
     totals: Dict[str, int] = {}
     for _, assets in counts_by_day.items():
         for asset_key, count in assets.items():
-            totals[asset_key] = totals.get(asset_key, 0) + count
+            totals[asset_key] = totals.get(asset_key, 0)  count
 
     return {
         "generated_utc": nowiso(),
@@ -1691,7 +1690,7 @@ def time_of_day_bucket(now_utc: Optional[datetime]) -> str:
         now_utc = datetime.now(timezone.utc)
     if now_utc.tzinfo is None:
         now_utc = now_utc.replace(tzinfo=timezone.utc)
-    minute = now_utc.hour * 60 + now_utc.minute
+    minute = now_utc.hour * 60  now_utc.minute
     return _btc_time_of_day_bucket(minute)
 
 
@@ -1825,7 +1824,7 @@ def ensure_closed_candles(df: pd.DataFrame,
     if not isinstance(idx, pd.DatetimeIndex):
         return df.copy()
 
-    cutoff = now + timedelta(seconds=max(tolerance_seconds, 0))
+    cutoff = now  timedelta(seconds=max(tolerance_seconds, 0))
     mask = idx <= cutoff
 
     if mask.all():
@@ -1863,8 +1862,8 @@ def session_windows_utc(asset: str) -> Tuple[
 def _min_of_day(hour: int, minute: int) -> int:
     """Return minutes from midnight, clamped to the valid daily range."""
 
-    total = hour * 60 + minute
-    return max(0, min(total, 23 * 60 + 59))
+    total = hour * 60  minute
+    return max(0, min(total, 23 * 60  59))
 
 
 def in_any_window_utc(windows: Optional[List[Tuple[int, int, int, int]]], h: int, m: int) -> bool:
@@ -1904,13 +1903,13 @@ def _convert_rule_minute_to_utc(
             rule_date, dtime(minute // 60, minute % 60, tzinfo=source_tz)
         )
         utc_dt = local_dt.astimezone(timezone.utc)
-        return utc_dt.hour * 60 + utc_dt.minute
+        return utc_dt.hour * 60  utc_dt.minute
     except Exception:
         return minute
 
 
 def format_utc_minute(minute: int) -> str:
-    minute = max(0, min(23 * 60 + 59, minute))
+    minute = max(0, min(23 * 60  59, minute))
     return f"{minute // 60:02d}:{minute % 60:02d}"
 
 
@@ -1930,7 +1929,7 @@ def convert_windows_to_local(
         start_dt = datetime.combine(today_utc, dtime(sh, sm, tzinfo=timezone.utc))
         end_dt = datetime.combine(today_utc, dtime(eh, em, tzinfo=timezone.utc))
         if end_dt <= start_dt:
-            end_dt += timedelta(days=1)
+            end_dt = timedelta(days=1)
         start_local = start_dt.astimezone(tz)
         end_local = end_dt.astimezone(tz)
         result.append(format_local_range(start_local, end_local))
@@ -1944,7 +1943,7 @@ def convert_minutes_to_local_range(
     start_dt = datetime.combine(today_utc, dtime(start // 60, start % 60, tzinfo=timezone.utc))
     end_dt = datetime.combine(today_utc, dtime(end // 60, end % 60, tzinfo=timezone.utc))
     if end_dt <= start_dt:
-        end_dt += timedelta(days=1)
+        end_dt = timedelta(days=1)
     start_local = start_dt.astimezone(tz)
     end_local = end_dt.astimezone(tz)
     return format_local_range(start_local, end_local)
@@ -1968,7 +1967,7 @@ def next_session_open(asset: str, now: Optional[datetime] = None) -> Optional[da
         entry_windows = [(0, 0, 23, 59)]
 
     for day_offset in range(0, 8):
-        day = (now + timedelta(days=day_offset)).date()
+        day = (now  timedelta(days=day_offset)).date()
         if weekdays and day.weekday() not in weekdays:
             continue
 
@@ -1990,7 +1989,7 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
     now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     h, m = now_utc.hour, now_utc.minute
     now_budapest = now_utc.astimezone(BUDAPEST_TIMEZONE)
-    minute_of_day = h * 60 + m
+    minute_of_day = h * 60  m
     entry_windows, monitor_windows = session_windows_utc(asset)
     monitor_ok = in_any_window_utc(monitor_windows, h, m)
     entry_window_ok = in_any_window_utc(entry_windows, h, m)
@@ -2026,7 +2025,7 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
     sunday_open_local: Optional[List[str]] = None
     if sunday_open is not None:
         sunday_open_local = convert_minutes_to_local_range(
-            sunday_open, (sunday_open + 1) % (24 * 60), tz=BUDAPEST_TIMEZONE
+            sunday_open, (sunday_open  1) % (24 * 60), tz=BUDAPEST_TIMEZONE
         )
     if sunday_open is not None and now_utc.weekday() == 6 and minute_of_day < sunday_open:
         monitor_ok = False
@@ -2369,7 +2368,7 @@ def translate_severity(value: Optional[str]) -> Optional[str]:
 def short_text(text: str, limit: int = 160) -> str:
     if len(text) <= limit:
         return text
-    return text[: limit - 1].rstrip() + "…"
+    return text[: limit - 1].rstrip()  "…"
 
 
 def build_action_plan(
@@ -2706,7 +2705,7 @@ def build_action_plan(
                 summary_note_parts.append(f"RR min: {float(rr_effective):.2f}")
             if mom_note:
                 summary_note_parts.append(mom_note)
-            add_note("Belépési döntés – összefogás: " + "; ".join(summary_note_parts))
+            add_note("Belépési döntés – összefogás: "  "; ".join(summary_note_parts))
 
             btc_entry_summary = {
                 "profile": profile_name,
@@ -2768,7 +2767,7 @@ def build_action_plan(
                 if value is not None:
                     step[key] = value
         plan["steps"].append(step)
-        order_counter += 1
+        order_counter = 1
 
     def update_state(new_status: str, new_priority: str) -> None:
         nonlocal current_status, current_priority
@@ -2863,7 +2862,7 @@ def build_action_plan(
         summary_parts.append(
             short_text(
                 f"{severity_label.capitalize() if severity_label else 'Exit'} jelzés: {state_display}"
-                + (f" ({direction})" if direction else "")
+                 (f" ({direction})" if direction else "")
             )
         )
         exit_actions = exit_signal.get("actions") or []
@@ -2895,7 +2894,7 @@ def build_action_plan(
             else:
                 base = f"Hajtsd végre a(z) {action_type} műveletet"
             if extra_parts:
-                base += " (" + ", ".join(extra_parts) + ")"
+                base = " ("  ", ".join(extra_parts)  ")"
             return base
 
         for action in exit_actions:
@@ -2942,12 +2941,12 @@ def build_action_plan(
         direction_label = "long" if decision == "buy" else "short"
         summary_text = f"Új {direction_label} setup kész ({probability}% valószínűség)"
         if not entry_open:
-            summary_text += " – belépési ablak zárva"
+            summary_text = " – belépési ablak zárva"
         summary_parts.append(short_text(summary_text))
         stop_instruction = (
             "Stop-loss szint: "
-            + format_price_compact(sl)
-            + (" (long)" if decision == "buy" else " (short)")
+             format_price_compact(sl)
+             (" (long)" if decision == "buy" else " (short)")
         )
         add_step(
             "risk",
@@ -3015,7 +3014,7 @@ def build_action_plan(
         arming_since = None
     precision_timeout_triggered = False
     timeout_minutes = 10
-    runtime_bucket["events"] = int(runtime_bucket.get("events", 0)) + 1
+    runtime_bucket["events"] = int(runtime_bucket.get("events", 0))  1
     runtime_bucket.setdefault("hits_ready", 0)
     runtime_bucket.setdefault("hits_arming", 0)
     runtime_bucket.setdefault("hits_soft_block", 0)
@@ -3029,20 +3028,20 @@ def build_action_plan(
         if runtime_bucket.get("last_state") != "precision_ready":
             runtime_bucket["ready_since"] = now_runtime
         runtime_bucket["last_state"] = "precision_ready"
-        runtime_bucket["hits_ready"] = int(runtime_bucket.get("hits_ready", 0)) + 1
+        runtime_bucket["hits_ready"] = int(runtime_bucket.get("hits_ready", 0))  1
         runtime_bucket.pop("arming_since", None)
     elif precision_state == "precision_arming":
         if runtime_bucket.get("last_state") != "precision_arming":
             runtime_bucket["arming_since"] = now_runtime
         runtime_bucket["last_state"] = "precision_arming"
-        runtime_bucket["hits_arming"] = int(runtime_bucket.get("hits_arming", 0)) + 1
+        runtime_bucket["hits_arming"] = int(runtime_bucket.get("hits_arming", 0))  1
         runtime_bucket.pop("ready_since", None)
     else:
         runtime_bucket["last_state"] = precision_state
         runtime_bucket.pop("ready_since", None)
         runtime_bucket.pop("arming_since", None)
         if precision_state == "precision_soft_block":
-            runtime_bucket["hits_soft_block"] = int(runtime_bucket.get("hits_soft_block", 0)) + 1
+            runtime_bucket["hits_soft_block"] = int(runtime_bucket.get("hits_soft_block", 0))  1
     if precision_timeout_triggered and isinstance(entry_thresholds, dict):
         entry_thresholds["precision_timeout"] = {"minutes": timeout_minutes}
     precision_gate_snapshot = entry_thresholds_meta.get("precision_gate_state")
@@ -3139,7 +3138,7 @@ def build_action_plan(
     ) and not entry_open:
         session_msg = "Belépési ablak zárva – várj a megnyitásig."
         if next_open:
-            session_msg += f" Következő nyitás: {next_open}."
+            session_msg = f" Következő nyitás: {next_open}."
         add_step("session", session_msg, source="session", extra={"next_open_utc": next_open})
 
     plan["summary"] = " | ".join(summary_parts)
@@ -3188,7 +3187,7 @@ def derive_position_management_note(
         anchor_dt = parse_utc_timestamp(anchor_timestamp)
         if anchor_dt:
             local_dt = anchor_dt.astimezone(MARKET_TIMEZONE)
-            anchor_note += f", nyitva: {local_dt.strftime('%Y-%m-%d %H:%M')} helyi idő"
+            anchor_note = f", nyitva: {local_dt.strftime('%Y-%m-%d %H:%M')} helyi idő"
         hint_parts.append(anchor_note)
 
     atr_hint = format_atr_hint(asset, atr1h)
@@ -3221,12 +3220,12 @@ def derive_position_management_note(
     if anchor_active and bias in {"long", "short"} and anchor_bias != bias:
         base = (
             prefix
-            + f"aktív {anchor_bias} pozíció a jelenlegi bias ({bias}) ellen → defenzív menedzsment, részleges zárás vagy szoros SL"
+             f"aktív {anchor_bias} pozíció a jelenlegi bias ({bias}) ellen → defenzív menedzsment, részleges zárás vagy szoros SL"
         )
         det = deterioration_messages()
         if det:
-            base += " — " + "; ".join(det)
-        return base + hint_suffix, None
+            base = " — "  "; ".join(det)
+        return base  hint_suffix, None
 
     direction = anchor_bias or bias
     base_message: Optional[str]
@@ -3278,7 +3277,7 @@ def derive_position_management_note(
         if price is None or not np.isfinite(price) or current_price_val is None:
             return False
         if side == "long":
-            return current_price_val <= price + tolerance
+            return current_price_val <= price  tolerance
         if side == "short":
             return current_price_val >= price - tolerance
         return False
@@ -3299,13 +3298,13 @@ def derive_position_management_note(
 
     if exit_reasons:
         det = deterioration_messages()
-        message = prefix + (
+        message = prefix  (
             f"aktív {anchor_bias} pozíció invalidálódott → hard exit szükséges"
         )
-        message += " (" + "; ".join(exit_reasons) + ")"
+        message = " ("  "; ".join(exit_reasons)  ")"
         if det:
-            message += " — " + "; ".join(det)
-        message += hint_suffix
+            message = " — "  "; ".join(det)
+        message = hint_suffix
         exit_signal = {
             "state": "hard_exit",
             "severity": "critical",
@@ -3337,30 +3336,30 @@ def derive_position_management_note(
 
     if anchor_bias == "long" and structure_flag == "bos_down":
         structure_flip = True
-        reversal_strength += 1.0
+        reversal_strength = 1.0
         reversal_reasons.append("5m struktúra lefelé fordult")
     elif anchor_bias == "short" and structure_flag == "bos_up":
         structure_flip = True
-        reversal_strength += 1.0
+        reversal_strength = 1.0
         reversal_reasons.append("5m struktúra felfelé fordult")
 
     if anchor_bias == "long" and bias == "short":
         bias_flip = True
-        reversal_strength += 1.0
+        reversal_strength = 1.0
         reversal_reasons.append("Bias short-ra fordult")
     elif anchor_bias == "short" and bias == "long":
         bias_flip = True
-        reversal_strength += 1.0
+        reversal_strength = 1.0
         reversal_reasons.append("Bias long-ra fordult")
 
     regime_break = not regime_ok
     if regime_break:
-        reversal_strength += 1.0
+        reversal_strength = 1.0
         reversal_reasons.append("Trend filter kikapcsolt")
 
     drift_deteriorating = (drift_state == "deteriorating")
     if drift_deteriorating:
-        reversal_strength += 1.0
+        reversal_strength = 1.0
         reversal_reasons.append("Anchor drift romlik")
 
     pscore_collapse = current_p_score is not None and current_p_score <= 35
@@ -3428,7 +3427,7 @@ def derive_position_management_note(
         and (strong_reversal or profit_guard_trigger)
         and (profit_risk or pscore_collapse)
     ):
-        context_parts = list(dict.fromkeys(reversal_reasons + profit_reasons))
+        context_parts = list(dict.fromkeys(reversal_reasons  profit_reasons))
         if not context_parts and pscore_collapse and current_p_score is not None:
             context_parts.append(f"P-score {current_p_score:.0f}")
         exit_actions: List[Dict[str, Any]] = []
@@ -3441,15 +3440,15 @@ def derive_position_management_note(
         else:
             exit_actions.append({"type": "scale_out", "size": 0.5})
         exit_actions.append({"type": "tighten_stop"})
-        message = prefix + (
+        message = prefix  (
             f"aktív {anchor_bias} pozíció piros jelzésben → {exit_phrase}"
         )
         if context_parts:
-            message += " (" + "; ".join(context_parts) + ")"
+            message = " ("  "; ".join(context_parts)  ")"
         det = deterioration_messages()
         if det:
-            message += " — " + "; ".join(det)
-        message += hint_suffix
+            message = " — "  "; ".join(det)
+        message = hint_suffix
         exit_signal = {
             "state": exit_state,
             "severity": "high" if exit_state == "hard_exit" else "elevated",
@@ -3563,7 +3562,7 @@ def derive_position_management_note(
 
     det_notes = deterioration_messages()
     if det_notes:
-        base_message += " — " + "; ".join(det_notes)
+        base_message = " — "  "; ".join(det_notes)
 
     sentiment_state: Optional[str] = None
     sentiment_reasons: List[str] = []
@@ -3585,7 +3584,7 @@ def derive_position_management_note(
             effective_score = sentiment_score * direction_factor
             if effective_score <= -0.25:
                 base_reason = (
-                    f"Sentiment {sentiment_score:+.2f} ellentétes a {anchor_bias} pozícióval"
+                    f"Sentiment {sentiment_score:.2f} ellentétes a {anchor_bias} pozícióval"
                 )
                 sentiment_reasons.append(base_reason)
                 if sentiment_signal.headline:
@@ -3608,7 +3607,7 @@ def derive_position_management_note(
                     sentiment_severity_label = "moderate" if severity >= 0.7 else "caution"
 
                 if base_message:
-                    base_message += " — Sentiment kockázat: " + "; ".join(sentiment_reasons)
+                    base_message = " — Sentiment kockázat: "  "; ".join(sentiment_reasons)
                 else:
                     base_message = "Sentiment kockázat aktív"
 
@@ -3693,9 +3692,9 @@ def derive_position_management_note(
         if initial_risk_abs is not None and np.isfinite(initial_risk_abs):
             exit_signal["initial_risk_abs"] = initial_risk_abs
         if trail_reasons:
-            base_message += " — Exit jelzés: " + "; ".join(trail_reasons)
+            base_message = " — Exit jelzés: "  "; ".join(trail_reasons)
 
-    return (prefix + base_message + hint_suffix, exit_signal) if base_message else (None, exit_signal)
+    return (prefix  base_message  hint_suffix, exit_signal) if base_message else (None, exit_signal)
 
 def atr_low_threshold(asset: str) -> float:
     h, m = now_utctime_hm()
@@ -3920,8 +3919,8 @@ def _load_precision_flow_stats(
             "total": float(total),
             "flow_hits": float(flow_hits),
         }
-        total_signals_sum += max(total, 0.0)
-        flow_sum += max(flow_hits, 0.0)
+        total_signals_sum = max(total, 0.0)
+        flow_sum = max(flow_hits, 0.0)
 
     if total_signals_sum > 0:
         stats["__GLOBAL__"] = {
@@ -3950,9 +3949,9 @@ def get_precision_flow_rules(asset: str) -> Dict[str, float]:
     imbalance_th = ORDER_FLOW_IMBALANCE_TH * scale
     pressure_th = ORDER_FLOW_PRESSURE_TH * scale
 
-    imbalance_margin = 1.0 + (PRECISION_FLOW_IMBALANCE_MARGIN - 1.0) * scale
+    imbalance_margin = 1.0  (PRECISION_FLOW_IMBALANCE_MARGIN - 1.0) * scale
     imbalance_margin = max(PRECISION_FLOW_MARGIN_MIN, imbalance_margin)
-    pressure_margin = 1.0 + (PRECISION_FLOW_PRESSURE_MARGIN - 1.0) * scale
+    pressure_margin = 1.0  (PRECISION_FLOW_PRESSURE_MARGIN - 1.0) * scale
     pressure_margin = max(PRECISION_FLOW_MARGIN_MIN, pressure_margin)
 
     strength_floor = PRECISION_FLOW_STRENGTH_BASE * (1.0 - 0.25 * overshoot_ratio)
@@ -3987,7 +3986,7 @@ def parse_hhmm(value: str) -> Optional[int]:
         return None
     try:
         hour, minute = value.split(":", 1)
-        return int(hour) * 60 + int(minute)
+        return int(hour) * 60  int(minute)
     except Exception:
         return None
 
@@ -3997,7 +3996,7 @@ def in_utc_range(now_utc: datetime, start: str, end: str) -> bool:
     end_min = parse_hhmm(end)
     if start_min is None or end_min is None:
         return False
-    minute_now = now_utc.hour * 60 + now_utc.minute
+    minute_now = now_utc.hour * 60  now_utc.minute
     if start_min <= end_min:
         return start_min <= minute_now < end_min
     # Átívelés éjfélen
@@ -4159,20 +4158,20 @@ def compute_btcusd_intraday_watch(
         price_30 = safe_float(df_1m["close"].iloc[-30])
         roc_30_pct = abs(_percent_change(price, price_30) or 0.0)
         if roc_thresholds:
-            tiers = list(roc_thresholds) + [roc_thresholds[-1] + 1]
+            tiers = list(roc_thresholds)  [roc_thresholds[-1]  1]
             if roc_30_pct >= tiers[2]:
-                speed_score += 24
+                speed_score = 24
             elif roc_30_pct >= tiers[1]:
-                speed_score += 16
+                speed_score = 16
             elif roc_30_pct >= tiers[0]:
-                speed_score += 9
+                speed_score = 9
 
     roc_5_pct = 0.0
     if len(df_5m) >= 2:
         price_5 = safe_float(df_5m["close"].iloc[-2])
         roc_5_pct = abs(_percent_change(price, price_5) or 0.0)
         if roc_5_pct >= max(roc_thresholds[0] / 2 if roc_thresholds else 0.6, 0.4):
-            speed_score += 6
+            speed_score = 6
     speed_score = min(32.0, speed_score)
 
     atr_period = get_atr_period("BTCUSD")
@@ -4189,9 +4188,9 @@ def compute_btcusd_intraday_watch(
     if atr5_val and atr5_med:
         atr_ratio = atr5_val / atr5_med if atr5_med else None
         if atr_ratio and atr_ratio >= atr_spike_ratio:
-            vol_score += 18
+            vol_score = 18
         elif atr_ratio and atr_ratio >= max(atr_spike_ratio - 0.4, 1.2):
-            vol_score += 10
+            vol_score = 10
 
     range_score = 0.0
     range_position = None
@@ -4205,9 +4204,9 @@ def compute_btcusd_intraday_watch(
             top_pct = (high - price) / price * 100.0
             bottom_pct = (price - low) / price * 100.0
             if top_pct <= range_breakout_pct:
-                range_score += 10
+                range_score = 10
             if bottom_pct <= range_breakout_pct:
-                range_score += 10
+                range_score = 10
 
     var_ratio = None
     if len(df_1m) >= 120 and len(df_5m) >= 24:
@@ -4216,9 +4215,9 @@ def compute_btcusd_intraday_watch(
         if np.isfinite(short_var) and np.isfinite(long_var) and long_var > 0:
             var_ratio = float(short_var / long_var)
             if var_ratio >= 1.8:
-                vol_score += 8
+                vol_score = 8
             elif var_ratio >= 1.4:
-                vol_score += 4
+                vol_score = 4
     vol_score = min(24.0, vol_score)
 
     base_comms = max(0.0, min(10.0, float(news_flag or 0)))
@@ -4226,9 +4225,9 @@ def compute_btcusd_intraday_watch(
     applied_sentiment = 0.0
     if sentiment_points:
         applied_sentiment = max(-base_comms, min(sentiment_points, 10.0 - base_comms))
-    comms = max(0.0, min(12.0, base_comms + applied_sentiment))
+    comms = max(0.0, min(12.0, base_comms  applied_sentiment))
 
-    total_score = speed_score + vol_score + range_score + comms
+    total_score = speed_score  vol_score  range_score  comms
     crypto_score = int(round(max(0.0, min(100.0, total_score))))
     band = intervention_band(crypto_score, config.get("irs_bands", {}))
 
@@ -4341,10 +4340,10 @@ def build_intervention_reasons(
 
     comms_flag = safe_float(metrics.get("comms_from_flag"))
     if comms_flag:
-        reasons.append(f"Manual news flag +{int(round(comms_flag))}")
+        reasons.append(f"Manual news flag {int(round(comms_flag))}")
     sentiment_pts = safe_float(metrics.get("comms_from_sentiment"))
     if sentiment_pts:
-        sign = "+" if sentiment_pts > 0 else ""
+        sign = "" if sentiment_pts > 0 else ""
         reasons.append(f"Sentiment {sign}{sentiment_pts:.1f}")
 
     return reasons
@@ -4370,7 +4369,7 @@ def build_intervention_policy(band: str, metrics: Dict[str, Any], config: Dict[s
             policy.append("require_retest_before_breakout_entries")
         p_add = high_actions.get("p_score_add", 0)
         if p_add:
-            policy.append(f"p_score_long_add:+{int(p_add)}")
+            policy.append(f"p_score_long_add:{int(p_add)}")
 
     if band == "EXTREME":
         extreme_actions = actions.get("EXTREME", {})
@@ -5443,7 +5442,7 @@ def _format_manual_position_note(
     if tp2 is not None:
         details.append(f"TP2: {tp2}")
 
-    detail_suffix = " (" + ", ".join(details) + ")" if details else ""
+    detail_suffix = " ("  ", ".join(details)  ")" if details else ""
     return f"Pozíciómenedzsment: aktív {side_txt} pozíció{detail_suffix}"
 
 
@@ -5602,7 +5601,7 @@ def _trailing_streak(entries: Sequence[str], target: Optional[str]) -> int:
     streak = 0
     for item in reversed(list(entries)):
         if item == target:
-            streak += 1
+            streak = 1
         else:
             break
     return streak
@@ -5735,7 +5734,7 @@ def apply_signal_stability_layer(
                 notify["should_notify"] = False
                 notify["reason"] = "entry_cooldown_active"
                 notify["cooldown_until_utc"] = to_utc_iso(
-                    last_ts + timedelta(minutes=min_between)
+                    last_ts  timedelta(minutes=min_between)
                 )
 
             hard_exit_cd = parse_utc_timestamp(state.get("hard_exit_cooldown_until_utc"))
@@ -5773,7 +5772,7 @@ def apply_signal_stability_layer(
                 min_after_exit = _resolve_asset_value(cd_cfg, asset, 0)
                 state["hard_exit_side"] = exit_side or entry_side
                 state["hard_exit_cooldown_until_utc"] = to_utc_iso(
-                    now_dt + timedelta(minutes=min_after_exit)
+                    now_dt  timedelta(minutes=min_after_exit)
                 )
         _save_signal_state(state_path, state)
 
@@ -5974,8 +5973,8 @@ def update_latency_profile(outdir: str, latency_seconds: Optional[int]) -> None:
     data = load_latency_profile(outdir)
     ema_delay = float(data.get("ema_delay", latency_seconds))
     alpha = data.get("alpha", 0.15)
-    ema_delay = (1 - alpha) * ema_delay + alpha * float(latency_seconds)
-    payload = {"ema_delay": ema_delay, "alpha": alpha, "samples": int(data.get("samples", 0)) + 1}
+    ema_delay = (1 - alpha) * ema_delay  alpha * float(latency_seconds)
+    payload = {"ema_delay": ema_delay, "alpha": alpha, "samples": int(data.get("samples", 0))  1}
     save_json(profile_path, payload)
 
 
@@ -6096,7 +6095,7 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     roll_up = pd.Series(up, index=series.index).rolling(period).mean()
     roll_down = pd.Series(down, index=series.index).rolling(period).mean()
     rs = roll_up / (roll_down.replace(0, np.nan))
-    r = 100 - (100 / (1 + rs))
+    r = 100 - (100 / (1  rs))
     return r.bfill().fillna(50.0)
 
 def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -6111,10 +6110,10 @@ def volume_ratio(df: pd.DataFrame, recent: int, baseline: int) -> Optional[float
     if df.empty or "volume" not in df.columns:
         return None
     vol = df["volume"].astype(float)
-    if len(vol) < recent + baseline:
+    if len(vol) < recent  baseline:
         return None
     recent_slice = vol.iloc[-recent:]
-    baseline_slice = vol.iloc[-(recent + baseline):-recent]
+    baseline_slice = vol.iloc[-(recent  baseline):-recent]
     baseline_mean = baseline_slice.mean()
     if not np.isfinite(baseline_mean) or baseline_mean <= 0:
         return None
@@ -6146,7 +6145,7 @@ def compute_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
     atr_series = tr.ewm(span=period, adjust=False).mean()
     plus_di = 100.0 * pd.Series(plus_dm, index=df.index).ewm(span=period, adjust=False).mean() / atr_series
     minus_di = 100.0 * pd.Series(minus_dm, index=df.index).ewm(span=period, adjust=False).mean() / atr_series
-    di_sum = (plus_di + minus_di).replace(0.0, np.nan)
+    di_sum = (plus_di  minus_di).replace(0.0, np.nan)
     dx = (plus_di - minus_di).abs() / di_sum * 100.0
     adx_series = dx.ewm(span=period, adjust=False).mean()
     return adx_series.bfill().dropna()
@@ -6269,7 +6268,7 @@ def compute_ofi_zscore(k1m: pd.DataFrame, window: int) -> Optional[float]:
         return None
     prices = k1m["close"].astype(float).copy()
     volumes = k1m["volume"].astype(float).copy()
-    if len(prices) < window + 5:
+    if len(prices) < window  5:
         return None
     price_delta = prices.diff().fillna(0.0)
     signed_volume = np.sign(price_delta) * volumes
@@ -6457,7 +6456,7 @@ def evaluate_news_lockout(asset: str, now: datetime) -> Tuple[bool, Optional[str
             break
         if 0 < delta_minutes < stabilisation_minutes:
             lockout = True
-            reason = (event.get("title") or event.get("name") or "High impact news") + " — stabilizáció"
+            reason = (event.get("title") or event.get("name") or "High impact news")  " — stabilizáció"
             break
     return lockout, reason
 
@@ -6511,7 +6510,7 @@ def compute_order_flow_metrics(
     signed_volume = np.sign(price_delta) * recent["volume"].fillna(0.0)
     buy_vol = signed_volume[signed_volume > 0].sum()
     sell_vol = -signed_volume[signed_volume < 0].sum()
-    total = buy_vol + sell_vol
+    total = buy_vol  sell_vol
     if total > 0:
         metrics["imbalance"] = float((buy_vol - sell_vol) / total)
 
@@ -6606,7 +6605,7 @@ def _auto_smt_penalty(asset: str, k5m: pd.DataFrame) -> Tuple[int, Optional[str]
             continue
         if abs(a_ret) < threshold and abs(r_ret) < threshold:
             continue
-        considered += 1
+        considered = 1
         sign_asset = np.sign(a_ret)
         sign_ref = np.sign(r_ret)
         if relationship == "inverse":
@@ -6614,7 +6613,7 @@ def _auto_smt_penalty(asset: str, k5m: pd.DataFrame) -> Tuple[int, Optional[str]
         else:
             diverge_now = sign_asset != sign_ref and sign_asset != 0 and sign_ref != 0
         if diverge_now:
-            diverging += 1
+            diverging = 1
             last_significant_direction = "bullish" if sign_asset > 0 else "bearish"
     if considered >= min_bars and diverging >= min_bars:
         direction = last_significant_direction or "divergence"
@@ -6626,8 +6625,8 @@ def _auto_smt_penalty(asset: str, k5m: pd.DataFrame) -> Tuple[int, Optional[str]
 def find_swings(df: pd.DataFrame, lb: int = 2) -> pd.DataFrame:
     if df.empty: return df
     hi = df["high"]; lo = df["low"]
-    swing_hi = (hi.shift(lb) == hi.rolling(lb*2+1, center=True).max())
-    swing_lo = (lo.shift(lb) == lo.rolling(lb*2+1, center=True).min())
+    swing_hi = (hi.shift(lb) == hi.rolling(lb*21, center=True).max())
+    swing_lo = (lo.shift(lb) == lo.rolling(lb*21, center=True).min())
     out = df.copy()
     out["swing_hi"] = swing_hi.fillna(False)
     out["swing_lo"] = swing_lo.fillna(False)
@@ -6641,8 +6640,8 @@ def last_swing_levels(df: pd.DataFrame) -> Tuple[Optional[float], Optional[float
 
 def detect_sweep(df: pd.DataFrame, lookback: int = 24) -> Dict[str, bool]:
     out = {"sweep_high": False, "sweep_low": False}
-    if len(df) < lookback + 2: return out
-    ref = df.iloc[-(lookback+1):-1]
+    if len(df) < lookback  2: return out
+    ref = df.iloc[-(lookback1):-1]
     last = df.iloc[-1]
     prev_max, prev_min = ref["high"].max(), ref["low"].min()
     if last["high"] > prev_max and last["close"] < prev_max: out["sweep_high"] = True
@@ -6663,9 +6662,9 @@ def detect_bos(df: pd.DataFrame, direction: str) -> bool:
 def broke_structure(df: pd.DataFrame, direction: str, lookback: Optional[int] = None) -> bool:
     """Egyszerű szerkezeti törés: utolsó high/low áttöri az előző N bar csúcsát/alját."""
     lb = lookback or DEFAULT_BOS_LOOKBACK
-    if df.empty or len(df) < lb + 2:
+    if df.empty or len(df) < lb  2:
         return False
-    ref = df.iloc[-(lb + 1) : -1]
+    ref = df.iloc[-(lb  1) : -1]
     last = df.iloc[-1]
     if direction == "long":
         return last["high"] > ref["high"].max()
@@ -6678,10 +6677,10 @@ def retest_level(df: pd.DataFrame, direction: str, lookback: Optional[int] = Non
     if df.empty or len(df) < 2:
         return False
     lb = lookback or DEFAULT_BOS_LOOKBACK
-    if len(df) < lb + 1:
+    if len(df) < lb  1:
         ref = df.iloc[:-1]
     else:
-        ref = df.iloc[-(lb + 1) : -1]
+        ref = df.iloc[-(lb  1) : -1]
     if ref.empty:
         return False
     last = df.iloc[-1]
@@ -6728,7 +6727,7 @@ def _recent_liquidity_levels(
 ) -> List[float]:
     if df.empty:
         return []
-    window = df.tail(max(lookback + 5, 10))
+    window = df.tail(max(lookback  5, 10))
     swings = find_swings(window, lb=1)
     levels: List[float] = []
     if direction == "buy":
@@ -6850,19 +6849,19 @@ def compute_precision_entry(
         base_threshold = max(imbalance_threshold, 1e-9)
         strong_threshold = max(strong_threshold, base_threshold)
         if direction == "buy" and imb > imbalance_threshold:
-            score += 12.0
-            flow_strength += min(1.0, float(imb) / base_threshold)
-            factors.append(f"order flow imbalance +{imb:.2f}")
+            score = 12.0
+            flow_strength = min(1.0, float(imb) / base_threshold)
+            factors.append(f"order flow imbalance {imb:.2f}")
             flow_reasons.append(f"imbalance {imb:.2f}")
             if imb >= strong_threshold:
-                flow_signal_count += 1
+                flow_signal_count = 1
         elif direction == "sell" and imb < -imbalance_threshold:
-            score += 12.0
-            flow_strength += min(1.0, abs(float(imb)) / base_threshold)
+            score = 12.0
+            flow_strength = min(1.0, abs(float(imb)) / base_threshold)
             factors.append(f"order flow imbalance {imb:.2f}")
             flow_reasons.append(f"imbalance {imb:.2f}")
             if imb <= -strong_threshold:
-                flow_signal_count += 1
+                flow_signal_count = 1
         else:
             if direction == "buy" and imb <= -strong_threshold:
                 flow_blockers.append(f"imbalance {imb:.2f}")
@@ -6875,19 +6874,19 @@ def compute_precision_entry(
         pressure_base = max(pressure_threshold, 1e-9)
         pressure_strong = max(pressure_strong, pressure_base)
         if direction == "buy" and pressure > pressure_threshold:
-            score += 10.0
-            flow_strength += min(1.0, float(pressure) / pressure_base)
-            factors.append(f"order flow pressure +{pressure:.2f}")
+            score = 10.0
+            flow_strength = min(1.0, float(pressure) / pressure_base)
+            factors.append(f"order flow pressure {pressure:.2f}")
             flow_reasons.append(f"pressure {pressure:.2f}")
             if pressure >= pressure_strong:
-                flow_signal_count += 1
+                flow_signal_count = 1
         elif direction == "sell" and pressure < -pressure_threshold:
-            score += 10.0
-            flow_strength += min(1.0, abs(float(pressure)) / pressure_base)
+            score = 10.0
+            flow_strength = min(1.0, abs(float(pressure)) / pressure_base)
             factors.append(f"order flow pressure {pressure:.2f}")
             flow_reasons.append(f"pressure {pressure:.2f}")
             if pressure <= -pressure_strong:
-                flow_signal_count += 1
+                flow_signal_count = 1
         else:
             if direction == "buy" and pressure <= -pressure_strong:
                 flow_blockers.append(f"pressure {pressure:.2f}")
@@ -6899,17 +6898,17 @@ def compute_precision_entry(
         try:
             dv = float(delta_volume)
             if direction == "buy" and dv > 0:
-                flow_strength += min(0.5, abs(dv))
-                flow_reasons.append(f"delta +{dv:.1f}")
-                flow_signal_count += 1
-            elif direction == "sell" and dv < 0:
-                flow_strength += min(0.5, abs(dv))
+                flow_strength = min(0.5, abs(dv))
                 flow_reasons.append(f"delta {dv:.1f}")
-                flow_signal_count += 1
+                flow_signal_count = 1
+            elif direction == "sell" and dv < 0:
+                flow_strength = min(0.5, abs(dv))
+                flow_reasons.append(f"delta {dv:.1f}")
+                flow_signal_count = 1
             elif direction == "buy" and dv < 0:
                 flow_blockers.append(f"delta {dv:.1f}")
             elif direction == "sell" and dv > 0:
-                flow_blockers.append(f"delta +{dv:.1f}")
+                flow_blockers.append(f"delta {dv:.1f}")
         except (TypeError, ValueError):
             pass
 
@@ -6975,15 +6974,15 @@ def compute_precision_entry(
     plan["order_flow_stalled"] = stalled_flow
       
     if micro_bos_with_retest(k1m, k5m, direction):
-        score += 12.0
-        factors.append("micro BOS + retest confirmed")
+        score = 12.0
+        factors.append("micro BOS  retest confirmed")
 
     if atr1m is not None and atr1m > 0:
-        score += 6.0
+        score = 6.0
         factors.append(f"ATR1m {atr1m:.4f}")
 
     if atr5 is not None and np.isfinite(atr5) and atr5 > 0:
-        score += 6.0
+        score = 6.0
         factors.append(f"ATR5m {float(atr5):.4f}")
 
     entry_level: Optional[float] = None
@@ -6996,7 +6995,7 @@ def compute_precision_entry(
         distance = abs(base_price - entry_level)
         tolerance = max(atr1m or 0.0, (float(atr5) if atr5 else 0.0) * 0.6)
         if tolerance > 0 and distance <= tolerance * 1.2:
-            score += 10.0
+            score = 10.0
             factors.append("price near liquidity pocket")
     else:
         entry_level = base_price
@@ -7025,19 +7024,19 @@ def compute_precision_entry(
 
     if direction == "buy":
         stop_loss = entry_level - risk_buffer if entry_level is not None else None
-        tp1 = entry_level + risk_buffer * TP1_R if entry_level is not None else None
-        tp2 = entry_level + risk_buffer * TP2_R if entry_level is not None else None
+        tp1 = entry_level  risk_buffer * TP1_R if entry_level is not None else None
+        tp2 = entry_level  risk_buffer * TP2_R if entry_level is not None else None
         entry_window = (
             entry_level - risk_buffer * 0.4,
-            entry_level + risk_buffer * 0.2,
+            entry_level  risk_buffer * 0.2,
         ) if entry_level is not None else None
     else:
-        stop_loss = entry_level + risk_buffer if entry_level is not None else None
+        stop_loss = entry_level  risk_buffer if entry_level is not None else None
         tp1 = entry_level - risk_buffer * TP1_R if entry_level is not None else None
         tp2 = entry_level - risk_buffer * TP2_R if entry_level is not None else None
         entry_window = (
             entry_level - risk_buffer * 0.2,
-            entry_level + risk_buffer * 0.4,
+            entry_level  risk_buffer * 0.4,
         ) if entry_level is not None else None
 
     plan["risk"] = risk_buffer if np.isfinite(risk_buffer) else None
@@ -7109,7 +7108,7 @@ def compute_precision_entry(
                 trigger_state = "arming"
                 trigger_progress = max(trigger_progress, 0.85)
                 plan["trigger_reasons"].append("price inside window")
-            elif tolerance and price_val <= window_hi + tolerance:
+            elif tolerance and price_val <= window_hi  tolerance:
                 trigger_progress = max(trigger_progress, 0.7)
                 plan["trigger_reasons"].append("price near window")
         else:
@@ -7159,7 +7158,7 @@ def compute_precision_entry(
     except (TypeError, ValueError):
         flow_conf = 0.0
     plan["trigger_confidence"] = round(
-        min(1.0, (score_conf + flow_conf + plan["trigger_progress"]) / 3.0), 3
+        min(1.0, (score_conf  flow_conf  plan["trigger_progress"]) / 3.0), 3
     )
 
     if plan["trigger_reasons"]:
@@ -7177,7 +7176,7 @@ def compute_precision_entry(
             else:
                 candidate = candidate.tz_convert(timezone.utc)
             ready_ts = (
-                candidate.floor("s").isoformat().replace("+00:00", "Z")
+                candidate.floor("s").isoformat().replace("00:00", "Z")
             )
     except Exception:
         ready_ts = None
@@ -7196,13 +7195,13 @@ def compute_precision_entry(
 
 
 def ema_cross_recent(short: pd.Series, long: pd.Series, bars: int = MOMENTUM_BARS, direction: str = "long") -> bool:
-    if short.empty or long.empty or len(short) < bars + 2 or len(long) < bars + 2:
+    if short.empty or long.empty or len(short) < bars  2 or len(long) < bars  2:
         return False
     short = short.dropna()
     long = long.dropna()
-    if len(short) < bars + 2 or len(long) < bars + 2:
+    if len(short) < bars  2 or len(long) < bars  2:
         return False
-    for i in range(1, bars + 1):
+    for i in range(1, bars  1):
         idx_now = -i
         idx_prev = -i - 1
         try:
@@ -7249,13 +7248,13 @@ def fib_zone_ok(move_hi, move_lo, price_now,
     length = move_hi - move_lo
     if length == 0:
         return False
-    z1_long  = move_lo + low  * length
-    z2_long  = move_lo + high * length
+    z1_long  = move_lo  low  * length
+    z2_long  = move_lo  high * length
     z1_short = move_hi - high * length
     z2_short = move_hi - low  * length
     tol = max(float(tol_abs), abs(length) * float(tol_frac))
-    in_long  = min(z1_long,  z2_long ) - tol <= price_now <= max(z1_long,  z2_long ) + tol
-    in_short = min(z1_short, z2_short) - tol <= price_now <= max(z1_short, z2_short) + tol
+    in_long  = min(z1_long,  z2_long ) - tol <= price_now <= max(z1_long,  z2_long )  tol
+    in_short = min(z1_short, z2_short) - tol <= price_now <= max(z1_short, z2_short)  tol
     return in_long or in_short
 
 def bias_from_emas(df: pd.DataFrame) -> str:
@@ -7275,7 +7274,7 @@ def ema_slope_ok(
 ) -> Tuple[bool, float, float]:
     """EMA21 relatív meredekség 1h-n: abs(ema_now - ema_prev)/price_now >= th."""
 
-    if df_1h.empty or len(df_1h) < period + lookback + 1:
+    if df_1h.empty or len(df_1h) < period  lookback  1:
         return False, 0.0, 0.0
 
     c = df_1h["close"]
@@ -7306,7 +7305,7 @@ class RegimeClassifier:
         self.adx_range_threshold = adx_range_threshold
 
     def classify(self, k5m: pd.DataFrame, k1h: pd.DataFrame) -> Dict[str, Any]:
-        """Return regime label + raw metrics based on 5m ADX and 1h EMA slope."""
+        """Return regime label  raw metrics based on 5m ADX and 1h EMA slope."""
 
         if k5m is None or k1h is None or k5m.empty or k1h.empty:
             return {"label": "CHOPPY", "adx": None, "ema_slope": None, "ema_slope_signed": None}
@@ -7386,16 +7385,16 @@ def compute_dynamic_tp_profile(
                 rr_core = max(rr_core, rr_high_core)
                 rr_mom = max(rr_mom, rr_high_mom)
                 tp1_core = max(tp1_core, 1.9)
-                tp2_core = max(tp2_core, rr_core + 0.6)
+                tp2_core = max(tp2_core, rr_core  0.6)
                 tp1_mom = max(tp1_mom, 1.6)
-                tp2_mom = max(tp2_mom, rr_mom + 0.4)
+                tp2_mom = max(tp2_mom, rr_mom  0.4)
             elif low_rel > 0 and rel_atr <= low_rel:
                 rr_core = max(rr_low, min(rr_core, rr_low))
                 rr_mom = max(rr_low, min(rr_mom, rr_low))
                 tp1_core = max(tp1_core * 0.95, 1.2)
-                tp2_core = max(tp2_core * 0.95, tp1_core + 0.3)
+                tp2_core = max(tp2_core * 0.95, tp1_core  0.3)
                 tp1_mom = max(tp1_mom * 0.95, 1.1)
-                tp2_mom = max(tp2_mom * 0.95, tp1_mom + 0.25)
+                tp2_mom = max(tp2_mom * 0.95, tp1_mom  0.25)
 
     if current <= perc20:
         regime = "low_vol"
@@ -7425,7 +7424,7 @@ def compute_dynamic_tp_profile(
         if rel_atr < ATR_LOW_TH_ASSET.get(asset, ATR_LOW_TH_DEFAULT) * 0.8:
             regime = "compressed"
             tp1_core = max(tp1_core * 0.9, 1.1)
-            tp2_core = max(tp2_core * 0.9, tp1_core + 0.3)
+            tp2_core = max(tp2_core * 0.9, tp1_core  0.3)
 
     return {
         "core": {"tp1": float(tp1_core), "tp2": float(tp2_core), "rr": float(rr_core)},
@@ -7445,7 +7444,7 @@ def trading_day_bounds(now: datetime, tz: ZoneInfo = MARKET_TIMEZONE) -> Tuple[d
 
     local_now = now.astimezone(tz)
     start_local = datetime(local_now.year, local_now.month, local_now.day, tzinfo=tz)
-    end_local = start_local + timedelta(days=1)
+    end_local = start_local  timedelta(days=1)
     return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
 
@@ -7555,7 +7554,7 @@ def compute_intraday_profile(
         except (TypeError, ValueError, ZeroDivisionError):
             range_position = None
 
-    opening_end = min(now, day_start_utc + timedelta(minutes=OPENING_RANGE_MINUTES))
+    opening_end = min(now, day_start_utc  timedelta(minutes=OPENING_RANGE_MINUTES))
     opening_slice = intraday.loc[(intraday.index >= day_start_utc) & (intraday.index <= opening_end)]
     opening_high = safe_float(opening_slice["high"].max()) if not opening_slice.empty else None
     opening_low = safe_float(opening_slice["low"].min()) if not opening_slice.empty else None
@@ -8017,7 +8016,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 min(realtime_confidence, max(0.2, 1.0 - float(latency_avg) / latency_limit))
             )
         if realtime_transport == "websocket" and isinstance(samples, (int, float)) and samples >= 5:
-            realtime_confidence = float(min(1.0, realtime_confidence + 0.05))
+            realtime_confidence = float(min(1.0, realtime_confidence  0.05))
 
     display_spot = safe_float(spot_price)
     k1m_closed = ensure_closed_candles(k1m, now)
@@ -8164,7 +8163,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 adjusted_keys = ", ".join(str(key) for key in guard_meta.get("adjusted", []))
                 note = "spot: realtime stat outlier guard aktiv"
                 if adjusted_keys:
-                    note += f" ({adjusted_keys})"
+                    note = f" ({adjusted_keys})"
                 spot_latency_notes.append(note)
 
     if spot_fallback_used:
@@ -8173,7 +8172,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         else:
             note = "spot: 5m zárt gyertya árát használjuk"
         if fallback_latency is not None:
-            note += f" ({fallback_latency // 60} perc késés)"
+            note = f" ({fallback_latency // 60} perc késés)"
         spot_latency_notes.append(note)
         realtime_confidence = min(realtime_confidence, 0.4)
     elif relaxed_spot_reason:
@@ -8185,7 +8184,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     elif isinstance(spot_realtime, dict) and spot_realtime.get("forced"):
         force_note = "spot: realtime mintavétel kényszerítve"
         if spot_realtime.get("force_reason"):
-            force_note += f" ({spot_realtime.get('force_reason')})"
+            force_note = f" ({spot_realtime.get('force_reason')})"
         spot_latency_notes.append(force_note)
 
     spread_abs = _resolve_spread_for_entry(
@@ -8305,10 +8304,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         if last_closed:
             latency_sec = int((now - last_closed).total_seconds())
             expected = expected_delays.get(key, 0)
-            if expected and latency_sec > expected + 240:
+            if expected and latency_sec > expected  240:
                 latency_flags.append(f"{key}: utolsó zárt gyertya {latency_sec//60} perc késésben van")
             tol = TF_STALE_TOLERANCE.get(key, 0)
-            if expected and tol and latency_sec > expected + tol:
+            if expected and tol and latency_sec > expected  tol:
                 stale_timeframes[key] = True
                 delay_min = latency_sec // 60
                 flag_msg = f"{key}: jelzés korlátozva {delay_min} perc késés miatt"
@@ -8443,15 +8442,15 @@ def analyze(asset: str) -> Dict[str, Any]:
                 age_minutes = None
             relax_note = "Latency guard lazítva"
             if latency_relax_meta.get("profile"):
-                relax_note += f" ({latency_relax_meta['profile']})"
+                relax_note = f" ({latency_relax_meta['profile']})"
             if age_minutes is not None:
-                relax_note += f" — {age_minutes} perc késés"
+                relax_note = f" — {age_minutes} perc késés"
             if latency_penalty:
-                relax_note += f" ({-latency_penalty:+.1f})"
+                relax_note = f" ({-latency_penalty:.1f})"
             latency_flags.append(relax_note)
             reasons.append(
                 "Relaxed latency guard: belépés engedélyezve kiterjesztett késleltetéssel"
-                + (f" (−{latency_penalty:.1f} P-score)" if latency_penalty else "")
+                 (f" (−{latency_penalty:.1f} P-score)" if latency_penalty else "")
             )
             entry_thresholds_meta["latency_relaxation_used"] = True
 
@@ -8583,7 +8582,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             missing_frames.append("k1h")
         if k4h.empty:
             missing_frames.append("k4h")
-        data_gap_reasons.append("Missing candles: " + ", ".join(missing_frames))
+        data_gap_reasons.append("Missing candles: "  ", ".join(missing_frames))
 
     if data_gap_reasons:
         msg = build_data_gap_signal(
@@ -8606,7 +8605,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         flow_data_available = False
         ofi_available = False
         precision_data_gap_reason = (
-            "k1m stale — precision/momentum/flow modulok letiltva, core (spot+k5m) fut tovább"
+            "k1m stale — precision/momentum/flow modulok letiltva, core (spotk5m) fut tovább"
         )
         gates_mode_override = "core_only"
         if precision_data_gap_reason not in reasons:
@@ -9001,7 +9000,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     if atr_soft_meta.get("mode") == "soft_pass":
         soft_gate_reason = "ATR Soft Gate: belépés engedélyezve toleranciával"
         if atr_soft_penalty:
-            soft_gate_reason += f" (−{atr_soft_penalty:.1f} P-score)"
+            soft_gate_reason = f" (−{atr_soft_penalty:.1f} P-score)"
         reasons.append(soft_gate_reason)
         entry_thresholds_meta["atr_soft_gate_used"] = True
 
@@ -9191,7 +9190,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         invalid_buffer_candidates.append(float(atr_half))
     invalid_buffer = max(invalid_buffer_candidates) if invalid_buffer_candidates else None
     invalid_level_sell = (
-        float(move_hi + invalid_buffer)
+        float(move_hi  invalid_buffer)
         if (move_hi is not None and invalid_buffer is not None)
         else None
     )
@@ -9232,7 +9231,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         }
         entry_gate_context_hu.update(profil_context)
 
-    # 6/b) Kiegészítő likviditás kontextus (1h EMA21 közelség + szerkezeti retest)
+    # 6/b) Kiegészítő likviditás kontextus (1h EMA21 közelség  szerkezeti retest)
     ema21_1h = float(ema(k1h_closed["close"], 21).iloc[-1]) if not k1h_closed.empty else float("nan")
     ema21_dist_ok = (
         np.isfinite(ema21_1h)
@@ -9339,7 +9338,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     if asset == "GOLD_CFD":
         rsi_extreme = np.isfinite(rsi14_val) and (rsi14_val < 30 or rsi14_val > 70)
         if rsi_extreme:
-            gold_reversal_hits += 1
+            gold_reversal_hits = 1
             gold_reversal_reasons.append(f"RSI14 szélsőséges ({rsi14_val:.1f})")
 
         daily_range: Optional[float] = None
@@ -9352,13 +9351,13 @@ def analyze(asset: str) -> Dict[str, Any]:
                     daily_range = None
         if daily_range is not None and atr1h is not None and atr1h > 0:
             if daily_range >= 1.2 * float(atr1h):
-                gold_reversal_hits += 1
+                gold_reversal_hits = 1
                 gold_reversal_reasons.append("Napi range ≥ 1.2×ATR")
             gold_reversal_meta["daily_range"] = daily_range
 
         fib_touch = bool(fib_ok)
         if fib_touch:
-            gold_reversal_hits += 1
+            gold_reversal_hits = 1
             gold_reversal_reasons.append("Kulcsszint érintve (Fib/pivot)")
 
         bos_against_trend = False
@@ -9367,7 +9366,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         elif trend_bias == "short" and (bos1h_long or bos5m_long):
             bos_against_trend = True
         if bos_against_trend:
-            gold_reversal_hits += 1
+            gold_reversal_hits = 1
             gold_reversal_reasons.append("BOS a trend ellen")
 
         adx_value_safe: Optional[float] = None
@@ -9540,7 +9539,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         if regime_ok and (bos_support or struct_support or (micro_support and atr_push)):
             effective_bias = override_dir
             bias_override_used = True
-            bias_override_reason = f"Bias override: 1h trend {override_dir} + momentum támogatás"
+            bias_override_reason = f"Bias override: 1h trend {override_dir}  momentum támogatás"
 
     if (
         asset == "NVDA"
@@ -9724,7 +9723,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                                 f"{label_text}: {', '.join(missing_pretty)}"
                             )
                     if missing_msgs:
-                        msg = "Intraday bias gate feltételek hiányosak — " + " | ".join(missing_msgs)
+                        msg = "Intraday bias gate feltételek hiányosak — "  " | ".join(missing_msgs)
                         if msg not in bias_gate_notes:
                             bias_gate_notes.append(msg)
 
@@ -9754,30 +9753,30 @@ def analyze(asset: str) -> Dict[str, Any]:
     if bias_gate_notes:
         reasons.extend(bias_gate_notes)
     if effective_bias != "neutral":
-        bias_strength = 1.0 + (0.3 if bias_override_used else 0.0)
+        bias_strength = 1.0  (0.3 if bias_override_used else 0.0)
         bias_points = 15.0 * bias_strength
-        P += bias_points
+        P = bias_points
         if bias_override_used:
             label = bias_override_reason or f"Bias override: {effective_bias}"
         else:
             label = f"Bias(4H→1H)={effective_bias}"
-        reasons.append(f"{label} (+{bias_points:.1f})")
+        reasons.append(f"{label} ({bias_points:.1f})")
     else:
         reasons.append("Bias neutrálsávban")
 
     if regime_ok:
         ema_ratio = abs(regime_slope_signed) / max(1e-9, slope_threshold)
-        regime_points = 6.0 + 6.0 * min(2.5, ema_ratio)
-        P += regime_points
-        reasons.append(f"EMA21 slope {ema_ratio:.2f}× küszöb (+{regime_points:.1f})")
+        regime_points = 6.0  6.0 * min(2.5, ema_ratio)
+        P = regime_points
+        reasons.append(f"EMA21 slope {ema_ratio:.2f}× küszöb ({regime_points:.1f})")
     else:
         reasons.append("Regime filter inaktív")
         P -= 4.0
 
     if swept:
         sweep_points = 10.0
-        P += sweep_points
-        reasons.append(f"HTF sweep ok (+{sweep_points:.1f})")
+        P = sweep_points
+        reasons.append(f"HTF sweep ok ({sweep_points:.1f})")
 
     struct_retest_active = (
         (effective_bias == "long" and struct_retest_long)
@@ -9785,25 +9784,25 @@ def analyze(asset: str) -> Dict[str, Any]:
     )
     if bos5m:
         swing_points = 16.0
-        P += swing_points
-        reasons.append(f"5M BOS trendirányba (+{swing_points:.1f})")
+        P = swing_points
+        reasons.append(f"5M BOS trendirányba ({swing_points:.1f})")
     elif struct_retest_active:
         swing_points = 11.0
-        P += swing_points
-        reasons.append(f"5m szerkezeti törés + retest a trend irányába (+{swing_points:.1f})")
+        P = swing_points
+        reasons.append(f"5m szerkezeti törés  retest a trend irányába ({swing_points:.1f})")
     elif asset == "NVDA" and (
         (effective_bias == "long" and nvda_cross_long)
         or (effective_bias == "short" and nvda_cross_short)
     ):
         swing_points = 13.0
-        P += swing_points
-        reasons.append(f"5m EMA9×21 momentum kereszt megerősítés (+{swing_points:.1f})")
+        P = swing_points
+        reasons.append(f"5m EMA9×21 momentum kereszt megerősítés ({swing_points:.1f})")
     elif micro_bos_active:
         if atr_ok and not np.isnan(rel_atr) and rel_atr >= max(atr_threshold, MOMENTUM_ATR_REL):
-            P += MICRO_BOS_P_BONUS
-            reasons.append(f"Micro BOS megerősítés (1m szerkezet + magas ATR) (+{MICRO_BOS_P_BONUS})")
+            P = MICRO_BOS_P_BONUS
+            reasons.append(f"Micro BOS megerősítés (1m szerkezet  magas ATR) ({MICRO_BOS_P_BONUS})")
         else:
-            reasons.append("1m BOS + 5m retest — várjuk a 5m megerősítést")
+            reasons.append("1m BOS  5m retest — várjuk a 5m megerősítést")
 
     if not spread_gate_ok:
         reasons.append("Spread gate: aktuális spread meghaladja az ATR arány limitet")
@@ -9818,8 +9817,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     except (TypeError, ValueError):
         open_window, open_penalty = 0, 0.0
     if open_window > 0 and minute_now <= open_window:
-        time_penalty_total += open_penalty
-        time_penalty_notes.append(f"Nyitási illikviditás hatás ({open_penalty:+.1f})")
+        time_penalty_total = open_penalty
+        time_penalty_notes.append(f"Nyitási illikviditás hatás ({open_penalty:.1f})")
     close_cfg = P_SCORE_TIME_WINDOWS.get("close") or {}
     try:
         close_window = int(close_cfg.get("window_minutes") or 0)
@@ -9827,8 +9826,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     except (TypeError, ValueError):
         close_window, close_penalty = 0, 0.0
     if close_window > 0 and minute_now >= max(0, 1440 - close_window):
-        time_penalty_total += close_penalty
-        time_penalty_notes.append(f"Zárási sáv likviditás büntetés ({close_penalty:+.1f})")
+        time_penalty_total = close_penalty
+        time_penalty_notes.append(f"Zárási sáv likviditás büntetés ({close_penalty:.1f})")
     overlap_cfg = P_SCORE_TIME_WINDOWS.get("overlap") or {}
     overlap_start = ATR_PERCENTILE_OVERLAP.get("start_minute") if ATR_PERCENTILE_OVERLAP else None
     overlap_end = ATR_PERCENTILE_OVERLAP.get("end_minute") if ATR_PERCENTILE_OVERLAP else None
@@ -9840,13 +9839,13 @@ def analyze(asset: str) -> Dict[str, Any]:
         overlap_window = 0
     if overlap_start is not None and overlap_end is not None:
         if overlap_start <= minute_now <= overlap_end:
-            time_penalty_total += overlap_penalty
-            time_penalty_notes.append(f"London–NY overlap profil ({overlap_penalty:+.1f})")
-    elif overlap_window > 0 and 720 - overlap_window <= minute_now <= 720 + overlap_window:
-        time_penalty_total += overlap_penalty
-        time_penalty_notes.append(f"Overlap ablak penalty ({overlap_penalty:+.1f})")
+            time_penalty_total = overlap_penalty
+            time_penalty_notes.append(f"London–NY overlap profil ({overlap_penalty:.1f})")
+    elif overlap_window > 0 and 720 - overlap_window <= minute_now <= 720  overlap_window:
+        time_penalty_total = overlap_penalty
+        time_penalty_notes.append(f"Overlap ablak penalty ({overlap_penalty:.1f})")
     if time_penalty_total:
-        P += time_penalty_total
+        P = time_penalty_total
         reasons.append("; ".join(time_penalty_notes))
 
     if (
@@ -9854,16 +9853,16 @@ def analyze(asset: str) -> Dict[str, Any]:
         and structure_components.get("ofi")
         and P_SCORE_OFI_BONUS
     ):
-        P += P_SCORE_OFI_BONUS
-        reasons.append(f"OFI megerősítés (+{P_SCORE_OFI_BONUS:.1f})")
+        P = P_SCORE_OFI_BONUS
+        reasons.append(f"OFI megerősítés ({P_SCORE_OFI_BONUS:.1f})")
 
     atr_ratio = 0.0
     if not np.isnan(rel_atr) and atr_threshold > 0:
         atr_ratio = rel_atr / atr_threshold
     if atr_ok:
-        atr_points = 5.0 + 6.0 * min(3.0, atr_ratio)
-        P += atr_points
-        reasons.append(f"ATR erősség {atr_ratio:.2f}× küszöb (+{atr_points:.1f})")
+        atr_points = 5.0  6.0 * min(3.0, atr_ratio)
+        P = atr_points
+        reasons.append(f"ATR erősség {atr_ratio:.2f}× küszöb ({atr_points:.1f})")
     else:
         reasons.append("ATR nincs rendben (relatív vagy abszolút küszöb)")
         P -= 8.0
@@ -9912,22 +9911,22 @@ def analyze(asset: str) -> Dict[str, Any]:
                 P -= 7.0
                 reasons.append("Intraday range felső harmada telített (−7.0)")
             elif range_position is not None and range_position <= INTRADAY_BALANCE_LOW:
-                P += 4.0
-                reasons.append("Ár az intraday range alsó zónájában (+4.0)")
+                P = 4.0
+                reasons.append("Ár az intraday range alsó zónájában (4.0)")
         elif effective_bias == "short":
             if exhaustion_short:
                 P -= 7.0
                 reasons.append("Intraday range alsó harmada telített (−7.0)")
             elif range_position is not None and range_position >= INTRADAY_BALANCE_HIGH:
-                P += 4.0
-                reasons.append("Ár az intraday range felső zónájában (+4.0)")
+                P = 4.0
+                reasons.append("Ár az intraday range felső zónájában (4.0)")
 
         if range_compression and not strong_momentum:
             P -= 5.0
             reasons.append("Napi range <0.45×ATR — breakout előtt türelem (−5.0)")
         elif range_expansion and strong_momentum:
-            P += 3.0
-            reasons.append("Range expanzió támogatja a momentumot (+3.0)")
+            P = 3.0
+            reasons.append("Range expanzió támogatja a momentumot (3.0)")
 
     if asset == "BTCUSD":
         volume_factor = momentum_vol_ratio if momentum_vol_ratio is not None else 0.0
@@ -9976,7 +9975,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             override_note = (
                 btc_momentum_override_desc
                 if btc_momentum_override_desc
-                else "BTC momentum override — EMA9×21 + OFI megerősítés"
+                else "BTC momentum override — EMA9×21  OFI megerősítés"
             )
             if override_note not in reasons:
                 reasons.append(override_note)
@@ -10036,19 +10035,19 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     if fib_ok:
         fib_points = 18.0
-        P += fib_points
-        reasons.append(f"Fib zóna konfluencia (0.618–0.886) (+{fib_points:.1f})")
+        P = fib_points
+        reasons.append(f"Fib zóna konfluencia (0.618–0.886) ({fib_points:.1f})")
     elif ema21_dist_ok:
         ema_points = 10.0
-        P += ema_points
-        reasons.append(f"Ár 1h EMA21 zónában (+{ema_points:.1f})")
+        P = ema_points
+        reasons.append(f"Ár 1h EMA21 zónában ({ema_points:.1f})")
 
     of_imb = order_flow_metrics.get("imbalance")
     if of_imb is not None:
         if abs(of_imb) >= ORDER_FLOW_IMBALANCE_TH:
             boost = 8.0 * min(1.0, abs(of_imb))
-            P += boost
-            reasons.append(f"Order flow imbalance {of_imb:+.2f} (+{boost:.1f})")
+            P = boost
+            reasons.append(f"Order flow imbalance {of_imb:.2f} ({boost:.1f})")
         else:
             penalty = 5.0 * (ORDER_FLOW_IMBALANCE_TH - abs(of_imb)) / ORDER_FLOW_IMBALANCE_TH
             P -= penalty
@@ -10057,43 +10056,43 @@ def analyze(asset: str) -> Dict[str, Any]:
     of_pressure = order_flow_metrics.get("pressure")
     if of_pressure is not None and effective_bias in {"long", "short"}:
         if effective_bias == "long" and of_pressure > ORDER_FLOW_PRESSURE_TH:
-            P += 5.0
-            reasons.append("Buy pressure támogatja a setupot (+5)")
+            P = 5.0
+            reasons.append("Buy pressure támogatja a setupot (5)")
         elif effective_bias == "short" and of_pressure < -ORDER_FLOW_PRESSURE_TH:
-            P += 5.0
-            reasons.append("Sell pressure támogatja a setupot (+5)")
+            P = 5.0
+            reasons.append("Sell pressure támogatja a setupot (5)")
         elif abs(of_pressure) > ORDER_FLOW_PRESSURE_TH:
             P -= 4.0
             reasons.append("Order flow ellentétes irányba tolódik (−4)")
 
     if ofi_zscore is not None and effective_bias in {"long", "short"} and OFI_Z_TRIGGER > 0:
         if effective_bias == "long" and ofi_zscore <= -OFI_Z_TRIGGER:
-            penalty = min(8.0, (abs(ofi_zscore) - OFI_Z_TRIGGER + 1.0) * 3.0)
+            penalty = min(8.0, (abs(ofi_zscore) - OFI_Z_TRIGGER  1.0) * 3.0)
             P -= penalty
             reasons.append(f"OFI toxikus long irányra (−{penalty:.1f})")
         elif effective_bias == "short" and ofi_zscore >= OFI_Z_TRIGGER:
-            penalty = min(8.0, (abs(ofi_zscore) - OFI_Z_TRIGGER + 1.0) * 3.0)
+            penalty = min(8.0, (abs(ofi_zscore) - OFI_Z_TRIGGER  1.0) * 3.0)
             P -= penalty
             reasons.append(f"OFI toxikus short irányra (−{penalty:.1f})")
 
     aggressor_ratio = order_flow_metrics.get("aggressor_ratio")
     if aggressor_ratio is not None and effective_bias in {"long", "short"}:
         if effective_bias == "long" and aggressor_ratio > 0.6:
-            P += 4.0
-            reasons.append("Aggresszív vevők dominálnak (+4)")
+            P = 4.0
+            reasons.append("Aggresszív vevők dominálnak (4)")
         elif effective_bias == "short" and aggressor_ratio < -0.6:
-            P += 4.0
-            reasons.append("Aggresszív eladók dominálnak (+4)")
+            P = 4.0
+            reasons.append("Aggresszív eladók dominálnak (4)")
         elif abs(aggressor_ratio) < 0.2:
             P -= 2.0
             reasons.append("Aggresszor arány neutrális (−2)")
 
     stale_penalty = 0.0
     if stale_timeframes.get("k5m"):
-        stale_penalty += 22.0
+        stale_penalty = 22.0
         reasons.append("5m adat késés — momentum pontok csökkentve")
     if stale_timeframes.get("k1h") or stale_timeframes.get("k4h"):
-        stale_penalty += 9.0
+        stale_penalty = 9.0
         reasons.append("HTF adat késés — trend pontok csökkentve")
     if stale_penalty:
         P = max(0.0, P - stale_penalty)
@@ -10111,8 +10110,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         P -= 5.0
         reasons.append("Anchor trail drift romlik (−5)")
     elif anchor_drift_state == "improving":
-        P += 3.0
-        reasons.append("Anchor trail drift javul (+3)")
+        P = 3.0
+        reasons.append("Anchor trail drift javul (3)")
 
     smt_pen, smt_reason = smt_penalty(asset, k5m_closed)
     if smt_pen and smt_reason:
@@ -10132,14 +10131,14 @@ def analyze(asset: str) -> Dict[str, Any]:
             sentiment_points = 4.0 * sentiment_signal.score
         severity = sentiment_signal.effective_severity
         sentiment_points *= severity
-        P += sentiment_points
+        P = sentiment_points
         sentiment_msg = (
-            f"News sentiment ({sentiment_signal.bias}) {sentiment_signal.score:+.2f}"
+            f"News sentiment ({sentiment_signal.bias}) {sentiment_signal.score:.2f}"
         )
         if severity not in {1.0, 1}:
-            sentiment_msg += f" × severity {severity:.2f}"
+            sentiment_msg = f" × severity {severity:.2f}"
         if sentiment_points >= 0:
-            reasons.append(f"{sentiment_msg} (+{sentiment_points:.1f})")
+            reasons.append(f"{sentiment_msg} ({sentiment_points:.1f})")
         else:
             reasons.append(f"{sentiment_msg} ({sentiment_points:.1f})")
     elif sentiment_signal:
@@ -10192,16 +10191,16 @@ def analyze(asset: str) -> Dict[str, Any]:
     if range_guard_reason and range_guard_reason not in reasons:
         reasons.append(range_guard_reason)
 
-    # --- Kapuk (liquidity = Fib zóna VAGY sweep) + session + regime ---
+    # --- Kapuk (liquidity = Fib zóna VAGY sweep)  session  regime ---
     nvda_open_window = False
     nvda_close_window = False
     if asset == "NVDA":
         h, m = now_utctime_hm()
-        minute = h * 60 + m
+        minute = h * 60  m
         cash_start = _min_of_day(13, 30)
         cash_end = _min_of_day(20, 0)
         in_cash_session = cash_start <= minute <= cash_end
-        nvda_open_window = cash_start <= minute <= min(cash_end, cash_start + 60)
+        nvda_open_window = cash_start <= minute <= min(cash_end, cash_start  60)
         nvda_close_window = max(cash_start, cash_end - 30) <= minute <= cash_end
         high_atr_for_extended_hours = (
             not np.isnan(rel_atr)
@@ -10447,7 +10446,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 eurusd_vwap_break_long and higher_timeframe_break and not recent_break_short
             )
             if structure_components["bos"]:
-                structure_notes.append("EURUSD BOS + VWAP felett — trend folytatás megerősítve")
+                structure_notes.append("EURUSD BOS  VWAP felett — trend folytatás megerősítve")
             elif higher_timeframe_break and not eurusd_price_above_vwap:
                 structure_notes.append("EURUSD BOS aktív, de VWAP alatt — türelem")
             if eurusd_price_above_vwap or vwap_confluence.get("trend_pullback"):
@@ -10458,7 +10457,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 eurusd_vwap_break_short and higher_timeframe_break and not recent_break_long
             )
             if structure_components["bos"]:
-                structure_notes.append("EURUSD BOS + VWAP alatt — bearish folytatás megerősítve")
+                structure_notes.append("EURUSD BOS  VWAP alatt — bearish folytatás megerősítve")
             elif higher_timeframe_break and not eurusd_price_below_vwap:
                 structure_notes.append("EURUSD BOS aktív, de VWAP felett — várakozás")
             if eurusd_price_below_vwap or vwap_confluence.get("trend_pullback"):
@@ -10483,7 +10482,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             higher_break = bool(bos1h_long)
             if usoil_gap_break_long:
                 structure_components["bos"] = True
-                gap_note = "USOIL: Gap + VWAP törés — long setup prioritás"
+                gap_note = "USOIL: Gap  VWAP törés — long setup prioritás"
                 if gap_note not in structure_notes:
                     structure_notes.append(gap_note)
             elif not higher_break:
@@ -10495,7 +10494,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             higher_break = bool(bos1h_short)
             if usoil_gap_break_short:
                 structure_components["bos"] = True
-                gap_note = "USOIL: Gap + VWAP törés — short setup prioritás"
+                gap_note = "USOIL: Gap  VWAP törés — short setup prioritás"
                 if gap_note not in structure_notes:
                     structure_notes.append(gap_note)
             elif not higher_break:
@@ -10512,14 +10511,14 @@ def analyze(asset: str) -> Dict[str, Any]:
             higher_timeframe_break = bool(bos1h_long or (bos5m_long and micro_bos_long))
             structure_components["bos"] = higher_timeframe_break and price_above_vwap and not recent_break_short
             if higher_timeframe_break and price_above_vwap:
-                structure_notes.append("H1 kitörés + VWAP felett — GOLD long konfluencia")
+                structure_notes.append("H1 kitörés  VWAP felett — GOLD long konfluencia")
             elif higher_timeframe_break and not price_above_vwap:
                 structure_notes.append("VWAP alatt — GOLD long breakout késleltetve")
         elif effective_bias == "short":
             higher_timeframe_break = bool(bos1h_short or (bos5m_short and micro_bos_short))
             structure_components["bos"] = higher_timeframe_break and price_below_vwap and not recent_break_long
             if higher_timeframe_break and price_below_vwap:
-                structure_notes.append("H1 letörés + VWAP alatt — GOLD short konfluencia")
+                structure_notes.append("H1 letörés  VWAP alatt — GOLD short konfluencia")
             elif higher_timeframe_break and not price_below_vwap:
                 structure_notes.append("VWAP felett — GOLD short breakout várakozik")
         if effective_bias == "long" and price_above_vwap:
@@ -10548,7 +10547,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             long_break = bool(higher_break_long and price_above_vwap and not recent_break_short)
             if not long_break and price_above_vwap and micro_long and (strong_momentum or xag_momentum_override):
                 long_break = True
-                structure_notes.append("XAG: mikro HL/HH + VWAP felett — gyors long reakció")
+                structure_notes.append("XAG: mikro HL/HH  VWAP felett — gyors long reakció")
             elif not price_above_vwap:
                 structure_notes.append("XAG: VWAP alatt — long setup türelmet igényel")
             structure_components["bos"] = long_break
@@ -10558,7 +10557,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             short_break = bool(higher_break_short and price_below_vwap and not recent_break_long)
             if not short_break and price_below_vwap and micro_short and (strong_momentum or xag_momentum_override):
                 short_break = True
-                structure_notes.append("XAG: mikro LH/LL + VWAP alatt — gyors short reakció")
+                structure_notes.append("XAG: mikro LH/LL  VWAP alatt — gyors short reakció")
             elif not price_below_vwap:
                 structure_notes.append("XAG: VWAP felett — short setup türelmet igényel")
             structure_components["bos"] = short_break
@@ -10584,7 +10583,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         micro_ok = bool(btc_trigger_meta.get("bos_ok"))
         vwap_ok = bool(btc_trigger_meta.get("vwap_ok"))
         ofi_ok = bool(btc_trigger_meta.get("ofi_ok"))
-        satisfied_combo = int(micro_ok) + int(vwap_ok) + int(ofi_ok)
+        satisfied_combo = int(micro_ok)  int(vwap_ok)  int(ofi_ok)
         if effective_bias == "long":
             if micro_ok:
                 structure_notes.append("BTC mikro BOS long aktív")
@@ -10698,7 +10697,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             and P_val is not None
             and np.isfinite(p_min_val)
             and np.isfinite(P_val)
-            and P_val >= (p_min_val + 6.0)
+            and P_val >= (p_min_val  6.0)
         )
         good_vola = (
             rel_atr_val is not None
@@ -10754,7 +10753,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 bias_override_used = True
                 bias_override_reason = f"Bias override: BTC intraday combo {selected_bias}"
                 note = (
-                    "BTC bias override — VWAP + OFI megerősítés"
+                    "BTC bias override — VWAP  OFI megerősítés"
                     if profile_lookup == "relaxed"
                     else "BTC bias override — 2/3 momentum kapu"
                 )
@@ -10781,20 +10780,20 @@ def analyze(asset: str) -> Dict[str, Any]:
             atr1h_pips = float(atr1h) / EURUSD_PIP
             eurusd_overrides.setdefault("atr1h_pips", atr1h_pips)
         if atr1h_pips is not None and atr1h_pips < EURUSD_ATR_PIPS_LOW:
-            p_score_min_local += EURUSD_P_SCORE_LOW_VOL_ADD
+            p_score_min_local = EURUSD_P_SCORE_LOW_VOL_ADD
             eurusd_p_score_meta["low_vol_add"] = EURUSD_P_SCORE_LOW_VOL_ADD
             reasons.append(
-                "EURUSD: ATR(1h) alacsony — P-score küszöb +6 pontra emelve"
+                "EURUSD: ATR(1h) alacsony — P-score küszöb 6 pontra emelve"
             )
         if (
             atr1h_pips is not None
             and atr1h_pips >= EURUSD_ATR_PIPS_HIGH
             and strong_momentum
         ):
-            p_score_min_local += EURUSD_P_SCORE_MOMENTUM_ADD
+            p_score_min_local = EURUSD_P_SCORE_MOMENTUM_ADD
             eurusd_p_score_meta["momentum_add"] = EURUSD_P_SCORE_MOMENTUM_ADD
             reasons.append(
-                "EURUSD: Momentum override aktív — extra P-score követelmény (+2)"
+                "EURUSD: Momentum override aktív — extra P-score követelmény (2)"
             )
         if eurusd_p_score_meta:
             eurusd_overrides["p_score_adjustments"] = eurusd_p_score_meta
@@ -10803,7 +10802,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         if nvda_daily_atr is not None:
             nvda_p_score_meta["daily_atr"] = nvda_daily_atr
             if NVDA_DAILY_ATR_MIN > 0 and nvda_daily_atr < NVDA_DAILY_ATR_MIN:
-                p_score_min_local += NVDA_LOW_ATR_P_SCORE_ADD
+                p_score_min_local = NVDA_LOW_ATR_P_SCORE_ADD
                 nvda_p_score_meta["low_atr_add"] = NVDA_LOW_ATR_P_SCORE_ADD
                 reasons.append(
                     "NVDA: napi ATR becslés alacsony — P-score küszöb emelve"
@@ -10818,7 +10817,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                     p_score_min_local = max(0.0, p_score_min_local - relax)
                     nvda_p_score_meta["momentum_relax"] = relax
                     reasons.append(
-                        "NVDA: magas napi ATR + momentum — P-score küszöb lazítva"
+                        "NVDA: magas napi ATR  momentum — P-score küszöb lazítva"
                     )
         if nvda_daily_atr_rel is not None:
             nvda_p_score_meta["daily_atr_rel"] = nvda_daily_atr_rel
@@ -10830,14 +10829,14 @@ def analyze(asset: str) -> Dict[str, Any]:
         if atr1h is not None and atr1h > 0:
             usoil_p_score_meta["atr1h"] = float(atr1h)
             if atr1h < USOIL_ATR1H_BREAKOUT_MIN:
-                p_score_min_local += USOIL_P_SCORE_LOW_ATR_ADD
+                p_score_min_local = USOIL_P_SCORE_LOW_ATR_ADD
                 usoil_p_score_meta["low_atr_add"] = USOIL_P_SCORE_LOW_ATR_ADD
                 reasons.append(
                     "USOIL: 1h ATR <1 USD — P-score küszöb emelve a zajos sáv miatt"
                 )
         if isinstance(intraday_profile, dict):
             if intraday_profile.get("range_compression") and not strong_momentum:
-                p_score_min_local += USOIL_P_SCORE_SIDEWAYS_ADD
+                p_score_min_local = USOIL_P_SCORE_SIDEWAYS_ADD
                 usoil_p_score_meta["sideways_add"] = USOIL_P_SCORE_SIDEWAYS_ADD
                 reasons.append(
                     "USOIL: oldalazásban szigorított P-score — kevesebb fals jelzés"
@@ -10846,9 +10845,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             usoil_overrides.setdefault("p_score_adjustments", {})
             usoil_overrides["p_score_adjustments"].update(usoil_p_score_meta)
     if asset == "BTCUSD" and intervention_band in {"HIGH", "EXTREME"} and effective_bias == "long":
-        p_score_min_local += INTERVENTION_P_SCORE_ADD
+        p_score_min_local = INTERVENTION_P_SCORE_ADD
         note = (
-            f"Crypto Watch: BTCUSD long P-score küszöb +{INTERVENTION_P_SCORE_ADD} (IRS {intervention_summary['irs']} {intervention_band})"
+            f"Crypto Watch: BTCUSD long P-score küszöb {INTERVENTION_P_SCORE_ADD} (IRS {intervention_summary['irs']} {intervention_band})"
             if intervention_summary
             else None
         )
@@ -10859,7 +10858,7 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     tp_net_threshold = tp_net_min_for(asset)
     tp_net_pct_display = f"{tp_net_threshold * 100:.2f}".rstrip("0").rstrip(".")
-    tp_net_label = f"tp1_net>=+{tp_net_pct_display}%"
+    tp_net_label = f"tp1_net>={tp_net_pct_display}%"
     if tp_net_threshold > 0.2:
         profile_resolution["resolution_notes"].append(
             "WARNING: tp_net_min unusually high; check units"
@@ -11123,7 +11122,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             size_scale = float(funding_rules.get("size_scale") or 1.0)
             if funding_value >= pos_ext and pos_ext:
                 funding_dir_filter = "short"
-                funding_reason = f"Funding +{funding_value:.3f} → csak short"
+                funding_reason = f"Funding {funding_value:.3f} → csak short"
             elif funding_value <= neg_ext and neg_ext:
                 funding_dir_filter = "long"
                 funding_reason = f"Funding {funding_value:.3f} → csak long"
@@ -11199,7 +11198,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             entry_thresholds_meta["btc_position_meta"] = btc_position_meta
 
     if asset == "USOIL":
-        minute_now = analysis_now.hour * 60 + analysis_now.minute
+        minute_now = analysis_now.hour * 60  analysis_now.minute
         session_label = "asia"
         session_scale = 0.7
         if 12 * 60 <= minute_now < 21 * 60:
@@ -11772,7 +11771,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             "momentum_ok": bool(mom_dir),
             "momentum_direction": mom_dir,
             "momentum_reason": mom_trigger_desc
-            or ("missing:" + ",".join(sorted(dict.fromkeys(missing_mom))) if missing_mom else ""),
+            or ("missing:"  ",".join(sorted(dict.fromkeys(missing_mom))) if missing_mom else ""),
             "momentum_missing": list(dict.fromkeys(missing_mom)),
             "momentum_regime_ok": bool(regime_ok),
             "momentum_structure_ok": bool(structure_gate),
@@ -11787,7 +11786,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         entry_gate_context_hu["momentum_kapu"] = momentum_context
         gate_extra_context.update(entry_gate_context_hu)   
                
-    # 8) Döntés + szintek (RR/TP matek) — core vagy momentum
+    # 8) Döntés  szintek (RR/TP matek) — core vagy momentum
     decision = "no entry"
     entry = sl = tp1 = tp2 = rr = None
     lev = LEVERAGE.get(asset, 2.0)
@@ -11910,16 +11909,16 @@ def analyze(asset: str) -> Dict[str, Any]:
             if risk < 0:
                 sl = entry - buf
                 risk = entry - sl
-            tp1 = entry + tp1_mult * risk
-            tp2 = entry + tp2_mult * risk
+            tp1 = entry  tp1_mult * risk
+            tp2 = entry  tp2_mult * risk
             tp1_dist = tp1 - entry
             ok_math = (sl < entry < tp1 <= tp2)
         else:
-            base_sl = hi5 if hi5 is not None else (entry + atr5_val)
-            sl = base_sl + buf
+            base_sl = hi5 if hi5 is not None else (entry  atr5_val)
+            sl = base_sl  buf
             risk = sl - entry
             if risk < 0:
-                sl = entry + buf
+                sl = entry  buf
                 risk = sl - entry
             tp1 = entry - tp1_mult * risk
             tp2 = entry - tp2_mult * risk
@@ -11938,12 +11937,12 @@ def analyze(asset: str) -> Dict[str, Any]:
                 if decision_side == "buy":
                     sl = entry - target_risk
                     risk = entry - sl
-                    tp1 = entry + tp1_mult * risk
-                    tp2 = entry + tp2_mult * risk
+                    tp1 = entry  tp1_mult * risk
+                    tp2 = entry  tp2_mult * risk
                     tp1_dist = tp1 - entry
                     ok_math = (sl < entry < tp1 <= tp2)
                 else:
-                    sl = entry + target_risk
+                    sl = entry  target_risk
                     risk = sl - entry
                     tp1 = entry - tp1_mult * risk
                     tp2 = entry - tp2_mult * risk
@@ -11973,12 +11972,12 @@ def analyze(asset: str) -> Dict[str, Any]:
                     if decision_side == "buy":
                         sl = entry - target_risk
                         risk = entry - sl
-                        tp1 = entry + tp1_mult * risk
-                        tp2 = entry + tp2_mult * risk
+                        tp1 = entry  tp1_mult * risk
+                        tp2 = entry  tp2_mult * risk
                         tp1_dist = tp1 - entry
                         ok_math = (sl < entry < tp1 <= tp2)
                     else:
-                        sl = entry + target_risk
+                        sl = entry  target_risk
                         risk = sl - entry
                         tp1 = entry - tp1_mult * risk
                         tp2 = entry - tp2_mult * risk
@@ -12003,12 +12002,12 @@ def analyze(asset: str) -> Dict[str, Any]:
                 if decision_side == "buy":
                     sl = entry - target_risk
                     risk = entry - sl
-                    tp1 = entry + tp1_mult * risk
-                    tp2 = entry + tp2_mult * risk
+                    tp1 = entry  tp1_mult * risk
+                    tp2 = entry  tp2_mult * risk
                     tp1_dist = tp1 - entry
                     ok_math = (sl < entry < tp1 <= tp2)
                 else:
-                    sl = entry + target_risk
+                    sl = entry  target_risk
                     risk = sl - entry
                     tp1 = entry - tp1_mult * risk
                     tp2 = entry - tp2_mult * risk
@@ -12029,7 +12028,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 sl = entry - risk_min
                 risk = entry - sl
             else:
-                sl = entry + risk_min
+                sl = entry  risk_min
                 risk = sl - entry
 
         risk = max(risk, 1e-6)
@@ -12041,8 +12040,8 @@ def analyze(asset: str) -> Dict[str, Any]:
             min_stoploss_ok = False
 
         if decision_side == "buy":
-            tp1 = entry + tp1_mult * risk
-            tp2 = entry + tp2_mult * risk
+            tp1 = entry  tp1_mult * risk
+            tp2 = entry  tp2_mult * risk
             rr  = (tp2 - entry) / risk
             tp1_dist = tp1 - entry
             ok_math = ok_math and (sl < entry < tp1 <= tp2)
@@ -12117,7 +12116,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         tp_min_profit_pct = tp_min_pct
         overnight_days = estimate_overnight_days(asset, analysis_now)
         cost_round_pct, overnight_pct = compute_cost_components(asset, entry, overnight_days)
-        total_cost_pct = cost_mult * cost_round_pct + overnight_pct
+        total_cost_pct = cost_mult * cost_round_pct  overnight_pct
         net_pct = gross_pct - total_cost_pct
         tp1_net_pct_value = net_pct
 
@@ -12126,7 +12125,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         min_profit_abs = max(
             tp_min_abs_default,
             tp_min_pct * entry,
-            (cost_mult * cost_round_pct + overnight_pct) * entry,
+            (cost_mult * cost_round_pct  overnight_pct) * entry,
             atr5_min_mult * atr5_val,
         )
 
@@ -12168,9 +12167,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             if decision == "buy":
                 sl = anchor_level - stop_buffer
                 entry = price_for_calc
-                tp1 = anchor_level + band_width
+                tp1 = anchor_level  band_width
             else:
-                sl = anchor_level + stop_buffer
+                sl = anchor_level  stop_buffer
                 entry = price_for_calc
                 tp1 = anchor_level - band_width
             tp2 = tp1
@@ -12325,7 +12324,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                     slip_state = compute_slippage_state(decision, profile_slippage_limit)
                     if slip_state:
                         entry_thresholds_meta.setdefault("slippage_guard", {})["core"] = slip_state
-                        if slip_state["slip"] > slip_state["allowed"] + 1e-9:
+                        if slip_state["slip"] > slip_state["allowed"]  1e-9:
                             if "slippage_guard" not in missing:
                                 missing.append("slippage_guard")
                             slip_reason = (
@@ -12432,7 +12431,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                             sl_price,
                         )
                     else:
-                        no_chase_violation = slip > allowed_slip + 1e-9
+                        no_chase_violation = slip > allowed_slip  1e-9
                     slip_info = {
                         "slip": float(slip),
                         "allowed": float(allowed_slip),
@@ -12463,7 +12462,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 else:
                     reason_msg = "Momentum override"
                     if mom_trigger_desc:
-                        reason_msg += f" ({mom_trigger_desc})"
+                        reason_msg = f" ({mom_trigger_desc})"
                     reasons.append(reason_msg)
                     reasons.append("Momentum: rész-realizálás javasolt 2.0R-n és trailing SL aktiválása")
                     if momentum_vol_ratio is not None:
@@ -12472,7 +12471,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                         )
                     if last_computed_risk is not None and entry is not None:
                         if decision == "buy":
-                            trail_price = entry + last_computed_risk * MOMENTUM_TRAIL_LOCK
+                            trail_price = entry  last_computed_risk * MOMENTUM_TRAIL_LOCK
                         else:
                             trail_price = entry - last_computed_risk * MOMENTUM_TRAIL_LOCK
                         momentum_trailing_plan = {
@@ -12833,7 +12832,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             if giveback_val is not None:
                 try:
                     giveback_pct = float(giveback_val) * 100.0
-                    description += f", profit giveback {giveback_pct:.0f}%"
+                    description = f", profit giveback {giveback_pct:.0f}%"
                 except (TypeError, ValueError):
                     giveback_val = None
             step_payload: Dict[str, Any] = {"step": "time_stop", "description": description}
@@ -12905,9 +12904,9 @@ def analyze(asset: str) -> Dict[str, Any]:
                     ttl_display = None
             limit_desc = "Precision parkolt limit belépő"
             if window_payload:
-                limit_desc += f" {window_payload[0]:.5f}–{window_payload[1]:.5f}"
+                limit_desc = f" {window_payload[0]:.5f}–{window_payload[1]:.5f}"
             if ttl_display:
-                limit_desc += f" — {ttl_display} perc timeout"
+                limit_desc = f" — {ttl_display} perc timeout"
             limit_step: Dict[str, Any] = {
                 "step": "precision_limit",
                 "description": limit_desc,
@@ -12920,11 +12919,11 @@ def analyze(asset: str) -> Dict[str, Any]:
             execution_playbook.append(limit_step)
             limit_note = "Precision limit belépő parkolva"
             if ttl_display:
-                limit_note += f" {ttl_display} percig"
+                limit_note = f" {ttl_display} percig"
             else:
                 default_ttl = precision_timeouts.get("ready")
                 if default_ttl:
-                    limit_note += f" ~{default_ttl} percig"
+                    limit_note = f" ~{default_ttl} percig"
             if limit_note not in reasons:
                 reasons.append(limit_note)
         trigger_levels_raw = precision_plan.get("trigger_levels") or {}
@@ -12963,7 +12962,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "arming": precision_timeouts.get("arming"),
     }
 
-    # 9) Session override + mentés: signal.json
+    # 9) Session override  mentés: signal.json
     if latency_flags:
         for flag in latency_flags:
             msg = f"Diagnosztika: {flag}"
@@ -12988,7 +12987,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             if "intervention_watch" not in missing:
                 missing.append("intervention_watch")
         elif decision == "sell" and intervention_band == "EXTREME":
-            note_short = "Crypto Watch: új short csak 0.5×ATR5m pullback + RR≥2.5 után"
+            note_short = "Crypto Watch: új short csak 0.5×ATR5m pullback  RR≥2.5 után"
             if note_short not in reasons:
                 reasons.append(note_short)
         if intervention_band == "EXTREME":
@@ -13218,7 +13217,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     combined_probability = P / 100.0
     if ml_probability is not None:
         combined_probability = min(
-            1.0, max(0.0, 0.6 * (P / 100.0) + 0.4 * ml_probability)
+            1.0, max(0.0, 0.6 * (P / 100.0)  0.4 * ml_probability)
         )
 
     ml_confidence_block = False
@@ -13340,7 +13339,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "session_info": session_meta,
         "momentum_diagnostics": momentum_diagnostics,
         "diagnostics": diagnostics_payload(tf_meta, source_files, latency_flags),
-        "reasons": (reasons + ([f"missing: {', '.join(missing)}"] if missing else []))
+        "reasons": (reasons  ([f"missing: {', '.join(missing)}"] if missing else []))
         or ["no signal"],
         "realtime_transport": realtime_transport,
     }
@@ -13466,7 +13465,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         score_repr = sentiment_exit_summary.get("score")
         severity_repr = sentiment_exit_summary.get("severity_score")
         try:
-            score_text = f"{float(score_repr):+.2f}" if score_repr is not None else "n/a"
+            score_text = f"{float(score_repr):.2f}" if score_repr is not None else "n/a"
         except (TypeError, ValueError):
             score_text = "n/a"
         try:
@@ -14067,8 +14066,8 @@ def main():
         summary["degraded_components"] = sorted(MISSING_OPTIONAL_DEPENDENCIES)
         degraded_note = (
             "Guardrail modulok hiányoznak: "
-            + ", ".join(sorted(MISSING_OPTIONAL_DEPENDENCIES))
-            + " — monitoring/precision/latency hook-ok fallback módot használnak."
+             ", ".join(sorted(MISSING_OPTIONAL_DEPENDENCIES))
+             " — monitoring/precision/latency hook-ok fallback módot használnak."
         )
         summary["troubleshooting"].append(degraded_note)
         summary["optional_dependency_issues"] = list(OPTIONAL_DEPENDENCY_ISSUES)
@@ -14174,14 +14173,14 @@ def main():
         reminder_assets: List[str] = []
         if missing_models:
             reminder_assets.append(
-                "hiányzó modellek: " + ", ".join(sorted(missing_models))
+                "hiányzó modellek: "  ", ".join(sorted(missing_models))
             )
         if placeholder_models:
             reminder_assets.append(
-                "placeholder modellek: " + ", ".join(sorted(placeholder_models))
+                "placeholder modellek: "  ", ".join(sorted(placeholder_models))
             )
         reminder_text = (
-            "Heti ML modell státusz emlékeztető – " + "; ".join(reminder_assets)
+            "Heti ML modell státusz emlékeztető – "  "; ".join(reminder_assets)
         )
         summary["troubleshooting"].append(reminder_text)
         if not SUPPRESS_ML_MODEL_WARNINGS:
@@ -14195,7 +14194,7 @@ def main():
         reason_text = "; ".join(ml_disable_notes) if ml_disable_notes else "ismeretlen ok"
         summary["troubleshooting"].append(
             "ML valószínűség számítás ideiglenesen letiltva"
-            + (f" ({reason_text})." if reason_text else ".")
+             (f" ({reason_text})." if reason_text else ".")
         )
     worker_count = _determine_analysis_workers(asset_count)
     if worker_count > 1:
@@ -14298,8 +14297,8 @@ def main():
     save_json(os.path.join(PUBLIC_DIR, "analysis_summary.json"), summary)
 
     html = "<!doctype html><meta charset='utf-8'><title>Analysis Summary</title>"
-    html += "<h1>Analysis Summary (TD-only)</h1>"
-    html += "<pre>" + json.dumps(summary, ensure_ascii=False, indent=2) + "</pre>"
+    html = "<h1>Analysis Summary (TD-only)</h1>"
+    html = "<pre>"  json.dumps(summary, ensure_ascii=False, indent=2)  "</pre>"
     with open(os.path.join(PUBLIC_DIR, "analysis.html"), "w", encoding="utf-8") as f:
         f.write(html)
 
@@ -14359,11 +14358,12 @@ def main():
         and payload["probability_stack"].get("status") == "data_gap"
     ]
     if data_gap_assets:
-        message = "Probability stack data gap detected for: " + ", ".join(sorted(data_gap_assets))
+        message = "Probability stack data gap detected for: "  ", ".join(sorted(data_gap_assets))
         LOGGER.warning(message)
 
 if __name__ == "__main__":
     main()
+
 
 
 
