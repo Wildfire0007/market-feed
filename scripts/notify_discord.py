@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-notify_discord.py — Esemény-alapú Discord riasztó + óránkénti összefoglaló (per-eszköz panelek)
+notify_discord.py — Esemény-alapú Discord riasztó  óránkénti összefoglaló (per-eszköz panelek)
 
 Stílus:
 - Külön embed minden eszköznek, saját emojival.
@@ -24,7 +24,7 @@ ENV:
 - DISCORD_WEBHOOK_URL_MANAGEMENT (opcionális: #💼-management)
 - DISCORD_WEBHOOK_URL_MARKET_SCAN (opcionális: #📊-market-scan)
 - DISCORD_COOLDOWN_MIN (perc, default 5)
-- DISCORD_FORCE_NOTIFY=1 ➜ cooldown figyelmen kívül hagyása + összefoglaló kényszerítése
+- DISCORD_FORCE_NOTIFY=1 ➜ cooldown figyelmen kívül hagyása  összefoglaló kényszerítése
 - DISCORD_FORCE_HEARTBEAT=1 ➜ csak az összefoglalót kényszerítjük (cooldown marad)
 """
 
@@ -37,7 +37,7 @@ from functools import lru_cache
 import numpy as np
 from typing import Iterable, Optional, Set, Tuple, Dict, Any, List
 from datetime import datetime, timezone, timedelta
-from zoneinfo import ZoneInfo  # Py3.9+
+from zoneinfo import ZoneInfo  # Py3.9
 
 # --- Ensure repository root on sys.path when executed as a script ---
 _SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -58,9 +58,12 @@ import position_tracker
 LOGGER = logging.getLogger("market_feed.notify")
 ensure_json_stream_handler(LOGGER, static_fields={"component": "notify"})
 
-PUBLIC_DIR = "public"
+PUBLIC_DIR = (_REPO_ROOT / "public").resolve()
+PUBLIC_DIR.mkdir(parents=True, exist_ok=True)
+POSITIONS_FILE = PUBLIC_DIR / "_manual_positions.json"
+AUDIT_FILE = PUBLIC_DIR / "_manual_positions_audit.jsonl"
 ASSETS: List[str] = list(CONFIG_ASSETS)
-STATE_ARCHIVE_PATH = f"{PUBLIC_DIR}/_notify_state.archive.json"
+STATE_ARCHIVE_PATH = PUBLIC_DIR / "_notify_state.archive.json"
 ACTIVE_ASSET_SET: Set[str] = {asset.upper() for asset in ASSETS}
 DEFAULT_ASSET_STATE: Dict[str, Any] = {
     "last": "no entry",
@@ -72,17 +75,17 @@ DEFAULT_ASSET_STATE: Dict[str, Any] = {
     "cooldown_until": None,
 }
 
-ENTRY_GATE_STATS_PATH = _REPO_ROOT / PUBLIC_DIR / "debug" / "entry_gate_stats.json"
-PIPELINE_MONITOR_PATH = _REPO_ROOT / PUBLIC_DIR / "monitoring" / "pipeline_timing.json"
+ENTRY_GATE_STATS_PATH = PUBLIC_DIR / "debug" / "entry_gate_stats.json"
+PIPELINE_MONITOR_PATH = PUBLIC_DIR / "monitoring" / "pipeline_timing.json"
 
 # ---- Active position helper config ----
-TDSTATUS_PATH = f"{PUBLIC_DIR}/tdstatus.json"
-EIA_OVERRIDES_PATH = f"{PUBLIC_DIR}/USOIL/eia_schedule_overrides.json"
+TDSTATUS_PATH = PUBLIC_DIR / "tdstatus.json"
+EIA_OVERRIDES_PATH = PUBLIC_DIR / "USOIL" / "eia_schedule_overrides.json"
 
 EMA21_SLOPE_MIN = 0.0008  # 0.08%
 ATR_TRAIL_MIN_ABS = 0.15
 
-ACTIVE_POSITION_STATE_PATH = f"{PUBLIC_DIR}/_active_position_state.json"
+ACTIVE_POSITION_STATE_PATH = PUBLIC_DIR / "_active_position_state.json"
 
 # Baseline watcher overrides; extended with every configured asset at runtime.
 _ACTIVE_WATCHER_OVERRIDES = {
@@ -208,6 +211,8 @@ class EntryAuditRecord:
 
         if self.commit_result.get("exception"):
             return "commit_exception"
+        if self.commit_result.get("verified") is False:
+            return "commit_verify_failed"
         if self.commit_result.get("committed"):
             return "commit_ok"
         return "gating_failed"
@@ -403,7 +408,7 @@ def _format_manual_position_line(
     if tp2 is not None:
         parts.append(f"TP2 {format_price(tp2, asset)}")
 
-    suffix = " — " + " • ".join(parts) if parts else ""
+    suffix = " — "  " • ".join(parts) if parts else ""
     return f"Pozíciómenedzsment: aktív {side_txt} pozíció{suffix}"
    
 def draw_progress_bar(value: float, length: int = 10) -> str:
@@ -412,10 +417,10 @@ def draw_progress_bar(value: float, length: int = 10) -> str:
     try:
         pct = max(0.0, min(1.0, float(value) / 100.0))
         filled = int(round(length * pct))
-        inner = "■" * filled + "□" * (length - filled)
+        inner = "■" * filled  "□" * (length - filled)
         return f"[{inner}]"
     except Exception:
-        return "[" + ("□" * length) + "]"
+        return "["  ("□" * length)  "]"
 
 
 def format_price(val: Any, asset: str) -> str:
@@ -454,7 +459,7 @@ def translate_reasons(missing_list: List[str]) -> str:
         "no_chase": "Túl késő (No Chase)",
         "structure(2of3)": "Struktúra kapu (2/3 komponens) nem teljesült",
        
-        # Momentum + order-flow
+        # Momentum  order-flow
         "momentum_trigger": "Momentum trigger hiányzik",
         "ofi": "Order-flow (OFI) megerősítés hiányzik",
 
@@ -486,7 +491,7 @@ def translate_reasons(missing_list: List[str]) -> str:
         if "rr_" in key:
             txt = "Gyenge RR arány / RR kapu nem teljesül"
 
-        # TP / profit-kapuk (pl. tp_min_profit, tp1_net>=+75%)
+        # TP / profit-kapuk (pl. tp_min_profit, tp1_net>=75%)
         elif key.startswith("tp"):
             txt = "Kicsi profit potenciál / TP kapu nem teljesül"
 
@@ -707,7 +712,7 @@ def build_mobile_embed_for_asset(
     tracked_levels = tracked_levels if isinstance(tracked_levels, dict) else {}
    
     try:
-        dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(ts_raw).replace("Z", "00:00"))
         local_time = dt.astimezone(HB_TZ).strftime("%H:%M")
     except Exception:
         local_time = "--:--"
@@ -892,7 +897,7 @@ def build_mobile_embed_for_asset(
         tp2 = signal_data.get("tp2")
         rr = signal_data.get("rr")
    
-    # --- Mobil + pszicho struktúra (7–8 sor) ---
+    # --- Mobil  pszicho struktúra (7–8 sor) ---
     tracked_entry = tracked_levels.get("entry") or entry
     tracked_sl = tracked_levels.get("sl") or sl
     tracked_tp1 = tracked_levels.get("tp1") or tp1
@@ -918,7 +923,7 @@ def build_mobile_embed_for_asset(
     if position_tp2 is not None:
         position_level_parts.append(f"TP2 `{format_price(position_tp2, asset)}`")
     if position_level_parts:
-        position_levels_line = "🧭 Position levels: " + " • ".join(position_level_parts)
+        position_levels_line = "🧭 Position levels: "  " • ".join(position_level_parts)
        
     lines: List[str] = []
     entry_lines: List[str] = []
@@ -963,7 +968,7 @@ def build_mobile_embed_for_asset(
             f"TP2 {format_price(tracked_tp2, asset) if tracked_tp2 is not None else '-'}",
         ]
         lines.append(
-            f"Nyitva: {opened_at or '-'} • " + " • ".join(level_parts)
+            f"Nyitva: {opened_at or '-'} • "  " • ".join(level_parts)
         )
         if intent in {"hard_exit", "manage_position"} and position_levels_line:
             lines.append(position_levels_line)
@@ -1224,7 +1229,7 @@ def post_batches(
                     pass
         return min(NETWORK_BACKOFF_CAP, NETWORK_BACKOFF_BASE * (2 ** (attempt - 1)))
        
-    batches = [embeds[i : i + batch_size] for i in range(0, len(embeds), batch_size)]
+    batches = [embeds[i : i  batch_size] for i in range(0, len(embeds), batch_size)]
     batch_results: List[Dict[str, Any]] = []
 
     for idx, batch in enumerate(batches):
@@ -1238,7 +1243,7 @@ def post_batches(
             "embed_count": len(batch),
         }
         last_error: Optional[Exception] = None
-        for attempt in range(1, NETWORK_RETRIES + 1):
+        for attempt in range(1, NETWORK_RETRIES  1):
             try:
                 r = requests.post(hook, json={"content": content, "embeds": batch}, timeout=20)
                 result["http_status"] = r.status_code
@@ -1257,7 +1262,7 @@ def post_batches(
                     extra={"status": result["http_status"], "attempt": attempt, "delay": delay},
                 )
                 if result["http_status"] == 429:
-                    _WEBHOOK_COOLDOWN_UNTIL[hook] = time.time() + NETWORK_COOLDOWN_MIN * 60
+                    _WEBHOOK_COOLDOWN_UNTIL[hook] = time.time()  NETWORK_COOLDOWN_MIN * 60
                 if attempt == NETWORK_RETRIES:
                     break
                 _sleep_with_cap(delay)
@@ -1293,7 +1298,7 @@ def post_batches(
 
 
 def _chunk_pairs(items: List[Tuple[Any, Any]], size: int) -> List[List[Tuple[Any, Any]]]:
-    return [items[i : i + size] for i in range(0, len(items), size)]
+    return [items[i : i  size] for i in range(0, len(items), size)]
 
 
 def _map_batch_results_to_assets(
@@ -1348,11 +1353,11 @@ def build_entry_gate_summary_embed() -> Optional[Dict[str, Any]]:
                     continue
                 reasons = item.get("missing") or item.get("precision_hiany") or []
                 if reasons:
-                    reject_count += 1
+                    reject_count = 1
                 for reason in reasons:
                     txt = str(reason)
-                    reason_counts[txt] = reason_counts.get(txt, 0) + 1
-                    asset_reason_counts[txt] = asset_reason_counts.get(txt, 0) + 1
+                    reason_counts[txt] = reason_counts.get(txt, 0)  1
+                    asset_reason_counts[txt] = asset_reason_counts.get(txt, 0)  1
 
             if reject_count:
                 top_reasons = sorted(asset_reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:2]
@@ -1590,7 +1595,7 @@ def bud_hh_key(dt=None) -> str:
 
 def bud_time_str(dt=None) -> str:
     dt = dt or bud_now()
-    return dt.strftime("%Y-%m-%d %H:%M ") + (dt.tzname() or "CET")
+    return dt.strftime("%Y-%m-%d %H:%M ")  (dt.tzname() or "CET")
 
 def draw_progress_bar(value, min_val=0, max_val=100, length=10):
     """
@@ -1603,7 +1608,7 @@ def draw_progress_bar(value, min_val=0, max_val=100, length=10):
         pct = max(0.0, min(1.0, pct))
         filled = int(round(length * pct))
         # ■ karakter a teli, □ az üres részre
-        bar = "■" * filled + "□" * (length - filled)
+        bar = "■" * filled  "□" * (length - filled)
         return bar
     except:
         return "□" * length
@@ -1616,7 +1621,7 @@ def utcnow_epoch():
 
 def iso_to_epoch(s: str) -> int:
     try:
-        return int(datetime.fromisoformat(s.replace("Z","+00:00")).timestamp())
+        return int(datetime.fromisoformat(s.replace("Z","00:00")).timestamp())
     except Exception:
         return 0
 
@@ -1630,7 +1635,7 @@ def parse_utc(value):
             return None
     if isinstance(value, str):
         try:
-            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(value.replace("Z", "00:00"))
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt
@@ -1647,7 +1652,7 @@ def to_utc_iso(dt):
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("00:00", "Z")
 
 
 def update_asset_send_state(
@@ -1679,7 +1684,7 @@ def update_asset_send_state(
     st["last_sent_known"] = True
 
     if cooldown_minutes and cooldown_minutes > 0:
-        st["cooldown_until"] = to_utc_iso(now + timedelta(minutes=cooldown_minutes))
+        st["cooldown_until"] = to_utc_iso(now  timedelta(minutes=cooldown_minutes))
     else:
         st["cooldown_until"] = None
 
@@ -1835,10 +1840,10 @@ def next_eia_release(now: Optional[datetime] = None) -> Optional[datetime]:
         days_ahead = (9 - weekday) % 7  # next Wednesday
         if days_ahead == 0:
             days_ahead = 7
-        release_date = (ny_now + timedelta(days=days_ahead)).date()
+        release_date = (ny_now  timedelta(days=days_ahead)).date()
     else:
         days_ahead = (2 - weekday)
-        release_date = (ny_now + timedelta(days=days_ahead)).date()
+        release_date = (ny_now  timedelta(days=days_ahead)).date()
 
     event_ny = datetime.combine(
         release_date,
@@ -1852,7 +1857,7 @@ def format_timedelta(delta: timedelta) -> str:
     total_seconds = int(delta.total_seconds())
     sign = "in"
     if total_seconds < 0:
-        sign = "+"
+        sign = ""
         total_seconds = abs(total_seconds)
     hours, remainder = divmod(total_seconds, 3600)
     minutes, _ = divmod(remainder, 60)
@@ -1862,7 +1867,7 @@ def format_timedelta(delta: timedelta) -> str:
         base = f"{minutes}m"
     if sign == "in":
         return f"in {base}"
-    return f"+{base}"
+    return f"{base}"
 
 
 def eia_countdown(now: Optional[datetime] = None) -> Tuple[Optional[str], Optional[float]]:
@@ -2149,25 +2154,77 @@ def _apply_and_persist_manual_transitions(
                     entries_after_save=commit_result.get("entries_after_save"),
                     positions_file=positions_path,
                     written_bytes=None,
-                )            
-        sig["position_state"] = manual_state
+                )
+        if commit_result.get("committed") and not commit_result.get("positions_snapshot"):
+            commit_result["positions_snapshot"] = position_tracker.positions_file_snapshot(positions_path)
 
-    if positions_changed and entry_opened and commit_result.get("committed"):
-        position_tracker.log_audit_event(
-            "entry open committed",
-            event="OPEN_COMMIT",
-            asset=asset,
-            intent=intent,
-            decision=decision,
-            entry_side=decision,
-            setup_grade=setup_grade,
-            entry=entry_level,
-            sl=sl_level,
-            tp2=tp2_level,
-            positions_file=positions_path,
-            send_kind=send_kind,
-        )
-        open_commits_this_run.add(asset)
+      verification_positions: Dict[str, Any] = manual_positions if isinstance(manual_positions, dict) else {}
+
+    if intent == "entry" and positions_changed and entry_opened and commit_result.get("committed"):
+        try:
+            verification_positions = position_tracker.load_positions(positions_path, False)
+            persisted_entry = (verification_positions or {}).get(asset) or {}
+            entry_side = "buy" if decision in {"buy", "long"} else "sell"
+            side_label = str(persisted_entry.get("side") or "").lower()
+            normalized_side = None
+            if side_label in {"buy", "long"}:
+                normalized_side = "buy"
+            elif side_label in {"sell", "short"}:
+                normalized_side = "sell"
+
+            if not persisted_entry:
+                raise ValueError("entry_missing_after_save")
+            if entry_side and normalized_side and entry_side != normalized_side:
+                raise ValueError("side_mismatch")
+            if not persisted_entry.get("opened_at_utc"):
+                raise ValueError("missing_opened_at_utc")
+
+            manual_positions = verification_positions if isinstance(verification_positions, dict) else {}
+            manual_state = position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt)
+            commit_result["verified"] = True
+            commit_result["positions_after_verify"] = position_tracker.positions_file_snapshot(positions_path)
+            commit_result["entries_after_save"] = len(manual_positions) if isinstance(manual_positions, dict) else 0
+            sig["position_state"] = manual_state
+            position_tracker.log_audit_event(
+                "entry open committed",
+                event="OPEN_COMMIT",
+                asset=asset,
+                intent=intent,
+                decision=decision,
+                entry_side=decision,
+                setup_grade=setup_grade,
+                entry=entry_level,
+                sl=sl_level,
+                tp2=tp2_level,
+                positions_file=positions_path,
+                send_kind=send_kind,
+                verified=True,
+            )
+            open_commits_this_run.add(asset)
+        except Exception as exc:
+            commit_result["verified"] = False
+            commit_result["verify_error"] = repr(exc)
+            commit_result["positions_after_verify"] = position_tracker.positions_file_snapshot(positions_path)
+            position_tracker.log_audit_event(
+                "entry commit verification failed",
+                event="ENTRY_COMMIT_VERIFY_FAILED",
+                asset=asset,
+                intent=intent,
+                decision=decision,
+                entry_side=decision,
+                send_kind=send_kind,
+                positions_file=positions_path,
+                error=repr(exc),
+                positions_snapshot=commit_result.get("positions_snapshot"),
+                verification_snapshot=verification_positions if isinstance(verification_positions, dict) else None,
+            )
+            manual_positions = verification_positions if isinstance(verification_positions, dict) else {}
+            if isinstance(manual_positions, dict):
+                manual_positions.pop(asset, None)
+            manual_state = position_tracker.compute_state(asset, tracking_cfg, {}, now_dt)
+            sig["position_state"] = manual_state
+    elif positions_changed:
+        sig["position_state"] = manual_state
 
     if intent == "entry":
         if commit_result.get("committed") and not commit_result.get("positions_snapshot"):
@@ -2185,6 +2242,9 @@ def _apply_and_persist_manual_transitions(
             positions_file=commit_result.get("positions_file", positions_path),
             written_bytes=commit_result.get("written_bytes"),
             positions_snapshot=commit_result.get("positions_snapshot"),
+            verified=commit_result.get("verified"),
+            verify_error=commit_result.get("verify_error"),
+            positions_after_verify=commit_result.get("positions_after_verify"),
         )
         if commit_result.get("positions_snapshot"):
             position_tracker.log_audit_event(
@@ -2346,7 +2406,7 @@ def _sanitize_last_sent(
 
     if parsed is not None and parsed_reason is None:
         now = now or datetime.now(timezone.utc)
-        future_threshold = now + timedelta(minutes=LAST_SENT_FUTURE_GRACE_MIN)
+        future_threshold = now  timedelta(minutes=LAST_SENT_FUTURE_GRACE_MIN)
         stale_threshold = now - timedelta(days=LAST_SENT_RETENTION_DAYS)
 
         if parsed > future_threshold:
@@ -2569,7 +2629,7 @@ def missing_from_sig(sig: dict):
         "liquidity(fib|sweep|ema21|retest)": "Liquidity",
         "atr": "ATR",
         "tp_min_profit": "TP min. profit",
-        "tp1_net>=+1.0%": "TP1 nettó ≥ +1.0%",
+        "tp1_net>=1.0%": "TP1 nettó ≥ 1.0%",
         "min_stoploss": "Minimum stoploss",
         "RR≥1.5": "RR≥1.5",
         "rr_math>=2.0": "RR≥2.0",
@@ -2774,7 +2834,7 @@ def format_percentage(value: Optional[float]) -> str:
 def format_signed_percentage(value: Optional[float]) -> str:
     if value is None or not isinstance(value, (int, float)) or not np.isfinite(value):
         return "n/a"
-    return f"{value * 100:+.2f}%"
+    return f"{value * 100:.2f}%"
 
 
 def format_tminus(delta: timedelta) -> str:
@@ -2782,7 +2842,7 @@ def format_tminus(delta: timedelta) -> str:
     if total_seconds >= 0:
         prefix = "T−"
     else:
-        prefix = "T+"
+        prefix = "T"
         total_seconds = abs(total_seconds)
     hours, remainder = divmod(total_seconds, 3600)
     minutes = remainder // 60
@@ -2806,7 +2866,7 @@ def weekday_short_hu(dt: datetime) -> str:
 
 def format_hu_countdown(delta: timedelta) -> str:
     total_seconds = int(delta.total_seconds())
-    prefix = "T-" if total_seconds >= 0 else "T+"
+    prefix = "T-" if total_seconds >= 0 else "T"
     total_seconds = abs(total_seconds)
     hours, remainder = divmod(total_seconds, 3600)
     minutes = remainder // 60
@@ -2960,7 +3020,7 @@ class ActivePositionWatcher:
         except ValueError:
             return False
         base = self.now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
-        candidates = [base, base + timedelta(days=1), base - timedelta(days=1)]
+        candidates = [base, base  timedelta(days=1), base - timedelta(days=1)]
         for cand in candidates:
             diff = abs((self.now - cand).total_seconds()) / 60.0
             if diff <= window:
@@ -3106,7 +3166,7 @@ class ActivePositionWatcher:
             anchor_parts.append(f"@ {fmt_num(anchor_price_display, digits=2)}")
         if size is not None:
             anchor_parts.append(f"size {fmt_num(size, digits=2)}")
-        anchor_value = f"{anchor_side.upper()}" + (" " + " • ".join(anchor_parts) if anchor_parts else "")
+        anchor_value = f"{anchor_side.upper()}"  (" "  " • ".join(anchor_parts) if anchor_parts else "")
 
         if invalid_level is not None:
             invalid_text = f"{fmt_num(invalid_level, digits=2)} (1h close{exit_arrow} ⇒ EXIT)"
@@ -3141,7 +3201,7 @@ class ActivePositionWatcher:
             k_text = "n/a"
         atr_field_text = f"{atr_text_base} / {trail_text}"
         if k_text != "n/a":
-            atr_field_text += f" (K={k_text})"
+            atr_field_text = f" (K={k_text})"
 
         fields = [
             action_field,
@@ -3163,15 +3223,15 @@ class ActivePositionWatcher:
 
         desc_lines: List[str] = []
         if tp1_reached is True:
-            desc_lines.append("TP1 reached → BE + cost, ATR trailing active.")
+            desc_lines.append("TP1 reached → BE  cost, ATR trailing active.")
         elif tp1_reached is False:
             desc_lines.append("TP1 pending → manage core size cautiously.")
         if state == "EXIT" and invalid_level is not None and last_close_1h is not None:
             desc_lines.append(
-                f"Trigger: 1h close {fmt_num(last_close_1h, digits=2)} vs invalid {fmt_num(invalid_level, digits=2)} + 5m BOS flip."
+                f"Trigger: 1h close {fmt_num(last_close_1h, digits=2)} vs invalid {fmt_num(invalid_level, digits=2)}  5m BOS flip."
             )
         elif state in {"REDUCE", "EVENT"} and structure_opposite:
-            reason = "Regime + 5m BOS opposite" if state == "REDUCE" else "Event window active"
+            reason = "Regime  5m BOS opposite" if state == "REDUCE" else "Event window active"
             if event_mode and event_info:
                 reason = f"EIA window {event_info.get('countdown')}"
             desc_lines.append(f"Trigger: {reason}.")
@@ -3322,7 +3382,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
         if isinstance(regime_meta, dict) and regime_meta.get("points"):
             points = safe_float(regime_meta.get("points")) or 0.0
             label = (regime_meta.get("label") or "").upper()
-            sign = "−" if points < 0 else "+"
+            sign = "−" if points < 0 else ""
             dynamic_lines.append(f"Regime {label}: {sign}{abs(points):.1f}P")
             if points < 0:
                 setup_issues.append(f"regime {label}")
@@ -3330,7 +3390,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
             points = safe_float(vol_meta.get("points")) or 0.0
             z_val = safe_float(vol_meta.get("volatility_z"))
             z_txt = f" z={z_val:.2f}" if z_val is not None else ""
-            dynamic_lines.append(f"Volatilitás bónusz +{points:.1f}P{z_txt}")
+            dynamic_lines.append(f"Volatilitás bónusz {points:.1f}P{z_txt}")
            
     price, utc = spot_from_sig_or_file(asset, sig)
     spot_s = fmt_num(price)
@@ -3423,7 +3483,7 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
        
         
     if dynamic_lines:
-        lines.append("⚙️ Dinamikus: " + " | ".join(dynamic_lines))
+        lines.append("⚙️ Dinamikus: "  " | ".join(dynamic_lines))
 
     if no_entry_reason:
         lines.append(no_entry_reason)
@@ -3468,15 +3528,15 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     if miss and not (no_entry_reason and "hiányzik" in no_entry_reason.lower()) and not missing_note:
         lines.append(f"Hiányzó: *{miss}*")
 
-    # cím + szín
+    # cím  szín
     title = f"{emoji} **{asset}**"
     if kind == "invalidate":
-        title += " • ❌ Invalidate"
+        title = " • ❌ Invalidate"
     elif kind == "flip":
         arrow = "→"
-        title += f" • 🔁 Flip ({(prev_decision or '').upper()} {arrow} {dec})"
+        title = f" • 🔁 Flip ({(prev_decision or '').upper()} {arrow} {dec})"
     elif kind == "heartbeat":
-        title += " • ℹ️ Állapot"
+        title = " • ℹ️ Állapot"
 
     color = card_color(dec, is_stable, kind, setup_grade)
 
@@ -3528,7 +3588,7 @@ def main():
     heartbeat_flag = flag_any(flags, "force-heartbeat", "heartbeat", "hb", "summary", "all")
     skip_cooldown_flag = flag_any(flags, "skip-cooldown", "no-cooldown", "nocooldown", "skipcooldown")
 
-    # Ezek a jelzők (manual/force + DISCORD_FORCE_NOTIFY) jelentik a valódi kézi kényszerítést.
+    # Ezek a jelzők (manual/force  DISCORD_FORCE_NOTIFY) jelentik a valódi kézi kényszerítést.
     manual_context = manual_flag or force_flag or force_env
 
     # Ha TTY-ból futtatjuk kézzel és nincs külön flag, tekintsük manuális kényszerítésnek.
@@ -3559,12 +3619,13 @@ def main():
     meta  = state.get("_meta", {})
     signal_stability_cfg = _signal_stability_config()
     tracking_cfg = (signal_stability_cfg.get("manual_position_tracking") or {})
+    state_loaded_env = str(os.getenv("STATE_LOADED", "0")).strip() == "1"
     manual_writer = str(tracking_cfg.get("writer") or "notify").lower()
     can_write_positions = manual_writer == "notify"
     manual_tracking_enabled = bool(tracking_cfg.get("enabled"))
-    positions_path = tracking_cfg.get("positions_file") or "public/_manual_positions.json"
+    positions_path = tracking_cfg.get("positions_file") or str(POSITIONS_FILE)
     treat_missing_positions = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
-    positions_state_loaded = True
+    positions_state_loaded = state_loaded_env
     try:
         manual_positions = position_tracker.load_positions(positions_path, treat_missing_positions)
     except Exception as exc:  # pragma: no cover - defensive
@@ -3683,7 +3744,7 @@ def main():
         })
 
         if eff == st.get("last"):
-            st["count"] = int(st.get("count", 0)) + 1
+            st["count"] = int(st.get("count", 0))  1
         else:
             st["last"]  = eff
             st["count"] = 1
@@ -3705,7 +3766,17 @@ def main():
                 notify_meta["reason"] = "no_open_position_tracked"
                 sig["notify"] = notify_meta
         if manual_tracking_enabled and intent == "entry":
-            if manual_state.get("cooldown_active"):
+            if not positions_state_loaded:
+                notify_meta = dict(notify_meta or {})
+                notify_meta.setdefault("should_notify", False)
+                notify_meta.setdefault("reason", "state_not_loaded")
+                sig["notify"] = notify_meta
+            elif not can_write_positions:
+                notify_meta = dict(notify_meta or {})
+                notify_meta.setdefault("should_notify", False)
+                notify_meta.setdefault("reason", "writer_read_only")
+                sig["notify"] = notify_meta
+            elif manual_state.get("cooldown_active"):
                 notify_meta = dict(notify_meta or {})
                 notify_meta.setdefault("should_notify", False)
                 notify_meta.setdefault("reason", "cooldown_active")
@@ -3913,7 +3984,7 @@ def main():
             if isinstance(sig, dict):
                 sig["position_state"] = manual_state
            
-        # --- embed + állapot frissítés ---
+        # --- embed  állapot frissítés ---
         if send_kind and (intent != "entry" or attempt_entry_dispatch):
             channel = classify_signal_channel(eff, send_kind, display_stable)
             if intent in {"hard_exit", "manage_position"}:
@@ -4003,7 +4074,7 @@ def main():
         if manual_tracking_enabled and manual_state.get("has_position"):
             manual_open_assets.add(asset)
 
-    audit_path = position_tracker.resolve_repo_path("public/_manual_positions_audit.jsonl")
+    audit_path = position_tracker.resolve_repo_path(str(AUDIT_FILE))
     prior_open_commits = _load_prior_open_commits(audit_path)
     for asset, mstate in manual_states.items():
         if (
