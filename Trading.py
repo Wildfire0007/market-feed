@@ -1202,6 +1202,20 @@ def _write_public_refresh_marker(
     )
 
 
+def _refresh_entry_gate_stats_recent(
+    out_dir: str, *, source_path: Optional[Path] = None
+) -> None:
+    """Keep the recent entry gate stats report in sync after a run."""
+
+    source = source_path or Path("reports") / "entry_gate_stats_recent.json"
+    if not source.exists():
+        raise FileNotFoundError(f"entry_gate_stats_recent.json not found at {source}")
+
+    target = Path(out_dir) / "reports" / "entry_gate_stats_recent.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+
+
 def _series_row_timestamp(row: Dict[str, Any]) -> Optional[float]:
     if not isinstance(row, dict):
         return None
@@ -4081,6 +4095,11 @@ def main():
         logger.warning("Failed to update system heartbeat: %s", exc)
 
     try:
+        _refresh_entry_gate_stats_recent(OUT_DIR)
+    except Exception as exc:
+        logger.warning("Failed to refresh entry_gate_stats_recent: %s", exc)
+
+    try:
         _write_public_refresh_marker(
             OUT_DIR,
             started_at=started_at_dt,
@@ -4092,6 +4111,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
