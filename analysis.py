@@ -12127,25 +12127,25 @@ def analyze(asset: str) -> Dict[str, Any]:
 
         atr5_min_mult = ATR5_MIN_MULT_ASSET.get(asset, ATR5_MIN_MULT)
 
-    min_profit_abs = max(
-        tp_min_abs_default,
-        tp_min_pct * entry,
-        (cost_mult * cost_round_pct + overnight_pct) * entry,
-        atr5_min_mult * atr5_val,
-    )
+        min_profit_abs = max(
+            tp_min_abs_default,
+            tp_min_pct * entry,
+            (cost_mult * cost_round_pct + overnight_pct) * entry,
+            atr5_min_mult * atr5_val,
+        )
 
-    if (not ok_math) or (rr is None) or (rr < rr_required) or (tp1_dist < min_profit_abs) or (net_pct < tp_net_threshold):
-        if rr is None or rr < rr_required:
-            missing.append(f"rr_math>={rr_required:.1f}")
-        if tp1_dist < min_profit_abs:
-            missing.append("tp_min_profit")
-        if net_pct < tp_net_threshold:
-            missing.append(tp_net_label)
-        if not min_stoploss_ok_local:
-            missing.append("min_stoploss")
-            return False
-        last_computed_risk = risk
-        return True
+        if (not ok_math) or (rr is None) or (rr < rr_required) or (tp1_dist < min_profit_abs) or (net_pct < tp_net_threshold):
+            if rr is None or rr < rr_required:
+                missing.append(f"rr_math>={rr_required:.1f}")
+            if tp1_dist < min_profit_abs:
+                missing.append("tp_min_profit")
+            if net_pct < tp_net_threshold:
+                missing.append(tp_net_label)
+            if not min_stoploss_ok_local:
+                missing.append("min_stoploss")
+                return False
+            last_computed_risk = risk
+            return True
 
     reversal_mode_used = False
     if asset == "EURUSD" and eurusd_range_signal in {"buy", "sell"}:
@@ -14369,6 +14369,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
