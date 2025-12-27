@@ -5634,8 +5634,13 @@ def apply_signal_stability_layer(
     stability_enabled = bool(config.get("enabled", False))
     now_dt = parse_utc_timestamp(analysis_timestamp) or datetime.now(timezone.utc)
     tracking_cfg = config.get("manual_position_tracking") or {}
-    manual_writer = str(tracking_cfg.get("writer") or "notify").lower()
-    analysis_can_write = manual_writer == "analysis"
+    manual_writer = str(tracking_cfg.get("writer") or "dual").lower()
+    redundant_guard = bool(tracking_cfg.get("redundant_write_guard", False))
+    pending_exit_path = (
+        tracking_cfg.get("pending_exit_file")
+        or "public/_manual_positions_pending_exit.json"
+    )
+    analysis_can_write = manual_writer in {"analysis", "dual"} or redundant_guard
     positions_path = tracking_cfg.get("positions_file") or "public/_manual_positions.json"
     treat_missing = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
     if manual_positions is None:
@@ -5809,6 +5814,19 @@ def apply_signal_stability_layer(
             if isinstance(manual_positions, dict)
             else None,
         )
+    elif (
+        manual_state.get("tracking_enabled")
+        and intent == "hard_exit"
+        and manual_state.get("has_position")
+    ):
+        position_tracker.record_pending_exit(
+            pending_exit_path,
+            asset,
+            reason="hard_exit",
+            closed_at_utc=to_utc_iso(now_dt),
+            cooldown_minutes=cooldown_minutes,
+            source="analysis",
+        )
 
     open_conditions_met = (
         manual_state.get("tracking_enabled")
@@ -5874,7 +5892,7 @@ def apply_signal_stability_layer(
         elif setup_grade not in {"A", "B"}:
             suppression_reason = "setup_grade_filtered"
         elif open_conditions_met and not analysis_can_write:
-            suppression_reason = "writer_is_notify"
+            suppression_reason = "writer_read_only"
         position_tracker.log_audit_event(
             "entry suppressed",
             event="ENTRY_SUPPRESSED",
@@ -5898,6 +5916,7 @@ def apply_signal_stability_layer(
 
     if positions_changed:
         position_tracker.save_positions_atomic(positions_path, manual_positions)
+        position_tracker.clear_pending_exits(pending_exit_path, [asset])
         _load_manual_positions_from_file.cache_clear()
         manual_state = position_tracker.compute_state(
             asset, tracking_cfg, manual_positions, now_dt
@@ -14414,6 +14433,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
