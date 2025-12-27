@@ -2645,7 +2645,7 @@ def _collect_http_frames(
                 quote = td_quote(symbol, exchange)
             except TDError as exc:
                 if exc.status_code in {400, 404}:
-                    consecutive_client_errors = 1
+                    consecutive_client_errors += 1
                     if force and consecutive_client_errors >= 2 and not frames:
                         abort_reason = f"client_error_{exc.status_code or 'unknown'}"
                         LOGGER.info(
@@ -4092,6 +4092,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
