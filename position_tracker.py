@@ -23,6 +23,10 @@ from logging_utils import ensure_json_file_handler, ensure_json_stream_handler
 LOGGER = logging.getLogger("manual_positions")
 ensure_json_stream_handler(LOGGER, static_fields={"component": "manual_positions"})
 
+
+class PositionFileError(RuntimeError):
+    """Raised when the manual position file is missing or invalid."""
+
 _AUDIT_CONTEXT: Dict[str, Any] = {
     "source": None,
     "run_id": None,
@@ -145,8 +149,48 @@ def _maybe_attach_file_handler() -> None:
 def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
     resolved = resolve_repo_path(path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    
-    if not resolved.exists():
+
+    backup_path = resolved.with_suffix(resolved.suffix + ".bak")
+
+    def _restore_from_backup() -> Optional[Dict[str, Any]]:
+        if not backup_path.exists():
+            return None
+        try:
+            data = json.loads(backup_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _audit_log(
+                    "restoring positions from backup",
+                    event="LOAD_POSITIONS_RESTORED",
+                    positions_file=str(resolved),
+                    backup_file=str(backup_path),
+                    entries=len(data),
+                )
+                resolved.write_text(backup_path.read_text(encoding="utf-8"), encoding="utf-8")
+                return data
+        except Exception as exc:  # pragma: no cover - defensive restore path
+            _audit_log(
+                "backup restore failed",
+                event="LOAD_POSITIONS_BACKUP_FAILED",
+                positions_file=str(resolved),
+                backup_file=str(backup_path),
+                exception=repr(exc),
+            )
+        return None
+
+     if not resolved.exists():
+        if not treat_missing_as_flat:
+            restored = _restore_from_backup()
+            if restored is not None:
+                return restored
+            _audit_log(
+                "positions missing and restore unavailable",
+                event="LOAD_POSITIONS_FAILED",
+                positions_file=str(resolved),
+                entries=0,
+                missing_file=True,
+                treat_missing_as_flat=False,
+            )
+            raise PositionFileError(f"Manual positions file missing: {resolved}")
         _audit_log(
             "positions missing; returning empty state",
             event="LOAD_POSITIONS",
@@ -159,7 +203,21 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
 
     try:
         data = json.loads(resolved.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as exc:
+        if not treat_missing_as_flat:
+            restored = _restore_from_backup()
+            if restored is not None:
+                return restored
+            _audit_log(
+                "positions file invalid",
+                event="LOAD_POSITIONS_FAILED",
+                positions_file=str(resolved),
+                entries=0,
+                invalid_file=True,
+                treat_missing_as_flat=False,
+                exception=repr(exc),
+            )
+            raise PositionFileError(f"Manual positions file unreadable: {resolved}") from exc
         data = {}
 
     positions = data if isinstance(data, dict) else {}
@@ -177,6 +235,25 @@ def save_positions_atomic(path: str, data: Dict[str, Any]) -> Dict[str, Any]:
     resolved.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
     tmp_path = resolved.with_suffix(resolved.suffix + ".tmp")
+    backup_path = resolved.with_suffix(resolved.suffix + ".bak")
+
+    if resolved.exists():
+        try:
+            backup_path.write_bytes(resolved.read_bytes())
+            _audit_log(
+                "positions backup created",
+                event="SAVE_BACKUP_CREATED",
+                positions_file=str(resolved),
+                backup_file=str(backup_path),
+            )
+        except Exception as exc:  # pragma: no cover - defensive backup path
+            _audit_log(
+                "positions backup failed",
+                event="SAVE_BACKUP_FAILED",
+                positions_file=str(resolved),
+                backup_file=str(backup_path),
+                exception=repr(exc),
+            )
     tmp_path.write_text(payload + "\n", encoding="utf-8")
     _audit_log(
         "persisting positions to disk",
@@ -361,6 +438,71 @@ def close_position(
         updated_position=deepcopy(entry),
     )
     return updated
+
+
+def load_pending_exits(path: str) -> Dict[str, Dict[str, Any]]:
+    """Load pending exit requests for deferred application."""
+
+    resolved = resolve_repo_path(path)
+    try:
+        payload = json.loads(resolved.read_text(encoding="utf-8")) if resolved.exists() else {}
+    except Exception:
+        payload = {}
+
+    return payload if isinstance(payload, dict) else {}
+
+
+def record_pending_exit(
+    path: str,
+    asset: str,
+    *,
+    reason: str,
+    closed_at_utc: str,
+    cooldown_minutes: int,
+    source: Optional[str] = None,
+) -> None:
+    """Persist a pending exit so the next writer can deterministically apply it."""
+
+    resolved = resolve_repo_path(path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    pending = load_pending_exits(path)
+    pending[asset] = {
+        "reason": reason,
+        "closed_at_utc": closed_at_utc,
+        "cooldown_minutes": int(max(0, cooldown_minutes)),
+        "source": source or _AUDIT_CONTEXT.get("source"),
+        "run_id": _AUDIT_CONTEXT.get("run_id"),
+    }
+
+    resolved.write_text(json.dumps(pending, ensure_ascii=False, indent=2), encoding="utf-8")
+    _audit_log(
+        "pending exit recorded",
+        event="PENDING_EXIT_RECORDED",
+        asset=asset,
+        reason=reason,
+        cooldown_minutes=int(max(0, cooldown_minutes)),
+        closed_at_utc=closed_at_utc,
+        pending_file=str(resolved),
+    )
+
+
+def clear_pending_exits(path: str, applied: Optional[Dict[str, Any]] = None) -> None:
+    resolved = resolve_repo_path(path)
+    if not resolved.exists():
+        return
+
+    if applied:
+        pending = load_pending_exits(path)
+        for asset in applied:
+            pending.pop(asset, None)
+        if pending:
+            resolved.write_text(json.dumps(pending, ensure_ascii=False, indent=2), encoding="utf-8")
+            return
+
+    try:
+        resolved.unlink()
+    except FileNotFoundError:
+        return
 
 
 def _levels_hit(side: Optional[str], spot_price: Optional[float], sl: Any, tp2: Any) -> Tuple[bool, Optional[str]]:
