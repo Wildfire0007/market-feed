@@ -893,7 +893,7 @@ def _parse_utc_timestamp(value: str) -> Optional[datetime]:
     try:
         ts = value.strip()
         if ts.endswith("Z"):
-            ts = ts[:-1]  "00:00"
+            ts = ts[:-1] + "+00:00"
         dt = datetime.fromisoformat(ts)
     except Exception:
         try:
@@ -14368,6 +14368,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
