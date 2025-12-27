@@ -1715,7 +1715,7 @@ def parse_utc(value):
             return None
     if isinstance(value, str):
         try:
-            dt = datetime.fromisoformat(value.replace("Z", "00:00"))
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt
@@ -1732,7 +1732,12 @@ def to_utc_iso(dt):
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("00:00", "Z")
+    return (
+        dt.astimezone(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def update_asset_send_state(
