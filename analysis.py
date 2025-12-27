@@ -36,6 +36,10 @@ LOGGER = logging.getLogger(__name__)
 MISSING_OPTIONAL_DEPENDENCIES: Set[str] = set()
 OPTIONAL_DEPENDENCY_ISSUES: List[str] = []
 
+# Track stale trading artefacts so the summary can surface degraded pipeline
+# state instead of aborting the entire analysis run.
+TRADING_ARTIFACT_LAG: Optional[Dict[str, Any]] = None
+
 
 POSITION_SIZE_SCALE_FLOOR_BY_ASSET = {
     "EURUSD": 0.05,
@@ -13895,6 +13899,7 @@ def _ensure_trading_preconditions(analysis_started_at: datetime) -> Optional[dat
     """Abort the run if the trading artefact is missing or stale."""
 
     trading_status_path = Path(PUBLIC_DIR) / "pipeline" / "trading_status.json"
+    global TRADING_ARTIFACT_LAG
     trading_ts: Optional[datetime] = None
     if not trading_status_path.exists():
         public_root = Path(PUBLIC_DIR).resolve()
@@ -13935,10 +13940,22 @@ def _ensure_trading_preconditions(analysis_started_at: datetime) -> Optional[dat
         lag_budget = None
 
     if lag_budget is not None and age_seconds > lag_budget:
-        raise SystemExit(
-            "Trading artefakt túl régi (%ds) – futtasd le újra a Trading.py lépést." % int(age_seconds)
+        TRADING_ARTIFACT_LAG = {
+            "age_seconds": age_seconds,
+            "threshold_seconds": lag_budget,
+            "trading_timestamp": trading_ts.isoformat(),
+        }
+        LOGGER.warning(
+            "Trading artefakt túl régi (%.1fs) — elemzés degradált módban folytatódik",
+            age_seconds,
+            extra={
+                "age_seconds": int(age_seconds),
+                "lag_threshold_seconds": lag_budget,
+                "trading_timestamp": trading_ts.isoformat(),
+            },
         )
-
+    else:
+        TRADING_ARTIFACT_LAG = None
     LOGGER.info("Trading artefakt időbélyeg: %s (késés %.1fs)", trading_ts.isoformat(), age_seconds)
     return trading_ts
 
@@ -14087,6 +14104,29 @@ def main():
         note_text = "Hétvégi snapshot — piaczárás miatt jelzések csak tájékoztató jellegűek"
         if note_text not in weekend_notes:
             weekend_notes.append(note_text)
+    if TRADING_ARTIFACT_LAG:
+        age_seconds = int(round(TRADING_ARTIFACT_LAG.get("age_seconds", 0)))
+        threshold = TRADING_ARTIFACT_LAG.get("threshold_seconds")
+        threshold_text = (
+            f"{int(threshold)}s" if isinstance(threshold, (int, float)) else "n/a"
+        )
+        flag_msg = (
+            "analysis: trading artefakt késés "
+            f"{age_seconds}s (küszöb {threshold_text}) — frissítsd a Trading futást"
+        )
+        if flag_msg not in summary["latency_flags"]:
+            summary["latency_flags"].append(flag_msg)
+        remediation = (
+            "Trading artefakt késésben van az elemzéshez képest — futtasd újra a Trading.py "
+            "lépést vagy frissítsd a market forrásokat, hogy az elemzés a legfrissebb adatokkal fusson."
+        )
+        if remediation not in summary["troubleshooting"]:
+            summary["troubleshooting"].append(remediation)
+        run_context["trading_artifact_age_seconds"] = age_seconds
+        degraded_components = summary.setdefault("degraded_components", [])
+        if "trading_artifact" not in degraded_components:
+            degraded_components.append("trading_artifact")
+        summary["degraded_mode"] = True
     revision_info = detect_analysis_revision()
     if revision_info:
         summary["analysis_revision"] = revision_info
@@ -14369,6 +14409,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
