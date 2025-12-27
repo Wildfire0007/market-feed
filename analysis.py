@@ -6725,7 +6725,7 @@ def _recent_liquidity_levels(
     df: pd.DataFrame,
     direction: str,
     lookback: int = 30,
-    ) -> List[f oat]:
+    ) -> List[float]:
     if df.empty:
         return []
     window = df.tail(max(lookback + 5, 10))
@@ -14369,6 +14369,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
