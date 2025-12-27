@@ -180,7 +180,7 @@ def test_batch_failure_only_blocks_embeds_in_failed_batch(monkeypatch, tmp_path)
     asset_pairs = [("BTCUSD", {"title": "btc"}), ("EURUSD", {"title": "eur"})]
 
     def fake_post_batches(hook, content, embeds, batch_size=10):
-        batches = [embeds[i : i  batch_size] for i in range(0, len(embeds), batch_size)]
+        batches = [embeds[i : i + batch_size] for i in range(0, len(embeds), batch_size)]
         batch_results = []
         for idx, batch in enumerate(batches):
             success = idx == 0
