@@ -500,6 +500,11 @@ def _classify_warning(message: str) -> str:
     """Classify a warning message into client_error/throttling/other buckets."""
 
     lowered = message.lower()
+    # Twelve Data symbol catalog lookups often return 404 on weekends/market close;
+    # treat these as informational noise rather than actionable client errors so they
+    # don't inflate the warning ratio.
+    if "twelve data" in lowered and "symbol catalog" in lowered and "404" in lowered:
+        return "other"
     if any(keyword in lowered for keyword in ("429", "rate limit", "ratelimit", "throttle")):
         return "throttling"
     if any(keyword in lowered for keyword in ("client error", "http 4", "status 4")):
