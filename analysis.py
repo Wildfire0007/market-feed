@@ -1204,7 +1204,12 @@ def nowiso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def to_utc_iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("00:00", "Z")
+    return (
+        dt.astimezone(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 def parse_utc_timestamp(value: Any) -> Optional[datetime]:
     if not value:
@@ -7180,9 +7185,7 @@ def compute_precision_entry(
                 candidate = candidate.tz_localize(timezone.utc)
             else:
                 candidate = candidate.tz_convert(timezone.utc)
-            ready_ts = (
-                candidate.floor("s").isoformat().replace("00:00", "Z")
-            )
+            ready_ts = candidate.floor("s").isoformat().replace("+00:00", "Z")
     except Exception:
         ready_ts = None
     plan["ready_ts"] = ready_ts
@@ -14409,6 +14412,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
