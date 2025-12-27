@@ -13349,7 +13349,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "momentum_diagnostics": momentum_diagnostics,
         "diagnostics": diagnostics_payload(tf_meta, source_files, latency_flags),
         "reasons": (
-            reasons  ([f"missing: {', '.join(missing)}"] if missing else [])
+            reasons + ([f"missing: {', '.join(missing)}"] if missing else [])
         ) or ["no signal"],
         "realtime_transport": realtime_transport,
     }
@@ -14409,6 +14409,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
