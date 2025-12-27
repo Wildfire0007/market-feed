@@ -177,7 +177,7 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
             )
         return None
 
-     if not resolved.exists():
+    if not resolved.exists():
         if not treat_missing_as_flat:
             restored = _restore_from_backup()
             if restored is not None:
