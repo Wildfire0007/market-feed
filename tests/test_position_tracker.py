@@ -1,4 +1,8 @@
 import datetime
+import json
+from pathlib import Path
+
+import pytest
 
 import position_tracker
 
@@ -18,6 +22,25 @@ def test_open_position_sets_has_position_true():
     assert state["has_position"] is True
     assert state["is_flat"] is False
     assert state["side"] == "buy"
+
+
+def test_load_positions_missing_raises_when_backup_unavailable(tmp_path: Path) -> None:
+    positions_path = tmp_path / "missing.json"
+
+    with pytest.raises(position_tracker.PositionFileError):
+        position_tracker.load_positions(str(positions_path), treat_missing_as_flat=False)
+
+
+def test_load_positions_restores_backup(tmp_path: Path) -> None:
+    positions_path = tmp_path / "positions.json"
+    backup_path = positions_path.with_suffix(positions_path.suffix + ".bak")
+    backup_payload = {"BTCUSD": {"side": "long"}}
+    backup_path.write_text(json.dumps(backup_payload), encoding="utf-8")
+
+    restored = position_tracker.load_positions(str(positions_path), treat_missing_as_flat=False)
+
+    assert restored == backup_payload
+    assert positions_path.exists()
 
 
 def test_close_position_sets_cooldown_state():
@@ -182,3 +205,22 @@ def test_check_close_by_levels_hits_sl_and_tp2():
     assert changed is True
     assert reason == "tp2_hit"
     assert updated["EURUSD"]["close_reason"] == "tp2_hit"
+
+
+def test_pending_exit_record_and_clear(tmp_path: Path) -> None:
+    pending_path = tmp_path / "pending.json"
+
+    position_tracker.record_pending_exit(
+        str(pending_path),
+        "BTCUSD",
+        reason="hard_exit",
+        closed_at_utc="2025-01-01T00:00:00Z",
+        cooldown_minutes=15,
+        source="test",
+    )
+
+    pending = position_tracker.load_pending_exits(str(pending_path))
+    assert pending["BTCUSD"]["cooldown_minutes"] == 15
+
+    position_tracker.clear_pending_exits(str(pending_path), ["BTCUSD"])
+    assert not pending_path.exists()
