@@ -58,7 +58,7 @@ def _parse_utc_timestamp(raw: Any) -> Optional[datetime]:
     if raw is None:
         return None
     try:
-        return datetime.fromisoformat(str(raw).replace("Z", "00:00")).astimezone(
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(
             timezone.utc
         )
     except Exception:
@@ -70,7 +70,7 @@ def _to_utc_iso(dt: datetime) -> str:
         dt = dt.replace(tzinfo=timezone.utc)
     else:
         dt = dt.astimezone(timezone.utc)
-    return dt.replace(microsecond=0).isoformat().replace("00:00", "Z")
+    return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def set_audit_context(source: str, run_id: str, tz_name: str = "Europe/Budapest") -> None:
