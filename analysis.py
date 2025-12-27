@@ -3055,6 +3055,7 @@ def build_action_plan(
         entry_thresholds["precision_timeout"] = {"minutes": timeout_minutes}
     precision_gate_snapshot = entry_thresholds_meta.get("precision_gate_state")
     if isinstance(precision_gate_snapshot, dict):
+        precision_gate_snapshot.setdefault("position_sizing_floor", 0.01)
         precision_gate_snapshot["precision_state"] = precision_state
         precision_gate_snapshot["precision_soft_block"] = precision_state == "precision_soft_block"
         precision_gate_snapshot["precision_profile"] = precision_profile_for_state
@@ -12679,6 +12680,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             "trigger_state": precision_trigger_state,
             "flow_blockers": blockers_snapshot,
             "profile": precision_profile_for_state,
+            "position_sizing_floor": 0.01,
         }
         entry_thresholds_meta["precision_gate_state"] = precision_gate_snapshot
 
@@ -14412,6 +14414,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
