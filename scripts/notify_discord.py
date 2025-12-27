@@ -3705,8 +3705,10 @@ def main():
     signal_stability_cfg = _signal_stability_config()
     tracking_cfg = (signal_stability_cfg.get("manual_position_tracking") or {})
     state_loaded_env = str(os.getenv("STATE_LOADED", "0")).strip() == "1"
-    manual_writer = str(tracking_cfg.get("writer") or "notify").lower()
-    can_write_positions = manual_writer == "notify"
+    manual_writer = str(tracking_cfg.get("writer") or "dual").lower()
+    redundant_guard = bool(tracking_cfg.get("redundant_write_guard", False))
+    pending_exit_path = tracking_cfg.get("pending_exit_file") or "public/_manual_positions_pending_exit.json"
+    can_write_positions = manual_writer in {"notify", "dual"} or redundant_guard
     manual_tracking_enabled = bool(tracking_cfg.get("enabled"))
     positions_path = tracking_cfg.get("positions_file") or str(POSITIONS_FILE)
     treat_missing_positions = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
@@ -3715,19 +3717,20 @@ def main():
         manual_positions = position_tracker.load_positions(positions_path, treat_missing_positions)
     except Exception as exc:  # pragma: no cover - defensive
         positions_state_loaded = False
-        manual_positions = {}
         position_tracker.log_audit_event(
             "manual positions load failed",
             event="LOAD_POSITIONS_FAILED",
             positions_file=positions_path,
             exception=repr(exc),
         )
+        raise
     cooldown_map = tracking_cfg.get("post_exit_cooldown_minutes") or {}
     cooldown_default = 20
     open_commits_this_run: Set[str] = set()
     manual_states: Dict[str, Any] = {}
     entry_audit_records: Dict[str, EntryAuditRecord] = {}
     pending_entry_commits: Dict[str, Dict[str, Any]] = {}
+    pending_exits = position_tracker.load_pending_exits(pending_exit_path)
    
     analysis_summary = load(f"{PUBLIC_DIR}/analysis_summary.json") or {}
     run_id = run_meta.get("run_id") or os.getenv("GITHUB_RUN_ID")
@@ -3744,6 +3747,31 @@ def main():
         last_analysis_utc=meta.get("last_analysis_utc"),
         assets=len(ASSETS),
     )
+
+    if pending_exits and manual_tracking_enabled and can_write_positions:
+        applied = []
+        for asset, exit_meta in pending_exits.items():
+            cooldown_val = exit_meta.get("cooldown_minutes") or cooldown_default
+            manual_positions = position_tracker.close_position(
+                asset,
+                reason=str(exit_meta.get("reason") or "hard_exit"),
+                closed_at_utc=str(exit_meta.get("closed_at_utc") or now_iso),
+                cooldown_minutes=int(cooldown_val),
+                positions=manual_positions,
+            )
+            applied.append(asset)
+            position_tracker.log_audit_event(
+                "pending exit applied",
+                event="PENDING_EXIT_APPLIED",
+                asset=asset,
+                pending_file=pending_exit_path,
+                exit_meta=exit_meta,
+            )
+
+        if applied:
+            position_tracker.save_positions_atomic(positions_path, manual_positions)
+            position_tracker.clear_pending_exits(pending_exit_path, applied)
+
     last_heartbeat_prev = meta.get("last_heartbeat_key")
     last_heartbeat_iso = meta.get("last_heartbeat_utc")
     asset_embeds = {}
