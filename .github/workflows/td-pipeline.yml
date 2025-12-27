@@ -170,6 +170,13 @@ jobs:
         run: |
           .venv/bin/python scripts/check_latency_sources.py --output public/monitoring/data_latency.json --pretty
 
+      - name: Upload pipeline log artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-log
+          path: public/monitoring/pipeline.log
+          if-no-files-found: error
+          
       - name: Commit and push refreshed public outputs
         if: github.ref == 'refs/heads/main'
         run: |
@@ -219,6 +226,8 @@ jobs:
       DISCORD_COOLDOWN_MIN: ${{ secrets.DISCORD_COOLDOWN_MIN }}
       DISCORD_COOLDOWN_MOMENTUM_MIN: ${{ secrets.DISCORD_COOLDOWN_MOMENTUM_MIN }}
       PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
+      DISABLE_PIPELINE_MONITOR: ${{ vars.DISABLE_PIPELINE_MONITOR || '0' }}
+      WARNINGS_RATIO_TARGET: "0.2"
     steps:
       - name: Checkout latest signals
         uses: actions/checkout@v4
@@ -241,6 +250,12 @@ jobs:
         with:
           name: analysis-public
           path: public
+
+      - name: Download pipeline log
+        uses: actions/download-artifact@v4
+        with:
+          name: pipeline-log
+          path: public/monitoring
 
       - name: Bootstrap manual positions from published state
         env:
@@ -283,6 +298,44 @@ jobs:
         run: |
           echo "VIRTUAL_ENV=$PWD/.venv" >> $GITHUB_ENV
           echo "PATH=$PWD/.venv/bin:$PATH" >> $GITHUB_ENV
+
+      - name: Evaluate pipeline warnings ratio
+        if: env.DISABLE_PIPELINE_MONITOR != '1'
+        env:
+          PIPELINE_MONITOR_LOG: public/monitoring/pipeline.log
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from reports.pipeline_monitor import summarize_pipeline_warnings
+
+          log_path = Path(os.environ.get("PIPELINE_MONITOR_LOG", "public/monitoring/pipeline.log"))
+          if not log_path.exists():
+              raise SystemExit(f"Pipeline log missing at {log_path}")
+
+          threshold = float(os.environ.get("WARNINGS_RATIO_TARGET", "0.2"))
+          summary = summarize_pipeline_warnings(log_path)
+          warnings = summary.get("warning_lines") or 0
+          ratio = summary.get("client_error_ratio")
+
+          if ratio is None:
+              ratio = 0.0 if warnings == 0 else 1.0
+
+          print(json.dumps({
+              "log_path": str(log_path),
+              "warning_lines": warnings,
+              "client_error_lines": summary.get("client_error_lines", 0),
+              "client_error_ratio": ratio,
+          }, indent=2))
+
+          if ratio >= threshold:
+              raise SystemExit(
+                  f"Pipeline client error ratio {ratio} exceeds target {threshold}"
+              )
+          PY
 
       - name: Run Discord notifier
         env:
