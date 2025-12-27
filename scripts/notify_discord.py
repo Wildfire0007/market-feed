@@ -76,6 +76,7 @@ DEFAULT_ASSET_STATE: Dict[str, Any] = {
 }
 
 ENTRY_GATE_STATS_PATH = PUBLIC_DIR / "debug" / "entry_gate_stats.json"
+ENTRY_GATE_LOG_DIR = PUBLIC_DIR / "debug" / "entry_gates"
 PIPELINE_MONITOR_PATH = PUBLIC_DIR / "monitoring" / "pipeline_timing.json"
 
 # ---- Active position helper config ----
@@ -1332,13 +1333,89 @@ def _map_batch_results_to_assets(
 
     return dispatch_by_asset
        
-def build_entry_gate_summary_embed() -> Optional[Dict[str, Any]]:
+def _parse_gate_timestamp(value: Any) -> Optional[datetime]:
+    try:
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        if isinstance(value, str):
+            cleaned = value.replace("Z", "+00:00")
+            return datetime.fromisoformat(cleaned).astimezone(timezone.utc)
+    except Exception:
+        return None
+    return None
+
+
+def _extract_gate_reasons(entry: Dict[str, Any]) -> List[str]:
+    reasons: List[str] = []
+    seen: Set[str] = set()
+    for key in ("missing", "precision_hiany", "reasons"):
+        raw = entry.get(key)
+        if isinstance(raw, list):
+            for item in raw:
+                if not item:
+                    continue
+                txt = str(item)
+                if txt in seen:
+                    continue
+                seen.add(txt)
+                reasons.append(txt)
+    return reasons
+
+
+def _load_entry_gate_stats_payload(now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+    if ENTRY_GATE_STATS_PATH.exists():
+        try:
+            return json.loads(ENTRY_GATE_STATS_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            LOGGER.debug("entry_gate_summary_embed_failed", exc_info=True)
+            return None
+
+    # Fallback: építsük újra a toplistát a nyers gate logokból (24h nézet).
+    reference_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    cutoff = reference_now - timedelta(hours=24)
+    if not ENTRY_GATE_LOG_DIR.exists():
+        return None
+
+    entries_by_asset: Dict[str, List[Dict[str, Any]]] = {}
+    jsonl_files = sorted(
+        ENTRY_GATE_LOG_DIR.glob("entry_gates_*.jsonl"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for path in jsonl_files:
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = _parse_gate_timestamp(
+                    record.get("timestamp") or record.get("utc_ts") or record.get("bud_ts")
+                )
+                if ts is None or ts < cutoff:
+                    continue
+                asset = str(record.get("asset") or record.get("symbol") or "UNKNOWN").upper()
+                reasons = _extract_gate_reasons(record)
+                if not reasons:
+                    continue
+                precision_reasons = [r for r in reasons if "precision" in r.lower()]
+                entries_by_asset.setdefault(asset, []).append(
+                    {"missing": reasons, "precision_hiany": precision_reasons}
+                )
+        except OSError:
+            continue
+
+    return entries_by_asset or None
+
+
+def build_entry_gate_summary_embed(*, now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
     """Return a compact embed with top entry gate elutasítási okok."""
 
     try:
-        if not ENTRY_GATE_STATS_PATH.exists():
+        payload = _load_entry_gate_stats_payload(now=now)
+        if not payload:
             return None
-        payload = json.loads(ENTRY_GATE_STATS_PATH.read_text(encoding="utf-8"))
+
         reason_counts: Dict[str, int] = {}
         asset_lines: List[Tuple[int, str]] = []
 
@@ -1351,9 +1428,9 @@ def build_entry_gate_summary_embed() -> Optional[Dict[str, Any]]:
             for item in entries:
                 if not isinstance(item, dict):
                     continue
-                reasons = item.get("missing") or item.get("precision_hiany") or []
+                reasons = _extract_gate_reasons(item)
                 if reasons:
-                    reject_count = 1
+                    reject_count += 1
                 for reason in reasons:
                     txt = str(reason)
                     reason_counts[txt] = reason_counts.get(txt, 0) + 1
