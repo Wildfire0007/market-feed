@@ -749,6 +749,7 @@ _REQUEST_SESSION.trust_env = False
 _REQUEST_SESSION.headers.update({"User-Agent": "market-feed/td-only/1.0"})
 _ORIGINAL_REQUESTS_GET = requests.get
 _TD_RESPONSE_CACHE: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], Tuple[float, Dict[str, Any]]] = {}
+_TD_CACHE_LOCK = threading.Lock()
 ANCHOR_LOCK = threading.Lock()
 _REALTIME_BACKGROUND_LOCK = threading.Lock()
 REALTIME_BACKGROUND_THREADS: List[threading.Thread] = []
@@ -1694,15 +1695,16 @@ def _td_cache_key(path: str, params: Dict[str, Any]) -> Tuple[str, Tuple[Tuple[s
 
 def _get_cached_td_response(path: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     key = _td_cache_key(path, params)
-    cached = _TD_RESPONSE_CACHE.get(key)
-    if not cached:
-        return None
-    recorded_at, payload = cached
-    age = max(0.0, time.monotonic() - recorded_at)
-    if age > TD_RESPONSE_CACHE_TTL:
-        _TD_RESPONSE_CACHE.pop(key, None)
-        return None
-    cached_payload = dict(payload)
+    with _TD_CACHE_LOCK:
+        cached = _TD_RESPONSE_CACHE.get(key)
+        if not cached:
+            return None
+        recorded_at, payload = cached
+        age = max(0.0, time.monotonic() - recorded_at)
+        if age > TD_RESPONSE_CACHE_TTL:
+            _TD_RESPONSE_CACHE.pop(key, None)
+            return None
+        cached_payload = dict(payload)
     cached_payload.setdefault("ok", True)
     cached_payload.setdefault("from_cache", True)
     cached_payload["cache_age_seconds"] = age
@@ -1715,7 +1717,31 @@ def _store_cached_td_response(path: str, params: Dict[str, Any], payload: Dict[s
     key = _td_cache_key(path, params)
     payload_copy = dict(payload)
     payload_copy.setdefault("retrieved_at_utc", now_utc())
-    _TD_RESPONSE_CACHE[key] = (time.monotonic(), payload_copy)
+    with _TD_CACHE_LOCK:
+        _TD_RESPONSE_CACHE[key] = (time.monotonic(), payload_copy)
+
+
+def _debug_td_cache_thread_safety(iterations: int = 1000, threads: int = 8) -> bool:
+    """Manual helper to stress the TD cache locking logic.
+
+    This is a no-op during normal execution; call manually when debugging.
+    Returns ``True`` if all threads complete without encountering unexpected
+    cache state.
+    """
+
+    import concurrent.futures
+
+    def _worker(index: int) -> bool:
+        params = {"symbol": f"TEST{index % 5}", "interval": "1min"}
+        payload = {"ok": True, "value": index}
+        _store_cached_td_response("/time_series", params, payload)
+        cached = _get_cached_td_response("/time_series", params)
+        return cached is not None and cached.get("ok") and "value" in cached
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, threads)) as pool:
+        results = list(pool.map(_worker, range(max(1, iterations))))
+
+    return all(results)
 
 
 def _td_error_details(payload: Any) -> Tuple[Optional[str], Optional[int]]:
@@ -4111,6 +4137,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
