@@ -9877,7 +9877,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         time_penalty_total = overlap_penalty
         time_penalty_notes.append(f"Overlap ablak penalty ({overlap_penalty:.1f})")
     if time_penalty_total:
-        P = time_penalty_total
+        P += time_penalty_total
         reasons.append("; ".join(time_penalty_notes))
 
     if (
@@ -14433,6 +14433,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
