@@ -3780,6 +3780,56 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
     adir = os.path.join(OUT_DIR, asset)
     ensure_dir(adir)
 
+    complete_marker = os.path.join(adir, "_complete.json")
+    incomplete_marker = os.path.join(adir, "_incomplete.json")
+    # Clear any stale run markers so downstream readers do not mistake a previous
+    # run for a completed one while this asset is being refreshed.
+    for marker in (complete_marker, incomplete_marker):
+        try:
+            os.remove(marker)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+    files_written: List[str] = []
+    run_id = os.getenv("GITHUB_RUN_ID", "").strip()
+    commit = os.getenv("GITHUB_SHA", "").strip()
+
+    def _record_written(name: str) -> None:
+        if not name:
+            return
+        if name not in files_written:
+            files_written.append(name)
+
+    def _write_complete_marker() -> None:
+        # Only emit the completion marker after critical artifacts are present so
+        # downstream steps can reliably ignore assets that failed mid-pipeline.
+        payload = {
+            "asset": asset,
+            "ok": True,
+            "run_id": run_id,
+            "commit": commit,
+            "timestamp_utc": now_utc(),
+            "files_written": list(files_written),
+        }
+        save_json(complete_marker, payload)
+
+    def _write_incomplete_marker(error: Exception) -> None:
+        payload = {
+            "asset": asset,
+            "ok": False,
+            "run_id": run_id,
+            "commit": commit,
+            "timestamp_utc": now_utc(),
+            "error": str(error),
+            "error_type": error.__class__.__name__,
+        }
+        try:
+            save_json(incomplete_marker, payload)
+        except Exception:
+            pass
+
     attempts = _normalize_symbol_attempts(cfg)
     attempts = _apply_symbol_catalog_filter(asset, cfg, attempts)
     attempt_memory = AttemptMemory()
@@ -3890,7 +3940,12 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
                 force_reason = "spot_fallback"
         series_payloads = _collect_series_payloads(attempts, attempt_memory, adir)
 
-    _write_spot_payload(adir, asset, spot)
+    try:
+        _write_spot_payload(adir, asset, spot)
+        _record_written("spot.json")
+    except Exception as exc:
+        _write_incomplete_marker(exc)
+        raise
     k5 = series_payloads.get("klines_5m")
     if not isinstance(k5, dict):
         k5 = {
@@ -3903,18 +3958,23 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
 
     # 3) 5m előzetes jelzés (analysis.py később felülírhatja)
     sig = signal_from_5m(k5 if isinstance(k5, dict) else {"ok": False})
-    save_json(
-        os.path.join(adir, "signal.json"),
-        {
-            "asset": asset,
-            "ok": bool(sig.get("ok")),
-            "retrieved_at_utc": now_utc(),
-            "signal": sig.get("signal", "no entry"),
-            "reasons": sig.get("reasons", []),
-            "probability": 0,   # előzetes; a véglegeset az analysis.py adja
-            "spot": {"price": spot.get("price"), "utc": spot.get("utc")},
-        },
-    )
+    try:
+        save_json(
+            os.path.join(adir, "signal.json"),
+            {
+                "asset": asset,
+                "ok": bool(sig.get("ok")),
+                "retrieved_at_utc": now_utc(),
+                "signal": sig.get("signal", "no entry"),
+                "reasons": sig.get("reasons", []),
+                "probability": 0,   # előzetes; a véglegeset az analysis.py adja
+                "spot": {"price": spot.get("price"), "utc": spot.get("utc")},
+            },
+        )
+        _record_written("signal.json")
+    except Exception as exc:
+        _write_incomplete_marker(exc)
+        raise
 
     collect_realtime_spot(
         asset,
@@ -3941,6 +4001,10 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
         )
         for name, payload in sorted_series_items
     }
+    for name in series_payloads.keys():
+        _record_written(f"{name}.json")
+        _record_written(f"{name}_meta.json")
+
     LOGGER.info(
         "fetch_completed",
         extra={
@@ -3965,6 +4029,36 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
             ],
         },
     )
+
+    try:
+        if {"spot.json", "signal.json"}.issubset(set(files_written)):
+            _write_complete_marker()
+    except Exception as exc:
+        LOGGER.warning("Failed to write completion marker for %s: %s", asset, exc)
+
+
+def _write_failure_marker(asset: str, error: Exception) -> None:
+    adir = os.path.join(OUT_DIR, asset)
+    ensure_dir(adir)
+    payload = {
+        "asset": asset,
+        "ok": False,
+        "run_id": os.getenv("GITHUB_RUN_ID", "").strip(),
+        "commit": os.getenv("GITHUB_SHA", "").strip(),
+        "timestamp_utc": now_utc(),
+        "error": str(error),
+        "error_type": error.__class__.__name__,
+    }
+    try:
+        save_json(os.path.join(adir, "_incomplete.json"), payload)
+    except Exception:
+        pass
+    try:
+        os.remove(os.path.join(adir, "_complete.json"))
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
 
 # ─────────────────────────────── main ─────────────────────────────────────
 
@@ -4003,12 +4097,15 @@ def _process_asset_guard(asset: str, cfg: Dict[str, Any]) -> None:
     try:
         process_asset(asset, cfg)
     except SymbolAttemptsExhausted as error:
+        _write_failure_marker(asset, error)
         _write_error_payload(asset, error)
         _record_asset_failure(asset, str(error))
         raise
     except Exception as error:
+        _write_failure_marker(asset, error)
         _write_error_payload(asset, error)
         _record_asset_failure(asset, str(error))
+        raise
 
 
 def _reset_out_dir_if_requested(out_dir: str, logger: logging.Logger) -> None:
@@ -4137,6 +4234,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
