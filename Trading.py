@@ -181,10 +181,10 @@ _FINNHUB_SESSION.headers.update({"User-Agent": "market-feed/finnhub-fallback/1.0
 # values are intentionally generous – if every symbol is stale we still return
 # the least-delayed payload instead of failing the pipeline.
 SERIES_FRESHNESS_LIMITS = {
-    "1min": 240.0,  # 1m candle  4m tolerance
-    "5min": 900.0,  # 5m candle  15m tolerance
-    "1h": 5400.0,  # 1h candle  90m tolerance
-    "4h": 21600.0,  # 4h candle  6h tolerance
+    "1min": 240.0,  # 1m candle + 4m tolerance
+    "5min": 900.0,  # 5m candle + 15m tolerance
+    "1h": 5400.0,  # 1h candle + 90m tolerance
+    "4h": 21600.0,  # 4h candle + 6h tolerance
 }
 try:
     from config.analysis_settings import (
@@ -913,7 +913,7 @@ def save_json(path: str, obj: Dict[str, Any]) -> None:
     ensure_dir(str(target.parent))
     tmp_path = target.with_suffix(target.suffix + ".tmp")
 
-    # ENV flags (defaults: fast  safe enough for CI)
+    # ENV flags (defaults: fast + safe enough for CI)
     durable_flag = os.getenv("TD_DURABLE_WRITES", "0").strip().lower() in {"1", "true", "yes", "on"}
     skip_unchanged_flag = (
         os.getenv("TD_SKIP_UNCHANGED_KLINES_WRITES", "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -1560,7 +1560,7 @@ def _refresh_series_if_stale(
             attempt_memory=attempt_memory,
             raise_on_all_client_errors=True,
         )
-        attempts_made = 1
+        attempts_made += 1
         if not isinstance(refreshed, dict) or not refreshed.get("ok"):
             continue
         refreshed_latency = _coerce_float(refreshed.get("latency_seconds"))
@@ -2376,7 +2376,7 @@ def _maybe_use_secondary_series(
     return fallback
 def td_time_series(symbol: str, interval: str, outputsize: int = 500,
                    exchange: Optional[str] = None, order: str = "desc") -> Dict[str, Any]:
-    """Hibatűrő time_series (hiba esetén ok:false  üres values)."""
+    """Hibatűrő time_series (hiba esetén ok:false + üres values)."""
 
     cache_key = (symbol, interval, exchange or "", int(outputsize), order or "desc")
     if cache_key in _SERIES_CACHE:
@@ -2503,7 +2503,7 @@ def td_quote(symbol: str, exchange: Optional[str] = None) -> Dict[str, Any]:
     }
 
 def td_last_close(symbol: str, interval: str = "5min", exchange: Optional[str] = None) -> Tuple[Optional[float], Optional[str]]:
-    """Idősorból az utolsó gyertya close  időpont (UTC ISO)."""
+    """Idősorból az utolsó gyertya close + időpont (UTC ISO)."""
     params = {
         "symbol": symbol,
         "interval": interval,
@@ -2566,7 +2566,7 @@ def td_spot_with_fallback(symbol: str, exchange: Optional[str] = None) -> Dict[s
 
     source = "twelvedata:quote"
     if fallback_used:
-        source = "twelvedata:quotetime_series_fallback"
+        source = "twelvedata:quote+time_series_fallback"
 
     result: Dict[str, Any] = {
         "asset": symbol,
@@ -2702,7 +2702,7 @@ def _collect_http_frames(
         if len(frames) >= sample_cap:
             break
         if not cycle_success:
-            failure_cycles = 1
+            failure_cycles += 1
             if not frames and failure_cycles >= max_failures:
                 break
         else:
@@ -2904,7 +2904,7 @@ def _collect_realtime_spot_impl(
                 attempted.append("websocket")
             if http_attempted:
                 attempted.append("http")
-        transport_display = "".join(attempted) if attempted else "none"
+        transport_display = "+".join(attempted) if attempted else "none"
         LOGGER.info(
             "Realtime spot unavailable for %s transport=%s abort_reason=%s forced=%s",
             asset,
@@ -3479,7 +3479,7 @@ def try_symbols(
                     "used_exchange": exch,
                 }
                 continue
-        attempts_made = 1
+        attempts_made += 1
         try:
             result = fetch_fn(sym, exch)
         except TDError as exc:
@@ -3680,7 +3680,7 @@ def fetch_with_freshness(
         and result.get("freshness_violation")
         and retries < max_refreshes
     ):
-        retries = 1
+        retries += 1
         time.sleep(max(TD_RATE_LIMITER.current_delay, 0.2))
         result = try_symbols(
             attempts,
@@ -4111,6 +4111,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
