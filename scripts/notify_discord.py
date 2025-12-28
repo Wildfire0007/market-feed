@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-notify_discord.py — Esemény-alapú Discord riasztó  óránkénti összefoglaló (per-eszköz panelek)
+notify_discord.py — Esemény-alapú Discord riasztó + óránkénti összefoglaló (per-eszköz panelek)
 
 Stílus:
 - Külön embed minden eszköznek, saját emojival.
@@ -24,7 +24,7 @@ ENV:
 - DISCORD_WEBHOOK_URL_MANAGEMENT (opcionális: #💼-management)
 - DISCORD_WEBHOOK_URL_MARKET_SCAN (opcionális: #📊-market-scan)
 - DISCORD_COOLDOWN_MIN (perc, default 5)
-- DISCORD_FORCE_NOTIFY=1 ➜ cooldown figyelmen kívül hagyása  összefoglaló kényszerítése
+- DISCORD_FORCE_NOTIFY=1 ➜ cooldown figyelmen kívül hagyása + összefoglaló kényszerítése
 - DISCORD_FORCE_HEARTBEAT=1 ➜ csak az összefoglalót kényszerítjük (cooldown marad)
 """
 
@@ -37,7 +37,7 @@ from functools import lru_cache
 import numpy as np
 from typing import Iterable, Optional, Set, Tuple, Dict, Any, List
 from datetime import datetime, timezone, timedelta
-from zoneinfo import ZoneInfo  # Py3.9
+from zoneinfo import ZoneInfo  # Py3.9+
 
 # --- Ensure repository root on sys.path when executed as a script ---
 _SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -460,7 +460,7 @@ def translate_reasons(missing_list: List[str]) -> str:
         "no_chase": "Túl késő (No Chase)",
         "structure(2of3)": "Struktúra kapu (2/3 komponens) nem teljesült",
        
-        # Momentum  order-flow
+        # Momentum + order-flow
         "momentum_trigger": "Momentum trigger hiányzik",
         "ofi": "Order-flow (OFI) megerősítés hiányzik",
 
@@ -492,7 +492,7 @@ def translate_reasons(missing_list: List[str]) -> str:
         if "rr_" in key:
             txt = "Gyenge RR arány / RR kapu nem teljesül"
 
-        # TP / profit-kapuk (pl. tp_min_profit, tp1_net>=75%)
+        # TP / profit-kapuk (pl. tp_min_profit, tp1_net>=+75%)
         elif key.startswith("tp"):
             txt = "Kicsi profit potenciál / TP kapu nem teljesül"
 
@@ -898,7 +898,7 @@ def build_mobile_embed_for_asset(
         tp2 = signal_data.get("tp2")
         rr = signal_data.get("rr")
    
-    # --- Mobil  pszicho struktúra (7–8 sor) ---
+    # --- Mobil + pszicho struktúra (7–8 sor) ---
     tracked_entry = tracked_levels.get("entry") or entry
     tracked_sl = tracked_levels.get("sl") or sl
     tracked_tp1 = tracked_levels.get("tp1") or tp1
@@ -1701,7 +1701,7 @@ def utcnow_epoch():
 
 def iso_to_epoch(s: str) -> int:
     try:
-        return int(datetime.fromisoformat(s.replace("Z","00:00")).timestamp())
+        return int(datetime.fromisoformat(s.replace("Z","+00:00")).timestamp())
     except Exception:
         return 0
 
@@ -1942,7 +1942,7 @@ def format_timedelta(delta: timedelta) -> str:
     total_seconds = int(delta.total_seconds())
     sign = "in"
     if total_seconds < 0:
-        sign = ""
+        sign = "+"
         total_seconds = abs(total_seconds)
     hours, remainder = divmod(total_seconds, 3600)
     minutes, _ = divmod(remainder, 60)
@@ -1952,7 +1952,7 @@ def format_timedelta(delta: timedelta) -> str:
         base = f"{minutes}m"
     if sign == "in":
         return f"in {base}"
-    return f"{base}"
+    return f"+{base}"
 
 
 def eia_countdown(now: Optional[datetime] = None) -> Tuple[Optional[str], Optional[float]]:
@@ -2714,7 +2714,7 @@ def missing_from_sig(sig: dict):
         "liquidity(fib|sweep|ema21|retest)": "Liquidity",
         "atr": "ATR",
         "tp_min_profit": "TP min. profit",
-        "tp1_net>=1.0%": "TP1 nettó ≥ 1.0%",
+        "tp1_net>=+1.0%": "TP1 nettó ≥ +1.0%",
         "min_stoploss": "Minimum stoploss",
         "RR≥1.5": "RR≥1.5",
         "rr_math>=2.0": "RR≥2.0",
@@ -2913,7 +2913,7 @@ def structure_label(flag: Optional[str]) -> str:
 def format_percentage(value: Optional[float]) -> str:
     if value is None or not isinstance(value, (int, float)) or not np.isfinite(value):
         return "n/a"
-    return f"{value * 100:.2f}%"
+    return f"{value * 100:+.2f}%"
 
 
 def format_signed_percentage(value: Optional[float]) -> str:
@@ -2927,7 +2927,7 @@ def format_tminus(delta: timedelta) -> str:
     if total_seconds >= 0:
         prefix = "T−"
     else:
-        prefix = "T"
+        prefix = "T+"
         total_seconds = abs(total_seconds)
     hours, remainder = divmod(total_seconds, 3600)
     minutes = remainder // 60
@@ -2951,7 +2951,7 @@ def weekday_short_hu(dt: datetime) -> str:
 
 def format_hu_countdown(delta: timedelta) -> str:
     total_seconds = int(delta.total_seconds())
-    prefix = "T-" if total_seconds >= 0 else "T"
+    prefix = "T-" if total_seconds >= 0 else "T+"
     total_seconds = abs(total_seconds)
     hours, remainder = divmod(total_seconds, 3600)
     minutes = remainder // 60
@@ -3286,7 +3286,7 @@ class ActivePositionWatcher:
             k_text = "n/a"
         atr_field_text = f"{atr_text_base} / {trail_text}"
         if k_text != "n/a":
-            atr_field_text = f" (K={k_text})"
+            atr_field_text += f" (K={k_text})"
 
         fields = [
             action_field,
@@ -3308,15 +3308,15 @@ class ActivePositionWatcher:
 
         desc_lines: List[str] = []
         if tp1_reached is True:
-            desc_lines.append("TP1 reached → BE  cost, ATR trailing active.")
+            desc_lines.append("TP1 reached → BE + cost, ATR trailing active.")
         elif tp1_reached is False:
             desc_lines.append("TP1 pending → manage core size cautiously.")
         if state == "EXIT" and invalid_level is not None and last_close_1h is not None:
             desc_lines.append(
-                f"Trigger: 1h close {fmt_num(last_close_1h, digits=2)} vs invalid {fmt_num(invalid_level, digits=2)}  5m BOS flip."
+                f"Trigger: 1h close {fmt_num(last_close_1h, digits=2)} vs invalid {fmt_num(invalid_level, digits=2)} + 5m BOS flip."
             )
         elif state in {"REDUCE", "EVENT"} and structure_opposite:
-            reason = "Regime  5m BOS opposite" if state == "REDUCE" else "Event window active"
+            reason = "Regime + 5m BOS opposite" if state == "REDUCE" else "Event window active"
             if event_mode and event_info:
                 reason = f"EIA window {event_info.get('countdown')}"
             desc_lines.append(f"Trigger: {reason}.")
@@ -3467,8 +3467,8 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
         if isinstance(regime_meta, dict) and regime_meta.get("points"):
             points = safe_float(regime_meta.get("points")) or 0.0
             label = (regime_meta.get("label") or "").upper()
-            sign = "−" if points < 0 else ""
-            dynamic_lines.append(f"Regime {label}: {sign}{abs(points):.1f}P")
+            sign = "−" if points < 0 else "+"
+            dynamic_lines.append(f"Regime {label}: {sign}{abs(points):+.1f}P")
             if points < 0:
                 setup_issues.append(f"regime {label}")
         if isinstance(vol_meta, dict) and vol_meta.get("points"):
@@ -3613,15 +3613,15 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     if miss and not (no_entry_reason and "hiányzik" in no_entry_reason.lower()) and not missing_note:
         lines.append(f"Hiányzó: *{miss}*")
 
-    # cím  szín
+    # cím + szín
     title = f"{emoji} **{asset}**"
     if kind == "invalidate":
-        title = " • ❌ Invalidate"
+        title += " • ❌ Invalidate"
     elif kind == "flip":
         arrow = "→"
-        title = f" • 🔁 Flip ({(prev_decision or '').upper()} {arrow} {dec})"
+        title += f" • 🔁 Flip ({(prev_decision or '').upper()} {arrow} {dec})"
     elif kind == "heartbeat":
-        title = " • ℹ️ Állapot"
+        title += " • ℹ️ Állapot"
 
     color = card_color(dec, is_stable, kind, setup_grade)
 
@@ -3673,7 +3673,7 @@ def main():
     heartbeat_flag = flag_any(flags, "force-heartbeat", "heartbeat", "hb", "summary", "all")
     skip_cooldown_flag = flag_any(flags, "skip-cooldown", "no-cooldown", "nocooldown", "skipcooldown")
 
-    # Ezek a jelzők (manual/force  DISCORD_FORCE_NOTIFY) jelentik a valódi kézi kényszerítést.
+    # Ezek a jelzők (manual/force + DISCORD_FORCE_NOTIFY) jelentik a valódi kézi kényszerítést.
     manual_context = manual_flag or force_flag or force_env
 
     # Ha TTY-ból futtatjuk kézzel és nincs külön flag, tekintsük manuális kényszerítésnek.
@@ -4097,7 +4097,7 @@ def main():
             if isinstance(sig, dict):
                 sig["position_state"] = manual_state
            
-        # --- embed  állapot frissítés ---
+        # --- embed + állapot frissítés ---
         if send_kind and (intent != "entry" or attempt_entry_dispatch):
             channel = classify_signal_channel(eff, send_kind, display_stable)
             if intent in {"hard_exit", "manage_position"}:
