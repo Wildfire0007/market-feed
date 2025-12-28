@@ -9787,7 +9787,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     if effective_bias != "neutral":
         bias_strength = 1.0 + (0.3 if bias_override_used else 0.0)
         bias_points = 15.0 * bias_strength
-        P = bias_points
+        P += bias_points
         if bias_override_used:
             label = bias_override_reason or f"Bias override: {effective_bias}"
         else:
@@ -9799,7 +9799,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     if regime_ok:
         ema_ratio = abs(regime_slope_signed) / max(1e-9, slope_threshold)
         regime_points = 6.0 + 6.0 * min(2.5, ema_ratio)
-        P = regime_points
+        P += regime_points
         reasons.append(f"EMA21 slope {ema_ratio:.2f}× küszöb ({regime_points:.1f})")
     else:
         reasons.append("Regime filter inaktív")
@@ -9807,7 +9807,7 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     if swept:
         sweep_points = 10.0
-        P = sweep_points
+        P += sweep_points
         reasons.append(f"HTF sweep ok ({sweep_points:.1f})")
 
     struct_retest_active = (
@@ -9816,22 +9816,22 @@ def analyze(asset: str) -> Dict[str, Any]:
     )
     if bos5m:
         swing_points = 16.0
-        P = swing_points
+        P += swing_points
         reasons.append(f"5M BOS trendirányba ({swing_points:.1f})")
     elif struct_retest_active:
         swing_points = 11.0
-        P = swing_points
+        P += swing_points
         reasons.append(f"5m szerkezeti törés  retest a trend irányába ({swing_points:.1f})")
     elif asset == "NVDA" and (
         (effective_bias == "long" and nvda_cross_long)
         or (effective_bias == "short" and nvda_cross_short)
     ):
         swing_points = 13.0
-        P = swing_points
+        P += swing_points
         reasons.append(f"5m EMA9×21 momentum kereszt megerősítés ({swing_points:.1f})")
     elif micro_bos_active:
         if atr_ok and not np.isnan(rel_atr) and rel_atr >= max(atr_threshold, MOMENTUM_ATR_REL):
-            P = MICRO_BOS_P_BONUS
+            P += MICRO_BOS_P_BONUS
             reasons.append(f"Micro BOS megerősítés (1m szerkezet  magas ATR) ({MICRO_BOS_P_BONUS})")
         else:
             reasons.append("1m BOS  5m retest — várjuk a 5m megerősítést")
@@ -9885,7 +9885,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         and structure_components.get("ofi")
         and P_SCORE_OFI_BONUS
     ):
-        P = P_SCORE_OFI_BONUS
+        P += P_SCORE_OFI_BONUS
         reasons.append(f"OFI megerősítés ({P_SCORE_OFI_BONUS:.1f})")
 
     atr_ratio = 0.0
@@ -9893,7 +9893,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         atr_ratio = rel_atr / atr_threshold
     if atr_ok:
         atr_points = 5.0 + 6.0 * min(3.0, atr_ratio)
-        P = atr_points
+        P += atr_points
         reasons.append(f"ATR erősség {atr_ratio:.2f}× küszöb ({atr_points:.1f})")
     else:
         reasons.append("ATR nincs rendben (relatív vagy abszolút küszöb)")
@@ -9943,21 +9943,21 @@ def analyze(asset: str) -> Dict[str, Any]:
                 P -= 7.0
                 reasons.append("Intraday range felső harmada telített (−7.0)")
             elif range_position is not None and range_position <= INTRADAY_BALANCE_LOW:
-                P = 4.0
+                P += 4.0
                 reasons.append("Ár az intraday range alsó zónájában (4.0)")
         elif effective_bias == "short":
             if exhaustion_short:
                 P -= 7.0
                 reasons.append("Intraday range alsó harmada telített (−7.0)")
             elif range_position is not None and range_position >= INTRADAY_BALANCE_HIGH:
-                P = 4.0
+                P += 4.0
                 reasons.append("Ár az intraday range felső zónájában (4.0)")
 
         if range_compression and not strong_momentum:
             P -= 5.0
             reasons.append("Napi range <0.45×ATR — breakout előtt türelem (−5.0)")
         elif range_expansion and strong_momentum:
-            P = 3.0
+            P += 3.0
             reasons.append("Range expanzió támogatja a momentumot (3.0)")
 
     if asset == "BTCUSD":
@@ -10067,18 +10067,18 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     if fib_ok:
         fib_points = 18.0
-        P = fib_points
+        P += fib_points
         reasons.append(f"Fib zóna konfluencia (0.618–0.886) ({fib_points:.1f})")
     elif ema21_dist_ok:
         ema_points = 10.0
-        P = ema_points
+        P += ema_points
         reasons.append(f"Ár 1h EMA21 zónában ({ema_points:.1f})")
 
     of_imb = order_flow_metrics.get("imbalance")
     if of_imb is not None:
         if abs(of_imb) >= ORDER_FLOW_IMBALANCE_TH:
             boost = 8.0 * min(1.0, abs(of_imb))
-            P = boost
+            P += boost
             reasons.append(f"Order flow imbalance {of_imb:.2f} ({boost:.1f})")
         else:
             penalty = 5.0 * (ORDER_FLOW_IMBALANCE_TH - abs(of_imb)) / ORDER_FLOW_IMBALANCE_TH
@@ -10088,10 +10088,10 @@ def analyze(asset: str) -> Dict[str, Any]:
     of_pressure = order_flow_metrics.get("pressure")
     if of_pressure is not None and effective_bias in {"long", "short"}:
         if effective_bias == "long" and of_pressure > ORDER_FLOW_PRESSURE_TH:
-            P = 5.0
+            P += 5.0
             reasons.append("Buy pressure támogatja a setupot (5)")
         elif effective_bias == "short" and of_pressure < -ORDER_FLOW_PRESSURE_TH:
-            P = 5.0
+            P += 5.0
             reasons.append("Sell pressure támogatja a setupot (5)")
         elif abs(of_pressure) > ORDER_FLOW_PRESSURE_TH:
             P -= 4.0
@@ -10110,10 +10110,10 @@ def analyze(asset: str) -> Dict[str, Any]:
     aggressor_ratio = order_flow_metrics.get("aggressor_ratio")
     if aggressor_ratio is not None and effective_bias in {"long", "short"}:
         if effective_bias == "long" and aggressor_ratio > 0.6:
-            P = 4.0
+            P += 4.0
             reasons.append("Aggresszív vevők dominálnak (4)")
         elif effective_bias == "short" and aggressor_ratio < -0.6:
-            P = 4.0
+            P += 4.0
             reasons.append("Aggresszív eladók dominálnak (4)")
         elif abs(aggressor_ratio) < 0.2:
             P -= 2.0
@@ -10142,7 +10142,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         P -= 5.0
         reasons.append("Anchor trail drift romlik (−5)")
     elif anchor_drift_state == "improving":
-        P = 3.0
+        P += 3.0
         reasons.append("Anchor trail drift javul (3)")
 
     smt_pen, smt_reason = smt_penalty(asset, k5m_closed)
@@ -14433,6 +14433,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
