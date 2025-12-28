@@ -3149,15 +3149,62 @@ def collect_realtime_spot(
     _collect_realtime_spot_impl(asset, symbol_cycle, out_dir, force=force, reason=reason)
 
 
-def wait_for_realtime_background() -> None:
+def wait_for_realtime_background(timeout_seconds: float = REALTIME_DURATION + 10.0) -> None:
+    logger = logging.getLogger("market_feed.trading")
+    start = time.monotonic()
+    timeout = max(float(timeout_seconds), 0.0)
+    deadline = start + timeout
+   join_slice = min(1.0, max(0.25, timeout / 40.0 if timeout > 0 else 0.25))
+
     while True:
         with _REALTIME_BACKGROUND_LOCK:
-            if not REALTIME_BACKGROUND_THREADS:
-                break
             threads = list(REALTIME_BACKGROUND_THREADS)
-            REALTIME_BACKGROUND_THREADS.clear()
+
+        if not threads:
+            return
+
+        now = time.monotonic()
+        remaining = deadline - now
+        if remaining <= 0:
+            with _REALTIME_BACKGROUND_LOCK:
+                alive_threads = [t for t in REALTIME_BACKGROUND_THREADS if t.is_alive()]
+            elapsed = now - start
+            alive_names = ", ".join(t.name or f"Thread-{i}" for i, t in enumerate(alive_threads))
+            logger.error(
+                "Realtime background threads did not finish within %.1f seconds (alive=%d): %s",
+                elapsed,
+                len(alive_threads),
+                alive_names,
+            )
+            raise TimeoutError(
+                f"Realtime background threads still alive after {elapsed:.1f} seconds: {alive_names}"
+            )
+
+        wait_slice = min(join_slice, remaining)
         for thread in threads:
-            thread.join()
+            join_time = min(wait_slice, max(deadline - time.monotonic(), 0.0))
+            if join_time <= 0:
+                break
+            thread.join(join_time)
+            if not thread.is_alive():
+                with _REALTIME_BACKGROUND_LOCK:
+                    try:
+                        REALTIME_BACKGROUND_THREADS.remove(thread)
+                    except ValueError:
+                        pass
+
+
+def _simulate_realtime_timeout_demo() -> None:
+    """Manual self-check for realtime timeout handling (not executed automatically)."""
+
+    def _stuck_thread() -> None:
+        time.sleep(5)
+
+    thread = threading.Thread(target=_stuck_thread, name="td-realtime-demo", daemon=False)
+    thread.start()
+    with _REALTIME_BACKGROUND_LOCK:
+        REALTIME_BACKGROUND_THREADS.append(thread)
+    wait_for_realtime_background(timeout_seconds=1.0)
 
 # ─────────────────────── több-szimbólumos fallback ───────────────────────
 
@@ -4234,6 +4281,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
