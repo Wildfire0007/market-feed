@@ -3,7 +3,7 @@
 analysis.py — TD-only intraday jelzésképző (lokális JSON-okból).
 Forrás: Trading.py által generált fájlok a public/<ASSET>/ alatt.
 Kimenet:
-  public/<ASSET>/signal.json      — "buy" / "sell" / "no entry"  okok
+  public/<ASSET>/signal.json      — "buy" / "sell" / "no entry" + okok
   public/analysis_summary.json    — összesített státusz
   public/analysis.html            — egyszerű HTML kivonat
 """
@@ -157,7 +157,7 @@ import numpy as np
 BTC_OFI_Z = {"trigger": 0.8, "strong": 1.0, "weakening": -0.4, "lookback_bars": 60}
 BTC_ADX_TREND_MIN = 20.0
 
-# ATR floor  napszak-percentilis (TOD = time-of-day buckets) – baseline/relaxed/suppressed
+# ATR floor + napszak-percentilis (TOD = time-of-day buckets) – baseline/relaxed/suppressed
 BTC_ATR_FLOOR_USD = {
     "baseline": 80.0,
     "relaxed": 80.0,
@@ -355,7 +355,7 @@ SETTINGS: Dict[str, Any] = load_config()
 
 
 def btc_rr_min_with_adx(profile: str, asset: str, adx_5m_val: float) -> Tuple[Optional[float], Dict[str, Any]]:
-    """Return BTC RR-min override  metadata based on 5m ADX regime."""
+    """Return BTC RR-min override + metadata based on 5m ADX regime."""
 
     if asset != "BTCUSD":
         return (None, {})
@@ -408,7 +408,7 @@ except NameError:  # pragma: no cover - stub fallback
 
 
 def btc_core_triggers_ok(asset: str, side: str) -> Tuple[bool, Dict[str, Any]]:
-    """BTC core: mikró-BOS (1mretest), VWAP reclaim/reject (5m), OFI z-score (runtime) — EITHER-OF(2)."""
+    """BTC core: mikró-BOS (1m+retest), VWAP reclaim/reject (5m), OFI z-score (runtime) — EITHER-OF(2)."""
 
     if asset != "BTCUSD" or side not in {"long", "short"}:
         return False, {"bos_ok": False, "vwap_ok": False, "ofi_ok": False, "ofi_z": None}
@@ -578,7 +578,7 @@ def btc_momentum_override(profile: str, asset: str, side: str, atr_ok: bool) -> 
         ofi_strong = z_value <= -ofi_strong_th
 
     if ema_ok and ofi_strong and atr_ok:
-        desc = f"ema9x21ofi_z={z_value:.2f}" if np.isfinite(z_value) else "ema9x21ofi"
+        desc = f"ema9x21+ofi_z={z_value:.2f}" if np.isfinite(z_value) else "ema9x21+ofi"
         return (True, rr_override, desc)
     return (False, None, "")
 
@@ -622,7 +622,7 @@ def btc_no_chase_violated(profile: str, entry_price: float, trigger_price: float
 def btc_gate_margins(asset: str, ctx) -> dict:
     """
     Számolja, mennyivel maradtunk el a belépési küszöböktől:
-    - ATR_gate: rel_atr vs atr_gate_th (érték  arány)
+    - ATR_gate: rel_atr vs atr_gate_th (érték + arány)
     - P-score:  P vs p_min
     - OFI:      |z| vs trigger
     - ADX:      adx vs trend_min
@@ -1101,7 +1101,7 @@ REFRESH_TIPS = (
     "CI/CD-ben kösd össze a Trading és Analysis futást: az analysis job csak a trading után induljon (needs: trading).",
     "A kliens kéréséhez adj cache-busting query paramot (pl. ?v=<timestamp>) és no-store cache-control fejlécet.",
     "Cloudflare Worker stale policy: 5m feedre állítsd 120s-re, hogy hamar átjöjjön az új jel.",
-    "A dashboard stabilizáló (2 azonos jel  10 perc cooldown) lassíthatja a kártya frissítését — lazítsd, ha realtime kell."
+    "A dashboard stabilizáló (2 azonos jel + 10 perc cooldown) lassíthatja a kártya frissítését — lazítsd, ha realtime kell."
 )
 LATENCY_PROFILE_FILENAME = "latency_profile.json"
 LATENCY_GUARD_STATE_FILENAME = "latency_guard_state.json"
@@ -1282,7 +1282,7 @@ def _normalize_realtime_meta(
             normalised["cleared_stale_meta"] = True
             if now_utc:
                 normalised["cleared_at_utc"] = now_utc.replace(microsecond=0).isoformat().replace(
-                    "00:00", "Z"
+                    "+00:00", "Z"
                 )
             normalised.setdefault("reason", "stale")
     return normalised
@@ -14433,6 +14433,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
