@@ -10163,7 +10163,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             sentiment_points = 4.0 * sentiment_signal.score
         severity = sentiment_signal.effective_severity
         sentiment_points *= severity
-        P = sentiment_points
+        P += sentiment_points
         sentiment_msg = (
             f"News sentiment ({sentiment_signal.bias}) {sentiment_signal.score:.2f}"
         )
@@ -14433,6 +14433,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
