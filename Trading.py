@@ -3154,7 +3154,7 @@ def wait_for_realtime_background(timeout_seconds: float = REALTIME_DURATION + 10
     start = time.monotonic()
     timeout = max(float(timeout_seconds), 0.0)
     deadline = start + timeout
-   join_slice = min(1.0, max(0.25, timeout / 40.0 if timeout > 0 else 0.25))
+    join_slice = min(1.0, max(0.25, timeout / 40.0 if timeout > 0 else 0.25))
 
     while True:
         with _REALTIME_BACKGROUND_LOCK:
@@ -4281,6 +4281,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
