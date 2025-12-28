@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
@@ -24,7 +25,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Set
 from zoneinfo import ZoneInfo
-
+ 
 LOCAL_TZ = ZoneInfo("Europe/Budapest")
 
 from logging_utils import ensure_json_file_handler
@@ -1171,6 +1172,7 @@ INTRADAY_BALANCE_LOW = 0.35
 INTRADAY_BALANCE_HIGH = 0.65
 OPENING_RANGE_MINUTES = 45
 ANCHOR_STATE_CACHE: Dict[str, Dict[str, Any]] = {}
+_ANCHOR_STATE_LOCK = threading.RLock()
 TF_STALE_TOLERANCE = {"k1m": 240, "k5m": 900, "k1h": 5400, "k4h": 21600}
 CRITICAL_STALE_FRAMES = {
     "k1m": "k1m: jelzés korlátozva",
@@ -1192,7 +1194,8 @@ INTERVENTION_P_SCORE_ADD = 5.0
 def current_anchor_state() -> Dict[str, Dict[str, Any]]:
     """Return the persisted anchor state in a defensive manner."""
     try:
-        return load_anchor_state()
+        with _ANCHOR_STATE_LOCK:
+            return load_anchor_state()
     except Exception:
         return {}
 
@@ -1882,8 +1885,12 @@ def in_any_window_utc(windows: Optional[List[Tuple[int, int, int, int]]], h: int
     for sh, sm, eh, em in windows:
         s = _min_of_day(sh, sm)
         e = _min_of_day(eh, em)
-        if s <= minutes <= e:
-            return True
+        if s <= e:
+            if s <= minutes <= e:
+                return True
+        else:
+            if minutes >= s or minutes <= e:
+                return True
     return False
 def minute_in_interval(minute: int, start: int, end: int) -> bool:
     if start == end:
@@ -13784,19 +13791,23 @@ def analyze(asset: str) -> Dict[str, Any]:
             }
         )
         try:
-            ANCHOR_STATE_CACHE = record_anchor(
-                asset,
-                decision,
-                price=anchor_price,
-                timestamp=decision_obj["retrieved_at_utc"],
-                extras=anchor_payload,
-            )
+            with _ANCHOR_STATE_LOCK:
+                ANCHOR_STATE_CACHE = record_anchor(
+                    asset,
+                    decision,
+                    price=anchor_price,
+                    timestamp=decision_obj["retrieved_at_utc"],
+                    extras=anchor_payload,
+                )
         except Exception:
             # Anchor frissítés hibája ne állítsa meg az elemzést.
             pass
     else:
         try:
-            ANCHOR_STATE_CACHE = update_anchor_metrics(asset, anchor_metrics_payload)
+            with _ANCHOR_STATE_LOCK:
+                ANCHOR_STATE_CACHE = update_anchor_metrics(
+                    asset, anchor_metrics_payload
+                )
         except Exception:
             pass
     _log_gate_summary(asset, decision_obj)
@@ -14433,6 +14444,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
