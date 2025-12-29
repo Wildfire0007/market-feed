@@ -12,7 +12,7 @@ def test_open_position_sets_has_position_true():
     opened_at = "2025-01-01T11:00:00Z"
 
     manual_positions = position_tracker.open_position(
-        "BTCUSD", "buy", 100.5, 95.0, 120.0, opened_at, positions={}
+        "BTCUSD", "buy", 100.5, 95.0, 110.0, 120.0, opened_at, positions={}
     )
 
     state = position_tracker.compute_state(
@@ -48,7 +48,7 @@ def test_close_position_sets_cooldown_state():
     opened_at = "2025-01-01T11:00:00Z"
     closed_at = "2025-01-01T12:05:00Z"
     manual_positions = position_tracker.open_position(
-        "BTCUSD", "buy", 100.5, 95.0, 120.0, opened_at, positions={}
+        "BTCUSD", "buy", 100.5, 95.0, 110.0, 120.0, opened_at, positions={}
     )
 
     cooled_positions = position_tracker.close_position(
@@ -70,7 +70,7 @@ def test_close_position_sets_cooldown_state():
 def test_compute_state_disabled_never_sets_position_true():
     now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
     manual_positions = position_tracker.open_position(
-        "BTCUSD", "buy", 100.5, 95.0, 120.0, "2025-01-01T11:00:00Z", positions={}
+        "BTCUSD", "buy", 100.5, 95.0, 110.0, 120.0, "2025-01-01T11:00:00Z", positions={}
     )
 
     state = position_tracker.compute_state(
@@ -85,6 +85,7 @@ def test_compute_state_disabled_never_sets_position_true():
     assert state["opened_at_utc"] is None
     assert state["entry"] is None
     assert state["sl"] is None
+    assert state["tp1"] is None
     assert state["tp2"] is None
     assert state["position"] is None
 
@@ -93,7 +94,7 @@ def test_cooldown_expiry_returns_to_flat_state():
     opened_at = "2025-01-01T11:00:00Z"
     closed_at = "2025-01-01T12:00:00Z"
     manual_positions = position_tracker.open_position(
-        "BTCUSD", "buy", 100.5, 95.0, 120.0, opened_at, positions={}
+        "BTCUSD", "buy", 100.5, 95.0, 110.0, 120.0, opened_at, positions={}
     )
 
     cooled_positions = position_tracker.close_position(
@@ -140,7 +141,7 @@ def test_open_position_sets_side_and_clears_cooldown():
     positions = {"BTCUSD": {"side": None, "cooldown_until_utc": "2025-01-02T00:00:00Z"}}
 
     updated = position_tracker.open_position(
-        "BTCUSD", "buy", 100.0, 90.0, 120.0, opened_at, positions
+        "BTCUSD", "buy", 100.0, 90.0, 110.0, 120.0, opened_at, positions
     )
 
     entry = updated["BTCUSD"]
@@ -148,6 +149,7 @@ def test_open_position_sets_side_and_clears_cooldown():
     assert entry["cooldown_until_utc"] is None
     assert entry["entry"] == 100.0
     assert entry["sl"] == 90.0
+    assert entry["tp1"] == 110.0
     assert entry["tp2"] == 120.0
     assert entry["opened_at_utc"] == opened_at
 
