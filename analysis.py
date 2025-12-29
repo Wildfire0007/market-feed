@@ -5470,7 +5470,7 @@ def _extract_tracked_levels(
 
     return {
         key: source.get(key)
-        for key in ("entry", "sl", "tp2", "opened_at_utc", "side")
+        for key in ("entry", "sl", "tp1", "tp2", "opened_at_utc", "side")
         if source.get(key) is not None
     }
 
@@ -5510,6 +5510,14 @@ def _format_manual_position_note(
     detail_suffix = " (" + ", ".join(details) + ")" if details else ""
     reason_suffix = f" — ok: {position_reason}" if position_reason else ""
     return f"Pozíciómenedzsment: aktív {side_txt} pozíció{detail_suffix}{reason_suffix}"
+
+
+def format_manual_position_note(
+    asset: str, manual_state: Dict[str, Any], tracked_levels: Dict[str, Any]
+) -> Optional[str]:
+    """Public wrapper to surface manual position notes alongside reasons."""
+
+    return _format_manual_position_note(asset, manual_state, tracked_levels)
 
 
 def _extract_spot_price(payload: Dict[str, Any]) -> Optional[float]:
@@ -6042,6 +6050,25 @@ def apply_signal_stability_layer(
                 positions_file=positions_path,
             )
 
+    manual_tracked_levels: Dict[str, Any] = tracked_levels if tracked_levels else {}
+    if manual_state.get("has_position"):
+        if not manual_tracked_levels:
+            manual_tracked_levels = _extract_tracked_levels(
+                asset, manual_state, manual_positions
+            )
+        if not manual_tracked_levels and isinstance(manual_state.get("position"), dict):
+            manual_source = manual_state.get("position") or {}
+            manual_tracked_levels = {
+                key: manual_source.get(key)
+                for key in ("entry", "sl", "tp1", "tp2", "opened_at_utc", "side")
+                if manual_source.get(key) is not None
+            }
+
+        for key in ("entry", "sl", "tp1", "tp2", "side", "opened_at_utc"):
+            value = manual_tracked_levels.get(key) or manual_state.get(key)
+            if value is not None:
+                payload[key] = value
+
     # Always export the trade levels into the payload so the downstream signal.json
     # contains normalized entry/SL/TP values even when no manual position changes
     # occur during the analysis pass.
@@ -6065,23 +6092,27 @@ def apply_signal_stability_layer(
     payload["trade_levels"] = {key: value for key, value in trade_levels.items() if value is not None}
 
     if not tracked_levels:
-        tracked_levels = _extract_tracked_levels(asset, manual_state, manual_positions)
+        tracked_levels = manual_tracked_levels or _extract_tracked_levels(
+            asset, manual_state, manual_positions
+        )
 
     payload["position_state"] = {
         "tracking_enabled": manual_state.get("tracking_enabled"),
-        "side": manual_state.get("side"),
+        "side": manual_state.get("side") or manual_tracked_levels.get("side"),
         "has_position": manual_state.get("has_position"),
         "cooldown_active": manual_state.get("cooldown_active"),
         "cooldown_until_utc": manual_state.get("cooldown_until_utc"),
-        "opened_at_utc": manual_state.get("opened_at_utc"),
-        "entry": manual_state.get("entry"),
-        "sl": manual_state.get("sl"),
-        "tp2": manual_state.get("tp2"),
+        "opened_at_utc": manual_state.get("opened_at_utc")
+        or manual_tracked_levels.get("opened_at_utc"),
+        "entry": manual_state.get("entry") or manual_tracked_levels.get("entry"),
+        "sl": manual_state.get("sl") or manual_tracked_levels.get("sl"),
+        "tp1": manual_state.get("tp1") or manual_tracked_levels.get("tp1"),
+        "tp2": manual_state.get("tp2") or manual_tracked_levels.get("tp2"),
     }
     if tracked_levels:
         payload["tracked_levels"] = tracked_levels
 
-    manual_note = _format_manual_position_note(asset, manual_state, tracked_levels)
+    manual_note = format_manual_position_note(asset, manual_state, tracked_levels)
     if manual_note:
         payload["position_management"] = manual_note
         reasons = payload.get("reasons") if isinstance(payload, dict) else None
@@ -14706,6 +14737,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
