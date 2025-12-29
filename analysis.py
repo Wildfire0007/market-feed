@@ -2112,6 +2112,40 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
             monitor_ok or not monitor_windows
         )
 
+    minutes_to_close: Optional[int] = None
+    session_close_reason: Optional[str] = None
+
+    if open_now and entry_window_ok:
+        now_minute = minute_of_day
+        end_candidates: List[Tuple[int, str]] = []
+
+        def _minutes_until(target: int) -> int:
+            delta = target - now_minute
+            return delta if delta >= 0 else delta + 24 * 60
+
+        for sh, sm, eh, em in entry_windows or []:
+            start = _min_of_day(sh, sm)
+            end = _min_of_day(eh, em)
+            if start <= end and start <= now_minute <= end:
+                end_candidates.append((end - now_minute, "entry_window"))
+            elif start > end:
+                # Wrapped window (e.g., spans midnight)
+                if now_minute >= start:
+                    end_candidates.append(((end + 24 * 60) - now_minute, "entry_window"))
+                elif now_minute <= end:
+                    end_candidates.append((end - now_minute, "entry_window"))
+
+        for start, _ in daily_breaks:
+            if minute_in_interval(now_minute, start, (start + 1) % (24 * 60)):
+                continue
+            end_candidates.append((_minutes_until(start), "daily_break"))
+
+        if friday_close is not None and now_utc.weekday() == 4 and now_minute < friday_close:
+            end_candidates.append((friday_close - now_minute, "friday_close"))
+
+        if end_candidates:
+            minutes_to_close, session_close_reason = min(end_candidates, key=lambda item: item[0])
+
     if status_profile:
         if status_profile.get("force_session_closed"):
             monitor_ok = False
@@ -2246,6 +2280,12 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
         info["sunday_open_budapest"] = sunday_open_local[0] if sunday_open_local else None
     if news_lockout:
         info["news_lockout"] = True
+    if minutes_to_close is not None:
+        info["minutes_to_session_close"] = minutes_to_close
+        if session_close_reason:
+            info["session_close_reason"] = session_close_reason
+        if minutes_to_close <= 5:
+            info["session_closing_soon"] = True
     next_open_calculated = next_session_open(asset, now_utc)
     if next_open_calculated:
         info["next_session_open_utc"] = next_open_calculated.isoformat()
@@ -13044,6 +13084,29 @@ def analyze(asset: str) -> Dict[str, Any]:
             if guard_note not in reasons:
                 reasons.append(guard_note)
 
+    closing_soon_grace = False
+    if not session_ok_flag and isinstance(session_meta, dict):
+        minutes_to_close_val = session_meta.get("minutes_to_session_close")
+        trigger_state_value = precision_trigger_state.lower() if precision_trigger_state else ""
+        try:
+            minutes_to_close_int = int(minutes_to_close_val)
+        except (TypeError, ValueError):
+            minutes_to_close_int = None
+        closing_soon_grace = bool(
+            minutes_to_close_int is not None
+            and minutes_to_close_int <= 5
+            and minutes_to_close_int >= 0
+            and trigger_state_value == "fire"
+        )
+        if closing_soon_grace:
+            session_ok_flag = True
+            session_meta = dict(session_meta)
+            session_meta["status"] = "session_closing_soon"
+            session_meta["status_note"] = (
+                "Piac hamarosan zár – precision trigger aktív, belépés engedve az ablak végéig"
+            )
+            session_meta["session_closing_soon"] = True
+
     if not session_ok_flag:
         status_note = session_meta.get("status_note") or "Session zárva"
         if status_note not in reasons:
@@ -14453,6 +14516,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
