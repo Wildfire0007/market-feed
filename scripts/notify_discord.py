@@ -380,7 +380,7 @@ def _tracked_levels_from_manual_positions(
         return {}
     return {
         key: entry.get(key)
-        for key in ("entry", "sl", "tp2", "opened_at_utc", "side")
+        for key in ("entry", "sl", "tp1", "tp2", "opened_at_utc", "side")
         if entry.get(key) is not None
     }
 
@@ -396,6 +396,7 @@ def _format_manual_position_line(
 
     entry = tracked_levels.get("entry") or position_state.get("entry")
     sl = tracked_levels.get("sl") or position_state.get("sl")
+    tp1 = tracked_levels.get("tp1") or position_state.get("tp1")
     tp2 = tracked_levels.get("tp2") or position_state.get("tp2")
     opened_at = tracked_levels.get("opened_at_utc") or position_state.get("opened_at_utc")
 
@@ -406,6 +407,8 @@ def _format_manual_position_line(
         parts.append(f"Entry {format_price(entry, asset)}")
     if sl is not None:
         parts.append(f"SL {format_price(sl, asset)}")
+    if tp1 is not None:
+        parts.append(f"TP1 {format_price(tp1, asset)}")
     if tp2 is not None:
         parts.append(f"TP2 {format_price(tp2, asset)}")
 
@@ -642,7 +645,9 @@ def resolve_setup_grade_for_signal(signal_data: Dict[str, Any], decision: str) -
     return None
 
 
-def extract_trade_levels(signal_data: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+def extract_trade_levels(
+    signal_data: Dict[str, Any],
+) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
     if not isinstance(signal_data, dict):
         return None, None, None
 
@@ -661,13 +666,19 @@ def extract_trade_levels(signal_data: Dict[str, Any]) -> Tuple[Optional[float], 
     if sl is None and isinstance(levels_block, dict):
         sl = levels_block.get("sl")
 
+    tp1 = signal_data.get("tp1")
+    if tp1 is None and isinstance(trade_block, dict):
+        tp1 = trade_block.get("tp1")
+    if tp1 is None and isinstance(levels_block, dict):
+        tp1 = levels_block.get("tp1")
+
     tp2 = signal_data.get("tp2")
     if tp2 is None and isinstance(trade_block, dict):
         tp2 = trade_block.get("tp2")
     if tp2 is None and isinstance(levels_block, dict):
         tp2 = levels_block.get("tp2")
 
-    return entry, sl, tp2
+    return entry, sl, tp1, tp2
 
 
 def build_mobile_embed_for_asset(
@@ -2088,7 +2099,7 @@ def _apply_manual_position_transitions(
         and send_kind in {"normal", "flip"}
         and display_stable
     ):
-        entry_level, sl_level, tp2_level = extract_trade_levels(signal_payload)
+        entry_level, sl_level, tp1_level, tp2_level = extract_trade_levels(signal_payload)
         position_tracker.log_audit_event(
             "entry open attempt",
             event="OPEN_ATTEMPT",
@@ -2106,6 +2117,7 @@ def _apply_manual_position_transitions(
             manual_cooldown_active=manual_state.get("cooldown_active"),
             entry_level=entry_level,
             sl=sl_level,
+            tp1=tp1_level,
             tp2=tp2_level,
             send_kind=send_kind,
         )
@@ -2114,6 +2126,7 @@ def _apply_manual_position_transitions(
             side="long" if decision == "buy" else "short",
             entry=entry_level,
             sl=sl_level,
+            tp1=tp1_level,
             tp2=tp2_level,
             opened_at_utc=now_iso,
             positions=manual_positions,
@@ -2122,11 +2135,12 @@ def _apply_manual_position_transitions(
             asset, tracking_cfg, manual_positions, now_dt
         )
         LOGGER.debug(
-            "OPEN state transition %s %s entry=%s sl=%s tp2=%s opened_at=%s",
+            "OPEN state transition %s %s entry=%s sl=%s tp1=%s tp2=%s opened_at=%s",
             asset,
             decision,
             entry_level,
             sl_level,
+            tp1_level,
             tp2_level,
             now_iso,
         )
@@ -2141,7 +2155,7 @@ def _apply_manual_position_transitions(
         and setup_grade in {"A", "B"}
         and decision in ("buy", "sell")
     ):
-        entry_level, sl_level, tp2_level = extract_trade_levels(signal_payload)
+        entry_level, sl_level, tp1_level, tp2_level = extract_trade_levels(signal_payload)
         position_tracker.log_audit_event(
             "entry suppressed: notify is read-only",
             event="ENTRY_SUPPRESSED",
@@ -2159,6 +2173,7 @@ def _apply_manual_position_transitions(
             manual_cooldown_active=manual_state.get("cooldown_active"),
             entry_level=entry_level,
             sl=sl_level,
+            tp1=tp1_level,
             tp2=tp2_level,
             send_kind=send_kind,
             suppression_reason="writer_is_analysis",
@@ -2190,6 +2205,7 @@ def _apply_and_persist_manual_transitions(
     positions_path: str,
     entry_level: Optional[float],
     sl_level: Optional[float],
+    tp1_level: Optional[float],
     tp2_level: Optional[float],
     open_commits_this_run: Set[str],
     sig: Dict[str, Any],
@@ -2315,6 +2331,7 @@ def _apply_and_persist_manual_transitions(
                 setup_grade=setup_grade,
                 entry=entry_level,
                 sl=sl_level,
+                tp1=tp1_level,
                 tp2=tp2_level,
                 positions_file=positions_path,
                 send_kind=send_kind,
@@ -2455,6 +2472,7 @@ def _finalize_entry_commit(
         positions_path=positions_path,
         entry_level=(pending.get("levels") or {}).get("entry"),
         sl_level=(pending.get("levels") or {}).get("sl"),
+        tp1_level=(pending.get("levels") or {}).get("tp1"),
         tp2_level=(pending.get("levels") or {}).get("tp2"),
         open_commits_this_run=open_commits_this_run,
         sig=pending.get("signal_payload") or {},
@@ -3840,11 +3858,12 @@ def main():
 
         entry_level: Optional[float] = None
         sl_level: Optional[float] = None
+        tp1_level: Optional[float] = None
         tp2_level: Optional[float] = None
         try:
-            entry_level, sl_level, tp2_level = extract_trade_levels(sig)
+            entry_level, sl_level, tp1_level, tp2_level = extract_trade_levels(sig)
         except Exception:
-            entry_level, sl_level, tp2_level = None, None, None
+            entry_level, sl_level, tp1_level, tp2_level = None, None, None, None
 
         spot_price, _ = spot_from_sig_or_file(asset, sig)
         if manual_state.get("has_position"):
@@ -4119,6 +4138,7 @@ def main():
                 positions_path=positions_path,
                 entry_level=entry_level,
                 sl_level=sl_level,
+                tp1_level=tp1_level,
                 tp2_level=tp2_level,
                 open_commits_this_run=open_commits_this_run,
                 sig=sig,
