@@ -722,6 +722,7 @@ def build_mobile_embed_for_asset(
         signal_data.get("tracked_levels") if isinstance(signal_data, dict) else {}
     )
     tracked_levels = tracked_levels if isinstance(tracked_levels, dict) else {}
+    entry_missing = entry_diag.get("missing") or [] if isinstance(entry_diag, dict) else []
    
     try:
         dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
@@ -878,7 +879,13 @@ def build_mobile_embed_for_asset(
     line_price = f"💵 {format_price(spot, asset)} • 🕒 {local_time}"
 
     grade_icon = "🟢" if setup_info["grade"] == "A" else "🟡" if setup_info["grade"] == "B" else "⚪"
-    line_setup = f"🎯 {grade_icon} **{setup_info['title']}** — {setup_info['action']}"
+    setup_direction = resolve_setup_direction(signal_data, decision_upper)
+    direction_suffix = ""
+    if setup_info["grade"] in {"A", "B", "C"} and setup_direction:
+        direction_suffix = f" ({setup_direction.upper()})"
+    line_setup = (
+        f"🎯 {grade_icon} **{setup_info['title']}** — {setup_info['action']}{direction_suffix}"
+    )
 
     # Pozíciómenedzsment
     position_note = None
@@ -927,209 +934,87 @@ def build_mobile_embed_for_asset(
     position_tp1 = position_levels.get("tp1") or position_state.get("tp1")
     position_tp2 = position_levels.get("tp2") or position_state.get("tp2")
 
-    position_levels_line = None
-    position_level_parts: List[str] = []
-    if position_entry is not None:
-        position_level_parts.append(f"entry `{format_price(position_entry, asset)}`")
-    if position_sl is not None:
-        position_level_parts.append(f"SL `{format_price(position_sl, asset)}`")
-    if position_tp1 is not None:
-        position_level_parts.append(f"TP1 `{format_price(position_tp1, asset)}`")
-    if position_tp2 is not None:
-        position_level_parts.append(f"TP2 `{format_price(position_tp2, asset)}`")
-    if position_level_parts:
-        position_levels_line = "🧭 Position levels: " + " • ".join(position_level_parts)
-       
-    lines: List[str] = []
-    entry_lines: List[str] = []
-    fields: List[Dict[str, Any]] = []
+    def _format_levels_line() -> Optional[str]:
+        level_parts: List[str] = []
+        level_entry = position_entry if position_entry is not None else tracked_entry or entry
+        level_sl = position_sl if position_sl is not None else tracked_sl or sl
+        level_tp1 = position_tp1 if position_tp1 is not None else tracked_tp1 or tp1
+        level_tp2 = position_tp2 if position_tp2 is not None else tracked_tp2 or tp2
 
-    cooldown_line = None
-    if cooldown_until:
-        try:
-            cooldown_dt = datetime.fromisoformat(str(cooldown_until).replace("Z", "+00:00"))
-            cooldown_line = (
-                f"⏳ Cooldown lejár: {cooldown_dt.astimezone(HB_TZ).strftime('%H:%M')} (CET)."
-            )
-        except Exception:
-            cooldown_line = None
+        level_parts.append(f"Entry: {format_price(level_entry, asset)}")
+        level_parts.append(f"SL: {format_price(level_sl, asset)}")
+        level_parts.append(f"TP1: {format_price(level_tp1, asset)}")
+        level_parts.append(f"TP2: {format_price(level_tp2, asset)}")
 
-    level_parts_inline: List[str] = []
-    level_entry = tracked_entry or entry
-    level_sl = tracked_sl or sl
-    level_tp1 = tracked_tp1 or tp1
-    level_tp2 = tracked_tp2 or tp2
-    if level_entry is not None:
-        level_parts_inline.append(f"Entry: {format_price(level_entry, asset)}")
-    if level_sl is not None:
-        level_parts_inline.append(f"SL: {format_price(level_sl, asset)}")
-    if level_tp1 is not None:
-        level_parts_inline.append(f"TP1: {format_price(level_tp1, asset)}")
-    if level_tp2 is not None:
-        level_parts_inline.append(f"TP2: {format_price(level_tp2, asset)}")
-    levels_line = (
-        f"🎯 `{' | '.join(level_parts_inline)}`" if level_parts_inline else None
-    ) 
-
-    def add_field_once(name: str, value: str) -> None:
-        if not value:
-            return
-        if any(f.get("name") == name for f in fields):
-            return
-        fields.append({"name": name, "value": value, "inline": False})
+        if not any(
+            v is not None for v in (level_entry, level_sl, level_tp1, level_tp2)
+        ):
+            return None
+        if not (has_tracked_position or decision_upper in {"BUY", "SELL"}):
+            return None
+        return "Position levels: " + " | ".join(level_parts)  
       
-    grade_emoji = "🟢" if setup_info["grade"] == "A" else "🟡" if setup_info["grade"] == "B" else "⚪"
-    setup_direction = resolve_setup_direction(signal_data, decision_upper)
-    direction_suffix = ""
-    if setup_info["grade"] in {"A", "B", "C"} and setup_direction:
-        direction_suffix = f" ({setup_direction.upper()})"
-
-    if cooldown_line:
-        lines.append(cooldown_line)  
-    if primary_header:
+    status_line = f"{status_icon} {status_text}"
+    levels_line = _format_levels_line()
+    lines: List[str] = [status_line]
+    
+    if primary_header and primary_header not in lines:
         lines.append(primary_header)
+      
+    if cooldown_active and cooldown_until:
+        lines.append(f"⏳ Cooldown lejár: {cooldown_until}")
 
     if levels_line:
         lines.append(levels_line)
-        add_field_once("Szintek", levels_line.replace("🎯 ", ""))
-      
-    # Fő blokk (pozíció/cooldown/entry)
-    if intent == "hard_exit":
-        hard_exit_reasons = translate_reasons(position_diag.get("reasons") or []) if isinstance(position_diag, dict) else None
-        lines.append(f"{status_icon} HARD EXIT — tracked pozíció zárása (assumed)")
-        if hard_exit_reasons:
-            lines.append(f"Ok: {hard_exit_reasons}")
-        if position_levels_line:
-            lines.append(position_levels_line)
-        if cooldown_until:
-            lines.append(f"Cooldown indul: {cooldown_until}")
-        lines.append(line_price)
-        lines.append(line_score)
-    elif cooldown_active:
-        lines.append(f"{status_icon} COOLDOWN — új belépők tiltva")
-        if cooldown_until:
-            lines.append(f"Lejár: {cooldown_until}")
-        lines.append(line_price)
-        if regime_line:
-            lines.append(regime_line)
-        lines.append(line_score)
-    elif has_tracked_position:
-        side_label = side_label if "side_label" in locals() else None
-        if not side_label:
-            side_label = "OPEN"
-        lines.append(f"{status_icon} {status_text} — {side_label}")
-        level_parts = [
-            f"SL {format_price(tracked_sl, asset) if tracked_sl is not None else '-'}",
-            f"TP1 {format_price(tracked_tp1, asset) if tracked_tp1 is not None else '-'}",
-            f"TP2 {format_price(tracked_tp2, asset) if tracked_tp2 is not None else '-'}",
-        ]
-        lines.append(
-            f"Nyitva: {opened_at or '-'} • " + " • ".join(level_parts)
-        )        
-        if position_note:
-            lines.append(f"🧭 **{position_note}**")
-        lines.append(line_price)
-        if regime_line:
-            lines.append(regime_line)
-        lines.append(line_score)
-    else:
-        lines.append(
-            f"{entry_status_icon} {decision_upper or 'NINCS'} • {setup_info['grade']} setup{direction_suffix} • {setup_info['action']}"
-        )
-        lines.append(line_price)
-        if regime_line:
-            lines.append(regime_line)        
-        if position_note:
-            lines.append(f"🧭 **{position_note}**")
-        if intent in {"hard_exit", "manage_position"}:
-            pos_state = position_diag.get("state") if isinstance(position_diag, dict) else None
-            pos_severity = position_diag.get("severity") if isinstance(position_diag, dict) else None
-            diag_parts: List[str] = []
-            if pos_state:
-                diag_parts.append(str(pos_state))
-            if pos_severity:
-                diag_parts.append(f"súlyosság: {pos_severity}")
-            if diag_parts:
-                lines.append(f"🧭 Pozíció diagnosztika: {' • '.join(diag_parts)}")
-            pos_reasons = position_diag.get("reasons") if isinstance(position_diag, dict) else []
-            if pos_reasons:
-                reasons_hu = translate_reasons([str(reason) for reason in pos_reasons])
-                lines.append(f"➤ Okok: {reasons_hu}")
 
-        if isinstance(entry_diag, dict):
-            entry_missing = entry_diag.get("missing") or []
-        else:
-            entry_missing = []
-        gates_missing = entry_missing if is_entry_intent else []
-        if gates_missing and entry_status_text != "NINCS BELÉPŐ":
-            reasons = translate_reasons(gates_missing)
-            lines.append(f"🧠 Figyelem: {reasons}")
-        lines.append(line_score)
-        if entry_status_text == "NINCS BELÉPŐ" and is_entry_intent:
-            if gates_missing:
-                reasons_hu = translate_reasons(gates_missing)
-                lines.append(f"⛔ Blokkolók: {reasons_hu}")
+    if opened_at:
+        lines.append(f"Nyitva: {opened_at}")
 
-    # Új belépők blokk pozíció vagy cooldown mellett
-    if has_tracked_position or cooldown_active:
-        if isinstance(entry_diag, dict):
-            entry_missing = entry_diag.get("missing") or []
-        else:
-            entry_missing = []
-        gates_missing = entry_missing if is_entry_intent else []
+    if position_note:
+        lines.append(f"🧭 {position_note}")
 
-        entry_lines.append("➕ ÚJ BELÉPŐK")
-        if cooldown_active:
-            cd_line = f"⏳ Cooldown aktív — új belépők tiltva"
-            if cooldown_until:
-                cd_line = f"{cd_line} (eddig: {cooldown_until})"
-            entry_lines.append(cd_line)
-        elif has_tracked_position:
-            entry_lines.append("⛔ Új belépők tiltva: aktív tracked pozíció, kivárás új trade-re.")
-        if entry_block_reason and entry_block_reason not in entry_lines:
-            entry_lines.append(entry_block_reason)
-        entry_lines.append(
-            f"{entry_status_icon} {entry_status_text} • {setup_info['grade']} setup{direction_suffix} • {setup_info['action']}"
-        )
-        entry_lines.append(line_price)
-        if regime_line:
-            entry_lines.append(regime_line)
-        if (
-            is_entry_intent
-            and decision_upper in {"BUY", "SELL"}
-            and all(v is not None for v in (tracked_entry, tracked_sl, tracked_tp1, tracked_tp2))
-        ):
-            rr_txt = f"RR≈`{rr}`" if rr is not None else ""
-            entry_levels_txt = (
-                f"`{format_price(tracked_entry, asset)}` • SL `{format_price(tracked_sl, asset)}` "
-                f"• TP1 `{format_price(tracked_tp1, asset)}` • TP2 `{format_price(tracked_tp2, asset)}` • {rr_txt}"
-            ).strip(" • ")
-            entry_lines.append(f"🎯 Belépő {entry_levels_txt}")
-            add_field_once("Belépő", entry_levels_txt)
-        if gates_missing and entry_status_text != "NINCS BELÉPŐ":
-            reasons = translate_reasons(gates_missing)
-            entry_lines.append(f"🧠 Figyelem: {reasons}")           
-        entry_lines.append(line_score)        
-        if entry_status_text == "NINCS BELÉPŐ" and is_entry_intent and gates_missing:
-            reasons_hu = translate_reasons(gates_missing)
-            entry_lines.append(f"⛔ Blokkolók: {reasons_hu}")
+    reasons_raw = (
+        signal_data.get("reasons") if isinstance(signal_data, dict) else []
+    )
+    if isinstance(reasons_raw, list):
+        for reason in reasons_raw:
+            if isinstance(reason, str) and reason.strip():
+                lines.append(reason.strip())
 
-    if entry_lines:
-        if lines:
-            lines.append("")
-        lines.extend(entry_lines)
+    if kind == "entry" and entry_missing:
+        reasons = translate_reasons([str(reason) for reason in entry_missing])
+        lines.append(f"Figyelem: {reasons}.")
+
+    if intent in {"hard_exit", "manage_position"} and isinstance(position_diag, dict):
+        diag_state = position_diag.get("state")
+        diag_reasons = position_diag.get("reasons") or []
+        if diag_state:
+            lines.append(f"Pozíció diagnosztika: {diag_state}")
+        if diag_reasons:
+            reasons_hu = translate_reasons([str(reason) for reason in diag_reasons])
+            lines.append(f"➤ Okok: {reasons_hu}")
+
+    lines.append(line_setup)
+    if regime_line:
+        lines.append(regime_line)
+    lines.append(line_price)
+    lines.append(line_score)
     
     description = "\n".join(lines)
 
-    final_color = color
-    if not (has_tracked_position or cooldown_active or intent == "hard_exit"):
-        final_color = entry_color if entry_status_text != "NINCS BELÉPŐ" else setup_info["color"]
-
+    if is_invalidate or kind == "invalidate":
+        final_color = COLORS.get("SHORT", COLORS["NO"])
+    elif decision_upper in {"BUY", "SELL"}:
+        final_color = COLORS.get("LONG", COLORS["NO"])
+    elif not is_stable or status_text == "VÁRAKOZÁS (Stabilizálás...)":
+        final_color = COLORS.get("WAIT", COLORS["NO"])
+    else:
+        final_color = color
+      
     return {
         "title": title,
         "description": description,
-        "color": final_color,
-        **({"fields": fields} if fields else {}),
+        "color": final_color,        
     }
    
 # ---- Debounce / stabilitás / cooldown ----
