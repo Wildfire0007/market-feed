@@ -7559,11 +7559,14 @@ def compute_intraday_profile(
         "range_exhaustion_long": False,
         "range_exhaustion_short": False,
         "range_guard": {"long": False, "short": False},
+        "micro_range_position": None,
+        "micro_range_vs_atr": None,
+        "micro_range_guard": {"long": False, "short": False},
         "opening_range_high": None,
         "opening_range_low": None,
         "opening_break": "none",
         "opening_range_minutes": OPENING_RANGE_MINUTES,
-        "opening_drive_ratio": None,
+        "opening_drive_ratio": None,  
         "previous_close": None,
         "opening_gap": None,
         "opening_gap_pct": None,
@@ -7715,6 +7718,33 @@ def compute_intraday_profile(
         if range_position <= lower_threshold and meets_atr:
             exhaustion_short = True
 
+    micro_range_guard = {"long": False, "short": False}
+    micro_range_position = None
+    micro_range_vs_atr = None
+    micro_lookback = 60
+    if not intraday.empty:
+        micro_window = intraday.tail(micro_lookback)
+        micro_high = safe_float(micro_window.get("high", pd.Series(dtype=float)).max())
+        micro_low = safe_float(micro_window.get("low", pd.Series(dtype=float)).min())
+        last_close_val = safe_float(micro_window.get("close", pd.Series(dtype=float)).iloc[-1])
+        if (
+            micro_high is not None
+            and micro_low is not None
+            and last_close_val is not None
+            and micro_high > micro_low
+        ):
+            micro_range = micro_high - micro_low
+            micro_range_position = (last_close_val - micro_low) / micro_range
+            micro_range_vs_atr = (micro_range / float(atr5)) if atr5 not in {None, 0} else None
+            micro_meets_atr = (
+                micro_range_vs_atr is None
+                or micro_range_vs_atr >= max(0.35, INTRADAY_ATR_EXHAUSTION * 0.6)
+            )
+            if micro_range_position >= 0.9 and micro_meets_atr:
+                micro_range_guard["long"] = True
+            if micro_range_position <= 0.1 and micro_meets_atr:
+                micro_range_guard["short"] = True
+
     notes: List[str] = []
     if exhaustion_long:
         notes.append("Intraday range felső része telített — ne üldözd a csúcsot.")
@@ -7750,6 +7780,9 @@ def compute_intraday_profile(
             "range_exhaustion_long": exhaustion_long,
             "range_exhaustion_short": exhaustion_short,
             "range_guard": {"long": exhaustion_long, "short": exhaustion_short},
+            "micro_range_position": micro_range_position,
+            "micro_range_vs_atr": micro_range_vs_atr,
+            "micro_range_guard": micro_range_guard,
             "opening_range_high": opening_high,
             "opening_range_low": opening_low,
             "opening_break": opening_break,
@@ -9376,6 +9409,12 @@ def analyze(asset: str) -> Dict[str, Any]:
     if stale_timeframes.get("k1m") or stale_timeframes.get("k5m"):
         micro_bos_long = micro_bos_short = False
 
+    micro_bias: Optional[str] = None
+    if micro_bos_long and not micro_bos_short:
+        micro_bias = "long"
+    elif micro_bos_short and not micro_bos_long:
+        micro_bias = "short"
+
     ema_cross_long = ema_cross_short = False
     ema9_5m: Optional[pd.Series] = None
     ema21_5m: Optional[pd.Series] = None
@@ -9394,6 +9433,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         nvda_cross_long = ema_cross_long
         nvda_cross_short = ema_cross_short
 
+    meta_bias = trend_bias
     effective_bias = trend_bias
     bias_override_used = False
     bias_override_reason: Optional[str] = None
@@ -9814,6 +9854,28 @@ def analyze(asset: str) -> Dict[str, Any]:
                         msg = "Intraday bias gate feltételek hiányosak — " + " | ".join(missing_msgs)
                         if msg not in bias_gate_notes:
                             bias_gate_notes.append(msg)
+
+    micro_bias_confidence = 0
+    micro_guard_state = intraday_profile.get("micro_range_guard") if isinstance(intraday_profile, dict) else None
+    if micro_bias:
+        micro_bias_confidence += 1
+        if strong_momentum:
+            micro_bias_confidence += 1
+        if isinstance(micro_guard_state, dict):
+            if micro_bias == "long" and not micro_guard_state.get("long"):
+                micro_bias_confidence += 1
+            elif micro_bias == "short" and not micro_guard_state.get("short"):
+                micro_bias_confidence += 1
+    if micro_bias and effective_bias in {"long", "short"} and effective_bias != micro_bias:
+        if micro_bias_confidence >= 2:
+            effective_bias = micro_bias
+            bias_override_used = True
+            bias_override_reason = "Micro bias override: gyors struktúra dominál"
+            reasons.append("Intraday micro-bias előnyben részesítve a belépésnél")
+    elif micro_bias and effective_bias == "neutral":
+        effective_bias = micro_bias
+        bias_override_used = True
+        bias_override_reason = "Micro bias override: neutral -> micro irány"
 
     if effective_bias == "long":
         bos5m = bos5m_long
@@ -10267,15 +10329,28 @@ def analyze(asset: str) -> Dict[str, Any]:
     if isinstance(intraday_profile, dict):
         exhaustion_long = bool(intraday_profile.get("range_exhaustion_long"))
         exhaustion_short = bool(intraday_profile.get("range_exhaustion_short"))
+        micro_guard = intraday_profile.get("micro_range_guard") or {}
+        micro_relief_long = exhaustion_long and not micro_guard.get("long")
+        micro_relief_short = exhaustion_short and not micro_guard.get("short")
         allow_override = bool(
             intraday_profile.get("range_expansion") and strong_momentum
         )
         if effective_bias == "long" and exhaustion_long and not allow_override:
-            range_guard_ok = False
-            range_guard_reason = "Intraday range felső része telített — visszahúzódásra várunk."
+            if micro_relief_long:
+                reasons.append(
+                    "Range guard lazítva: napi sáv teteje, de mikro-range visszahúzódott."
+                )
+            else:
+                range_guard_ok = False
+                range_guard_reason = "Intraday range felső része telített — visszahúzódásra várunk."
         elif effective_bias == "short" and exhaustion_short and not allow_override:
-            range_guard_ok = False
-            range_guard_reason = "Intraday range alsó része telített — visszapattanásra várunk."
+            if micro_relief_short:
+                reasons.append(
+                    "Range guard lazítva: napi sáv alja, de mikro-range visszapattant."
+                )
+            else:
+                range_guard_ok = False
+                range_guard_reason = "Intraday range alsó része telített — visszapattanásra várunk."
     if range_guard_reason and range_guard_reason not in reasons:
         reasons.append(range_guard_reason)
 
@@ -10932,6 +11007,20 @@ def analyze(asset: str) -> Dict[str, Any]:
         if usoil_p_score_meta:
             usoil_overrides.setdefault("p_score_adjustments", {})
             usoil_overrides["p_score_adjustments"].update(usoil_p_score_meta)
+    intraday_p_score_relax: Optional[float] = None
+    if micro_bias and effective_bias == micro_bias:
+        relax_base = 3.0
+        if micro_bias == "short":
+            relax_base += 1.5
+        if isinstance(intraday_profile, dict):
+            state = intraday_profile.get("range_state")
+            if state in {"expansion"}:
+                relax_base *= 0.5
+        intraday_p_score_relax = max(0.0, relax_base)
+        p_score_min_local = max(0.0, p_score_min_local - intraday_p_score_relax)
+        reasons.append(
+            f"Intraday P-score lazítás: micro-bias {micro_bias} elsőbbséget kap (−{intraday_p_score_relax:.1f})"
+        )
     if asset == "BTCUSD" and intervention_band in {"HIGH", "EXTREME"} and effective_bias == "long":
         p_score_min_local += INTERVENTION_P_SCORE_ADD
         note = (
@@ -10942,6 +11031,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         if note and note not in reasons:
             reasons.append(note)
         entry_thresholds_meta["p_score_min_intervention_add"] = INTERVENTION_P_SCORE_ADD
+    entry_thresholds_meta["bias_meta"] = meta_bias
+    entry_thresholds_meta["bias_micro"] = micro_bias
+    if intraday_p_score_relax is not None:
+        entry_thresholds_meta["p_score_intraday_relax"] = intraday_p_score_relax
     entry_thresholds_meta["p_score_min_effective"] = p_score_min_local
 
     tp_net_threshold = tp_net_min_for(asset)
@@ -12608,6 +12701,31 @@ def analyze(asset: str) -> Dict[str, Any]:
             order_flow_metrics,
             score_threshold=precision_threshold_value,
         )
+        counter_direction = "sell" if precision_direction == "buy" else "buy"
+        counter_plan = compute_precision_entry(
+            asset,
+            counter_direction,
+            k1m_closed,
+            k5m_closed,
+            price_for_calc,
+            atr5_value,
+            order_flow_metrics,
+            score_threshold=precision_threshold_value,
+        )
+        if counter_plan:
+            precision_plan.setdefault("alternates", {})[counter_direction] = {
+                "direction": counter_plan.get("direction"),
+                "entry": counter_plan.get("entry"),
+                "entry_window": counter_plan.get("entry_window"),
+                "stop_loss": counter_plan.get("stop_loss"),
+                "take_profit_1": counter_plan.get("take_profit_1"),
+                "take_profit_2": counter_plan.get("take_profit_2"),
+                "risk": counter_plan.get("risk"),
+                "score": counter_plan.get("score"),
+                "confidence": counter_plan.get("confidence"),
+                "trigger_levels": counter_plan.get("trigger_levels"),
+                "order_flow_ready": counter_plan.get("order_flow_ready"),
+            }
 
     if precision_disabled_due_to_data_gap:
         precision_trigger_state = "disabled"
@@ -14516,6 +14634,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
