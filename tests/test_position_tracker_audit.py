@@ -33,6 +33,7 @@ def test_open_and_save_emit_audit_fields(capfd, tmp_path, monkeypatch):
         side="buy",
         entry=25.0,
         sl=24.5,
+        tp1=25.5,
         tp2=26.0,
         opened_at_utc=datetime.now(timezone.utc).isoformat(),
     )
