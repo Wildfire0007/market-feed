@@ -5581,10 +5581,12 @@ def _resolve_setup_grade(signal_data: Dict[str, Any], decision: str) -> Optional
     return None
 
 
-def _extract_trade_levels(signal_data: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+def _extract_trade_levels(
+    signal_data: Dict[str, Any]
+) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
     if not isinstance(signal_data, dict):
-        return None, None, None
-
+        return None, None, None, None
+      
     trade_block = signal_data.get("trade") or {}
     levels_block = signal_data.get("levels") or {}
 
@@ -5599,6 +5601,12 @@ def _extract_trade_levels(signal_data: Dict[str, Any]) -> Tuple[Optional[float],
         sl = trade_block.get("sl")
     if sl is None and isinstance(levels_block, dict):
         sl = levels_block.get("sl")
+
+    tp1 = signal_data.get("tp1")
+    if tp1 is None and isinstance(trade_block, dict):
+        tp1 = trade_block.get("tp1")
+    if tp1 is None and isinstance(levels_block, dict):
+        tp1 = levels_block.get("tp1")
 
     tp2 = signal_data.get("tp2")
     if tp2 is None and isinstance(trade_block, dict):
@@ -5615,11 +5623,15 @@ def _extract_trade_levels(signal_data: Dict[str, Any]) -> Tuple[Optional[float],
     except (TypeError, ValueError):
         sl = None
     try:
+        tp1 = float(tp1) if tp1 is not None else None
+    except (TypeError, ValueError):
+        tp1 = None
+    try:
         tp2 = float(tp2) if tp2 is not None else None
     except (TypeError, ValueError):
         tp2 = None
 
-    return entry, sl, tp2
+    return entry, sl, tp1, tp2
 
 
 def _load_signal_state(path: Path, history_window: int) -> Dict[str, Any]:
@@ -5893,7 +5905,7 @@ def apply_signal_stability_layer(
     open_conditions_met = manual_entry_allowed
     if analysis_can_write and open_conditions_met:
         if setup_grade in {"A", "B"}:
-            entry_level, sl_level, tp2_level = _extract_trade_levels(payload)
+            entry_level, sl_level, tp1_level, tp2_level = _extract_trade_levels(payload)
             position_tracker.log_audit_event(
                 "entry open attempt",
                 event="OPEN_ATTEMPT",
@@ -5913,6 +5925,7 @@ def apply_signal_stability_layer(
                 manual_cooldown_active=manual_state.get("cooldown_active"),
                 entry_level=entry_level,
                 sl=sl_level,
+                tp1=tp1_level,
                 tp2=tp2_level,
             )
             manual_positions = position_tracker.open_position(
@@ -5920,6 +5933,7 @@ def apply_signal_stability_layer(
                 side="long" if entry_side == "buy" else "short",
                 entry=entry_level,
                 sl=sl_level,
+                tp1=tp1_level,
                 tp2=tp2_level,
                 opened_at_utc=to_utc_iso(now_dt),
                 positions=manual_positions,
@@ -5927,11 +5941,12 @@ def apply_signal_stability_layer(
             positions_changed = True
             entry_opened = True
             LOGGER.debug(
-                "OPEN state transition %s %s entry=%s sl=%s tp2=%s opened_at=%s",
+                "OPEN state transition %s %s entry=%s sl=%s tp1=%s tp2=%s opened_at=%s",
                 asset,
                 entry_side,
                 entry_level,
                 sl_level,
+                tp1_level,
                 tp2_level,
                 to_utc_iso(now_dt),
             )
@@ -5980,7 +5995,7 @@ def apply_signal_stability_layer(
         tracked_levels = _extract_tracked_levels(asset, manual_state, manual_positions)
 
         if entry_opened:
-            entry_level, sl_level, tp2_level = _extract_trade_levels(payload)
+            entry_level, sl_level, tp1_level, tp2_level = _extract_trade_levels(payload)
             position_tracker.log_audit_event(
                 "entry open committed",
                 event="OPEN_COMMIT",
@@ -5991,6 +6006,7 @@ def apply_signal_stability_layer(
                 setup_grade=setup_grade,
                 entry=entry_level,
                 sl=sl_level,
+                tp1=tp1_level,
                 tp2=tp2_level,
                 positions_file=positions_path,
             )
@@ -14634,6 +14650,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
