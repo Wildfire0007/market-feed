@@ -897,6 +897,29 @@ def build_mobile_embed_for_asset(
         tp1 = signal_data.get("tp1")
         tp2 = signal_data.get("tp2")
         rr = signal_data.get("rr")
+
+        trade_block = signal_data.get("trade") or {}
+        levels_block = signal_data.get("levels") or {}
+
+        if entry is None and isinstance(trade_block, dict):
+            entry = trade_block.get("entry")
+        if entry is None and isinstance(levels_block, dict):
+            entry = levels_block.get("entry")
+
+        if sl is None and isinstance(trade_block, dict):
+            sl = trade_block.get("sl")
+        if sl is None and isinstance(levels_block, dict):
+            sl = levels_block.get("sl")
+
+        if tp1 is None and isinstance(trade_block, dict):
+            tp1 = trade_block.get("tp1")
+        if tp1 is None and isinstance(levels_block, dict):
+            tp1 = levels_block.get("tp1")
+
+        if tp2 is None and isinstance(trade_block, dict):
+            tp2 = trade_block.get("tp2")
+        if tp2 is None and isinstance(levels_block, dict):
+            tp2 = levels_block.get("tp2")
    
     # --- Mobil + pszicho struktúra (7–8 sor) ---
     tracked_entry = tracked_levels.get("entry") or entry
@@ -997,11 +1020,12 @@ def build_mobile_embed_for_asset(
         if (
             intent == "entry"
             and decision_upper in {"BUY", "SELL"}
-            and all(v is not None for v in (entry, sl, tp1, tp2))
+            and all(v is not None for v in (tracked_entry, tracked_sl, tracked_tp1, tracked_tp2))
         ):
             rr_txt = f"RR≈`{rr}`" if rr is not None else ""
             entry_levels_txt = (
-                f"`{format_price(entry, asset)}` • SL `{format_price(sl, asset)}` • TP1 `{format_price(tp1, asset)}` • TP2 `{format_price(tp2, asset)}` • {rr_txt}"
+                f"`{format_price(tracked_entry, asset)}` • SL `{format_price(tracked_sl, asset)}` "
+                f"• TP1 `{format_price(tracked_tp1, asset)}` • TP2 `{format_price(tracked_tp2, asset)}` • {rr_txt}"
             ).strip(" • ")
             lines.append(f"🎯 Belépő {entry_levels_txt}")
             add_field_once("Belépő", entry_levels_txt)
@@ -1064,17 +1088,19 @@ def build_mobile_embed_for_asset(
         if (
             intent == "entry"
             and decision_upper in {"BUY", "SELL"}
-            and all(v is not None for v in (entry, sl, tp1, tp2))
+            and all(v is not None for v in (tracked_entry, tracked_sl, tracked_tp1, tracked_tp2))
         ):
             rr_txt = f"RR≈`{rr}`" if rr is not None else ""
             entry_levels_txt = (
-                f"`{format_price(entry, asset)}` • SL `{format_price(sl, asset)}` • TP1 `{format_price(tp1, asset)}` • TP2 `{format_price(tp2, asset)}` • {rr_txt}"
+                f"`{format_price(tracked_entry, asset)}` • SL `{format_price(tracked_sl, asset)}` "
+                f"• TP1 `{format_price(tracked_tp1, asset)}` • TP2 `{format_price(tracked_tp2, asset)}` • {rr_txt}"
             ).strip(" • ")
             entry_lines.append(f"🎯 Belépő {entry_levels_txt}")
             add_field_once("Belépő", entry_levels_txt)
         if gates_missing and entry_status_text != "NINCS BELÉPŐ":
             reasons = translate_reasons(gates_missing)
             entry_lines.append(f"🧠 Figyelem: {reasons}")
+            add_field_once("P-score", line_score)
         entry_lines.append(line_score)
         add_field_once("P-score", line_score)
         if entry_status_text == "NINCS BELÉPŐ" and intent == "entry" and gates_missing:
