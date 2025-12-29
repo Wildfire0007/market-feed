@@ -6011,6 +6011,33 @@ def apply_signal_stability_layer(
                 positions_file=positions_path,
             )
 
+    # Always export the trade levels into the payload so the downstream signal.json
+    # contains normalized entry/SL/TP values even when no manual position changes
+    # occur during the analysis pass.
+    entry_level, sl_level, tp1_level, tp2_level = _extract_trade_levels(payload)
+    if entry_level is not None and payload.get("entry") is None:
+        payload["entry"] = entry_level
+    if sl_level is not None and payload.get("sl") is None:
+        payload["sl"] = sl_level
+    if tp1_level is not None and payload.get("tp1") is None:
+        payload["tp1"] = tp1_level
+    if tp2_level is not None and payload.get("tp2") is None:
+        payload["tp2"] = tp2_level
+
+    payload["trade_levels"] = {
+        key: value
+        for key, value in (
+            ("entry", entry_level),
+            ("sl", sl_level),
+            ("tp1", tp1_level),
+            ("tp2", tp2_level),
+        )
+        if value is not None
+    }
+
+    if not tracked_levels:
+        tracked_levels = _extract_tracked_levels(asset, manual_state, manual_positions)
+
     payload["position_state"] = {
         "tracking_enabled": manual_state.get("tracking_enabled"),
         "side": manual_state.get("side"),
@@ -14650,6 +14677,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
