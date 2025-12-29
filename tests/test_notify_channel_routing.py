@@ -151,6 +151,42 @@ def test_entry_embed_uses_pre_dispatch_manual_state():
     assert "Pozíciómenedzsment" not in description
 
 
+def test_entry_levels_shown_when_kind_entry_even_without_intent():
+    sig = {
+        "asset": "BTCUSD",
+        "signal": "sell",
+        "intent": "standby",
+        "entry": 100.0,
+        "sl": 95.0,
+        "tp1": 105.0,
+        "tp2": 110.0,
+        "rr": 2.0,
+        "setup_grade": "A",
+        "notify": {"should_notify": True},
+        "position_state": {"has_position": False},
+    }
+
+    embed = notify_discord.build_mobile_embed_for_asset(
+        "BTCUSD",
+        state={},
+        signal_data=sig,
+        decision="sell",
+        mode="core",
+        is_stable=True,
+        is_flip=False,
+        is_invalidate=False,
+        kind="entry",
+        manual_positions={},
+    )
+
+    description = embed.get("description") or ""
+
+    assert "Belépő" in description
+    assert "SL" in description
+    assert "TP1" in description
+    assert "TP2" in description
+
+
 def test_market_scan_and_heartbeat_suppress_manual_position_line():
     manual_state = {
         "has_position": True,
