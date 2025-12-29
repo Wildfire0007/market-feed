@@ -323,6 +323,7 @@ def compute_state(
             "opened_at_utc": None,
             "entry": None,
             "sl": None,
+            "tp1": None,
             "tp2": None,
             "position": None,
         }
@@ -345,6 +346,7 @@ def compute_state(
     opened_at = asset_entry.get("opened_at_utc") if isinstance(asset_entry, dict) else None
     entry_level = asset_entry.get("entry") if isinstance(asset_entry, dict) else None
     sl_level = asset_entry.get("sl") if isinstance(asset_entry, dict) else None
+    tp1_level = asset_entry.get("tp1") if isinstance(asset_entry, dict) else None
     tp2_level = asset_entry.get("tp2") if isinstance(asset_entry, dict) else None
 
     return {
@@ -358,6 +360,7 @@ def compute_state(
         "opened_at_utc": opened_at,
         "entry": entry_level,
         "sl": sl_level,
+        "tp1": tp1_level,
         "tp2": tp2_level,
         "position": deepcopy(asset_entry) if isinstance(asset_entry, dict) else None,
     }
@@ -368,6 +371,7 @@ def open_position(
     side: Optional[str],
     entry: Optional[float],
     sl: Optional[float],
+    tp1: Optional[float],
     tp2: Optional[float],
     opened_at_utc: str,
     positions: Optional[Dict[str, Any]] = None,
@@ -381,6 +385,7 @@ def open_position(
         "opened_at_utc": opened_at_utc,
         "entry": entry,
         "sl": sl,
+        "tp1": tp1,
         "tp2": tp2,
         "closed_at_utc": None,
         "close_reason": None,
@@ -394,6 +399,7 @@ def open_position(
         normalized_side=norm_side,
         entry=entry,
         sl=sl,
+        tp1=tp1,
         tp2=tp2,
         opened_at_utc=opened_at_utc,
         previous_position=previous_entry,
