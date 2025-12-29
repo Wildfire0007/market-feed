@@ -5488,6 +5488,14 @@ def _format_manual_position_note(
     entry = tracked_levels.get("entry") or manual_state.get("entry")
     sl = tracked_levels.get("sl") or manual_state.get("sl")
     tp2 = tracked_levels.get("tp2") or manual_state.get("tp2")
+    position_obj = manual_state.get("position") if isinstance(manual_state, dict) else {}
+    position_reason = None
+    if isinstance(position_obj, dict):
+        for key in ("close_reason", "reason", "note"):
+            value = position_obj.get(key)
+            if isinstance(value, str) and value.strip():
+                position_reason = value.strip()
+                break
 
     details: List[str] = []
     if opened_at:
@@ -5500,7 +5508,8 @@ def _format_manual_position_note(
         details.append(f"TP2: {tp2}")
 
     detail_suffix = " (" + ", ".join(details) + ")" if details else ""
-    return f"Pozíciómenedzsment: aktív {side_txt} pozíció{detail_suffix}"
+    reason_suffix = f" — ok: {position_reason}" if position_reason else ""
+    return f"Pozíciómenedzsment: aktív {side_txt} pozíció{detail_suffix}{reason_suffix}"
 
 
 def _extract_spot_price(payload: Dict[str, Any]) -> Optional[float]:
@@ -5632,6 +5641,28 @@ def _extract_trade_levels(
         tp2 = None
 
     return entry, sl, tp1, tp2
+
+
+def extract_trade_levels(signal_data: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    """Public helper to normalize trade levels and RR into a flat mapping."""
+
+    entry, sl, tp1, tp2 = _extract_trade_levels(signal_data)
+
+    rr = None
+    try:
+        rr = float(signal_data.get("rr")) if signal_data.get("rr") is not None else None
+    except Exception:
+        rr = None
+
+    if rr is None and entry is not None and sl is not None and tp1 is not None:
+        try:
+            risk = abs(float(entry) - float(sl))
+            if risk > 0:
+                rr = abs(float(tp1) - float(entry)) / risk
+        except Exception:
+            rr = None
+
+    return {"entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": rr}
 
 
 def _load_signal_state(path: Path, history_window: int) -> Dict[str, Any]:
@@ -6014,26 +6045,24 @@ def apply_signal_stability_layer(
     # Always export the trade levels into the payload so the downstream signal.json
     # contains normalized entry/SL/TP values even when no manual position changes
     # occur during the analysis pass.
-    entry_level, sl_level, tp1_level, tp2_level = _extract_trade_levels(payload)
-    if entry_level is not None and payload.get("entry") is None:
-        payload["entry"] = entry_level
-    if sl_level is not None and payload.get("sl") is None:
-        payload["sl"] = sl_level
-    if tp1_level is not None and payload.get("tp1") is None:
-        payload["tp1"] = tp1_level
-    if tp2_level is not None and payload.get("tp2") is None:
-        payload["tp2"] = tp2_level
+    trade_levels = extract_trade_levels(payload)
+    entry_level = trade_levels.get("entry")
+    sl_level = trade_levels.get("sl")
+    tp1_level = trade_levels.get("tp1")
+    tp2_level = trade_levels.get("tp2")
+    rr_value = trade_levels.get("rr")
 
-    payload["trade_levels"] = {
-        key: value
-        for key, value in (
-            ("entry", entry_level),
-            ("sl", sl_level),
-            ("tp1", tp1_level),
-            ("tp2", tp2_level),
-        )
-        if value is not None
-    }
+    for key, value in (
+        ("entry", entry_level),
+        ("sl", sl_level),
+        ("tp1", tp1_level),
+        ("tp2", tp2_level),
+        ("rr", rr_value),
+    ):
+        if value is not None and payload.get(key) is None:
+            payload[key] = value
+
+    payload["trade_levels"] = {key: value for key, value in trade_levels.items() if value is not None}
 
     if not tracked_levels:
         tracked_levels = _extract_tracked_levels(asset, manual_state, manual_positions)
@@ -14677,6 +14706,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
