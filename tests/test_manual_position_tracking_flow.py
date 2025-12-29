@@ -365,6 +365,82 @@ class ManualPositionFlowTests(unittest.TestCase):
         assert "OPEN_ATTEMPT" in event_kinds
         assert "OPEN_COMMIT" in event_kinds
 
+    def test_notify_entry_opens_even_when_state_change_suppresses_alert(self) -> None:
+        now = datetime.now(timezone.utc)
+        now_iso = self._now_iso()
+        tracking_cfg = {"enabled": True}
+        manual_positions: dict = {}
+        manual_state = position_tracker.compute_state(
+            "BTCUSD", tracking_cfg, manual_positions, now
+        )
+        sig = {"entry": 101.0, "sl": 99.0, "tp1": 104.0, "tp2": 110.0}
+
+        with mock.patch.object(
+            position_tracker, "open_position", wraps=position_tracker.open_position
+        ) as open_mock:
+            manual_positions, manual_state, positions_changed, entry_opened = notify_discord._apply_manual_position_transitions(
+                asset="BTCUSD",
+                intent="entry",
+                decision="buy",
+                setup_grade="A",
+                notify_meta={"should_notify": False, "reason": "no_state_change"},
+                signal_payload=sig,
+                manual_tracking_enabled=True,
+                can_write_positions=True,
+                manual_state=manual_state,
+                manual_positions=manual_positions,
+                tracking_cfg=tracking_cfg,
+                now_dt=now,
+                now_iso=now_iso,
+                send_kind="normal",
+                display_stable=True,
+                missing_list=[],
+                cooldown_map={},
+                cooldown_default=20,
+            )
+
+        open_mock.assert_called_once()
+        assert positions_changed is True
+        assert entry_opened is True
+        assert manual_state["has_position"] is True
+
+    def test_notify_entry_blocks_when_cooldown_reason_present(self) -> None:
+        now = datetime.now(timezone.utc)
+        now_iso = self._now_iso()
+        tracking_cfg = {"enabled": True}
+        manual_positions: dict = {}
+        manual_state = position_tracker.compute_state(
+            "BTCUSD", tracking_cfg, manual_positions, now
+        )
+        sig = {"entry": 101.0, "sl": 99.0, "tp1": 104.0, "tp2": 110.0}
+
+        with mock.patch.object(position_tracker, "open_position") as open_mock:
+            manual_positions, manual_state, positions_changed, entry_opened = notify_discord._apply_manual_position_transitions(
+                asset="BTCUSD",
+                intent="entry",
+                decision="buy",
+                setup_grade="A",
+                notify_meta={"should_notify": True, "reason": "cooldown_active"},
+                signal_payload=sig,
+                manual_tracking_enabled=True,
+                can_write_positions=True,
+                manual_state=manual_state,
+                manual_positions=manual_positions,
+                tracking_cfg=tracking_cfg,
+                now_dt=now,
+                now_iso=now_iso,
+                send_kind="normal",
+                display_stable=True,
+                missing_list=[],
+                cooldown_map={},
+                cooldown_default=20,
+            )
+
+        open_mock.assert_not_called()
+        assert positions_changed is False
+        assert entry_opened is False
+        assert manual_state["has_position"] is False
+
     def test_manual_entry_requires_stable_send_kind(self) -> None:
         now = datetime.now(timezone.utc)
         now_iso = self._now_iso()
