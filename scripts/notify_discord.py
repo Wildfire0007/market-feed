@@ -763,6 +763,7 @@ def build_mobile_embed_for_asset(
     notify_reason = notify_meta.get("reason") if isinstance(notify_meta, dict) else None
     position_state = signal_data.get("position_state") if isinstance(signal_data, dict) else {}
     intent = (signal_data or {}).get("intent")
+    is_entry_intent = (intent == "entry") or (kind == "entry")
     has_tracked_position = bool(position_state.get("has_position"))
     cooldown_active = bool(position_state.get("cooldown_active"))
     cooldown_until = position_state.get("cooldown_until_utc") if isinstance(position_state, dict) else None
@@ -837,7 +838,7 @@ def build_mobile_embed_for_asset(
             color = COLORS.get("SHORT", color)
         else:
             color = COLORS.get("WAIT", color)
-    elif intent == "entry" and decision_upper in {"BUY", "SELL"}:
+    elif is_entry_intent and decision_upper in {"BUY", "SELL"}:
         primary_header = f"🚀 ENTRY ({decision_upper})"
     elif reason_override:
         primary_header = reason_override
@@ -1018,7 +1019,7 @@ def build_mobile_embed_for_asset(
         if regime_line:
             lines.append(regime_line)
         if (
-            intent == "entry"
+            is_entry_intent
             and decision_upper in {"BUY", "SELL"}
             and all(v is not None for v in (tracked_entry, tracked_sl, tracked_tp1, tracked_tp2))
         ):
@@ -1050,12 +1051,12 @@ def build_mobile_embed_for_asset(
             entry_missing = entry_diag.get("missing") or []
         else:
             entry_missing = []
-        gates_missing = entry_missing if intent == "entry" else []
+        gates_missing = entry_missing if is_entry_intent else []
         if gates_missing and entry_status_text != "NINCS BELÉPŐ":
             reasons = translate_reasons(gates_missing)
             lines.append(f"🧠 Figyelem: {reasons}")
-        lines.append(line_score)  
-        if entry_status_text == "NINCS BELÉPŐ" and intent == "entry":
+        lines.append(line_score)
+        if entry_status_text == "NINCS BELÉPŐ" and is_entry_intent:
             if gates_missing:
                 reasons_hu = translate_reasons(gates_missing)
                 lines.append(f"⛔ Blokkolók: {reasons_hu}")
@@ -1066,7 +1067,7 @@ def build_mobile_embed_for_asset(
             entry_missing = entry_diag.get("missing") or []
         else:
             entry_missing = []
-        gates_missing = entry_missing if intent == "entry" else []
+        gates_missing = entry_missing if is_entry_intent else []
 
         entry_lines.append("➕ ÚJ BELÉPŐK")
         if cooldown_active:
@@ -1085,7 +1086,7 @@ def build_mobile_embed_for_asset(
         if regime_line:
             entry_lines.append(regime_line)
         if (
-            intent == "entry"
+            is_entry_intent
             and decision_upper in {"BUY", "SELL"}
             and all(v is not None for v in (tracked_entry, tracked_sl, tracked_tp1, tracked_tp2))
         ):
@@ -1100,7 +1101,7 @@ def build_mobile_embed_for_asset(
             reasons = translate_reasons(gates_missing)
             entry_lines.append(f"🧠 Figyelem: {reasons}")           
         entry_lines.append(line_score)        
-        if entry_status_text == "NINCS BELÉPŐ" and intent == "entry" and gates_missing:
+        if entry_status_text == "NINCS BELÉPŐ" and is_entry_intent and gates_missing:
             reasons_hu = translate_reasons(gates_missing)
             entry_lines.append(f"⛔ Blokkolók: {reasons_hu}")
 
