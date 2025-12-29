@@ -27,6 +27,7 @@ class ManualPositionFlowTests(unittest.TestCase):
             side="long",
             entry=100.0,
             sl=95.0,
+            tp1=110.0,
             tp2=120.0,
             opened_at_utc=now_iso,
             positions={},
@@ -45,6 +46,7 @@ class ManualPositionFlowTests(unittest.TestCase):
             "tracked_levels": {
                 "entry": 100.0,
                 "sl": 95.0,
+                "tp1": 110.0,
                 "tp2": 120.0,
                 "opened_at_utc": now_iso,
             },
@@ -74,6 +76,7 @@ class ManualPositionFlowTests(unittest.TestCase):
             side="long",
             entry=100.0,
             sl=90.0,
+            tp1=105.0,
             tp2=110.0,
             opened_at_utc=now_iso,
             positions={},
@@ -309,7 +312,7 @@ class ManualPositionFlowTests(unittest.TestCase):
         manual_state = position_tracker.compute_state(
             "BTCUSD", tracking_cfg, manual_positions, now
         )
-        sig = {"entry": 101.0, "sl": 99.0, "tp2": 110.0}
+        sig = {"entry": 101.0, "sl": 99.0, "tp1": 104.0, "tp2": 110.0}
         events = []
 
         def _capture(message: str, *, event: str, **fields: object) -> None:
@@ -341,7 +344,7 @@ class ManualPositionFlowTests(unittest.TestCase):
             if positions_changed:
                 position_tracker.save_positions_atomic("/tmp/ignore.json", manual_positions)
             if positions_changed and entry_opened:
-                entry_level, sl_level, tp2_level = notify_discord.extract_trade_levels(sig)
+                entry_level, sl_level, tp1_level, tp2_level = notify_discord.extract_trade_levels(sig)
                 position_tracker.log_audit_event(
                     "entry open committed",
                     event="OPEN_COMMIT",
@@ -352,6 +355,7 @@ class ManualPositionFlowTests(unittest.TestCase):
                     setup_grade="A",
                     entry=entry_level,
                     sl=sl_level,
+                    tp1=tp1_level,
                     tp2=tp2_level,
                     positions_file="/tmp/ignore.json",
                     send_kind="normal",
@@ -378,7 +382,7 @@ class ManualPositionFlowTests(unittest.TestCase):
                 decision="buy",
                 setup_grade="A",
                 notify_meta={"should_notify": True},
-                signal_payload={"entry": 101.0, "sl": 99.0, "tp2": 110.0},
+                signal_payload={"entry": 101.0, "sl": 99.0, "tp1": 104.0, "tp2": 110.0},
                 manual_tracking_enabled=True,
                 can_write_positions=True,
                 manual_state=manual_state,
@@ -406,7 +410,7 @@ class ManualPositionFlowTests(unittest.TestCase):
         manual_state = position_tracker.compute_state(
             "BTCUSD", tracking_cfg, manual_positions, now
         )
-        sig = {"entry": 101.0, "sl": 99.0, "tp2": 110.0}
+        sig = {"entry": 101.0, "sl": 99.0, "tp1": 104.0, "tp2": 110.0}
 
         events = []
 
@@ -435,7 +439,7 @@ class ManualPositionFlowTests(unittest.TestCase):
         )
 
         if positions_changed and entry_opened:
-            entry_level, sl_level, tp2_level = notify_discord.extract_trade_levels(sig)
+            entry_level, sl_level, tp1_level, tp2_level = notify_discord.extract_trade_levels(sig)
             _capture(
                 "entry open committed",
                 event="OPEN_COMMIT",
@@ -446,6 +450,7 @@ class ManualPositionFlowTests(unittest.TestCase):
                 setup_grade="A",
                 entry=entry_level,
                 sl=sl_level,
+                tp1=tp1_level,
                 tp2=tp2_level,
                 positions_file="/tmp/ignore.json",
                 send_kind=None,
