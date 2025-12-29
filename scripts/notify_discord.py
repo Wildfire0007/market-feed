@@ -2040,6 +2040,20 @@ def _load_prior_open_commits(audit_path: Path) -> Set[str]:
     return assets
 
 
+def _notify_allows_manual_entry(notify_meta: Optional[Dict[str, Any]]) -> bool:
+    """Gate manual entry by hard blockers only, not by notify visibility."""
+
+    reason = (notify_meta or {}).get("reason")
+    if reason in {
+        "cooldown_active",
+        "entry_cooldown_active",
+        "hard_exit_cooldown_active",
+        "flip_flop_guard",
+    }:
+        return False
+    return True
+
+
 def _apply_manual_position_transitions(
     *,
     asset: str,
@@ -2093,7 +2107,7 @@ def _apply_manual_position_transitions(
         and can_write_positions
         and intent == "entry"
         and manual_state.get("is_flat")
-        and bool((notify_meta or {}).get("should_notify", True))
+        and _notify_allows_manual_entry(notify_meta)
         and setup_grade in {"A", "B"}
         and decision in ("buy", "sell")
         and send_kind in {"normal", "flip"}
@@ -2424,8 +2438,7 @@ def _finalize_entry_commit(
         manual_state = position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt)
         return manual_positions, manual_state, entry_record.commit_result
 
-    notify_meta = pending.get("notify_meta") or {}
-    notify_should_notify = bool(notify_meta.get("should_notify", True))
+    notify_meta = pending.get("notify_meta") or {}    
     manual_state_pre = pending.get("manual_state_pre") or {}
 
     def _fail(reason: str) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
@@ -2446,7 +2459,7 @@ def _finalize_entry_commit(
         return _fail("gating_failed")
     if pending.get("setup_grade") not in {"A", "B"}:
         return _fail("gating_failed")
-    if not notify_should_notify:
+    if not _notify_allows_manual_entry(notify_meta):
         return _fail("gating_failed")
 
     manual_state = position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt)
