@@ -11728,6 +11728,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         reasons.append("Likviditási kapu lazítva erős momentum miatt")
 
     # --- Momentum feltételek (override) — kriptókra (zárt 5m-ből) ---
+    precision_direction: Optional[str] = None
     momentum_used = False
     mom_dir: Optional[str] = None
     mom_atr_ok: Optional[bool] = None
@@ -12665,7 +12666,6 @@ def analyze(asset: str) -> Dict[str, Any]:
                     msg_net = f"TP1 nettó profit ≈ {tp1_net_pct_value*100:.2f}%"
                     if msg_net not in reasons:
                         reasons.append(msg_net)
-        precision_direction: Optional[str] = None
     execution_playbook: List[Dict[str, Any]] = []
     if decision in ("buy", "sell"):
         precision_direction = decision
@@ -14634,6 +14634,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
