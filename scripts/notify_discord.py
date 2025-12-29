@@ -3458,8 +3458,15 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
 
     p_raw = int(sig.get("probability", 0) or 0)
     p = 0 if closed else p_raw
-    entry = sig.get("entry"); sl = sig.get("sl"); t1 = sig.get("tp1"); t2 = sig.get("tp2")
+    entry, sl, t1, t2 = extract_trade_levels(sig)
     rr = sig.get("rr")
+    if rr is None and isinstance(sig, dict):
+        trade_block = sig.get("trade") or {}
+        levels_block = sig.get("levels") or {}
+        rr = (
+            (trade_block.get("rr") if isinstance(trade_block, dict) else None)
+            or (levels_block.get("rr") if isinstance(levels_block, dict) else None)
+        )
     mode = gates_mode(sig)
     mode_pretty = {
         "analysis_error": "analysis hiba",
@@ -3651,9 +3658,13 @@ def build_embed_for_asset(asset: str, sig: dict, is_stable: bool, kind: str = "n
     if position_note:
         if not any(line.strip() == position_note for line in lines):
             lines.append(f"🧭 {position_note}")
-    # RR/TP/SL sor (ha minden adat megvan)
-    if dec in ("BUY", "SELL") and all(v is not None for v in (entry, sl, t1, t2, rr)):
-        lines.append(f"@ `{fmt_num(entry)}` • SL `{fmt_num(sl)}` • TP1 `{fmt_num(t1)}` • TP2 `{fmt_num(t2)}` • RR≈`{rr}`")
+    # RR/TP/SL sor (ha az ár-szintek megvannak)
+    if dec in ("BUY", "SELL") and all(v is not None for v in (entry, sl, t1, t2)):
+        rr_txt = f" • RR≈`{rr}`" if rr is not None else ""
+        lines.append(
+            f"@ `{fmt_num(entry)}` • SL `{fmt_num(sl)}` • TP1 `{fmt_num(t1)}` "
+            f"• TP2 `{fmt_num(t2)}`{rr_txt}"
+        )  
     # Stabilizálás információ
     if dec in ("BUY", "SELL") and kind in ("normal", "heartbeat"):
         if core_bos_pending:
