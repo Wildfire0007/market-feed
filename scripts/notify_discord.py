@@ -928,7 +928,15 @@ def build_mobile_embed_for_asset(
        
     lines: List[str] = []
     entry_lines: List[str] = []
-    
+    fields: List[Dict[str, Any]] = []
+
+    def add_field_once(name: str, value: str) -> None:
+        if not value:
+            return
+        if any(f.get("name") == name for f in fields):
+            return
+        fields.append({"name": name, "value": value, "inline": False})
+      
     grade_emoji = "🟢" if setup_info["grade"] == "A" else "🟡" if setup_info["grade"] == "B" else "⚪"
     setup_direction = resolve_setup_direction(signal_data, decision_upper)
     direction_suffix = ""
@@ -992,11 +1000,11 @@ def build_mobile_embed_for_asset(
             and all(v is not None for v in (entry, sl, tp1, tp2))
         ):
             rr_txt = f"RR≈`{rr}`" if rr is not None else ""
-            lines.append(
-                f"🎯 Belépő `{format_price(entry, asset)}` • SL `{format_price(sl, asset)}` • TP1 `{format_price(tp1, asset)}` • TP2 `{format_price(tp2, asset)}` • {rr_txt}".strip(
-                    " • "
-                )
-            )
+            entry_levels_txt = (
+                f"`{format_price(entry, asset)}` • SL `{format_price(sl, asset)}` • TP1 `{format_price(tp1, asset)}` • TP2 `{format_price(tp2, asset)}` • {rr_txt}"
+            ).strip(" • ")
+            lines.append(f"🎯 Belépő {entry_levels_txt}")
+            add_field_once("Belépő", entry_levels_txt)
         if position_note:
             lines.append(f"🧭 {position_note}")
         if intent in {"hard_exit", "manage_position"}:
@@ -1023,6 +1031,7 @@ def build_mobile_embed_for_asset(
             reasons = translate_reasons(gates_missing)
             lines.append(f"🧠 Figyelem: {reasons}")
         lines.append(line_score)
+        add_field_once("P-score", line_score)
         if entry_status_text == "NINCS BELÉPŐ" and intent == "entry":
             if gates_missing:
                 reasons_hu = translate_reasons(gates_missing)
@@ -1058,15 +1067,16 @@ def build_mobile_embed_for_asset(
             and all(v is not None for v in (entry, sl, tp1, tp2))
         ):
             rr_txt = f"RR≈`{rr}`" if rr is not None else ""
-            entry_lines.append(
-                f"🎯 Belépő `{format_price(entry, asset)}` • SL `{format_price(sl, asset)}` • TP1 `{format_price(tp1, asset)}` • TP2 `{format_price(tp2, asset)}` • {rr_txt}".strip(
-                    " • "
-                )
-            )
+            entry_levels_txt = (
+                f"`{format_price(entry, asset)}` • SL `{format_price(sl, asset)}` • TP1 `{format_price(tp1, asset)}` • TP2 `{format_price(tp2, asset)}` • {rr_txt}"
+            ).strip(" • ")
+            entry_lines.append(f"🎯 Belépő {entry_levels_txt}")
+            add_field_once("Belépő", entry_levels_txt)
         if gates_missing and entry_status_text != "NINCS BELÉPŐ":
             reasons = translate_reasons(gates_missing)
             entry_lines.append(f"🧠 Figyelem: {reasons}")
         entry_lines.append(line_score)
+        add_field_once("P-score", line_score)
         if entry_status_text == "NINCS BELÉPŐ" and intent == "entry" and gates_missing:
             reasons_hu = translate_reasons(gates_missing)
             entry_lines.append(f"⛔ Blokkolók: {reasons_hu}")
@@ -1086,6 +1096,7 @@ def build_mobile_embed_for_asset(
         "title": title,
         "description": description,
         "color": final_color,
+        **({"fields": fields} if fields else {}),
     }
    
 # ---- Debounce / stabilitás / cooldown ----
