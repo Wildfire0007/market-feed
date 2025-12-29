@@ -5835,13 +5835,22 @@ def apply_signal_stability_layer(
             source="analysis",
         )
 
-    open_conditions_met = (
-        manual_state.get("tracking_enabled")
+    manual_entry_allowed = (
+        intent == "entry"
+        and manual_state.get("tracking_enabled")
         and manual_state.get("is_flat")
-        and intent == "entry"
-        and notify.get("should_notify")
         and entry_side in {"buy", "sell"}
+        and setup_grade in {"A", "B"}
+        and notify.get("reason")
+        not in {
+            "cooldown_active",
+            "entry_cooldown_active",
+            "hard_exit_cooldown_active",
+            "flip_flop_guard",
+        }
     )
+
+    open_conditions_met = manual_entry_allowed
     if analysis_can_write and open_conditions_met:
         if setup_grade in {"A", "B"}:
             entry_level, sl_level, tp2_level = _extract_trade_levels(payload)
@@ -14444,6 +14453,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
