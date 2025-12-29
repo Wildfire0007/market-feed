@@ -649,7 +649,7 @@ def extract_trade_levels(
     signal_data: Dict[str, Any],
 ) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
     if not isinstance(signal_data, dict):
-        return None, None, None
+        return None, None, None, None
 
     trade_block = signal_data.get("trade") or {}
     levels_block = signal_data.get("levels") or {}
@@ -902,36 +902,15 @@ def build_mobile_embed_for_asset(
                 asset, position_state, fallback_levels
             )
 
-    entry = sl = tp1 = tp2 = rr = None
-    if isinstance(signal_data, dict):
-        entry = signal_data.get("entry")
-        sl = signal_data.get("sl")
-        tp1 = signal_data.get("tp1")
-        tp2 = signal_data.get("tp2")
-        rr = signal_data.get("rr")
-
-        trade_block = signal_data.get("trade") or {}
-        levels_block = signal_data.get("levels") or {}
-
-        if entry is None and isinstance(trade_block, dict):
-            entry = trade_block.get("entry")
-        if entry is None and isinstance(levels_block, dict):
-            entry = levels_block.get("entry")
-
-        if sl is None and isinstance(trade_block, dict):
-            sl = trade_block.get("sl")
-        if sl is None and isinstance(levels_block, dict):
-            sl = levels_block.get("sl")
-
-        if tp1 is None and isinstance(trade_block, dict):
-            tp1 = trade_block.get("tp1")
-        if tp1 is None and isinstance(levels_block, dict):
-            tp1 = levels_block.get("tp1")
-
-        if tp2 is None and isinstance(trade_block, dict):
-            tp2 = trade_block.get("tp2")
-        if tp2 is None and isinstance(levels_block, dict):
-            tp2 = levels_block.get("tp2")
+    entry, sl, tp1, tp2 = extract_trade_levels(signal_data if isinstance(signal_data, dict) else {})
+    rr = signal_data.get("rr") if isinstance(signal_data, dict) else None
+    if rr is None and None not in (entry, sl, tp1):
+        try:
+            risk = abs(float(entry) - float(sl))
+            if risk > 0:
+                rr = abs(float(tp1) - float(entry)) / risk
+        except Exception:
+            rr = None
    
     # --- Mobil + pszicho struktúra (7–8 sor) ---
     tracked_entry = tracked_levels.get("entry") or entry
@@ -965,6 +944,33 @@ def build_mobile_embed_for_asset(
     entry_lines: List[str] = []
     fields: List[Dict[str, Any]] = []
 
+    cooldown_line = None
+    if cooldown_until:
+        try:
+            cooldown_dt = datetime.fromisoformat(str(cooldown_until).replace("Z", "+00:00"))
+            cooldown_line = (
+                f"⏳ Cooldown lejár: {cooldown_dt.astimezone(HB_TZ).strftime('%H:%M')} (CET)."
+            )
+        except Exception:
+            cooldown_line = None
+
+    level_parts_inline: List[str] = []
+    level_entry = tracked_entry or entry
+    level_sl = tracked_sl or sl
+    level_tp1 = tracked_tp1 or tp1
+    level_tp2 = tracked_tp2 or tp2
+    if level_entry is not None:
+        level_parts_inline.append(f"Entry: {format_price(level_entry, asset)}")
+    if level_sl is not None:
+        level_parts_inline.append(f"SL: {format_price(level_sl, asset)}")
+    if level_tp1 is not None:
+        level_parts_inline.append(f"TP1: {format_price(level_tp1, asset)}")
+    if level_tp2 is not None:
+        level_parts_inline.append(f"TP2: {format_price(level_tp2, asset)}")
+    levels_line = (
+        f"🎯 `{' | '.join(level_parts_inline)}`" if level_parts_inline else None
+    ) 
+
     def add_field_once(name: str, value: str) -> None:
         if not value:
             return
@@ -978,9 +984,15 @@ def build_mobile_embed_for_asset(
     if setup_info["grade"] in {"A", "B", "C"} and setup_direction:
         direction_suffix = f" ({setup_direction.upper()})"
 
+    if cooldown_line:
+        lines.append(cooldown_line)  
     if primary_header:
         lines.append(primary_header)
 
+    if levels_line:
+        lines.append(levels_line)
+        add_field_once("Szintek", levels_line.replace("🎯 ", ""))
+      
     # Fő blokk (pozíció/cooldown/entry)
     if intent == "hard_exit":
         hard_exit_reasons = translate_reasons(position_diag.get("reasons") or []) if isinstance(position_diag, dict) else None
@@ -1013,11 +1025,9 @@ def build_mobile_embed_for_asset(
         ]
         lines.append(
             f"Nyitva: {opened_at or '-'} • " + " • ".join(level_parts)
-        )
-        if intent in {"hard_exit", "manage_position"} and position_levels_line:
-            lines.append(position_levels_line)
+        )        
         if position_note:
-            lines.append(f"🧭 {position_note}")
+            lines.append(f"🧭 **{position_note}**")
         lines.append(line_price)
         if regime_line:
             lines.append(regime_line)
@@ -1028,21 +1038,9 @@ def build_mobile_embed_for_asset(
         )
         lines.append(line_price)
         if regime_line:
-            lines.append(regime_line)
-        if (
-            is_entry_intent
-            and decision_upper in {"BUY", "SELL"}
-            and all(v is not None for v in (tracked_entry, tracked_sl, tracked_tp1, tracked_tp2))
-        ):
-            rr_txt = f"RR≈`{rr}`" if rr is not None else ""
-            entry_levels_txt = (
-                f"`{format_price(tracked_entry, asset)}` • SL `{format_price(tracked_sl, asset)}` "
-                f"• TP1 `{format_price(tracked_tp1, asset)}` • TP2 `{format_price(tracked_tp2, asset)}` • {rr_txt}"
-            ).strip(" • ")
-            lines.append(f"🎯 Belépő {entry_levels_txt}")
-            add_field_once("Belépő", entry_levels_txt)
+            lines.append(regime_line)        
         if position_note:
-            lines.append(f"🧭 {position_note}")
+            lines.append(f"🧭 **{position_note}**")
         if intent in {"hard_exit", "manage_position"}:
             pos_state = position_diag.get("state") if isinstance(position_diag, dict) else None
             pos_severity = position_diag.get("severity") if isinstance(position_diag, dict) else None
