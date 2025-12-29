@@ -1054,8 +1054,7 @@ def build_mobile_embed_for_asset(
         if gates_missing and entry_status_text != "NINCS BELÉPŐ":
             reasons = translate_reasons(gates_missing)
             lines.append(f"🧠 Figyelem: {reasons}")
-        lines.append(line_score)
-        add_field_once("P-score", line_score)
+        lines.append(line_score)  
         if entry_status_text == "NINCS BELÉPŐ" and intent == "entry":
             if gates_missing:
                 reasons_hu = translate_reasons(gates_missing)
@@ -1099,10 +1098,8 @@ def build_mobile_embed_for_asset(
             add_field_once("Belépő", entry_levels_txt)
         if gates_missing and entry_status_text != "NINCS BELÉPŐ":
             reasons = translate_reasons(gates_missing)
-            entry_lines.append(f"🧠 Figyelem: {reasons}")
-            add_field_once("P-score", line_score)
-        entry_lines.append(line_score)
-        add_field_once("P-score", line_score)
+            entry_lines.append(f"🧠 Figyelem: {reasons}")           
+        entry_lines.append(line_score)        
         if entry_status_text == "NINCS BELÉPŐ" and intent == "entry" and gates_missing:
             reasons_hu = translate_reasons(gates_missing)
             entry_lines.append(f"⛔ Blokkolók: {reasons_hu}")
