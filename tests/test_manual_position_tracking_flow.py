@@ -1,5 +1,5 @@
 import os
-import os
+import json
 import sys
 import tempfile
 import unittest
@@ -204,6 +204,67 @@ class ManualPositionFlowTests(unittest.TestCase):
             notify_meta = cooldown_result.get("notify") or {}
             assert notify_meta.get("should_notify") is False
             assert notify_meta.get("reason") == "cooldown_active"
+
+    def test_entry_persists_even_when_notify_suppressed(self) -> None:
+        now = datetime.now(timezone.utc)
+        now_iso = self._now_iso()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            positions_path = Path(tmpdir) / "positions.json"
+            state_path = Path(tmpdir) / "signal_state.json"
+
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "last_notified_intent": "entry",
+                        "last_notified_side": "buy",
+                        "last_notified_at_utc": now_iso,
+                    }
+                )
+            )
+
+            stability_cfg = {
+                "enabled": True,
+                "only_notify_on_state_change": True,
+                "manual_position_tracking": {
+                    "enabled": True,
+                    "writer": "analysis",
+                    "positions_file": str(positions_path),
+                    "treat_missing_file_as_flat": True,
+                    "post_exit_cooldown_minutes": {"default": 15},
+                },
+            }
+
+            payload = {
+                "asset": "EURUSD",
+                "signal": "sell",
+                "setup_grade": "A",
+                "reasons": [],
+            }
+
+            analysis.apply_signal_stability_layer(
+                "EURUSD",
+                payload,
+                decision="sell",
+                action_plan=None,
+                exit_signal=None,
+                gates_missing=[],
+                analysis_timestamp=now_iso,
+                outdir=Path(tmpdir),
+                stability_config=stability_cfg,
+            )
+
+            positions_after_entry = position_tracker.load_positions(
+                str(positions_path), True
+            )
+            manual_state = position_tracker.compute_state(
+                "EURUSD",
+                stability_cfg["manual_position_tracking"],
+                positions_after_entry,
+                now,
+            )
+
+            assert manual_state["has_position"] is True
             
     def test_analysis_is_read_only_when_writer_notify(self) -> None:
         now_iso = self._now_iso()
