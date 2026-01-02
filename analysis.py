@@ -1130,6 +1130,8 @@ PRECISION_SCORE_THRESHOLD = PRECISION_SCORE_THRESHOLD_DEFAULT
 PRECISION_READY_TIMEOUT_DEFAULT = 15
 PRECISION_ARMING_TIMEOUT_DEFAULT = 20
 PRECISION_TRIGGER_NEAR_MULT = 0.2
+PRECISION_TRIGGER_FALLBACK_MIN_MINUTES = 5.0
+PRECISION_TRIGGER_FALLBACK_MAX_MINUTES = 10.0
 REALTIME_JUMP_MULT = 2.0
 MICRO_BOS_P_BONUS = 8.0
 MOMENTUM_ATR_REL = 0.0005
@@ -12091,6 +12093,9 @@ def analyze(asset: str) -> Dict[str, Any]:
     precision_trigger_ready = False
     precision_flow_gate_needed = False
     precision_trigger_gate_needed = False
+    precision_trigger_wait_since: Optional[datetime] = None
+    precision_trigger_wait_minutes: Optional[float] = None
+    precision_trigger_fallback_active = False
     precision_trigger_state: Optional[str] = None
     precision_override_active = False
     session_entry_open = bool(session_meta.get("entry_open"))
@@ -12897,6 +12902,25 @@ def analyze(asset: str) -> Dict[str, Any]:
         precision_flow_gate_needed = precision_ready_for_entry and flow_data_available
         precision_trigger_gate_needed = precision_ready_for_entry
 
+        precision_runtime = _PRECISION_RUNTIME.setdefault(asset, {})
+        wait_anchor = precision_runtime.get("trigger_wait_since")
+        if isinstance(wait_anchor, datetime):
+            precision_trigger_wait_since = wait_anchor
+
+        if precision_trigger_gate_needed and not precision_trigger_ready:
+            if precision_trigger_wait_since is None:
+                precision_trigger_wait_since = analysis_now
+                precision_runtime["trigger_wait_since"] = analysis_now
+            elapsed_seconds = _precision_ready_elapsed_seconds(
+                precision_trigger_wait_since, analysis_now
+            )
+            if elapsed_seconds is not None:
+                precision_trigger_wait_minutes = elapsed_seconds / 60.0
+                if precision_trigger_wait_minutes >= PRECISION_TRIGGER_FALLBACK_MIN_MINUTES:
+                    precision_trigger_fallback_active = True
+        else:
+            precision_runtime.pop("trigger_wait_since", None)
+
         if precision_ready_for_entry and not flow_data_available:
             if "Order-flow gates skipped (no tick/imbalance data)" not in reasons:
                 reasons.append("Order-flow gates skipped (no tick/imbalance data)")
@@ -12977,11 +13001,16 @@ def analyze(asset: str) -> Dict[str, Any]:
             "flow_blockers": blockers_snapshot,
             "profile": precision_profile_for_state,
             "position_sizing_floor": 0.01,
+            "trigger_wait_since": _gate_timestamp_fields(precision_trigger_wait_since)
+            if precision_trigger_wait_since
+            else None,
+            "trigger_wait_minutes": precision_trigger_wait_minutes,
+            "trigger_fallback": precision_trigger_fallback_active,
         }
         entry_thresholds_meta["precision_gate_state"] = precision_gate_snapshot
 
     if precision_plan:
-        if not precision_ready_for_entry:
+        if not precision_ready_for_entry:  
             if decision in ("buy", "sell"):
                 score_note = (
                     f"Precision score {precision_score_val:.2f} < {precision_threshold_label}"
@@ -12996,6 +13025,27 @@ def analyze(asset: str) -> Dict[str, Any]:
                 for item in missing
                 if item not in {precision_gate_label, precision_flow_gate_label, precision_trigger_gate_label}
             ]
+            rr_gate_ok = bool(
+                rr is not None
+                and rr_required_effective is not None
+                and rr >= rr_required_effective - 1e-9
+            )
+            bos_component_ok = bool(
+                isinstance(structure_components, dict)
+                and structure_components.get("bos")
+            )
+            mandatory_gates_ok = bool(
+                atr_ok
+                and rr_gate_ok
+                and structure_gate
+                and bos_component_ok
+            )
+            precision_trigger_fallback_ready = bool(
+                precision_trigger_fallback_active
+                and mandatory_gates_ok
+                and (precision_flow_ready or not precision_flow_gate_needed)
+                and not other_missing
+            )
             if decision in ("buy", "sell"):
                 # csak akkor blokkoljon a flow, ha a flow-kapu ténylegesen aktív/szükséges
                 if precision_flow_gate_needed and (not precision_flow_ready):
@@ -13004,12 +13054,29 @@ def analyze(asset: str) -> Dict[str, Any]:
                         reasons.append(flow_note)
                     decision = "precision_ready"
                     entry = sl = tp1 = tp2 = rr = None
-                elif precision_trigger_state != "fire":
+                elif precision_trigger_state != "fire" and not precision_trigger_fallback_ready:
                     arming_note = "Precision belépő: trigger ablak aktív"
                     if arming_note not in reasons:
                         reasons.append(arming_note)
                     decision = "precision_arming"
                     entry = sl = tp1 = tp2 = rr = None
+                elif precision_trigger_state != "fire" and precision_trigger_fallback_ready:
+                    fallback_note = (
+                        "Precision fallback: trigger >5 percig nem szinkron, core belépő engedve"
+                    )
+                    if fallback_note not in reasons:
+                        reasons.append(fallback_note)
+                    precision_plan["trigger_fallback_active"] = True
+                    missing = [
+                        item
+                        for item in missing
+                        if item != precision_trigger_gate_label
+                    ]
+                    required_list = [
+                        item
+                        for item in required_list
+                        if item != precision_trigger_gate_label
+                    ]
             if (
                 decision == "no entry"
                 and precision_trigger_state in {"arming", "fire"}
@@ -14737,6 +14804,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
