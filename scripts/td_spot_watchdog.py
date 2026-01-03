@@ -8,7 +8,9 @@ watchdog marks it as stale, writes a summary state file and optionally triggers
 an alert command.
 
 Run the watchdog periodically (e.g. from cron) to ensure the realtime spot feed
-keeps up with the expectations of the analysis pipeline.
+keeps up with the expectations of the analysis pipeline.  The watchdog can also
+auto-recover stale quotes by triggering a feed restart or a fallback data
+source.
 """
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -31,6 +34,9 @@ DEFAULT_MARGIN_SECONDS = float(os.getenv("TD_SPOT_WATCHDOG_MARGIN_SECONDS", "0")
 DEFAULT_LOOP_SECONDS = float(os.getenv("TD_SPOT_WATCHDOG_LOOP_SECONDS", "0"))
 DEFAULT_STATE_DIR = os.getenv("TD_SPOT_WATCHDOG_STATE_DIR")
 DEFAULT_ALERT_CMD = os.getenv("TD_SPOT_WATCHDOG_ALERT_CMD", "")
+DEFAULT_RESTART_THRESHOLDS = os.getenv(
+    "TD_SPOT_WATCHDOG_RESTART_THRESHOLDS", "DEFAULT:900,BTCUSD:360,NVDA:600"
+)
 
 
 @dataclass
@@ -43,6 +49,7 @@ class SpotStatus:
     threshold_seconds: float
     age_seconds: Optional[float]
     retrieved_utc: Optional[str]
+    quote_delay_seconds: Optional[float]
     stale: bool
     reason: str
     freshness_violation: bool = False
@@ -61,6 +68,7 @@ class SpotStatus:
             "age_seconds": self.age_seconds,
             "age_minutes": self.age_minutes(),
             "retrieved_utc": self.retrieved_utc,
+            "quote_delay_seconds": self.quote_delay_seconds,
             "stale": self.stale,
             "reason": self.reason,
             "freshness_violation": self.freshness_violation,
@@ -158,6 +166,7 @@ def collect_spot_statuses(
                     limit_seconds=limit_seconds,
                     threshold_seconds=threshold_seconds,
                     age_seconds=None,
+                    quote_delay_seconds=None,
                     retrieved_utc=None,
                     stale=True,
                     reason=error or "unknown_error",
@@ -166,6 +175,7 @@ def collect_spot_statuses(
             continue
 
         retrieved_utc = payload.get("utc") or payload.get("retrieved_at_utc")
+        quote_delay = payload.get("quote_latency_seconds")
         freshness_violation = bool(payload.get("freshness_violation"))
 
         timestamp = _parse_iso8601(retrieved_utc)
@@ -186,6 +196,17 @@ def collect_spot_statuses(
                 stale = True
                 reason = "age_exceeds_limit"
 
+
+        if quote_delay is None:
+            retrieved_ts = _parse_iso8601(payload.get("retrieved_at_utc"))
+            if timestamp and retrieved_ts:
+                quote_delay = max((retrieved_ts - timestamp).total_seconds(), 0.0)
+
+        try:
+            quote_delay_seconds: Optional[float] = None if quote_delay is None else float(quote_delay)
+        except (TypeError, ValueError):
+            quote_delay_seconds = None
+
         statuses.append(
             SpotStatus(
                 asset=asset_name,
@@ -193,6 +214,7 @@ def collect_spot_statuses(
                 limit_seconds=limit_seconds,
                 threshold_seconds=threshold_seconds,
                 age_seconds=age_seconds,
+                quote_delay_seconds=quote_delay_seconds,
                 retrieved_utc=retrieved_utc,
                 stale=stale,
                 reason=reason,
@@ -203,7 +225,12 @@ def collect_spot_statuses(
     return statuses
 
 
-def write_state(statuses: Sequence[SpotStatus], state_path: Path, generated_at: Optional[datetime] = None) -> Dict[str, Any]:
+def write_state(
+    statuses: Sequence[SpotStatus],
+    state_path: Path,
+    generated_at: Optional[datetime] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Persist the watchdog status to ``state_path`` and return the payload."""
 
     state_path = Path(state_path)
@@ -214,6 +241,9 @@ def write_state(statuses: Sequence[SpotStatus], state_path: Path, generated_at: 
         "stale_assets": [status.asset for status in statuses if status.stale],
         "assets": {status.asset: status.as_dict() for status in statuses},
     }
+    
+    if extra:
+        payload.update(extra)
 
     payload_text = json.dumps(payload, indent=2, sort_keys=True)
     
@@ -239,6 +269,44 @@ def _trigger_alert(cmd: str) -> None:
         LOGGER.exception("Alert command failed")
 
 
+def _parse_threshold_map(value: Optional[str]) -> Dict[str, float]:
+    thresholds: Dict[str, float] = {}
+    if not value:
+        return thresholds
+    raw_items: List[str] = []
+    if isinstance(value, str):
+        raw_items = [item for item in value.split(",") if item.strip()]
+    for item in raw_items:
+        if ":" not in item:
+            continue
+        asset, threshold = item.split(":", 1)
+        try:
+            thresholds[asset.strip().upper()] = float(threshold)
+        except ValueError:
+            continue
+    return thresholds
+
+
+def _load_state(path: Path) -> Dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _execute_command(cmd: Optional[Sequence[str]], label: str) -> int:
+    if not cmd:
+        LOGGER.info("No %s command configured; skipping", label)
+        return 0
+    pretty_cmd = " ".join(cmd)
+    LOGGER.info("Executing %s command: %s", label, pretty_cmd)
+    result = subprocess.run(cmd, cwd=Path(__file__).resolve().parent.parent)
+    rc = int(result.returncode)
+    if rc != 0:
+        LOGGER.error("%s command exited with code %s", label.title(), rc)
+    return rc
+
+
 def _configure_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -251,6 +319,22 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--margin-seconds", type=float, default=DEFAULT_MARGIN_SECONDS, help="Alert earlier by subtracting this margin from the freshness limit")
     parser.add_argument("--state-file", help="Optional path for persisting watchdog state")
     parser.add_argument("--alert-cmd", default=DEFAULT_ALERT_CMD, help="Shell command to execute when any asset is stale")
+    parser.add_argument("--restart-cmd", nargs="+", help="Command to reset the feed when quote latency breaches the SLA")
+    parser.add_argument("--fallback-cmd", nargs="+", help="Optional fallback data source command executed before restart")
+    parser.add_argument(
+        "--restart-thresholds",
+        default=DEFAULT_RESTART_THRESHOLDS,
+        help=(
+            "Comma separated asset:seconds thresholds for quote delay SLA "
+            f"(default: {DEFAULT_RESTART_THRESHOLDS})"
+        ),
+    )
+    parser.add_argument(
+        "--cooldown-seconds",
+        type=float,
+        default=DEFAULT_COOLDOWN_SECONDS,
+        help="Cooldown between recovery attempts to avoid restart loops",
+    )
     parser.add_argument("--loop-seconds", type=float, default=DEFAULT_LOOP_SECONDS, help="When >0 the watchdog re-runs on this interval")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
     return parser.parse_args(argv)
@@ -286,6 +370,16 @@ def _run_once(args: argparse.Namespace) -> int:
         now=now,
     )
 
+    restart_thresholds = _parse_threshold_map(args.restart_thresholds)
+    cooldown_seconds = max(float(args.cooldown_seconds), 0.0)
+    fallback_cmd = list(args.fallback_cmd) if args.fallback_cmd else None
+    restart_cmd = list(args.restart_cmd) if args.restart_cmd else [sys.executable or "python3", "Trading.py"]
+    state_path = _resolve_state_path(args)
+    state_payload: Dict[str, Any] = {}
+    if state_path:
+        state_payload.update(_load_state(state_path))
+    state_payload["last_run_utc"] = _format_iso(now)
+
     for status in statuses:
         if status.stale:
             LOGGER.error(
@@ -304,14 +398,61 @@ def _run_once(args: argparse.Namespace) -> int:
                 status.threshold_seconds,
             )
 
-    state_path = _resolve_state_path(args)
     if state_path:
-        write_state(statuses, state_path, generated_at=now)
+        state_payload = write_state(statuses, state_path, generated_at=now, extra=state_payload)
 
     stale_assets = [status for status in statuses if status.stale]
+    breached_assets: List[Tuple[str, float, float]] = []
+
+    for status in statuses:
+        if status.quote_delay_seconds is None and status.age_seconds is None:
+            continue
+        asset_key = status.asset.upper()
+        threshold = restart_thresholds.get(asset_key) or restart_thresholds.get("DEFAULT") or restart_thresholds.get("default")
+        if threshold is None:
+            continue
+        observed = status.quote_delay_seconds if status.quote_delay_seconds is not None else status.age_seconds
+        if observed is not None and observed >= threshold:
+            breached_assets.append((status.asset, observed, threshold))
+
+    if not stale_assets and not breached_assets:
+        return 0
+
+    _trigger_alert(args.alert_cmd)
+
+    if state_path:
+        state_payload = _load_state(state_path)
+    last_recovery = _parse_iso8601((state_payload or {}).get("last_recovery_utc")) if state_payload else None
+    if cooldown_seconds > 0 and last_recovery is not None:
+        elapsed = (now - last_recovery).total_seconds()
+        if elapsed < cooldown_seconds:
+            LOGGER.info("Skipping recovery – cooldown %.0fs remaining", max(cooldown_seconds - elapsed, 0.0))
+            return 1
+
+    if breached_assets:
+        for asset, observed, threshold in breached_assets:
+            LOGGER.warning(
+                "Quote latency breach for %s: %.1fs >= %.1fs (threshold)", asset, observed, threshold
+            )
+
     if stale_assets:
-        _trigger_alert(args.alert_cmd)
-        return 1
+        LOGGER.warning("Stale assets detected: %s", ", ".join(status.asset for status in stale_assets))
+
+    fallback_rc = _execute_command(fallback_cmd, "fallback") if fallback_cmd else 0
+    restart_rc = _execute_command(restart_cmd, "restart")
+
+    recovery_state = {
+        "last_recovery_utc": _format_iso(now),
+        "last_recovery_assets": [status.asset for status in stale_assets] + [name for name, _, _ in breached_assets],
+        "last_recovery_result": "ok" if restart_rc == 0 and fallback_rc == 0 else "failed",
+        "last_recovery_restart_rc": restart_rc,
+        "last_recovery_fallback_rc": fallback_rc,
+    }
+    if state_path:
+        write_state(statuses, state_path, generated_at=now, extra=recovery_state)
+
+    if restart_rc != 0 or fallback_rc != 0:
+        return restart_rc or fallback_rc or 1
 
     return 0
 
