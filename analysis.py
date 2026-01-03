@@ -9993,7 +9993,8 @@ def analyze(asset: str) -> Dict[str, Any]:
                             bias_gate_notes.append(msg)
 
     micro_bias_confidence = 0
-    micro_guard_state = intraday_profile.get("micro_range_guard") if isinstance(intraday_profile, dict) else None
+    strong_momentum = False
+    micro_guard_state = intraday_profile.get("micro_range_guard") if isinstance(intraday_profile, dict) else None  
     if micro_bias:
         micro_bias_confidence += 1
         if strong_momentum:
@@ -14837,6 +14838,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
