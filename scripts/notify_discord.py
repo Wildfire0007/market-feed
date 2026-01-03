@@ -1007,6 +1007,8 @@ def build_mobile_embed_for_asset(
         action_items.append(primary_header)
     if entry_block_reason and entry_block_reason not in action_items:
         action_items.append(entry_block_reason)
+    if is_entry_intent:
+        action_items.append("Belépő üzemmód aktív")
     if cooldown_active and cooldown_until:
         action_items.append(f"⏳ Cooldown lejár: {cooldown_until}")
     if position_note:
