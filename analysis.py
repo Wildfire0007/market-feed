@@ -3242,11 +3242,11 @@ def derive_position_management_note(
 
     hint_parts: List[str] = []
     if anchor_active:
-        anchor_note += f"aktív {anchor_bias} pozíció"
+        anchor_note = f"aktív {anchor_bias} pozíció"
         anchor_dt = parse_utc_timestamp(anchor_timestamp)
         if anchor_dt:
             local_dt = anchor_dt.astimezone(MARKET_TIMEZONE)
-            anchor_note = f", nyitva: {local_dt.strftime('%Y-%m-%d %H:%M')} helyi idő"
+            anchor_note += f", nyitva: {local_dt.strftime('%Y-%m-%d %H:%M')} helyi idő"
         hint_parts.append(anchor_note)
 
     atr_hint = format_atr_hint(asset, atr1h)
@@ -14838,6 +14838,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
