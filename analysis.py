@@ -4852,6 +4852,25 @@ def ensure_probability_metadata(
     return normalised
 
 
+def _combine_probability(
+    base_p_score: float, ml_probability: Optional[float], *, ml_enabled: bool
+) -> float:
+    """Blend heuristic and ML valószínűség a megadott kapcsoló alapján.
+
+    Ha az ML komponens nincs engedélyezve, az alap P-score százalékos értéke
+    változatlanul kerül visszaadásra, így a heurisztikus pontozást nem írja
+    felül egy letiltott ML pipeline. Engedélyezett ML esetén a korábbi
+    súlyozási arányokat alkalmazzuk, és az eredményt 0–1 tartományra
+    korlátozzuk.
+    """
+
+    combined = base_p_score / 100.0
+    if ml_enabled and ml_probability is not None:
+        combined = min(1.0, max(0.0, 0.6 * (base_p_score / 100.0) + 0.4 * ml_probability))
+
+    return combined
+
+
 def _ml_feature_snapshot_present(asset: str, base_dir: Optional[Path] = None) -> bool:
     asset_root = Path(base_dir or PUBLIC_DIR) / str(asset or "").upper()
     feature_dir = asset_root / ML_FEATURE_SNAPSHOT_DIRNAME
@@ -13573,11 +13592,14 @@ def analyze(asset: str) -> Dict[str, Any]:
         ml_prediction = predict_signal_probability(asset, ml_features)
     else:
         ml_prediction = ProbabilityPrediction(
+            probability=None,
+            raw_probability=None,
+            threshold=None,
             metadata={
                 "source": "sklearn",
                 "status": "disabled",
                 "unavailable_reason": "ml_scoring_disabled",
-            }
+            },
         )
     ml_probability = ml_prediction.probability
     ml_probability_raw = ml_prediction.raw_probability
@@ -13627,11 +13649,9 @@ def analyze(asset: str) -> Dict[str, Any]:
         entry = sl = tp1 = tp2 = rr = None
         execution_playbook = []
 
-    combined_probability = P / 100.0
-    if ml_probability is not None:
-        combined_probability = min(
-            1.0, max(0.0, 0.6 * (P / 100.0) + 0.4 * ml_probability)
-        )
+    combined_probability = _combine_probability(
+        P, ml_probability, ml_enabled=bool(ML_PROBABILITY_ACTIVE)
+    )
 
     ml_confidence_block = False
     if (
@@ -14817,6 +14837,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
