@@ -114,10 +114,41 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         help="Skip latency watchdog enforcement",
     )
     parser.add_argument(
+        "--skip-spot-watchdog",
+        action="store_true",
+        help="Skip spot quote latency watchdog",
+    )
+    parser.add_argument(
         "--watchdog-threshold",
         type=float,
         default=15.0,
         help="Latency threshold in minutes before triggering restart (default: 15)",
+    )
+    parser.add_argument(
+        "--spot-watchdog-assets",
+        nargs="*",
+        default=[],
+        help="Assets monitored by the spot quote watchdog (default: all configured assets)",
+    )
+    parser.add_argument(
+        "--spot-watchdog-threshold-minutes",
+        type=float,
+        default=None,
+        help=(
+            "Override quote latency restart threshold (minutes). "
+            "Defaults: BTCUSD 6, NVDA 10, all others 15"
+        ),
+    )
+    parser.add_argument(
+        "--spot-watchdog-cooldown-minutes",
+        type=float,
+       default=10.0,
+        help="Cooldown before repeating spot watchdog recoveries (default: 10)",
+    )
+    parser.add_argument(
+        "--spot-watchdog-fallback-cmd",
+        nargs="+",
+        help="Optional fallback datasource command executed before restart",
     )
     parser.add_argument(
         "--watchdog-verify-seconds",
@@ -214,6 +245,54 @@ def main(argv: List[str] | None = None) -> int:
         notify_cmd = [python, "scripts/notify_discord.py"]
         notify_cmd.extend(args.notify_arg)
         _run_step("Discord notify", notify_cmd, optional=True)
+
+    if not args.skip_spot_watchdog:
+        spot_cooldown_seconds = max(float(args.spot_watchdog_cooldown_minutes), 0.0) * 60.0
+        spot_assets = [asset.upper() for asset in args.spot_watchdog_assets or []]
+
+        default_restart_thresholds = {
+            "DEFAULT": 900.0,
+            "BTCUSD": 360.0,
+            "NVDA": 600.0,
+        }
+
+        restart_thresholds_map = dict(default_restart_thresholds)
+        if args.spot_watchdog_threshold_minutes is not None:
+            override_seconds = max(float(args.spot_watchdog_threshold_minutes), 0.0) * 60.0
+            restart_thresholds_map["DEFAULT"] = override_seconds
+            for asset in spot_assets:
+                restart_thresholds_map[asset] = override_seconds
+        else:
+            for asset in spot_assets:
+                restart_thresholds_map.setdefault(asset, restart_thresholds_map["DEFAULT"])
+
+        ordered_assets = ["DEFAULT", "BTCUSD", "NVDA"] + [asset for asset in spot_assets if asset not in {"BTCUSD", "NVDA"}]
+        restart_thresholds = ",".join(
+            f"{asset}:{restart_thresholds_map[asset]:g}" for asset in ordered_assets if asset in restart_thresholds_map
+        )
+
+        spot_cmd: List[str] = [
+            python,
+            "scripts/td_spot_watchdog.py",
+            "--public-dir",
+            args.public_dir,
+            "--restart-thresholds",
+            restart_thresholds,
+            "--cooldown-seconds",
+            f"{spot_cooldown_seconds:g}",
+            "--restart-cmd",
+            python,
+            "Trading.py",
+        ]
+
+        if spot_assets:
+            spot_cmd.append("--assets")
+            spot_cmd.extend(spot_assets)
+        if args.spot_watchdog_fallback_cmd:
+            spot_cmd.append("--fallback-cmd")
+            spot_cmd.extend(args.spot_watchdog_fallback_cmd)
+
+        _run_step("Spot quote watchdog", spot_cmd, optional=True)
 
     if not args.skip_watchdog:
         public_dir = Path(args.public_dir)
