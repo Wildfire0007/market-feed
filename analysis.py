@@ -5687,6 +5687,7 @@ def _load_signal_state(path: Path, history_window: int) -> Dict[str, Any]:
     state.setdefault("last_notified_intent", None)
     state.setdefault("last_notified_side", None)
     state.setdefault("last_notified_at_utc", None)
+    state.setdefault("last_invalidated_at_utc", None)
     state.setdefault("hard_exit_cooldown_until_utc", None)
     state.setdefault("hard_exit_side", None)
     state["entry_direction_history"] = entry_history[-history_window:]
@@ -5834,6 +5835,14 @@ def apply_signal_stability_layer(
         state = _load_signal_state(state_path, history_window)
         _update_entry_history(state, entry_side, history_window)
 
+        if not actionable and state.get("last_notified_at_utc"):
+            state["last_invalidated_at_utc"] = to_utc_iso(now_dt)
+        last_invalidated_ts = parse_utc_timestamp(state.get("last_invalidated_at_utc"))
+        invalidated_recently = bool(
+            last_invalidated_ts
+            and now_dt - last_invalidated_ts <= timedelta(minutes=15)
+        )
+
         if actionable and intent == "entry":
             cooldown_cfg = (config.get("cooldowns") or {}).get(
                 "min_minutes_between_entry_notifications", {}
@@ -5873,13 +5882,17 @@ def apply_signal_stability_layer(
             last_intent = state.get("last_notified_intent")
             last_side = state.get("last_notified_side")
             if intent == last_intent and (intent != "entry" or entry_side == last_side):
-                notify["should_notify"] = False
-                notify["reason"] = "no_state_change"
+                if not invalidated_recently:
+                    notify["should_notify"] = False
+                    notify["reason"] = "no_state_change"
+                else:
+                    notify["reason"] = "state_invalidated_recently"
 
         if notify["should_notify"]:
             state["last_notified_intent"] = intent
             state["last_notified_side"] = entry_side or exit_side
             state["last_notified_at_utc"] = to_utc_iso(now_dt)
+            state["last_invalidated_at_utc"] = None
             if intent == "hard_exit":
                 cd_cfg = (config.get("cooldowns") or {}).get(
                     "min_minutes_after_hard_exit", {}
@@ -14804,6 +14817,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
