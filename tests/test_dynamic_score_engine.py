@@ -34,5 +34,5 @@ def test_dynamic_score_engine_applies_regime_penalty_and_clamps(
 
     assert score == expected_score
     assert meta["final_score"] == expected_score
-+    assert meta["regime_penalty"] == {"label": "CHOPPY", "points": regime_points}
-+    assert any("regime CHOPPY" in note for note in notes)
+    assert meta["regime_penalty"] == {"label": "CHOPPY", "points": regime_points}
+    assert any("regime CHOPPY" in note for note in notes)
