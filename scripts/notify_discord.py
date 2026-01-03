@@ -952,55 +952,96 @@ def build_mobile_embed_for_asset(
             return None
         if not (has_tracked_position or decision_upper in {"BUY", "SELL"}):
             return None
-        return "Position levels: " + " | ".join(level_parts)  
+        return "Pozíciószintek: " + " | ".join(level_parts)
+
+    def _format_entry_window() -> Optional[str]:
+        if not isinstance(session, dict):
+            return None
+
+        window_label = None
+        windows_local = session.get("windows_local_budapest") or session.get(
+            "windows_local_cet"
+        )
+        if isinstance(windows_local, list) and windows_local:
+            first = windows_local[0]
+            if isinstance(first, list) and len(first) == 2:
+                window_label = f"{first[0]}–{first[1]}"
+
+        if session.get("within_entry_window") or session.get("entry_open"):
+            minutes_left = session.get("minutes_to_session_close")
+            suffix = ""
+            try:
+                if minutes_left is not None:
+                    suffix = f" • zárás ~{int(float(minutes_left))}p"
+            except (TypeError, ValueError):
+                suffix = ""
+            status_note = session.get("status_note") or "Entry ablak nyitva"
+            return f"Belépési ablak: **NYITVA**{f' ({window_label})' if window_label else ''} — {status_note}{suffix}"
+
+        next_open = (
+            session.get("next_session_open_budapest")
+            or session.get("next_session_open_utc")
+            or session.get("next_open_utc")
+        )
+        status_note = session.get("status_note") or session.get("status")
+        return (
+            f"Belépési ablak: ZÁRVA — következő nyitás: {next_open}"
+            if next_open
+            else f"Belépési ablak: ZÁRVA{f' — {status_note}' if status_note else ''}"
+        )
       
     status_line = f"{status_icon} {status_text}"
     levels_line = _format_levels_line()
-    lines: List[str] = [status_line]
-    
-    if primary_header and primary_header not in lines:
-        lines.append(primary_header)
-      
+    entry_window_line = _format_entry_window()
+
+    def _add_section(title: str, items: List[Optional[str]], *, force: bool = False) -> List[str]:
+        filtered = [item for item in items if item]
+        if not filtered and not force:
+            return []
+        return [f"**{title}**", *filtered] if filtered else [f"**{title}**", "—"]
+
+    sections: List[str] = []
+
+    action_items: List[Optional[str]] = [status_line]
+    if primary_header:
+        action_items.append(primary_header)
+    if entry_block_reason and entry_block_reason not in action_items:
+        action_items.append(entry_block_reason)
     if cooldown_active and cooldown_until:
-        lines.append(f"⏳ Cooldown lejár: {cooldown_until}")
-
-    if levels_line:
-        lines.append(levels_line)
-
-    if opened_at:
-        lines.append(f"Nyitva: {opened_at}")
-
+        action_items.append(f"⏳ Cooldown lejár: {cooldown_until}")
     if position_note:
-        lines.append(f"🧭 {position_note}")
+        action_items.append(f"🧭 {position_note}")
+    if opened_at:
+        action_items.append(f"Nyitva: {opened_at}")
+    if entry_window_line:
+        action_items.append(entry_window_line)
+    action_items.append(line_price)
+    sections.append("\n".join(_add_section("Akció", action_items)))
 
-    reasons_raw = (
-        signal_data.get("reasons") if isinstance(signal_data, dict) else []
-    )
-    if isinstance(reasons_raw, list):
-        for reason in reasons_raw:
-            if isinstance(reason, str) and reason.strip():
-                lines.append(reason.strip())
+    precision_missing = [r for r in entry_missing if "precision" in str(r).lower()]
+    other_missing = [r for r in entry_missing if r not in precision_missing]
 
-    if kind == "entry" and entry_missing:
-        reasons = translate_reasons([str(reason) for reason in entry_missing])
-        lines.append(f"Figyelem: {reasons}.")
+    gate_lines: List[Optional[str]] = []
+    if precision_missing:
+        precision_txt = translate_reasons([str(r) for r in precision_missing])
+        gate_lines.append(f"⛔ **PRECISION BLOKK:** {precision_txt}")
+    if other_missing:
+        gate_lines.append(f"Hiányzó: {translate_reasons([str(r) for r in other_missing])}")
+    if not gate_lines:
+        gate_lines.append("✅ Minden kötelező kapu teljesült")
+    sections.append("\n".join(_add_section("Kötelező kapuk", gate_lines, force=True)))
 
-    if intent in {"hard_exit", "manage_position"} and isinstance(position_diag, dict):
-        diag_state = position_diag.get("state")
-        diag_reasons = position_diag.get("reasons") or []
-        if diag_state:
-            lines.append(f"Pozíció diagnosztika: {diag_state}")
-        if diag_reasons:
-            reasons_hu = translate_reasons([str(reason) for reason in diag_reasons])
-            lines.append(f"➤ Okok: {reasons_hu}")
+    trend_lines: List[Optional[str]] = [line_setup, regime_line, line_score]
+    sections.append("\n".join(_add_section("Trend/Momentum", trend_lines)))
 
-    lines.append(line_setup)
-    if regime_line:
-        lines.append(regime_line)
-    lines.append(line_price)
-    lines.append(line_score)
-    
-    description = "\n".join(lines)
+    rr_lines: List[Optional[str]] = []
+    if rr is not None:
+        rr_lines.append(f"RR: `{rr:.2f}x`")
+    if levels_line:
+        rr_lines.append(levels_line)
+    sections.append("\n".join(_add_section("Risk/RR", rr_lines)))
+
+    description = "\n\n".join([section for section in sections if section.strip()])
 
     if is_invalidate or kind == "invalidate":
         final_color = COLORS.get("SHORT", COLORS["NO"])
@@ -1396,6 +1437,17 @@ def build_entry_gate_summary_embed(*, now: Optional[datetime] = None) -> Optiona
     except Exception:
         LOGGER.debug("entry_gate_summary_embed_failed", exc_info=True)
         return None
+
+
+def should_send_daily_diagnostics(meta: Dict[str, Any], bud_dt: datetime) -> Tuple[bool, str]:
+    """Return whether daily diagnostics should be dispatched at 21:00 BUD time."""
+
+    report_key = bud_dt.strftime("%Y-%m-%d")
+    if bud_dt.hour != 21:
+        return False, report_key
+
+    last_sent_key = meta.get("last_pipeline_report_key") if isinstance(meta, dict) else None
+    return last_sent_key != report_key, report_key
 
 
 def _format_seconds(value: Optional[float]) -> str:
@@ -4222,8 +4274,12 @@ def main():
     save_state(state)
     
     gate_embed = build_entry_gate_summary_embed()
-   
-    pipeline_embed = build_pipeline_diag_embed(now=now_dt)
+  
+    pipeline_embed = None
+    send_diag, diag_key = should_send_daily_diagnostics(meta, bud_dt)
+    if send_diag:
+        pipeline_embed = build_pipeline_diag_embed(now=now_dt)
+        meta["last_pipeline_report_key"] = diag_key
    
     live_embeds, management_embeds, market_scan_embeds = _collect_channel_embeds(
         asset_embeds=asset_embeds,
