@@ -490,11 +490,45 @@ def _extract_prev_spot_price(state: Dict[str, Any], asset_key: str, signal_data:
             if prev_price is not None:
                 return prev_price
 
-    notify_state = (signal_data.get("notify") or {}).get("state") if isinstance(signal_data, dict) else None
-    if isinstance(notify_state, dict):
-        prev_price = notify_state.get("last_spot_price") or notify_state.get("spot")
-        if prev_price is not None:
-            return prev_price
+    def _from_notify_payload() -> Any:
+        notify_payload = signal_data.get("notify") if isinstance(signal_data, dict) else None
+        if not isinstance(notify_payload, dict):
+            return None
+
+        # state blob (preferred if present)
+        notify_state = notify_payload.get("state")
+        if isinstance(notify_state, dict):
+            prev_price = notify_state.get("last_spot_price")
+            if prev_price is None:
+                prev_price = notify_state.get("spot")
+            if prev_price is not None:
+                return prev_price
+
+        # direct notify fields (fallback)
+        for key in ("previous_spot_price", "prev_spot_price", "prev_spot"):
+            prev_price = notify_payload.get(key)
+            if prev_price is not None:
+                return prev_price
+
+        return None
+
+    # Try explicit previous spot fields on the signal first
+    if isinstance(signal_data, dict):
+        spot_block = signal_data.get("spot")
+        if isinstance(spot_block, dict):
+            for key in ("previous", "prev", "previous_price", "prev_price"):
+                prev_price = spot_block.get(key)
+                if prev_price is not None:
+                    return prev_price
+
+        for key in ("previous_spot_price", "prev_spot_price", "prev_spot"):
+            prev_price = signal_data.get(key)
+            if prev_price is not None:
+                return prev_price
+
+    prev_price = _from_notify_payload()
+    if prev_price is not None:
+        return prev_price
 
     return None
 
