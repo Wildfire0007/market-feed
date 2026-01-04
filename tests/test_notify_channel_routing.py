@@ -238,3 +238,40 @@ def test_market_scan_and_heartbeat_suppress_manual_position_line():
 
     assert "Pozíciómenedzsment" not in market_description
     assert "Pozíciómenedzsment" not in heartbeat_description
+
+
+def test_price_line_adds_direction_and_updates_state():
+    state = {
+        "BTCUSD": {
+            **notify_discord.DEFAULT_ASSET_STATE,
+            "last_spot_price": 101.0,
+            "last_spot_utc": "2024-01-01T11:00:00Z",
+        }
+    }
+
+    sig = {
+        "asset": "BTCUSD",
+        "signal": "buy",
+        "probability": 55,
+        "probability_raw": 55,
+        "retrieved_at_utc": "2024-01-01T12:00:00Z",
+        "position_state": {},
+        "spot": {"price": 102.5, "utc": "2024-01-01T12:00:00Z"},
+    }
+
+    embed = notify_discord.build_mobile_embed_for_asset(
+        "BTCUSD",
+        state,
+        sig,
+        decision="buy",
+        mode="core",
+        is_stable=True,
+        is_flip=False,
+        is_invalidate=False,
+    )
+
+    description = embed.get("description") or ""
+
+    assert "↑" in description
+    assert state["BTCUSD"].get("last_spot_price") == 102.5
+    assert state["BTCUSD"].get("last_spot_utc") == "2024-01-01T12:00:00Z"
