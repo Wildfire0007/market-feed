@@ -462,6 +462,9 @@ def _coerce_price(value: Any) -> Optional[float]:
                 value.replace(",", "")
                 .replace(" ", "")
                 .replace("\u202f", "")
+                .replace("↑", "")
+                .replace("↓", "")
+                .replace("→", "")
                 .strip()
             )
             if cleaned == "":
@@ -470,6 +473,30 @@ def _coerce_price(value: Any) -> Optional[float]:
         return float(value)
     except Exception:
         return None
+
+
+def _extract_prev_spot_price(state: Dict[str, Any], asset_key: str, signal_data: Dict[str, Any]) -> Any:
+    """Get the previous spot price either from state or notify payload.
+
+    Ha az állapotfájl nem marad meg két futás között (pl. ephemeral deploy),
+    próbáljuk a jelzett notify állapotból kinyerni az előző spotot, hogy az
+    irány nyíl akkor is frissülhessen.
+    """
+
+    if isinstance(state, dict):
+        state_for_asset = state.get(asset_key) or state.get(asset_key.upper()) or state.get(asset_key.lower())
+        if isinstance(state_for_asset, dict):
+            prev_price = state_for_asset.get("last_spot_price")
+            if prev_price is not None:
+                return prev_price
+
+    notify_state = (signal_data.get("notify") or {}).get("state") if isinstance(signal_data, dict) else None
+    if isinstance(notify_state, dict):
+        prev_price = notify_state.get("last_spot_price") or notify_state.get("spot")
+        if prev_price is not None:
+            return prev_price
+
+    return None
 
 
 def translate_reasons(missing_list: List[str]) -> str:
@@ -759,11 +786,7 @@ def build_mobile_embed_for_asset(
         local_time = "--:--"
 
     asset_key = (asset or "").upper()
-    prev_spot_price = None
-    if isinstance(state, dict):
-        state_for_asset = state.get(asset_key) or state.get(asset)
-        if isinstance(state_for_asset, dict):
-            prev_spot_price = state_for_asset.get("last_spot_price")
+    prev_spot_price = _extract_prev_spot_price(state, asset_key, signal_data)
 
     current_spot_price: Optional[float] = _coerce_price(spot)
 
@@ -790,7 +813,7 @@ def build_mobile_embed_for_asset(
                 target_state["last_spot_price"] = current_spot_price
             if ts_raw is not None:
                 target_state["last_spot_utc"] = str(ts_raw)
-    
+     
     gates_for_setup = (signal_data or {}).get("gates", {})
     if isinstance(gates_for_setup, dict) and isinstance(entry_diag, dict):
         gates_for_setup = {**gates_for_setup, "missing": entry_diag.get("missing", [])}
