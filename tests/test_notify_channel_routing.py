@@ -337,3 +337,34 @@ def test_price_direction_handles_formatted_strings():
 
     assert "↓" in description_down
     assert state["BTCUSD"].get("last_spot_price") == 91422.0
+
+
+def test_price_direction_uses_notify_state_fallback():
+    state = {}
+
+    sig = {
+        "asset": "BTCUSD",
+        "signal": "buy",
+        "probability": 55,
+        "probability_raw": 55,
+        "retrieved_at_utc": "2024-01-01T12:00:00Z",
+        "position_state": {},
+        "spot": {"price": "91,469", "utc": "2024-01-01T12:00:00Z"},
+        "notify": {"state": {"last_spot_price": "91,455"}},
+    }
+
+    embed = notify_discord.build_mobile_embed_for_asset(
+        "BTCUSD",
+        state,
+        sig,
+        decision="buy",
+        mode="core",
+        is_stable=True,
+        is_flip=False,
+        is_invalidate=False,
+    )
+
+    description = embed.get("description") or ""
+
+    assert "↑" in description
+    assert state["BTCUSD"].get("last_spot_price") == 91469.0
