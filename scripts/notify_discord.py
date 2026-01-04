@@ -28,7 +28,7 @@ ENV:
 - DISCORD_FORCE_HEARTBEAT=1 ➜ csak az összefoglalót kényszerítjük (cooldown marad)
 """
 
-import os, json, sys, logging, requests, time
+import os, json, sys, logging, requests, time, math
 from uuid import uuid4
 from dataclasses import dataclass, field
 from copy import deepcopy
@@ -73,6 +73,8 @@ DEFAULT_ASSET_STATE: Dict[str, Any] = {
     "last_sent_mode": None,
     "last_sent_known": False,
     "cooldown_until": None,
+    "last_spot_price": None,
+    "last_spot_utc": None,
 }
 
 ENTRY_GATE_STATS_PATH = PUBLIC_DIR / "debug" / "entry_gate_stats.json"
@@ -729,6 +731,44 @@ def build_mobile_embed_for_asset(
         local_time = dt.astimezone(HB_TZ).strftime("%H:%M")
     except Exception:
         local_time = "--:--"
+
+    asset_key = (asset or "").upper()
+    prev_spot_price = None
+    if isinstance(state, dict):
+        state_for_asset = state.get(asset_key) or state.get(asset)
+        if isinstance(state_for_asset, dict):
+            prev_spot_price = state_for_asset.get("last_spot_price")
+
+    current_spot_price: Optional[float] = None
+    try:
+        if spot is not None:
+            current_spot_price = float(spot)
+    except Exception:
+        current_spot_price = None
+
+    price_direction = None
+    if current_spot_price is not None:
+        try:
+            if prev_spot_price is not None:
+                prev_price_f = float(prev_spot_price)
+                if math.isclose(current_spot_price, prev_price_f, rel_tol=1e-6, abs_tol=1e-8):
+                    price_direction = "→"
+                elif current_spot_price > prev_price_f:
+                    price_direction = "↑"
+                else:
+                    price_direction = "↓"
+            else:
+                price_direction = "→"
+        except Exception:
+            price_direction = "→"
+
+    if isinstance(state, dict) and asset_key:
+        target_state = state.setdefault(asset_key, _default_asset_state())
+        if isinstance(target_state, dict):
+            if current_spot_price is not None:
+                target_state["last_spot_price"] = current_spot_price
+            if ts_raw is not None:
+                target_state["last_spot_utc"] = str(ts_raw)
     
     gates_for_setup = (signal_data or {}).get("gates", {})
     if isinstance(gates_for_setup, dict) and isinstance(entry_diag, dict):
@@ -876,7 +916,11 @@ def build_mobile_embed_for_asset(
 
     p_bar = draw_progress_bar(p_score)
     line_score = f"📊 `{p_bar}` {int(p_score)}%"
-    line_price = f"💵 {format_price(spot, asset)} • 🕒 {local_time}"
+    price_parts = [format_price(spot, asset)]
+    if price_direction:
+        price_parts.append(price_direction)
+    price_text = " ".join(price_parts)
+    line_price = f"💵 {price_text} • 🕒 {local_time}"
 
     grade_icon = "🟢" if setup_info["grade"] == "A" else "🟡" if setup_info["grade"] == "B" else "⚪"
     setup_direction = resolve_setup_direction(signal_data, decision_upper)
@@ -3861,15 +3905,8 @@ def main():
         mode_current = gates_mode(sig)
         eff = decision_of(sig)  # 'buy' | 'sell' | 'no entry'
         setup_grade = resolve_setup_grade_for_signal(sig, eff)
-
-        st = state.get(asset, {
-            "last": None, "count": 0,
-            "last_sent": None,
-            "last_sent_decision": None,
-            "last_sent_mode": None,
-            "last_sent_known": False,
-            "cooldown_until": None,
-        })
+      
+        st = state.get(asset, _default_asset_state())
 
         if eff == st.get("last"):
             st["count"] = int(st.get("count", 0)) + 1
