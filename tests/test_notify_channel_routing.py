@@ -1,5 +1,7 @@
 import os
+import logging
 from datetime import datetime, timezone
+from typing import Any, Dict
 
 import position_tracker
 import scripts.notify_discord as notify_discord
@@ -402,3 +404,57 @@ def test_price_direction_uses_signal_prev_spot_fields():
 
     assert "↓" in description
     assert state["BTCUSD"].get("last_spot_price") == 91389.0
+
+
+def test_price_direction_logs_source_and_values():
+    state: Dict[str, Any] = {}
+
+    sig = {
+        "asset": "BTCUSD",
+        "signal": "buy",
+        "probability": 55,
+        "probability_raw": 55,
+        "retrieved_at_utc": "2024-01-01T12:10:00Z",
+        "position_state": {},
+        "spot": {
+            "price": "91,389",
+            "previous": "91,412",
+            "utc": "2024-01-01T12:10:00Z",
+        },
+    }
+
+    records = []
+
+    class _CaptureHandler(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _CaptureHandler()
+    logger = notify_discord.LOGGER
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+
+    try:
+        notify_discord.build_mobile_embed_for_asset(
+            "BTCUSD",
+            state,
+            sig,
+            decision="buy",
+            mode="core",
+            is_stable=True,
+            is_flip=False,
+            is_invalidate=False,
+        )
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+
+    assert records, "No log lines captured"
+
+    payload = records[-1]
+    assert payload.getMessage() == "Price direction resolved"
+    assert payload.prev_spot_price_source == "signal.spot.previous"
+    assert payload.prev_spot_price_coerced == 91412.0
+    assert payload.current_spot_price == 91389.0
+    assert payload.price_direction == "↓"
