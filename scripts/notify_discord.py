@@ -825,21 +825,41 @@ def build_mobile_embed_for_asset(
     current_spot_price: Optional[float] = _coerce_price(spot)
 
     price_direction = None
-    if current_spot_price is not None:
+    price_direction_reason = None
+    if current_spot_price is None:
+        price_direction_reason = "missing-current-spot"
+    else:
         try:
             prev_price_f = _coerce_price(prev_spot_price) if prev_spot_price is not None else None
             if prev_price_f is not None:
                 if math.isclose(current_spot_price, prev_price_f, rel_tol=1e-6, abs_tol=1e-8):
                     price_direction = "→"
+                    price_direction_reason = "prev-present-equal"
                 elif current_spot_price > prev_price_f:
                     price_direction = "↑"
+                    price_direction_reason = "prev-present-up"
                 else:
                     price_direction = "↓"
+                    price_direction_reason = "prev-present-down"
             else:
                 price_direction = "→"
-        except Exception:
+                price_direction_reason = "missing-prev-spot"
+        except Exception as exc:
             price_direction = "→"
+            price_direction_reason = f"parse-error: {exc.__class__.__name__}"
 
+    if price_direction_reason:
+        LOGGER.debug(
+            "Price direction resolved",
+            extra={
+                "asset": asset_key,
+                "current_spot_price": current_spot_price,
+                "prev_spot_price_raw": prev_spot_price,
+                "price_direction": price_direction,
+                "price_direction_reason": price_direction_reason,
+            },
+        )
+      
     if isinstance(state, dict) and asset_key:
         target_state = state.setdefault(asset_key, _default_asset_state())
         if isinstance(target_state, dict):
