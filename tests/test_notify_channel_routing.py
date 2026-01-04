@@ -275,3 +275,65 @@ def test_price_line_adds_direction_and_updates_state():
     assert "↑" in description
     assert state["BTCUSD"].get("last_spot_price") == 102.5
     assert state["BTCUSD"].get("last_spot_utc") == "2024-01-01T12:00:00Z"
+
+
+def test_price_direction_handles_formatted_strings():
+    state = {
+        "BTCUSD": {
+            **notify_discord.DEFAULT_ASSET_STATE,
+            "last_spot_price": 91378.0,
+            "last_spot_utc": "2024-01-01T11:00:00Z",
+        }
+    }
+
+    sig_up = {
+        "asset": "BTCUSD",
+        "signal": "buy",
+        "probability": 55,
+        "probability_raw": 55,
+        "retrieved_at_utc": "2024-01-01T12:00:00Z",
+        "position_state": {},
+        "spot": {"price": "91,430", "utc": "2024-01-01T12:00:00Z"},
+    }
+
+    embed_up = notify_discord.build_mobile_embed_for_asset(
+        "BTCUSD",
+        state,
+        sig_up,
+        decision="buy",
+        mode="core",
+        is_stable=True,
+        is_flip=False,
+        is_invalidate=False,
+    )
+
+    description_up = embed_up.get("description") or ""
+
+    assert "↑" in description_up
+    assert state["BTCUSD"].get("last_spot_price") == 91430.0
+
+    sig_down = {
+        "asset": "BTCUSD",
+        "signal": "buy",
+        "probability": 55,
+        "probability_raw": 55,
+        "retrieved_at_utc": "2024-01-01T12:05:00Z",
+        "position_state": {},
+        "spot": {"price": "91,422", "utc": "2024-01-01T12:05:00Z"},
+    }
+
+    embed_down = notify_discord.build_mobile_embed_for_asset(
+        "BTCUSD",
+        state,
+        sig_down,
+        decision="buy",
+        mode="core",
+        is_stable=True,
+        is_flip=False,
+        is_invalidate=False,
+    )
+
+    description_down = embed_down.get("description") or ""
+
+    assert "↓" in description_down
+    assert state["BTCUSD"].get("last_spot_price") == 91422.0
