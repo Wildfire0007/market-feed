@@ -446,6 +446,32 @@ def format_price(val: Any, asset: str) -> str:
         return str(val)
 
 
+def _coerce_price(value: Any) -> Optional[float]:
+    """Convert a spot/price value to float, tolerating thousands separators.
+
+    Discord jelentesekben a spot néha vesszővel formázott stringként érkezik
+    (pl. "91,430"), ami ``float()`` hívásra hibát dobna. Itt előzetesen
+    eltávolítjuk az elválasztókat, hogy az irány nyíl számítása működjön.
+    """
+
+    try:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            cleaned = (
+                value.replace(",", "")
+                .replace(" ", "")
+                .replace("\u202f", "")
+                .strip()
+            )
+            if cleaned == "":
+                return None
+            return float(cleaned)
+        return float(value)
+    except Exception:
+        return None
+
+
 def translate_reasons(missing_list: List[str]) -> str:
     """Technikai kulcsok magyarra fordítása"""
 
@@ -739,18 +765,13 @@ def build_mobile_embed_for_asset(
         if isinstance(state_for_asset, dict):
             prev_spot_price = state_for_asset.get("last_spot_price")
 
-    current_spot_price: Optional[float] = None
-    try:
-        if spot is not None:
-            current_spot_price = float(spot)
-    except Exception:
-        current_spot_price = None
+    current_spot_price: Optional[float] = _coerce_price(spot)
 
     price_direction = None
     if current_spot_price is not None:
         try:
-            if prev_spot_price is not None:
-                prev_price_f = float(prev_spot_price)
+            prev_price_f = _coerce_price(prev_spot_price) if prev_spot_price is not None else None
+            if prev_price_f is not None:
                 if math.isclose(current_spot_price, prev_price_f, rel_tol=1e-6, abs_tol=1e-8):
                     price_direction = "→"
                 elif current_spot_price > prev_price_f:
