@@ -59,6 +59,3 @@ def test_micro_bias_locals_are_initialized(monkeypatch, analysis_module, fixed_n
     assert isinstance(result, dict)
     # Regression guard: micro-bias evaluation runs without uninitialized locals.
     assert {"long", "short"}.issubset(set(micro_bos_calls))
- 
-EOF
-)
