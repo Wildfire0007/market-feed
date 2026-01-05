@@ -6489,7 +6489,16 @@ def compute_ofi_zscore(k1m: pd.DataFrame, window: int) -> Optional[float]:
     if window <= 0 or k1m.empty or "close" not in k1m.columns or "volume" not in k1m.columns:
         return None
     prices = k1m["close"].astype(float).copy()
-    volumes = k1m["volume"].astype(float).copy()
+    volumes_raw = k1m["volume"].astype(float).copy()
+    volumes = volumes_raw.copy()
+    vol_invalid = (~np.isfinite(volumes)) | (volumes <= 0)
+    if vol_invalid.all():
+        volumes = pd.Series(1.0, index=volumes_raw.index)
+    elif vol_invalid.any():
+        fallback_value = volumes[~vol_invalid].median()
+        if not np.isfinite(fallback_value) or fallback_value <= 0:
+            fallback_value = 1.0
+        volumes.loc[vol_invalid] = fallback_value
     if len(prices) < window + 5:
         return None
     price_delta = prices.diff().fillna(0.0)
@@ -6729,7 +6738,20 @@ def compute_order_flow_metrics(
 
     recent = k1m.tail(ORDER_FLOW_LOOKBACK_MIN).copy()
     price_delta = recent["close"].diff().fillna(0.0)
-    signed_volume = np.sign(price_delta) * recent["volume"].fillna(0.0)
+    vol_series = recent["volume"].astype(float)
+    vol_invalid = (~np.isfinite(vol_series)) | (vol_series <= 0)
+    synthetic_volume = False
+    if vol_invalid.all():
+        vol_series = pd.Series(1.0, index=vol_series.index)
+        synthetic_volume = True
+    elif vol_invalid.any():
+        replacement = vol_series[~vol_invalid].median()
+        if not np.isfinite(replacement) or replacement <= 0:
+            replacement = 1.0
+        vol_series.loc[vol_invalid] = replacement
+        synthetic_volume = True
+
+    signed_volume = np.sign(price_delta) * vol_series
     buy_vol = signed_volume[signed_volume > 0].sum()
     sell_vol = -signed_volume[signed_volume < 0].sum()
     total = buy_vol + sell_vol
@@ -6737,7 +6759,7 @@ def compute_order_flow_metrics(
         metrics["imbalance"] = float((buy_vol - sell_vol) / total)
 
     pressure = price_delta.rolling(5).mean().iloc[-1]
-    volume_avg = recent["volume"].rolling(5).mean().iloc[-1]
+    volume_avg = vol_series.rolling(5).mean().iloc[-1]
     if np.isfinite(pressure) and np.isfinite(volume_avg) and volume_avg > 0:
         metrics["pressure"] = float(pressure * volume_avg / max(total, 1e-9))
 
@@ -6745,9 +6767,19 @@ def compute_order_flow_metrics(
     metrics["delta_volume"] = float(delta_sum) if np.isfinite(delta_sum) else None
 
     if not k5m.empty and "volume" in k5m.columns:
-        ref = k5m.tail(12)
+        ref = k5m.tail(12).copy()
+        ref_vol = ref["volume"].astype(float)
+        ref_invalid = (~np.isfinite(ref_vol)) | (ref_vol <= 0)
+        if ref_invalid.all():
+            ref_vol = pd.Series(1.0, index=ref_vol.index)
+        elif ref_invalid.any():
+            replacement = ref_vol[~ref_invalid].median()
+            if not np.isfinite(replacement) or replacement <= 0:
+                replacement = 1.0
+            ref_vol.loc[ref_invalid] = replacement
+        ref["volume"] = ref_vol
         if not ref.empty:
-            rel = recent["volume"].sum() / max(ref["volume"].sum(), 1e-9)
+            rel = vol_series.sum() / max(ref["volume"].sum(), 1e-9)
             metrics["pressure"] = float(rel * (metrics["pressure"] or 0.0))
 
     if OFI_Z_LOOKBACK > 0:
@@ -6755,7 +6787,7 @@ def compute_order_flow_metrics(
         if z_score is not None and np.isfinite(z_score):
             metrics["imbalance_z"] = float(z_score)
 
-    metrics["status"] = "ok"
+    metrics["status"] = "ok" if not synthetic_volume else "synthetic_volume"
     return metrics
 
 
@@ -14838,6 +14870,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
