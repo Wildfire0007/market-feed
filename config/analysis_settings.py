@@ -388,7 +388,13 @@ def _normalize_dynamic_logic(raw: Any) -> Dict[str, Any]:
         "enabled": False,
         "p_score": {},
         "soft_gates": {
-            "atr": {"enabled": False, "tolerance_pct": 0.15, "penalty_max": 6.0}
+            "atr": {"enabled": False, "tolerance_pct": 0.15, "penalty_max": 6.0},
+            "p_score": {
+                "enabled": False,
+                "gap_max": 2.0,
+                "size_scale": 0.7,
+                "rr_add": 0.15,
+            },
         },
         "latency_relaxation": {
             "profiles": {"strict": {"limit": None, "penalty": 0}},
@@ -417,6 +423,15 @@ def _normalize_dynamic_logic(raw: Any) -> Dict[str, Any]:
         atr_cfg.setdefault("enabled", False)
         atr_cfg.setdefault("tolerance_pct", 0.15)
         atr_cfg.setdefault("penalty_max", 6.0)
+        p_score_cfg = (
+            soft_cfg.setdefault("p_score", {})
+            if isinstance(soft_cfg.get("p_score"), dict)
+            else soft_cfg.setdefault("p_score", {})
+        )
+        p_score_cfg.setdefault("enabled", False)
+        p_score_cfg.setdefault("gap_max", 2.0)
+        p_score_cfg.setdefault("size_scale", 0.7)
+        p_score_cfg.setdefault("rr_add", 0.15)
     cfg.setdefault("p_score", {})
     return cfg
 
