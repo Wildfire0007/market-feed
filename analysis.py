@@ -13234,11 +13234,11 @@ def analyze(asset: str) -> Dict[str, Any]:
                     ]
                     required_list = [
                         item
-                       for item in required_list
+                        for item in required_list
                         if item
                         not in {precision_flow_gate_label, precision_trigger_gate_label}
                     ]
-                   precision_plan["precision_fallback_used"] = True
+                    precision_plan["precision_fallback_used"] = True
                     precision_plan["precision_fallback_rr_required"] = (
                         precision_fallback_rr_required
                     )
@@ -13255,7 +13255,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                         reasons.append(fallback_note)
                 elif precision_flow_gate_needed and (not precision_flow_ready):
                     flow_note = "Precision belépő: order flow megerősítésre vár"
-                   if flow_note not in reasons:
+                    if flow_note not in reasons:
                         reasons.append(flow_note)
                     decision = "precision_ready"
                     entry = sl = tp1 = tp2 = rr = None  
@@ -15039,6 +15039,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
