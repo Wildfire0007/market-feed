@@ -11866,18 +11866,70 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     size_multiplier = calculate_position_size_multiplier(regime_label, atr_ok, P)
     position_size_scale *= size_multiplier
+    p_score_soft_cfg: Dict[str, Any] = {}
+    if isinstance(dynamic_logic_cfg, dict):
+        soft_gates_cfg = dynamic_logic_cfg.get("soft_gates")
+        if isinstance(soft_gates_cfg, dict):
+            p_score_soft_cfg = (
+                soft_gates_cfg.get("p_score")
+                if isinstance(soft_gates_cfg.get("p_score"), dict)
+                else {}
+            )
+    p_score_soft_gate_used = False
+    if p_score_soft_cfg.get("enabled") and p_score_min_local is not None:
+        try:
+            gap_max = float(p_score_soft_cfg.get("gap_max", 0.0))
+        except (TypeError, ValueError):
+            gap_max = 0.0
+        try:
+            p_score_gap = float(p_score_min_local) - float(P)
+        except (TypeError, ValueError):
+            p_score_gap = None
+        if (
+            p_score_gap is not None
+            and gap_max > 0
+            and 0 < p_score_gap <= gap_max
+            and not critical_missing
+        ):
+            try:
+                size_scale = float(p_score_soft_cfg.get("size_scale", 1.0))
+            except (TypeError, ValueError):
+                size_scale = 1.0
+            try:
+                rr_add = float(p_score_soft_cfg.get("rr_add", 0.0))
+            except (TypeError, ValueError):
+                rr_add = 0.0
+            if 0 < size_scale < 1.0:
+                position_size_scale *= size_scale
+            if rr_add > 0:
+                core_rr_min = max(core_rr_min + rr_add, core_rr_min)
+            p_score_soft_gate_used = True
+            entry_thresholds_meta["p_score_soft_gate"] = {
+                "gap": float(p_score_gap),
+                "gap_max": float(gap_max),
+                "size_scale": float(size_scale),
+                "rr_add": float(rr_add),
+                "core_rr_min_effective": float(core_rr_min),
+            }
+            rr_gate_meta["soft_p_score_gate"] = dict(entry_thresholds_meta["p_score_soft_gate"])
+            rr_gate_meta["core_rr_min"] = core_rr_min
+            entry_thresholds_meta["rr_min_core"] = core_rr_min
+            entry_thresholds_meta["rr_meta"] = rr_gate_meta
+            reasons.append(
+                f"P-score soft gate: −{p_score_gap:.1f} pont tolerancia (size ×{size_scale:.2f}, RR +{rr_add:.2f})"
+            )
     position_scale_floor = POSITION_SIZE_SCALE_FLOOR_BY_ASSET.get(asset, 0.25)
     floor = position_scale_floor
     if position_size_scale < floor:
         critical_missing.append("position_sizing_floor")
-        reasons.append(
+        reasons.append(  
             f"Position size scale {position_size_scale:.4f} below floor {floor:.2f} — entry blocked"
         )
 
     base_core_ok = not critical_missing
-    can_enter_core = (P >= p_score_min_local) and base_core_ok
+    can_enter_core = ((P >= p_score_min_local) or p_score_soft_gate_used) and base_core_ok
     missing_core = list(critical_missing)
-    if P < p_score_min_local:
+    if P < p_score_min_local and not p_score_soft_gate_used:
         if float(p_score_min_local).is_integer():
             p_score_label = str(int(round(p_score_min_local)))
         else:
@@ -14987,6 +15039,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
