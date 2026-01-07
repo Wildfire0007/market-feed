@@ -67,7 +67,10 @@ def validate_dynamic_logic_config(
             "momentum_boost": {"enabled": False, "adx_min": None, "points": None},
             "regime_penalty": {"enabled": False, "adx_max": None, "points": None},
         },
-        "soft_gates": {"atr": {"enabled": False, "tolerance_pct": 0.15, "penalty_max": 6.0}},
+        "soft_gates": {
+            "atr": {"enabled": False, "tolerance_pct": 0.15, "penalty_max": 6.0},
+            "p_score": {"enabled": False, "gap_max": 2.0, "size_scale": 0.7, "rr_add": 0.15},
+        },
         "latency_relaxation": {
             "profiles": {"strict": {"limit": None, "penalty": 0.0}},
             "asset_map": {"default": "strict"},
@@ -140,6 +143,28 @@ def validate_dynamic_logic_config(
                 allow_negative=False,
             )
             soft_gates_cfg["atr"] = atr_cfg
+        p_score_raw = raw_soft.get("p_score")
+        if isinstance(p_score_raw, dict):
+            p_score_soft_cfg: Dict[str, Any] = {"enabled": bool(p_score_raw.get("enabled"))}
+            p_score_soft_cfg["gap_max"] = _coerce_float(
+                p_score_raw.get("gap_max"),
+                path="soft_gates.p_score.gap_max",
+                warnings=warnings,
+                allow_negative=False,
+            )
+            p_score_soft_cfg["size_scale"] = _coerce_float(
+                p_score_raw.get("size_scale"),
+                path="soft_gates.p_score.size_scale",
+                warnings=warnings,
+                allow_negative=False,
+            )
+            p_score_soft_cfg["rr_add"] = _coerce_float(
+                p_score_raw.get("rr_add"),
+                path="soft_gates.p_score.rr_add",
+                warnings=warnings,
+                allow_negative=False,
+            )
+            soft_gates_cfg["p_score"] = p_score_soft_cfg
     sanitized["soft_gates"] = soft_gates_cfg
 
     latency_cfg: Dict[str, Any] = {"profiles": {}, "asset_map": {}}
