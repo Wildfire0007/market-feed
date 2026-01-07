@@ -1132,6 +1132,11 @@ PRECISION_ARMING_TIMEOUT_DEFAULT = 20
 PRECISION_TRIGGER_NEAR_MULT = 0.2
 PRECISION_TRIGGER_FALLBACK_MIN_MINUTES = 5.0
 PRECISION_TRIGGER_FALLBACK_MAX_MINUTES = 10.0
+PRECISION_FALLBACK_SCORE_BUFFER = float(os.getenv("PRECISION_FALLBACK_SCORE_BUFFER", "4.0"))
+PRECISION_FALLBACK_POSITION_SCALE = float(
+    os.getenv("PRECISION_FALLBACK_POSITION_SCALE", "0.6")
+)
+PRECISION_FALLBACK_RR_BONUS = float(os.getenv("PRECISION_FALLBACK_RR_BONUS", "0.3"))
 REALTIME_JUMP_MULT = 2.0
 MICRO_BOS_P_BONUS = 8.0
 MOMENTUM_ATR_REL = 0.0005
@@ -1536,6 +1541,7 @@ def _log_gate_summary(asset: str, decision: Dict[str, Any]) -> None:
             "atr_threshold": entry_meta.get("atr_threshold_effective"),
             "atr_ok": entry_meta.get("atr_ratio_ok"),
             "spread_ok": entry_meta.get("spread_gate_ok"),
+            "precision_fallback_used": entry_meta.get("precision_fallback_used"),
             "liquidity_ok": decision.get("momentum_liquidity_ok"),
             "rr_min_core": entry_meta.get("rr_min_core"),
             "rr_min_momentum": entry_meta.get("rr_min_momentum"),
@@ -12163,6 +12169,10 @@ def analyze(asset: str) -> Dict[str, Any]:
     precision_trigger_fallback_active = False
     precision_trigger_state: Optional[str] = None
     precision_override_active = False
+    precision_fallback_used = False
+    precision_fallback_score_ready = False
+    precision_fallback_daily_used = False
+    precision_fallback_rr_required: Optional[float] = None
     session_entry_open = bool(session_meta.get("entry_open"))
     precision_threshold_value = get_precision_score_threshold(asset)
     if float(precision_threshold_value).is_integer():
@@ -13105,20 +13115,98 @@ def analyze(asset: str) -> Dict[str, Any]:
                 and structure_gate
                 and bos_component_ok
             )
+            precision_fallback_score_ready = bool(
+                PRECISION_FALLBACK_SCORE_BUFFER >= 0.0
+                and precision_score_val
+                >= (precision_threshold_value + PRECISION_FALLBACK_SCORE_BUFFER)
+            )
             precision_trigger_fallback_ready = bool(
                 precision_trigger_fallback_active
                 and mandatory_gates_ok
                 and (precision_flow_ready or not precision_flow_gate_needed)
                 and not other_missing
             )
+            precision_fallback_pending = bool(
+                precision_fallback_score_ready
+                and (not precision_flow_ready or not precision_trigger_ready)
+            )
+            precision_fallback_rr_required = None
+            precision_fallback_allowed = False
+            if precision_fallback_pending:
+                today_key = analysis_now.date().isoformat()
+                precision_fallback_daily_used = (
+                    precision_runtime.get("fallback_used_date") == today_key
+                )
+                if not precision_fallback_daily_used:
+                    base_rr_required = (
+                        rr_required_effective
+                        if rr_required_effective is not None
+                        else core_rr_min
+                    )
+                    precision_fallback_rr_required = (
+                        base_rr_required + PRECISION_FALLBACK_RR_BONUS
+                    )
+                    fallback_rr_ok = bool(
+                        rr is not None
+                        and rr >= (precision_fallback_rr_required - 1e-9)
+                    )
+                    precision_fallback_allowed = bool(
+                        fallback_rr_ok
+                        and mandatory_gates_ok
+                        and not other_missing
+                        and atr_ok
+                        and spread_gate_ok
+                        and not news_lockout_active
+                    )
             if decision in ("buy", "sell"):
                 # csak akkor blokkoljon a flow, ha a flow-kapu ténylegesen aktív/szükséges
-                if precision_flow_gate_needed and (not precision_flow_ready):
+                if precision_fallback_allowed:
+                    precision_fallback_used = True
+                    position_size_scale = min(
+                        position_size_scale,
+                        max(0.1, PRECISION_FALLBACK_POSITION_SCALE),
+                    )
+                    if (
+                        precision_fallback_rr_required is not None
+                        and (
+                            rr_required_effective is None
+                            or precision_fallback_rr_required > rr_required_effective
+                        )
+                    ):
+                        rr_required_effective = precision_fallback_rr_required
+                    missing = [
+                        item
+                        for item in missing
+                        if item
+                        not in {precision_flow_gate_label, precision_trigger_gate_label}
+                    ]
+                    required_list = [
+                        item
+                       for item in required_list
+                        if item
+                        not in {precision_flow_gate_label, precision_trigger_gate_label}
+                    ]
+                   precision_plan["precision_fallback_used"] = True
+                    precision_plan["precision_fallback_rr_required"] = (
+                        precision_fallback_rr_required
+                    )
+                    precision_plan["precision_fallback_position_scale"] = min(
+                        1.0, max(0.1, PRECISION_FALLBACK_POSITION_SCALE)
+                    )
+                    precision_runtime["fallback_used_date"] = today_key
+                    precision_runtime["fallback_used_at"] = analysis_now.isoformat()
+                    fallback_note = (
+                        "Precision fallback: magas score, flow/trigger késik "
+                        f"→ méret ×{position_size_scale:.2f}, RR≥{rr_required_effective:.2f}"
+                    )
+                    if fallback_note not in reasons:
+                        reasons.append(fallback_note)
+                elif precision_flow_gate_needed and (not precision_flow_ready):
                     flow_note = "Precision belépő: order flow megerősítésre vár"
-                    if flow_note not in reasons:
+                   if flow_note not in reasons:
                         reasons.append(flow_note)
                     decision = "precision_ready"
-                    entry = sl = tp1 = tp2 = rr = None
+                    entry = sl = tp1 = tp2 = rr = None  
                 elif precision_trigger_state != "fire" and not precision_trigger_fallback_ready:
                     arming_note = "Precision belépő: trigger ablak aktív"
                     if arming_note not in reasons:
@@ -13153,6 +13241,35 @@ def analyze(asset: str) -> Dict[str, Any]:
                 armed_note = "Precision trigger kész → limit figyelés"
                 if armed_note not in reasons:
                     reasons.append(armed_note)
+        if precision_fallback_used:
+            entry_thresholds_meta["precision_fallback_used"] = True
+            precision_gate_snapshot = entry_thresholds_meta.get("precision_gate_state")
+            if isinstance(precision_gate_snapshot, dict):
+                precision_gate_snapshot.update(
+                    {
+                        "precision_fallback_used": True,
+                        "precision_fallback_score_ready": precision_fallback_score_ready,
+                        "precision_fallback_daily_used": precision_fallback_daily_used,
+                        "precision_fallback_rr_required": precision_fallback_rr_required,
+                       "precision_fallback_position_scale": min(
+                            1.0, max(0.1, PRECISION_FALLBACK_POSITION_SCALE)
+                        ),
+                    }
+                )
+            if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
+                precision_ctx = entry_gate_context_hu.get("precision_kapu")
+                if isinstance(precision_ctx, dict):
+                    precision_ctx.update(
+                        {
+                            "precision_fallback_used": True,
+                            "precision_fallback_score_ready": precision_fallback_score_ready,
+                            "precision_fallback_daily_used": precision_fallback_daily_used,
+                            "precision_fallback_rr_required": precision_fallback_rr_required,
+                            "precision_fallback_position_scale": min(
+                                1.0, max(0.1, PRECISION_FALLBACK_POSITION_SCALE)
+                            ),
+                        }
+                    )
         _emit_precision_gate_log(
             asset,
             "precision_state",
@@ -14870,6 +14987,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
