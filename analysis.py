@@ -6977,14 +6977,52 @@ def structure_break_with_retest(
     return retest_level(df, direction, lb)
 
 
+def _micro_bos_stabilized(
+    k1m: pd.DataFrame, direction: str, hold_bars: int = 3, hold_required: int = 2
+) -> bool:
+    if k1m.empty or len(k1m) < hold_bars:
+        return False
+    sw = find_swings(k1m, lb=2)
+    hi, lo = last_swing_levels(sw.iloc[:-1])
+    level = hi if direction == "long" else lo if direction == "short" else None
+    if level is None or not np.isfinite(level):
+        return False
+    window = k1m.tail(hold_bars)
+    try:
+        closes = window["close"].astype(float)
+        highs = window["high"].astype(float)
+        lows = window["low"].astype(float)
+        opens = window["open"].astype(float)
+    except Exception:
+        return False
+    if direction == "long":
+        hold_ok = int((closes >= level).sum()) >= hold_required
+        correction_ok = bool(((lows <= level) & (closes >= level)).any())
+    elif direction == "short":
+        hold_ok = int((closes <= level).sum()) >= hold_required
+        correction_ok = bool(((highs >= level) & (closes <= level)).any())
+    else:
+        return False
+    ranges = highs - lows
+    bodies = (closes - opens).abs()
+    doji_ok = bool(((ranges > 0) & (bodies <= ranges * 0.25)).any())
+    return hold_ok or correction_ok or doji_ok
+
+
 def micro_bos_with_retest(
-    k1m: pd.DataFrame, k5m: pd.DataFrame, direction: str, lookback: Optional[int] = None
+    k1m: pd.DataFrame,
+    k5m: pd.DataFrame,
+    direction: str,
+    lookback: Optional[int] = None,
+    require_stabilization: bool = False,
 ) -> bool:
     if direction not in ("long", "short"):
         return False
     if k1m.empty or len(k1m) < 10:
         return False
     if not detect_bos(k1m, direction):
+        return False
+    if require_stabilization and not _micro_bos_stabilized(k1m, direction):
         return False
     return retest_level(k5m, direction, lookback or DEFAULT_BOS_LOOKBACK)
 
@@ -7024,6 +7062,7 @@ def compute_precision_entry(
     price_now: Optional[float],
     atr5: Optional[float],
     order_flow_metrics: Dict[str, Any],
+    require_stabilization: bool = False,
     score_threshold: float = PRECISION_SCORE_THRESHOLD_DEFAULT,
 ) -> Dict[str, Any]:
     plan: Dict[str, Any] = {
@@ -7242,7 +7281,12 @@ def compute_precision_entry(
         plan["trigger_reasons"].extend(flow_reasons)
     plan["order_flow_stalled"] = stalled_flow
       
-    if micro_bos_with_retest(k1m, k5m, direction):
+    if micro_bos_with_retest(
+        k1m,
+        k5m,
+        direction,
+        require_stabilization=require_stabilization,
+    ):
         score += 12.0
         factors.append("micro BOS + retest confirmed")
 
@@ -9588,8 +9632,21 @@ def analyze(asset: str) -> Dict[str, Any]:
     if stale_timeframes.get("k5m"):
         struct_retest_long = struct_retest_short = False
 
-    micro_bos_long = micro_bos_with_retest(k1m_closed, k5m_closed, "long", bos_lookback)
-    micro_bos_short = micro_bos_with_retest(k1m_closed, k5m_closed, "short", bos_lookback)
+    require_micro_stabilization = regime_label == "choppy"
+    micro_bos_long = micro_bos_with_retest(
+        k1m_closed,
+        k5m_closed,
+        "long",
+        bos_lookback,
+        require_stabilization=require_micro_stabilization,
+    )
+    micro_bos_short = micro_bos_with_retest(
+        k1m_closed,
+        k5m_closed,
+        "short",
+        bos_lookback,
+        require_stabilization=require_micro_stabilization,
+    )
     if stale_timeframes.get("k1m") or stale_timeframes.get("k5m"):
         micro_bos_long = micro_bos_short = False
 
@@ -13049,6 +13106,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             price_for_calc,
             atr5_value,
             order_flow_metrics,
+            require_stabilization=regime_label == "choppy",
             score_threshold=precision_threshold_value,
         )
         counter_direction = "sell" if precision_direction == "buy" else "buy"
@@ -13060,6 +13118,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             price_for_calc,
             atr5_value,
             order_flow_metrics,
+            require_stabilization=regime_label == "choppy",
             score_threshold=precision_threshold_value,
         )
         if counter_plan:
@@ -15158,6 +15217,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
