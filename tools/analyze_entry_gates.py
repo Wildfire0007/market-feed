@@ -583,6 +583,41 @@ def build_json_summary(stats: Mapping[str, SymbolStats]) -> Dict[str, Any]:
     return summary
 
 
+def _coerce_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def apply_summary_deltas(
+    summary: Dict[str, Any], previous: Mapping[str, Any]
+) -> Dict[str, Any]:
+    for symbol, payload in summary.items():
+        if not isinstance(payload, dict):
+            continue
+        prev_payload = previous.get(symbol, {}) if isinstance(previous, Mapping) else {}
+        prev_candidates = _coerce_int(
+            prev_payload.get("total_candidates") if isinstance(prev_payload, Mapping) else None
+        )
+        prev_rejected = _coerce_int(
+            prev_payload.get("total_rejected") if isinstance(prev_payload, Mapping) else None
+        )
+        current_candidates = _coerce_int(payload.get("total_candidates"))
+        current_rejected = _coerce_int(payload.get("total_rejected"))
+        payload["total_candidates_delta"] = (
+            None
+            if prev_candidates is None or current_candidates is None
+            else current_candidates - prev_candidates
+        )
+        payload["total_rejected_delta"] = (
+            None
+            if prev_rejected is None or current_rejected is None
+            else current_rejected - prev_rejected
+        )
+    return summary
+
+
 def build_daily_visualization(stats: Mapping[str, SymbolStats]) -> Dict[str, Any]:
     daily: Dict[str, Dict[str, Dict[str, int]]] = {}
     for record in stats.values():
@@ -611,6 +646,17 @@ def write_json_summary(path: Path, summary: Mapping[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, sort_keys=True)
         handle.write("\n")
+
+
+def load_existing_summary(path: Path) -> Mapping[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, Mapping) else {}
 
 
 # ---------------------------------------------------------------------------
@@ -702,7 +748,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         output_daily = (public_root / ENTRY_GATE_DAILY_RELATIVE_PATH).resolve()
 
+    previous_summary = load_existing_summary(output_json)  
     summary_payload = build_json_summary(stats)
+    summary_payload = apply_summary_deltas(summary_payload, previous_summary)
     write_json_summary(output_json, summary_payload)
     daily_payload = build_daily_visualization(stats)
     write_json_summary(output_daily, daily_payload)
