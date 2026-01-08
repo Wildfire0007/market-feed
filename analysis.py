@@ -283,6 +283,7 @@ from config.analysis_settings import (
     INTRADAY_BIAS_RELAX,
     LEVERAGE,
     MIN_RISK_ABS,
+    MEAN_REVERT_ADJUSTMENTS,
     MOMENTUM_RR_MIN,
     XAGUSD_ATR_5M_FLOOR,
     XAGUSD_ATR_5M_FLOOR_ENABLED,
@@ -1081,6 +1082,10 @@ OFI_Z_LOOKBACK = int(OFI_Z_SETTINGS.get("lookback_bars") or 0)
 
 VWAP_TREND_BAND = float(VWAP_BAND_MULT.get("trend") or 0.8)
 VWAP_MEAN_REVERT_BAND = float(VWAP_BAND_MULT.get("mean_revert") or 2.0)
+_MEAN_REVERT_CFG = MEAN_REVERT_ADJUSTMENTS if isinstance(MEAN_REVERT_ADJUSTMENTS, dict) else {}
+MEAN_REVERT_SIZE_SCALE = float(_MEAN_REVERT_CFG.get("size_scale") or 0.7)
+MEAN_REVERT_RR_ADD = float(_MEAN_REVERT_CFG.get("rr_add") or 0.0)
+MEAN_REVERT_ALLOW_BALANCED = bool(_MEAN_REVERT_CFG.get("allow_balanced", True))
 
 NEWS_LOCKOUT_MINUTES_DEFAULT = int(NEWS_MODE_SETTINGS.get("lockout_minutes") or 0)
 NEWS_STABILISATION_MINUTES_DEFAULT = int(NEWS_MODE_SETTINGS.get("stabilisation_minutes") or 0)
@@ -6568,7 +6573,10 @@ def evaluate_vwap_confluence(
         elif direction == "short" and delta >= 0:
             result["trend_pullback"] = True
     weakening_flow = ofi_z is not None and ofi_z <= OFI_Z_WEAKENING
-    if abs(delta) >= band_mean and regime == "range" and weakening_flow:
+    mean_revert_regimes = {"range"}
+    if MEAN_REVERT_ALLOW_BALANCED:
+        mean_revert_regimes.add("balanced")
+    if abs(delta) >= band_mean and regime in mean_revert_regimes and weakening_flow:
         if direction == "long" and delta < 0:
             result["mean_revert"] = True
         elif direction == "short" and delta > 0:
@@ -11238,6 +11246,25 @@ def analyze(asset: str) -> Dict[str, Any]:
         core_rr_min = max(core_rr_min, BTC_RR_MIN_TREND.get(profile, core_rr_min))
         momentum_rr_min = max(momentum_rr_min, BTC_MOMENTUM_RR_MIN.get(profile, momentum_rr_min))
     position_size_scale = 1.0
+    mean_revert_active = bool(vwap_confluence.get("mean_revert"))
+    if mean_revert_active:
+        rr_add = max(0.0, MEAN_REVERT_RR_ADD)
+        size_scale = MEAN_REVERT_SIZE_SCALE
+        if size_scale and size_scale > 0:
+            position_size_scale = min(position_size_scale, size_scale)
+        if rr_add > 0:
+            core_rr_min += rr_add
+            momentum_rr_min += rr_add
+        entry_thresholds_meta["mean_revert_adjustment"] = {
+            "active": True,
+            "size_scale": float(size_scale) if size_scale else None,
+            "rr_add": float(rr_add),
+            "core_rr_min_effective": core_rr_min,
+            "momentum_rr_min_effective": momentum_rr_min,
+        }
+        reasons.append(
+            f"Mean-revert setup: méret ×{position_size_scale:.2f}, RR +{rr_add:.2f}"
+        )
     funding_dir_filter: Optional[str] = None
     funding_reason: Optional[str] = None
     range_time_stop_plan: Optional[Dict[str, Any]] = None
@@ -15131,6 +15158,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
