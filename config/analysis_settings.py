@@ -1527,6 +1527,10 @@ for key, value in _RAW_VWAP_BAND_MULT.items():
     except (TypeError, ValueError):
         continue
 
+MEAN_REVERT_ADJUSTMENTS: Dict[str, Any] = dict(
+    _get_config_value("mean_revert_adjustments") or {}
+)
+
 _RAW_OFI_Z = dict(_get_config_value("ofi_z_th") or {})
 OFI_Z_SETTINGS: Dict[str, float] = {}
 for key, value in _RAW_OFI_Z.items():
