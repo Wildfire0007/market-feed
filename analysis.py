@@ -8336,6 +8336,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         )
     except (TypeError, ValueError):
         flow_data_available = order_flow_imbalance is not None
+    order_flow_data_missing = not flow_data_available
 
     ofi_zscore = None
     if isinstance(order_flow_metrics, dict):
@@ -10990,18 +10991,26 @@ def analyze(asset: str) -> Dict[str, Any]:
             structure_components["ofi"] = ofi_zscore <= -OFI_Z_TRIGGER
     if structure_components.get("ofi") and ofi_zscore is not None:
         structure_notes.append(f"OFI z-score {ofi_zscore:.2f} támogatja az irányt")
-    structure_gate = sum(1 for flag in structure_components.values() if flag) >= 2
-    if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
-        entry_gate_context_hu["structure_kapu"] = {
-            "ok": bool(structure_gate),
-            "komponensek": {k: bool(v) for k, v in structure_components.items()},
-            **_gate_timestamp_fields(analysis_now),
-        }
+    structure_hit_count = sum(1 for flag in structure_components.values() if flag)
+    structure_gate = structure_hit_count >= 2
     if asset == "BTCUSD" and btc_momentum_override_active and not structure_gate:
         if structure_components.get("bos") and structure_components.get("ofi"):
             structure_gate = True
         elif structure_components.get("liquidity") and structure_components.get("ofi"):
             structure_gate = True
+    structure_soft_one_of_three = (
+        not structure_gate
+        and structure_hit_count == 1
+        and atr_ok
+        and spread_gate_ok
+    )
+    if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
+        entry_gate_context_hu["structure_kapu"] = {
+            "ok": bool(structure_gate),
+            "komponensek": {k: bool(v) for k, v in structure_components.items()},
+            "soft_1of3": bool(structure_soft_one_of_three),
+            **_gate_timestamp_fields(analysis_now),
+        }
     if asset == "BTCUSD" and not btc_momentum_override_active and not structure_gate:
         profile_lookup = btc_profile_name or _btc_active_profile()
         try:
@@ -11779,7 +11788,11 @@ def analyze(asset: str) -> Dict[str, Any]:
         return extra
 
     data_integrity_ok = core_data_ok and not critical_flags.get("k1h", False) and not critical_flags.get("k4h", False)
-    soft_structure_gate = bool(structure_gate or (strong_momentum and not structure_gate))
+    soft_structure_gate = bool(
+        structure_gate
+        or structure_soft_one_of_three
+        or (strong_momentum and not structure_gate)
+    )
 
     core_required = [
         "session",
@@ -11818,6 +11831,7 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     critical_missing: List[str] = []
     soft_flags: List[str] = []
+    soft_gate_reasons: List[str] = []  
     intraday_relaxable_guards = {"data_integrity", range_guard_label}
     for name, ok in conds_core.items():
         category = classify_gate_failure(name)
@@ -11840,6 +11854,12 @@ def analyze(asset: str) -> Dict[str, Any]:
         else:
             soft_flags.append(name)
 
+    if soft_flags:
+        for flag in soft_flags:
+            label = f"core_{flag}"
+            if label not in soft_gate_reasons:
+                soft_gate_reasons.append(label) 
+
     if intraday_relaxed_guards:
         entry_thresholds_meta["intraday_relaxed_guards"] = list(intraday_relaxed_guards)
         entry_thresholds_meta["intraday_relax_size_scale"] = intraday_relax_scale
@@ -11859,8 +11879,15 @@ def analyze(asset: str) -> Dict[str, Any]:
     if not conds_core.get("bias", True):
         P -= 15.0
         reasons.append("Bias eltérés: H1 trend ütközik az M5 belépéssel (−15 P-score)")
+    if structure_soft_one_of_three:
+        P -= 6.0
+        position_size_scale *= 0.7
+        reasons.append("Strukturális soft gate: 1/3 jel + ATR/spread OK (−6 P-score, size ×0.70)")
+        soft_gate_reasons.append("structure_1of3")
     if not structure_gate and soft_structure_gate:
         reasons.append("Strukturális kapu lazítva: momentum erős, BOS hiány engedve")
+        if "structure_momentum_override" not in soft_gate_reasons:
+            soft_gate_reasons.append("structure_momentum_override")
 
     P = max(0.0, min(100.0, P))
 
@@ -11918,6 +11945,23 @@ def analyze(asset: str) -> Dict[str, Any]:
             reasons.append(
                 f"P-score soft gate: −{p_score_gap:.1f} pont tolerancia (size ×{size_scale:.2f}, RR +{rr_add:.2f})"
             )
+    if order_flow_data_missing:
+        order_flow_rr_add = 0.15
+        order_flow_size_scale = 0.6
+        core_rr_min = max(core_rr_min + order_flow_rr_add, core_rr_min)
+        momentum_rr_min = max(momentum_rr_min + order_flow_rr_add, momentum_rr_min)
+        position_size_scale *= order_flow_size_scale
+        entry_thresholds_meta["order_flow_soft_gate"] = {
+            "reason": "missing",
+            "rr_add": order_flow_rr_add,
+            "size_scale": order_flow_size_scale,
+            "core_rr_min_effective": core_rr_min,
+            "momentum_rr_min_effective": momentum_rr_min,
+        }
+        reasons.append(
+            f"Order-flow hiány: szigorúbb RR (+{order_flow_rr_add:.2f}), méret ×{order_flow_size_scale:.2f}"
+        )
+        soft_gate_reasons.append("order_flow_missing")
     position_scale_floor = POSITION_SIZE_SCALE_FLOOR_BY_ASSET.get(asset, 0.25)
     floor = position_scale_floor
     if position_size_scale < floor:
@@ -11978,6 +12022,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         mom_required.append("funding_alignment")
     missing_mom: List[str] = []
     mom_trigger_desc: Optional[str] = None
+    momentum_soft_flags: List[str] = []
 
     momentum_liquidity_ok = True
     momentum_adx_ok = True
@@ -12002,7 +12047,8 @@ def analyze(asset: str) -> Dict[str, Any]:
             regime_ok or xag_momentum_regime_bypass or eurusd_momentum_regime_bypass
         )
         if not regime_gate_for_momentum:
-            missing_mom.append("regime")
+            momentum_soft_flags.append("regime")
+            regime_gate_for_momentum = True
         if direction is None:
             if eurusd_momentum_regime_bypass:
                 direction = trend_bias if trend_bias in {"long", "short"} else direction
@@ -12040,7 +12086,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             if (
                 override_active
                 and session_ok_flag
-                and regime_ok
+                and regime_gate_for_momentum
                 and mom_atr_ok
             ):
                 mom_dir = "buy" if direction == "long" else "sell"
@@ -12069,15 +12115,16 @@ def analyze(asset: str) -> Dict[str, Any]:
             elif (
                 direction in {"long", "short"}
                 and session_ok_flag
-                and (regime_ok or xag_momentum_regime_bypass)
+                and regime_gate_for_momentum
                 and mom_atr_ok
                 and cross_flag
-                and ofi_confirm
             ):
                 mom_dir = "buy" if direction == "long" else "sell"
                 mom_trigger_desc = "EMA9×21 momentum cross"
                 momentum_trigger_ok = True
                 missing_mom = [item for item in missing_mom if item not in {"liquidity", "ofi"}]
+                if not ofi_confirm and "ofi" not in momentum_soft_flags:
+                    momentum_soft_flags.append("ofi")
                 if asset == "XAGUSD" and xag_momentum_regime_bypass:
                     entry_thresholds_meta["xag_momentum_bias_bypass"] = True
                 if funding_dir_filter and (
@@ -12092,8 +12139,10 @@ def analyze(asset: str) -> Dict[str, Any]:
                     missing_mom.append("atr")
                 if not cross_flag and "momentum_trigger" not in missing_mom:
                     missing_mom.append("momentum_trigger")
-                if not ofi_confirm and "ofi" not in missing_mom:
-                    missing_mom.append("ofi")
+                if not ofi_confirm and "ofi" not in momentum_soft_flags:
+                    momentum_soft_flags.append("ofi")
+            if mom_dir and not ofi_confirm and "ofi" not in momentum_soft_flags:
+                momentum_soft_flags.append("ofi")
         else:
             if not liquidity_data_available:
                 momentum_liquidity_ok = True
@@ -12101,26 +12150,34 @@ def analyze(asset: str) -> Dict[str, Any]:
                     reasons.append("Liquidity gate skipped (no volume proxy available)")
                 if "liquidity_no_data" not in gate_skips:
                     gate_skips.append("liquidity_no_data")
+                if "liquidity" not in momentum_soft_flags:
+                    momentum_soft_flags.append("liquidity")
             elif momentum_vol_ratio < MOMENTUM_VOLUME_RATIO_TH:
                 momentum_liquidity_ok = False
-                missing_mom.append("liquidity")
+                if "liquidity" not in momentum_soft_flags:
+                    momentum_soft_flags.append("liquidity")
 
             if flow_data_available:
                 if order_flow_imbalance is not None and abs(order_flow_imbalance) < ORDER_FLOW_IMBALANCE_TH:
                     momentum_liquidity_ok = False
-                    missing_mom.append("order_flow")
+                    if "order_flow" not in momentum_soft_flags:
+                        momentum_soft_flags.append("order_flow")
                 if order_flow_pressure is not None and direction is not None:
                     if direction == "long" and order_flow_pressure < ORDER_FLOW_PRESSURE_TH:
                         momentum_liquidity_ok = False
-                        missing_mom.append("order_flow_pressure")
+                        if "order_flow_pressure" not in momentum_soft_flags:
+                            momentum_soft_flags.append("order_flow_pressure")
                     elif direction == "short" and order_flow_pressure > -ORDER_FLOW_PRESSURE_TH:
                         momentum_liquidity_ok = False
-                        missing_mom.append("order_flow_pressure")
+                        if "order_flow_pressure" not in momentum_soft_flags:
+                            momentum_soft_flags.append("order_flow_pressure")
             else:
                 if "Order-flow gates skipped (no tick/imbalance data)" not in reasons:
                     reasons.append("Order-flow gates skipped (no tick/imbalance data)")
                 if "orderflow_no_data" not in gate_skips:
                     gate_skips.append("orderflow_no_data")
+                if "order_flow_missing" not in momentum_soft_flags:
+                    momentum_soft_flags.append("order_flow_missing")
             if asset == "GOLD_CFD":
                 momentum_adx_ok = regime_adx is not None and regime_adx >= 20.0
                 if not momentum_adx_ok:
@@ -12132,9 +12189,9 @@ def analyze(asset: str) -> Dict[str, Any]:
                 else:
                     ofi_confirm = ofi_zscore <= -OFI_Z_TRIGGER
             if not ofi_confirm:
-                if ofi_available:
-                    missing_mom.append("ofi")
-                elif "Order-flow gates skipped (no tick/imbalance data)" not in reasons:
+                if "ofi" not in momentum_soft_flags:
+                    momentum_soft_flags.append("ofi")
+                if not ofi_available and "Order-flow gates skipped (no tick/imbalance data)" not in reasons:
                     reasons.append("Order-flow gates skipped (no tick/imbalance data)")
                 if not ofi_available and "ofi_no_data" not in gate_skips:
                     gate_skips.append("ofi_no_data")
@@ -12152,15 +12209,14 @@ def analyze(asset: str) -> Dict[str, Any]:
                 else:
                     mom_atr_ok = bool(atr_ok and not np.isnan(rel_atr))
                     cross_flag = ema_cross_long if direction == "long" else ema_cross_short
-                if (
+                base_momentum_ready = (
                     session_ok_flag
-                    and regime_ok
+                    and regime_gate_for_momentum
                     and momentum_adx_ok
                     and mom_atr_ok
                     and cross_flag
-                    and momentum_liquidity_ok
-                    and ofi_confirm
-                ):
+                )
+                if base_momentum_ready:
                     mom_dir = "buy" if direction == "long" else "sell"
                     mom_trigger_desc = "EMA9×21 momentum cross"
                     momentum_trigger_ok = True
@@ -12173,8 +12229,6 @@ def analyze(asset: str) -> Dict[str, Any]:
                         missing_mom.append("atr")
                     if not cross_flag:
                         missing_mom.append("momentum_trigger")
-                    if not momentum_liquidity_ok:
-                        missing_mom.append("liquidity")
 
     if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
         momentum_context: Dict[str, Any] = {
@@ -12183,6 +12237,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             "momentum_reason": mom_trigger_desc
             or ("missing:" + ",".join(sorted(dict.fromkeys(missing_mom))) if missing_mom else ""),
             "momentum_missing": list(dict.fromkeys(missing_mom)),
+            "momentum_soft_gates": list(dict.fromkeys(momentum_soft_flags)),
             "momentum_regime_ok": bool(regime_ok),
             "momentum_structure_ok": bool(structure_gate),
             "momentum_atr_ok": mom_atr_ok if mom_atr_ok is not None else False,
@@ -12763,6 +12818,38 @@ def analyze(asset: str) -> Dict[str, Any]:
             missing = []
             momentum_used = True
             decision = mom_dir
+            if momentum_soft_flags:
+                soft_penalty = 0.0
+                size_scale = 1.0
+                if "regime" in momentum_soft_flags:
+                    soft_penalty += 6.0
+                    size_scale *= 0.85
+                if "liquidity" in momentum_soft_flags:
+                    soft_penalty += 4.0
+                    size_scale *= 0.8
+                if any(
+                    flag in momentum_soft_flags
+                    for flag in {"order_flow", "order_flow_pressure", "order_flow_missing", "ofi"}
+                ):
+                    soft_penalty += 4.0
+                    size_scale *= 0.85
+                if soft_penalty:
+                    P -= soft_penalty
+                position_size_scale *= size_scale
+                entry_thresholds_meta["momentum_soft_gates"] = {
+                    "flags": list(dict.fromkeys(momentum_soft_flags)),
+                    "p_penalty": soft_penalty,
+                    "size_scale": size_scale,
+                }
+                reasons.append(
+                    "Momentum soft gate: "
+                    + ", ".join(dict.fromkeys(momentum_soft_flags))
+                    + f" (−{soft_penalty:.1f} P, size ×{size_scale:.2f})"
+                )
+                for flag in momentum_soft_flags:
+                    label = f"momentum_{flag}"
+                    if label not in soft_gate_reasons:
+                        soft_gate_reasons.append(label)
             if not compute_levels(decision, momentum_rr_min, mom_tp1_mult, mom_tp2_mult):
                 decision = "no entry"
             else:
@@ -12915,6 +13002,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "direction_result": mom_dir,
         "required": list(mom_required),
         "missing": list(dict.fromkeys(missing_mom)),
+        "soft_flags": list(dict.fromkeys(momentum_soft_flags)),
         "liquidity_data_available": bool(liquidity_data_available),
         "flow_data_available": bool(flow_data_available),
         "ofi_available": bool(ofi_available) if "ofi_available" in locals() else None,
@@ -13932,6 +14020,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         "session_window": session_window_payload,
     }
 
+    if soft_gate_reasons:
+        entry_thresholds_meta["soft_gate_reasons"] = list(dict.fromkeys(soft_gate_reasons))
+        if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
+            entry_gate_context_hu["soft_gate_reasons"] = list(dict.fromkeys(soft_gate_reasons))
 
     decision_obj = {
         "asset": asset,
@@ -15039,6 +15131,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
