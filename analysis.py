@@ -7321,6 +7321,7 @@ def compute_precision_entry(
     score = max(0.0, min(100.0, score))
     plan["microstructure_score"] = score
     plan["score"] = round(score, 2)
+    plan["score_ready"] = plan["score"] >= score_threshold
     plan["confidence"] = _confidence_from_score(score)
     plan["factors"].extend(factors)
     plan["entry"] = entry_level
@@ -15217,6 +15218,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
