@@ -12017,8 +12017,9 @@ def analyze(asset: str) -> Dict[str, Any]:
         position_size_scale *= 0.5
         reasons.append("ATR soft gate: alacsony volatilitás −5 P-score, méret felezve")
     if not conds_core.get("bias", True):
-        P -= 15.0
-        reasons.append("Bias eltérés: H1 trend ütközik az M5 belépéssel (−15 P-score)")
+        if effective_bias in {"long", "short"}:
+            P -= 15.0
+            reasons.append("Bias eltérés: H1 trend ütközik az M5 belépéssel (−15 P-score)")
     if structure_soft_one_of_three:
         P -= 6.0
         position_size_scale *= 0.7
@@ -15273,6 +15274,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
