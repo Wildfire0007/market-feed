@@ -52,4 +52,4 @@ def test_daily_break_blocks_with_cooldown_template(monkeypatch):
     assert meta.get("daily_break_active") is True
     assert meta.get("daily_break_window_utc") == ["22:00", "22:05"]
     template = settings.get_risk_template("EURUSD", settings.ENTRY_THRESHOLD_PROFILE_NAME)
-    assert template.get("cooldown_minutes") == 20
+    assert template.get("cooldown_minutes") == 10
