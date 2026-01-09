@@ -419,6 +419,7 @@ ASSETS = {
         "exchange": "PHYSICAL CURRENCY",
         "exchange_display": "Physical Currency",
         "currency": "USD",
+        "disable_symbol_catalog": True,
     },
     "BTCUSD": {
         "symbol": "BTC/USD",
@@ -428,6 +429,7 @@ ASSETS = {
         "exchange": "Coinbase Pro",
         "exchange_display": "Coinbase Pro",
         "currency": "USD",
+        "disable_symbol_catalog": True,
     },
     "GOLD_CFD": {
         "symbol": "XAU/USD",
@@ -436,6 +438,7 @@ ASSETS = {
         "exchange": "PHYSICAL METAL",
         "exchange_display": "Physical Metal",
         "currency": "USD",
+        "disable_symbol_catalog": True,
     },
 
     # ÚJ: WTI kőolaj. A Twelve Data-n a hivatalos jelölés: WTI/USD, de több
@@ -451,6 +454,7 @@ ASSETS = {
         "mic": "COMMODITY",
         "currency": "USD",
         "disable_compact_variants": True,
+        "disable_symbol_catalog": True,
         "alt": [
             {
                 "symbol": "WTI/USD",
@@ -475,6 +479,7 @@ ASSETS = {
         "mic": "XNGS",
         "currency": "USD",
         "supports_prepost": True,
+        "disable_symbol_catalog": True,
         "alt": [
             {"symbol": "NVDA", "exchange": "XNGS"},
             {"symbol": "NVDA", "exchange": "XNAS"},
@@ -495,6 +500,7 @@ ASSETS = {
         "currency": "USD",
         "disable_compact_variants": True,
         "disable_exchange_fallbacks": True,
+        "disable_symbol_catalog": True,
         "alt": [
             {
                 "symbol": "XAG/USD",
@@ -3441,7 +3447,7 @@ def _apply_symbol_catalog_filter(
 ) -> List[Tuple[str, Optional[str]]]:
     if not attempts:
         return attempts
-    if _SYMBOL_META_DISABLED or not API_KEY:
+    if _SYMBOL_META_DISABLED or not API_KEY or cfg.get("disable_symbol_catalog"):
         return attempts
 
     preferred_exchange = str(cfg.get("exchange") or "").strip()
@@ -4281,6 +4287,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
