@@ -4031,7 +4031,7 @@ def get_precision_flow_rules(asset: str) -> Dict[str, float]:
     if overshoot_ratio >= 0.8:
         min_signals = 0
 
-    return {
+    rules: Dict[str, float] = {
         "imbalance_threshold": float(imbalance_th),
         "pressure_threshold": float(pressure_th),
         "imbalance_margin": float(imbalance_margin),
@@ -4040,6 +4040,27 @@ def get_precision_flow_rules(asset: str) -> Dict[str, float]:
         "strength_floor": float(strength_floor),
         "block_ratio": float(ratio),
     }
+    overrides = (settings.load_config().get("precision_flow_overrides") or {}).get(asset_key)
+    if isinstance(overrides, dict):
+        for key in (
+            "imbalance_threshold",
+            "pressure_threshold",
+            "imbalance_margin",
+            "pressure_margin",
+            "strength_floor",
+            "delta_blocker_abs_max",
+        ):
+            if key in overrides:
+                try:
+                    rules[key] = float(overrides[key])
+                except (TypeError, ValueError):
+                    pass
+        if "min_signals" in overrides:
+            try:
+                rules["min_signals"] = int(float(overrides["min_signals"]))
+            except (TypeError, ValueError):
+                pass
+    return rules
 
 
 def deep_update(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -7115,6 +7136,12 @@ def compute_precision_entry(
         0.0, float(flow_rules.get("strength_floor", PRECISION_FLOW_STRENGTH_BASE))
     )
     block_ratio = float(flow_rules.get("block_ratio", 0.0))
+    delta_blocker_abs_max_raw = flow_rules.get("delta_blocker_abs_max")
+    delta_blocker_abs_max = (
+        float(delta_blocker_abs_max_raw)
+        if delta_blocker_abs_max_raw is not None
+        else None
+    )
 
     plan["order_flow_settings"] = {
         "imbalance_threshold": round(imbalance_threshold, 4),
@@ -7124,6 +7151,17 @@ def compute_precision_entry(
         "min_signals": min_flow_signals,
         "strength_floor": round(strength_floor, 2),
         "block_ratio": round(block_ratio, 4),
+    }
+    if delta_blocker_abs_max is not None:
+        plan["order_flow_settings"]["delta_blocker_abs_max"] = round(
+            delta_blocker_abs_max, 2
+        )
+    plan["order_flow_snapshot"] = {
+        "imbalance": order_flow_metrics.get("imbalance"),
+        "pressure": order_flow_metrics.get("pressure"),
+        "delta_volume": order_flow_metrics.get("delta_volume"),
+        "aggressor_ratio": order_flow_metrics.get("aggressor_ratio"),
+        "status": metrics_status,
     }
 
     if direction not in {"buy", "sell"}:
@@ -7214,9 +7252,15 @@ def compute_precision_entry(
                 flow_reasons.append(f"delta {dv:.1f}")
                 flow_signal_count += 1
             elif direction == "buy" and dv < 0:
-                flow_blockers.append(f"delta {dv:.1f}")
+                if delta_blocker_abs_max is not None and abs(dv) <= delta_blocker_abs_max:
+                    flow_reasons.append(f"delta {dv:.1f} (tűréshatáron belül)")
+                else:
+                    flow_blockers.append(f"delta {dv:.1f}")
             elif direction == "sell" and dv > 0:
-                flow_blockers.append(f"delta +{dv:.1f}")
+                if delta_blocker_abs_max is not None and abs(dv) <= delta_blocker_abs_max:
+                    flow_reasons.append(f"delta +{dv:.1f} (tűréshatáron belül)")
+                else:
+                    flow_blockers.append(f"delta +{dv:.1f}")
         except (TypeError, ValueError):
             pass
 
@@ -10479,6 +10523,17 @@ def analyze(asset: str) -> Dict[str, Any]:
         elif abs(aggressor_ratio) < 0.2:
             P -= 2.0
             reasons.append("Aggresszor arány neutrális (−2)")
+
+    entry_thresholds_meta["p_score_inputs"] = {
+        "fib_ok": fib_ok,
+        "ema21_dist_ok": ema21_dist_ok,
+        "order_flow_status": order_flow_metrics.get("status"),
+        "order_flow_imbalance": of_imb,
+        "order_flow_pressure": of_pressure,
+        "order_flow_aggressor": aggressor_ratio,
+        "ofi_z": ofi_zscore,
+        "realtime_confidence": realtime_confidence,
+    }
 
     stale_penalty = 0.0
     if stale_timeframes.get("k5m"):
@@ -15218,6 +15273,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
