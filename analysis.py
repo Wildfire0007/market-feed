@@ -3087,6 +3087,9 @@ def build_action_plan(
     runtime_bucket.setdefault("hits_ready", 0)
     runtime_bucket.setdefault("hits_arming", 0)
     runtime_bucket.setdefault("hits_soft_block", 0)
+    runtime_bucket.setdefault("hits_sync_ready", 0)
+    runtime_bucket.setdefault("hits_flow_ready_only", 0)
+    runtime_bucket.setdefault("hits_trigger_ready_only", 0)
     if runtime_bucket.get("last_state") == "precision_ready":
         elapsed = _precision_ready_elapsed_seconds(ready_since, now_runtime)
         if elapsed is not None and elapsed > timeout_minutes * 60:
@@ -3124,6 +3127,16 @@ def build_action_plan(
             BTC_PRECISION_MIN.get("baseline"),
         )
         counters = runtime_bucket if isinstance(runtime_bucket, dict) else {}
+        if precision_gate_snapshot.get("sync_ready"):
+            runtime_bucket["hits_sync_ready"] = int(runtime_bucket.get("hits_sync_ready", 0)) + 1
+        if precision_gate_snapshot.get("flow_ready_only"):
+            runtime_bucket["hits_flow_ready_only"] = int(
+                runtime_bucket.get("hits_flow_ready_only", 0)
+            ) + 1
+        if precision_gate_snapshot.get("trigger_ready_only"):
+            runtime_bucket["hits_trigger_ready_only"] = int(
+                runtime_bucket.get("hits_trigger_ready_only", 0)
+            ) + 1
         ready_ts_fields = _gate_timestamp_fields(ready_since) if ready_since else {}
         arming_ts_fields = _gate_timestamp_fields(arming_since) if arming_since else {}
         precision_gate_snapshot.update(
@@ -3134,6 +3147,9 @@ def build_action_plan(
                 "precision_hits_ready": counters.get("hits_ready"),
                 "precision_hits_arming": counters.get("hits_arming"),
                 "precision_hits_soft_block": counters.get("hits_soft_block"),
+                "precision_hits_sync_ready": counters.get("hits_sync_ready"),
+                "precision_hits_flow_ready_only": counters.get("hits_flow_ready_only"),
+                "precision_hits_trigger_ready_only": counters.get("hits_trigger_ready_only"),
             }
         )
         _log_precision_gate_summary(
@@ -13356,6 +13372,22 @@ def analyze(asset: str) -> Dict[str, Any]:
             "flow_ready": precision_flow_ready,
             "trigger_ready": precision_trigger_ready,
             "trigger_state": precision_trigger_state,
+            "sync_ready": bool(
+                precision_ready_for_entry
+                and precision_flow_ready
+                and precision_trigger_ready
+            ),
+            "flow_ready_only": bool(
+                precision_ready_for_entry
+                and precision_flow_ready
+                and not precision_trigger_ready
+            ),
+            "trigger_ready_only": bool(
+                precision_ready_for_entry
+                and precision_trigger_ready
+                and precision_flow_gate_needed
+                and not precision_flow_ready
+            ),
             "flow_blockers": blockers_snapshot,
             "profile": precision_profile_for_state,
             "position_sizing_floor": 0.01,
@@ -15274,6 +15306,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
