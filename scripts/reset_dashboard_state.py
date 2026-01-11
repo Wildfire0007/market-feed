@@ -23,7 +23,8 @@ _REPO_ROOT = _SCRIPTS_DIR.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from active_anchor import ANCHOR_STATE_PATH, load_anchor_state, reset_anchor_state
+from active_anchor import load_anchor_state, reset_anchor_state
+import state_db
 from scripts.notify_discord import (
     STATE_PATH as NOTIFY_STATE_PATH,
     build_default_state as build_notify_default_state,
@@ -78,37 +79,34 @@ def _make_backup(path: Path, backup_dir: Optional[Path]) -> Optional[Path]:
 def reset_anchor_state_file(
     *,
     max_age_hours: Optional[float] = 24.0,
-    path: Optional[Path] = None,
+    db_path: Optional[Path] = None,
     now: Optional[datetime] = None,
     dry_run: bool = False,
     backup_dir: Optional[Path] = None,
 ) -> ResetResult:
-    """Prune or clear ``_active_anchor.json`` entries."""
+    """Prune or clear anchor entries stored in SQLite."""
 
-    anchor_path = Path(path or ANCHOR_STATE_PATH)
-    raw_anchor = _load_json(anchor_path)
-    raw_count = len(raw_anchor) if isinstance(raw_anchor, dict) else 0
-    existing = load_anchor_state(str(anchor_path))
+    anchor_db = Path(db_path or state_db.DEFAULT_DB_PATH)
+    existing = load_anchor_state(str(anchor_db))
     before = len(existing)
 
     candidate = reset_anchor_state(
         max_age_hours,
-        str(anchor_path),
+        str(anchor_db),
         now=now,
         dry_run=True,
     )
 
     after = len(candidate)
-    removed = max(before - after, 0)
-    stale_keys_removed = raw_count > before and before == after == 0
-    changed = candidate != existing or stale_keys_removed
+    removed = max(before - after, 0)    
+    changed = candidate != existing
     backup_path = None
 
     if not dry_run and changed:
-        backup_path = _make_backup(anchor_path, backup_dir)
+        backup_path = _make_backup(anchor_db, backup_dir)
         candidate = reset_anchor_state(
             max_age_hours,
-            str(anchor_path),
+            str(anchor_db),
             now=now,
             dry_run=False,
         )
@@ -119,7 +117,7 @@ def reset_anchor_state_file(
     )
 
     return ResetResult(
-        path=anchor_path,
+        path=anchor_db,
         before=before,
         after=after,
         removed=removed,
@@ -250,9 +248,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--anchor-max-age-hours",
         type=float,
         default=24.0,
-        help="Entries older than this will be removed from _active_anchor.json (<=0 clears all).",
+        help="Entries older than this will be removed from the anchor table (<=0 clears all).",
     )
-    parser.add_argument("--anchor-path", type=str, default=None, help="Override anchor state path.")
+    parser.add_argument("--anchor-db", type=str, default=None, help="Override anchor DB path.")
     parser.add_argument("--notify-path", type=str, default=None, help="Override notify state path.")
     parser.add_argument("--status-path", type=str, default=None, help="Override status.json path.")
     parser.add_argument(
@@ -276,7 +274,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     anchor_result = reset_anchor_state_file(
         max_age_hours=args.anchor_max_age_hours,
-        path=Path(args.anchor_path) if args.anchor_path else None,
+        db_path=Path(args.anchor_db) if args.anchor_db else None,
         now=now,
         dry_run=args.dry_run,
         backup_dir=backup_dir,
