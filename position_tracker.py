@@ -161,9 +161,6 @@ def _maybe_attach_file_handler() -> None:
 def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
     repo_root = _find_repo_root()
     resolved = resolve_repo_path(path)
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-
-    backup_path = resolved.with_suffix(resolved.suffix + ".bak")
 
     use_db = False
     try:
@@ -199,65 +196,29 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
             }
         return positions
 
-    def _restore_from_backup() -> Optional[Dict[str, Any]]:
-        if not backup_path.exists():
-            return None
-        try:
-            data = json.loads(backup_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                _audit_log(
-                    "restoring positions from backup",
-                    event="LOAD_POSITIONS_RESTORED",
-                    positions_file=str(resolved),
-                    backup_file=str(backup_path),
-                    entries=len(data),
-                )
-                resolved.write_text(backup_path.read_text(encoding="utf-8"), encoding="utf-8")
-                return data
-        except Exception as exc:  # pragma: no cover - defensive restore path
-            _audit_log(
-                "backup restore failed",
-                event="LOAD_POSITIONS_BACKUP_FAILED",
-                positions_file=str(resolved),
-                backup_file=str(backup_path),
-                exception=repr(exc),
-            )
-        return None
-
     if use_db:
         db_path = Path(state_db.DEFAULT_DB_PATH)
-        if db_path.exists():
-            try:
-                positions = _load_positions_from_db()
-                _audit_log(
-                    "positions loaded from db",
-                    event="LOAD_POSITIONS_DB",
-                    positions_file=str(resolved),
-                    db_path=str(db_path),
-                    entries=len(positions),
-                )
-                return positions
-            except Exception as exc:
-                _audit_log(
-                    "positions db read failed; falling back to json",
-                    event="LOAD_POSITIONS_DB_FAILED",
-                    positions_file=str(resolved),
-                    db_path=str(db_path),
-                    exception=repr(exc),
-                )
-        else:
+        try:
+            positions = _load_positions_from_db()
             _audit_log(
-                "positions db missing; falling back to json",
-                event="LOAD_POSITIONS_DB_MISSING",
+                "positions loaded from db",
+                event="LOAD_POSITIONS_DB",
                 positions_file=str(resolved),
                 db_path=str(db_path),
+                entries=len(positions),
+            )
+            return positions
+        except Exception as exc:
+            _audit_log(
+                "positions db read failed; falling back to json",
+                event="LOAD_POSITIONS_DB_FAILED",
+                positions_file=str(resolved),
+                db_path=str(db_path),
+                exception=repr(exc),
             )
 
     if not resolved.exists():
         if not treat_missing_as_flat:
-            restored = _restore_from_backup()
-            if restored is not None:
-                return restored
             _audit_log(
                 "positions missing and restore unavailable",
                 event="LOAD_POSITIONS_FAILED",
@@ -281,9 +242,6 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
         data = json.loads(resolved.read_text(encoding="utf-8"))
     except Exception as exc:
         if not treat_missing_as_flat:
-            restored = _restore_from_backup()
-            if restored is not None:
-                return restored
             _audit_log(
                 "positions file invalid",
                 event="LOAD_POSITIONS_FAILED",
@@ -308,62 +266,34 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
 
 def save_positions_atomic(path: str, data: Dict[str, Any]) -> Dict[str, Any]:
     resolved = resolve_repo_path(path)
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
-    tmp_path = resolved.with_suffix(resolved.suffix + ".tmp")
-    backup_path = resolved.with_suffix(resolved.suffix + ".bak")
-
-    if resolved.exists():
-        try:
-            backup_path.write_bytes(resolved.read_bytes())
-            _audit_log(
-                "positions backup created",
-                event="SAVE_BACKUP_CREATED",
-                positions_file=str(resolved),
-                backup_file=str(backup_path),
-            )
-        except Exception as exc:  # pragma: no cover - defensive backup path
-            _audit_log(
-                "positions backup failed",
-                event="SAVE_BACKUP_FAILED",
-                positions_file=str(resolved),
-                backup_file=str(backup_path),
-                exception=repr(exc),
-            )
-    tmp_path.write_text(payload + "\n", encoding="utf-8")
     _audit_log(
-        "persisting positions to disk",
+        "persisting positions to db",
         event="SAVE_BEGIN",
-        positions_file=str(resolved),
-        tmp_file=str(tmp_path),
+        positions_file=str(resolved),        
         entries=len(data),
         assets=sorted(data.keys()),
-    )
-    os.replace(tmp_path, resolved)
+    )    
 
-    stat = resolved.stat()
-    mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+    db_written = _sync_positions_to_db(data)
+    
     _audit_log(
-        "positions saved",
+        "positions persisted to db",
         event="SAVE_COMMIT",
         positions_file=str(resolved),
-        size=stat.st_size,
-        mtime=mtime,
+        db_path=str(state_db.DEFAULT_DB_PATH),
         entries=len(data),
+        db_written=db_written,
     )
-
-    _sync_positions_to_db(data)
 
     return {
         "positions_file": str(resolved),
-        "size": stat.st_size,
-        "mtime": mtime,
-        "written_bytes": len(payload.encode("utf-8")) + 1,  # account for trailing newline
-        "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
+        "written_bytes": 0,
+        "db_path": str(state_db.DEFAULT_DB_PATH),
+        "db_written": db_written,
     }
 
 
-def _sync_positions_to_db(data: Dict[str, Any]) -> None:
+def _sync_positions_to_db(data: Dict[str, Any]) -> bool:
     try:
         _ensure_db_initialized()
         connection = state_db.connect()
@@ -373,7 +303,7 @@ def _sync_positions_to_db(data: Dict[str, Any]) -> None:
             event="DB_SYNC_FAILED",
             exception=repr(exc),
         )
-        return
+        return False
 
     now_iso = _to_utc_iso(datetime.now(timezone.utc))
     try:
@@ -423,8 +353,10 @@ def _sync_positions_to_db(data: Dict[str, Any]) -> None:
             event="DB_SYNC_FAILED",
             exception=repr(exc),
         )
+        return False
     finally:
         connection.close()
+    return True
 
 
 def positions_file_snapshot(path: str) -> Dict[str, Any]:
@@ -588,8 +520,53 @@ def close_position(
     return updated
 
 
+def _load_pending_exits_from_db() -> Dict[str, Dict[str, Any]]:
+    _ensure_db_initialized()
+    connection = state_db.connect()
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            """
+            SELECT asset, reason, closed_at_utc, cooldown_minutes, source, run_id
+            FROM pending_exits
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+
+    pending: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        asset = str(row["asset"] or "").upper()
+        if not asset:
+            continue
+        pending[asset] = {
+            "reason": row["reason"],
+            "closed_at_utc": row["closed_at_utc"],
+            "cooldown_minutes": row["cooldown_minutes"],
+            "source": row["source"],
+            "run_id": row["run_id"],
+        }
+    return pending
+
+
 def load_pending_exits(path: str) -> Dict[str, Dict[str, Any]]:
     """Load pending exit requests for deferred application."""
+
+    try:
+        pending = _load_pending_exits_from_db()
+        _audit_log(
+            "pending exits loaded from db",
+            event="PENDING_EXIT_LOAD_DB",
+            pending_count=len(pending),
+        )
+        return pending
+    except Exception as exc:
+        _audit_log(
+            "pending exits db load failed; falling back to json",
+            event="PENDING_EXIT_LOAD_DB_FAILED",
+            positions_file=str(resolve_repo_path(path)),
+            exception=repr(exc),
+        )
 
     resolved = resolve_repo_path(path)
     try:
@@ -610,11 +587,8 @@ def record_pending_exit(
     source: Optional[str] = None,
 ) -> None:
     """Persist a pending exit so the next writer can deterministically apply it."""
-
-    resolved = resolve_repo_path(path)
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    pending = load_pending_exits(path)
-    pending[asset] = {
+    now_iso = _to_utc_iso(datetime.now(timezone.utc))
+    payload = {
         "reason": reason,
         "closed_at_utc": closed_at_utc,
         "cooldown_minutes": int(max(0, cooldown_minutes)),
@@ -622,35 +596,102 @@ def record_pending_exit(
         "run_id": _AUDIT_CONTEXT.get("run_id"),
     }
 
-    resolved.write_text(json.dumps(pending, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        _ensure_db_initialized()
+        connection = state_db.connect()
+    except sqlite3.Error as exc:
+        _audit_log(
+            "pending exit db unavailable",
+            event="PENDING_EXIT_DB_FAILED",
+            asset=asset,
+            exception=repr(exc),
+        )
+        return
+
+    try:
+        with connection:
+            connection.execute(
+                """
+                INSERT INTO pending_exits (
+                    asset,
+                    reason,
+                    closed_at_utc,
+                    cooldown_minutes,
+                    source,
+                    run_id,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(asset) DO UPDATE SET
+                    reason=excluded.reason,
+                    closed_at_utc=excluded.closed_at_utc,
+                    cooldown_minutes=excluded.cooldown_minutes,
+                    source=excluded.source,
+                    run_id=excluded.run_id,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    asset.upper(),
+                    payload["reason"],
+                    payload["closed_at_utc"],
+                    payload["cooldown_minutes"],
+                    payload["source"],
+                    payload["run_id"],
+                    now_iso,
+                ),
+            )
+    except sqlite3.Error as exc:
+        _audit_log(
+            "pending exit db write failed",
+            event="PENDING_EXIT_DB_FAILED",
+            asset=asset,
+            exception=repr(exc),
+        )
+        return
+    finally:
+        connection.close()
+
     _audit_log(
         "pending exit recorded",
         event="PENDING_EXIT_RECORDED",
         asset=asset,
         reason=reason,
-        cooldown_minutes=int(max(0, cooldown_minutes)),
+        cooldown_minutes=payload["cooldown_minutes"],
         closed_at_utc=closed_at_utc,
-        pending_file=str(resolved),
+        pending_file=str(resolve_repo_path(path)),
     )
 
 
 def clear_pending_exits(path: str, applied: Optional[Dict[str, Any]] = None) -> None:
-    resolved = resolve_repo_path(path)
-    if not resolved.exists():
+    try:
+        _ensure_db_initialized()
+        connection = state_db.connect()
+    except sqlite3.Error as exc:
+        _audit_log(
+            "pending exit db unavailable",
+            event="PENDING_EXIT_DB_FAILED",
+            exception=repr(exc),
+        )
         return
-
-    if applied:
-        pending = load_pending_exits(path)
-        for asset in applied:
-            pending.pop(asset, None)
-        if pending:
-            resolved.write_text(json.dumps(pending, ensure_ascii=False, indent=2), encoding="utf-8")
-            return
 
     try:
-        resolved.unlink()
-    except FileNotFoundError:
-        return
+        with connection:
+            if applied:
+                for asset in applied:
+                    connection.execute(
+                        "DELETE FROM pending_exits WHERE asset = ?",
+                        (str(asset).upper(),),
+                    )
+            else:
+                connection.execute("DELETE FROM pending_exits")
+    except sqlite3.Error as exc:
+        _audit_log(
+            "pending exit db clear failed",
+            event="PENDING_EXIT_DB_FAILED",
+            exception=repr(exc),
+        )
+    finally:
+        connection.close()
 
 
 def _levels_hit(side: Optional[str], spot_price: Optional[float], sl: Any, tp2: Any) -> Tuple[bool, Optional[str]]:
