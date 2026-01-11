@@ -545,13 +545,8 @@ def _prune_anchor_state(
     from scripts.reset_dashboard_state import reset_anchor_state_file
 
     now = now or datetime.now(timezone.utc)
-    anchor_path = public_dir / "_active_anchor.json"
-    if not anchor_path.exists():
-        anchor_path.parent.mkdir(parents=True, exist_ok=True)
-        anchor_path.write_text("{}", encoding="utf-8")
     return reset_anchor_state_file(
         max_age_hours=max_age_hours,
-        path=str(anchor_path),
         now=now,
         backup_dir=public_dir / "monitoring" / "reset_backups",
     )
