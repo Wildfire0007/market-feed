@@ -1,5 +1,6 @@
 import datetime
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,30 @@ def test_load_positions_restores_backup(tmp_path: Path) -> None:
 
     assert restored == backup_payload
     assert positions_path.exists()
+
+
+def test_load_positions_falls_back_to_json_on_db_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    positions_path = tmp_path / "positions.json"
+    payload = {"BTCUSD": {"side": "long"}}
+    positions_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    db_path = tmp_path / "trading_state.db"
+    db_path.write_text("corrupt", encoding="utf-8")
+
+    monkeypatch.setattr(position_tracker, "_find_repo_root", lambda start=None: tmp_path)
+    monkeypatch.setattr(position_tracker.state_db, "DEFAULT_DB_PATH", db_path)
+    monkeypatch.setattr(position_tracker.state_db, "initialize", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        position_tracker.state_db,
+        "connect",
+        lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.Error("db down")),
+    )
+
+    loaded = position_tracker.load_positions("positions.json", treat_missing_as_flat=False)
+
+    assert loaded == payload
 
 
 def test_close_position_sets_cooldown_state():
