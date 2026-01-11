@@ -5516,7 +5516,7 @@ def _manual_position_state(
 ) -> Dict[str, Any]:
     tracking_cfg = stability_config.get("manual_position_tracking") or {}
     if manual_positions is None:
-        positions_path = tracking_cfg.get("positions_file") or "public/_manual_positions.json"
+        positions_path = tracking_cfg.get("positions_file") or str(state_db.DEFAULT_DB_PATH)
         treat_missing = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
         manual_positions = _load_manual_positions_from_file(
             positions_path, treat_missing
@@ -5807,12 +5807,9 @@ def apply_signal_stability_layer(
     tracking_cfg = config.get("manual_position_tracking") or {}
     manual_writer = str(tracking_cfg.get("writer") or "dual").lower()
     redundant_guard = bool(tracking_cfg.get("redundant_write_guard", False))
-    pending_exit_path = (
-        tracking_cfg.get("pending_exit_file")
-        or "public/_manual_positions_pending_exit.json"
-    )
+    pending_exit_path = tracking_cfg.get("pending_exit_file") or str(state_db.DEFAULT_DB_PATH)
     analysis_can_write = manual_writer in {"analysis", "dual"} or redundant_guard
-    positions_path = tracking_cfg.get("positions_file") or "public/_manual_positions.json"
+    positions_path = tracking_cfg.get("positions_file") or str(state_db.DEFAULT_DB_PATH)
     treat_missing = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
     if manual_positions is None:
         manual_positions = _load_manual_positions_from_file(positions_path, treat_missing)
@@ -14950,7 +14947,7 @@ def _fetch_market_update_timestamp(
         return None
     try:
         row = connection.execute(
-            "SELECT last_updated_at FROM market_data WHERE id = 1"
+            "SELECT MAX(timestamp) FROM market_data"
         ).fetchone()
     except sqlite3.Error:
         return None
@@ -15444,6 +15441,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
