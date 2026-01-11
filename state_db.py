@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 from typing import Iterable
 
-DEFAULT_DB_PATH = Path("trading_state.db")
+DEFAULT_DB_PATH = Path("trading.db")
 
 
 SCHEMA_STATEMENTS: Iterable[str] = (
@@ -14,13 +14,12 @@ SCHEMA_STATEMENTS: Iterable[str] = (
     CREATE TABLE IF NOT EXISTS positions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         asset TEXT NOT NULL,
-        side TEXT NOT NULL,
         entry_price REAL,
+        size REAL,
         sl REAL,
         tp REAL,
         status TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        strategy_metadata TEXT
     );
     """,
     """
@@ -68,8 +67,19 @@ SCHEMA_STATEMENTS: Iterable[str] = (
     """,
     """
     CREATE TABLE IF NOT EXISTS market_data (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        last_updated_at TEXT NOT NULL
+        symbol TEXT PRIMARY KEY,
+        price REAL,
+        timestamp TEXT NOT NULL,
+        source TEXT
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        asset TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        p_score REAL,
+        timestamp TEXT NOT NULL
     );
     """,
 )
