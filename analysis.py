@@ -12,10 +12,12 @@ import csv
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
@@ -81,6 +83,7 @@ from ml_model import (
 )
 from news_feed import SentimentSignal, load_sentiment
 import position_tracker
+import state_db
 
 try:  # Optional monitoring utilities; keep analysis resilient if absent.
     from reports.trade_journal import record_signal_event
@@ -14854,6 +14857,75 @@ def _ensure_trading_preconditions(analysis_started_at: datetime) -> Optional[dat
     return trading_ts
 
 
+_MARKET_DB_INITIALIZED = False
+_MARKET_DB_LOCK = threading.Lock()
+_MARKET_DB_PATH: Optional[Path] = None
+
+
+def _ensure_market_db_initialized(db_path: Path | str) -> None:
+    global _MARKET_DB_INITIALIZED, _MARKET_DB_PATH
+    target_path = Path(db_path)
+    if _MARKET_DB_INITIALIZED and _MARKET_DB_PATH == target_path:
+        return
+    with _MARKET_DB_LOCK:
+        if _MARKET_DB_INITIALIZED and _MARKET_DB_PATH == target_path:
+            return
+        state_db.initialize(target_path)
+        _MARKET_DB_INITIALIZED = True
+        _MARKET_DB_PATH = target_path
+
+
+def _fetch_market_update_timestamp(
+    db_path: Path | str = state_db.DEFAULT_DB_PATH,
+) -> Optional[datetime]:
+    try:
+        _ensure_market_db_initialized(db_path)
+        connection = state_db.connect(db_path)
+    except sqlite3.Error:
+        return None
+    try:
+        row = connection.execute(
+            "SELECT last_updated_at FROM market_data WHERE id = 1"
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+    if not row:
+        return None
+    return parse_utc_timestamp(row[0])
+
+
+def run_on_market_updates(
+    *,
+    run_cycle: Optional[Callable[[], None]] = None,
+    db_path: Path | str = state_db.DEFAULT_DB_PATH,
+    poll_interval: float = 0.5,
+    max_cycles: Optional[int] = None,
+    max_wait_seconds: Optional[float] = None,
+    stop_event: Optional[threading.Event] = None,
+) -> None:
+    if run_cycle is None:
+        run_cycle = main
+    last_seen = _fetch_market_update_timestamp(db_path)
+    cycles_run = 0
+    start_time = time.monotonic()
+    while True:
+        if stop_event and stop_event.is_set():
+            break
+        if max_wait_seconds is not None:
+            if (time.monotonic() - start_time) >= max_wait_seconds:
+                break
+        current = _fetch_market_update_timestamp(db_path)
+        if current and (last_seen is None or current > last_seen):
+            run_cycle()
+            cycles_run += 1
+            last_seen = current
+            if max_cycles is not None and cycles_run >= max_cycles:
+                break
+        time.sleep(poll_interval)
+
+
 def main():
     run_id = str(uuid4())
     position_tracker.set_audit_context(source="analysis", run_id=run_id)
@@ -15302,7 +15374,12 @@ def main():
         LOGGER.warning(message)
 
 if __name__ == "__main__":
-    main()
+    watch_flag = os.getenv("ANALYSIS_WATCH_MARKET_DATA", "0").strip().lower()
+    if watch_flag in {"1", "true", "yes", "on"}:
+        run_on_market_updates()
+    else:
+        main()
+
 
 
 
