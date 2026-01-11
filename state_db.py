@@ -41,6 +41,21 @@ SCHEMA_STATEMENTS: Iterable[str] = (
     CREATE INDEX IF NOT EXISTS idx_anchors_asset_type
         ON anchors(asset, anchor_type);
     """,
+    """
+    CREATE TABLE IF NOT EXISTS pending_exits (
+        asset TEXT PRIMARY KEY,
+        reason TEXT NOT NULL,
+        closed_at_utc TEXT NOT NULL,
+        cooldown_minutes INTEGER NOT NULL,
+        source TEXT,
+        run_id TEXT,
+        updated_at TEXT NOT NULL
+    );
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_pending_exits_asset
+        ON pending_exits(asset);
+    """,
 )
 
 
