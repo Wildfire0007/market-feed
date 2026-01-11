@@ -30,8 +30,6 @@ Környezeti változók:
   TD_REALTIME_HTTP_BACKGROUND = "auto/1" (HTTP realtime gyűjtés háttérszálon fusson-e)
   TD_REALTIME_HTTP_BUDGET = "auto" (HTTP realtime mintavételek per-run limitje)
   TD_REALTIME_WS_IDLE_GRACE = "15"  (WebSocket késlekedési türelem sec)
-  TD_REALTIME_SPOT_JSON = "0/1"  (spot.json frissítése WS tickből)
-  TD_REALTIME_SPOT_JSON_MIN_INTERVAL = "1.0" (spot.json írás min. sec két tick között)
   TD_MAX_WORKERS      = "5"      (max. párhuzamos eszköz feldolgozás)
   TD_REQUEST_CONCURRENCY = "4"   (egyszerre futó TD hívások plafonja)
   PIPELINE_MAX_LAG_SECONDS = "240" (Trading → Analysis log figyelmeztetés küszöbe)
@@ -137,28 +135,14 @@ REALTIME_FLAG = os.getenv("TD_REALTIME_SPOT", "0").lower() in {"1", "true", "yes
 REALTIME_INTERVAL = float(os.getenv("TD_REALTIME_INTERVAL", "5"))
 REALTIME_DURATION = float(os.getenv("TD_REALTIME_DURATION", "20"))
 REALTIME_ASSETS_ENV = os.getenv("TD_REALTIME_ASSETS", "")
-REALTIME_WS_URL = os.getenv("TD_REALTIME_WS_URL", "").strip()
-REALTIME_WS_SUBSCRIBE = os.getenv("TD_REALTIME_WS_SUBSCRIBE", "").strip()
+REALTIME_WS_URL = os.getenv("TD_REALTIME_WS_URL", "")
+REALTIME_WS_SUBSCRIBE = os.getenv("TD_REALTIME_WS_SUBSCRIBE", "")
 REALTIME_WS_PRICE_FIELD = os.getenv("TD_REALTIME_WS_PRICE_FIELD", "price")
 REALTIME_WS_TS_FIELD = os.getenv("TD_REALTIME_WS_TS_FIELD", "timestamp")
 REALTIME_WS_SYMBOL_FIELD = os.getenv("TD_REALTIME_WS_SYMBOL_FIELD", "symbol")
 REALTIME_WS_MAX_SAMPLES = int(os.getenv("TD_REALTIME_WS_MAX_SAMPLES", "120"))
 REALTIME_WS_IDLE_GRACE = float(os.getenv("TD_REALTIME_WS_IDLE_GRACE", "15"))
 REALTIME_WS_TIMEOUT = float(os.getenv("TD_REALTIME_WS_TIMEOUT", str(max(REALTIME_DURATION, 30.0))))
-REALTIME_SPOT_JSON_ENABLED = os.getenv("TD_REALTIME_SPOT_JSON", "1").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-REALTIME_SPOT_JSON_MIN_INTERVAL = max(
-    0.0,
-    _env_float("TD_REALTIME_SPOT_JSON_MIN_INTERVAL", 1.0),
-)
-if not REALTIME_WS_URL and API_KEY:
-    REALTIME_WS_URL = f"wss://ws.twelvedata.com/v1/quotes/price?apikey={API_KEY}"
-if not REALTIME_WS_SUBSCRIBE:
-    REALTIME_WS_SUBSCRIBE = '{{"action":"subscribe","params":{{"symbols":"{symbol}"}}}}'
 REALTIME_WS_ENABLED = bool(REALTIME_WS_URL and websocket is not None)
 REALTIME_HTTP_MAX_SAMPLES = int(os.getenv("TD_REALTIME_HTTP_MAX_SAMPLES", "6"))
 REALTIME_HTTP_DURATION = max(1.0, _env_float("TD_REALTIME_HTTP_DURATION", 8.0))
@@ -577,8 +561,6 @@ _REALTIME_LAST_PRICE: Dict[str, Dict[str, Any]] = {}
 _REALTIME_LAST_PRICE_LOCK = threading.Lock()
 _REALTIME_WS_THREAD: Optional[threading.Thread] = None
 _REALTIME_WS_THREAD_LOCK = threading.Lock()
-_REALTIME_SPOT_JSON_LAST_WRITE: Dict[str, float] = {}
-_REALTIME_SPOT_JSON_LOCK = threading.Lock()
 
 
 def _normalize_symbol_token(symbol: str) -> str:
@@ -1113,13 +1095,7 @@ def _fallback_state_info(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return info
 
 
-def _write_spot_payload(
-    adir: str,
-    asset: str,
-    payload: Dict[str, Any],
-    *,
-    persist_db: bool = True,
-) -> None:
+def _write_spot_payload(adir: str, asset: str, payload: Dict[str, Any]) -> None:
     path = os.path.join(adir, "spot.json")
     info = _fallback_state_info(payload)
     if _should_preserve_cache([path], payload):
@@ -1135,8 +1111,7 @@ def _write_spot_payload(
     utc = payload.get("utc") if isinstance(payload, dict) else None
     retrieved_at = payload.get("retrieved_at_utc") if isinstance(payload, dict) else None
     source = payload.get("source") if isinstance(payload, dict) else None
-    if persist_db:
-        _upsert_spot_price(asset, price, utc=utc, retrieved_at_utc=retrieved_at, source=source)
+    _upsert_spot_price(asset, price, utc=utc, retrieved_at_utc=retrieved_at, source=source)
     save_json(path, payload)
 
 
@@ -2799,77 +2774,6 @@ def _resolve_ws_asset(symbol_value: Any) -> Optional[str]:
     return None
 
 
-def _should_write_realtime_spot_json(asset: str) -> bool:
-    if not REALTIME_SPOT_JSON_ENABLED:
-        return False
-    min_interval = REALTIME_SPOT_JSON_MIN_INTERVAL
-    if min_interval <= 0:
-        return True
-    now = time.monotonic()
-    with _REALTIME_SPOT_JSON_LOCK:
-        last_write = _REALTIME_SPOT_JSON_LAST_WRITE.get(asset)
-        if last_write is not None and (now - last_write) < min_interval:
-            return False
-        _REALTIME_SPOT_JSON_LAST_WRITE[asset] = now
-    return True
-
-
-def _build_realtime_spot_payload(
-    asset: str,
-    price: float,
-    *,
-    utc: Optional[str],
-    retrieved_at_utc: str,
-    source: Optional[str],
-) -> Dict[str, Any]:
-    cfg = ASSETS.get(asset, {})
-    symbol = cfg.get("symbol") if isinstance(cfg, dict) else None
-    exchange = cfg.get("exchange") if isinstance(cfg, dict) else None
-    utc_value = utc or retrieved_at_utc
-    latency_seconds: Optional[float] = None
-    parsed = _parse_iso_utc(utc_value)
-    if parsed:
-        latency_seconds = max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
-    payload: Dict[str, Any] = {
-        "asset": asset,
-        "source": source or "websocket",
-        "ok": True,
-        "retrieved_at_utc": retrieved_at_utc,
-        "price": price,
-        "price_usd": price,
-        "utc": utc_value,
-        "realtime": True,
-    }
-    if latency_seconds is not None:
-        payload["latency_seconds"] = latency_seconds
-    if symbol:
-        payload["used_symbol"] = symbol
-    if exchange:
-        payload["used_exchange"] = exchange
-    return payload
-
-
-def _write_realtime_spot_json(
-    asset: str,
-    price: float,
-    *,
-    utc: Optional[str],
-    retrieved_at_utc: str,
-    source: Optional[str],
-) -> None:
-    if not _should_write_realtime_spot_json(asset):
-        return
-    payload = _build_realtime_spot_payload(
-        asset,
-        price,
-        utc=utc,
-        retrieved_at_utc=retrieved_at_utc,
-        source=source,
-    )
-    adir = os.path.join(OUT_DIR, asset)
-    _write_spot_payload(adir, asset, payload, persist_db=False)
-
-
 def _update_realtime_spot_cache(
     asset: str,
     price: float,
@@ -2887,15 +2791,7 @@ def _update_realtime_spot_cache(
     with _REALTIME_LAST_PRICE_LOCK:
         _REALTIME_LAST_PRICE[asset] = payload
     _upsert_spot_price(asset, price, utc=utc, retrieved_at_utc=retrieved_at_utc, source=source)
-    _write_realtime_spot_json(
-        asset,
-        price,
-        utc=utc,
-        retrieved_at_utc=retrieved_at_utc,
-        source=source,
-    )    
-
-
+    
 def _handle_realtime_ws_message(message: Any) -> Optional[str]:
     if message is None:
         return None
@@ -3213,12 +3109,7 @@ def _collect_realtime_spot_impl(
     duration = max(REALTIME_DURATION, interval)
     http_duration = max(interval, REALTIME_HTTP_DURATION)
 
-    use_ws = (
-        REALTIME_WS_ENABLED
-        and REALTIME_FLAG
-        and not force
-        and asset in REALTIME_WS_ALLOWED_ASSETS
-    )
+    use_ws = REALTIME_WS_ENABLED and REALTIME_FLAG and not force  
     if not use_ws:
         duration = min(duration, http_duration)
         if interval > 0:
@@ -3475,12 +3366,7 @@ def collect_realtime_spot(
         _log_plan("skipped", note="empty_symbol_cycle", cycle=attempt_cycle_for_log)
         return
 
-    use_ws = (
-        REALTIME_WS_ENABLED
-        and REALTIME_FLAG
-        and not force
-        and asset in REALTIME_WS_ALLOWED_ASSETS
-    )
+    use_ws = REALTIME_WS_ENABLED and REALTIME_FLAG and not force        
     http_background_enabled = (
         _REALTIME_HTTP_BACKGROUND_FLAG
         if _REALTIME_HTTP_BACKGROUND_FLAG is not None
@@ -4645,6 +4531,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
