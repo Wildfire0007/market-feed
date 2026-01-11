@@ -56,6 +56,16 @@ SCHEMA_STATEMENTS: Iterable[str] = (
     CREATE INDEX IF NOT EXISTS idx_pending_exits_asset
         ON pending_exits(asset);
     """,
+    """
+    CREATE TABLE IF NOT EXISTS spot_prices (
+        asset TEXT PRIMARY KEY,
+        price REAL,
+        utc TEXT,
+        retrieved_at_utc TEXT,
+        source TEXT,
+        updated_at TEXT NOT NULL
+    );
+    """,
 )
 
 
