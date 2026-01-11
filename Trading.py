@@ -35,7 +35,7 @@ Környezeti változók:
   PIPELINE_MAX_LAG_SECONDS = "240" (Trading → Analysis log figyelmeztetés küszöbe)
 """
 
-import os, json, time, math, logging, shutil
+import os, json, time, math, logging, shutil, sqlite3
 import threading
 from datetime import datetime, timezone, time as dt_time
 from pathlib import Path
@@ -46,6 +46,7 @@ import requests
 from requests.adapters import HTTPAdapter
 
 from logging_utils import ensure_json_file_handler
+import state_db
 
 try:
     from active_anchor import update_anchor_metrics
@@ -138,6 +139,7 @@ REALTIME_WS_URL = os.getenv("TD_REALTIME_WS_URL", "")
 REALTIME_WS_SUBSCRIBE = os.getenv("TD_REALTIME_WS_SUBSCRIBE", "")
 REALTIME_WS_PRICE_FIELD = os.getenv("TD_REALTIME_WS_PRICE_FIELD", "price")
 REALTIME_WS_TS_FIELD = os.getenv("TD_REALTIME_WS_TS_FIELD", "timestamp")
+REALTIME_WS_SYMBOL_FIELD = os.getenv("TD_REALTIME_WS_SYMBOL_FIELD", "symbol")
 REALTIME_WS_MAX_SAMPLES = int(os.getenv("TD_REALTIME_WS_MAX_SAMPLES", "120"))
 REALTIME_WS_IDLE_GRACE = float(os.getenv("TD_REALTIME_WS_IDLE_GRACE", "15"))
 REALTIME_WS_TIMEOUT = float(os.getenv("TD_REALTIME_WS_TIMEOUT", str(max(REALTIME_DURATION, 30.0))))
@@ -551,6 +553,16 @@ if _ASSET_FILTER_ENV:
         ASSETS = filtered_assets
 
 
+REALTIME_WS_ASSET_KEYS = ("BTCUSD", "GOLD_CFD")
+REALTIME_WS_ALLOWED_ASSETS = {
+    asset for asset in REALTIME_WS_ASSET_KEYS if asset in ASSETS
+}
+_REALTIME_LAST_PRICE: Dict[str, Dict[str, Any]] = {}
+_REALTIME_LAST_PRICE_LOCK = threading.Lock()
+_REALTIME_WS_THREAD: Optional[threading.Thread] = None
+_REALTIME_WS_THREAD_LOCK = threading.Lock()
+
+
 def _normalize_symbol_token(symbol: str) -> str:
     return symbol.replace("/", "").replace(":", "").replace("-", "").strip().upper()
 
@@ -950,6 +962,67 @@ def save_json(path: str, obj: Dict[str, Any]) -> None:
     os.replace(tmp_path, target)
 
 
+_SPOT_DB_INITIALIZED = False
+_SPOT_DB_LOCK = threading.Lock()
+
+
+def _ensure_spot_db_initialized() -> None:
+    global _SPOT_DB_INITIALIZED
+    if _SPOT_DB_INITIALIZED:
+        return
+    with _SPOT_DB_LOCK:
+        if _SPOT_DB_INITIALIZED:
+            return
+        state_db.initialize()
+        _SPOT_DB_INITIALIZED = True
+
+
+def _upsert_spot_price(
+    asset: str,
+    price: Optional[float],
+    *,
+    utc: Optional[str],
+    retrieved_at_utc: Optional[str],
+    source: Optional[str],
+) -> None:
+    if not asset:
+        return
+    if price is None:
+        return
+    try:
+        _ensure_spot_db_initialized()
+        connection = state_db.connect()
+    except sqlite3.Error:
+        return
+    now_ts = now_utc()
+    try:
+        with connection:
+            connection.execute(
+                """
+                INSERT INTO spot_prices (asset, price, utc, retrieved_at_utc, source, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(asset) DO UPDATE SET
+                    price=excluded.price,
+                    utc=excluded.utc,
+                    retrieved_at_utc=excluded.retrieved_at_utc,
+                    source=excluded.source,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    asset.upper(),
+                    price,
+                    utc,
+                    retrieved_at_utc,
+                    source,
+                    now_ts,
+                ),
+            )
+    except sqlite3.Error:
+        return
+    finally:
+        connection.close()
+      
+
 def _should_preserve_cache(paths: List[str], payload: Dict[str, Any]) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -1018,6 +1091,11 @@ def _write_spot_payload(adir: str, asset: str, payload: Dict[str, Any]) -> None:
         _store_fallback_state(adir, "spot", info)
     else:
         _store_fallback_state(adir, "spot", None)
+    price = _coerce_float(payload.get("price") if isinstance(payload, dict) else None)
+    utc = payload.get("utc") if isinstance(payload, dict) else None
+    retrieved_at = payload.get("retrieved_at_utc") if isinstance(payload, dict) else None
+    source = payload.get("source") if isinstance(payload, dict) else None
+    _upsert_spot_price(asset, price, utc=utc, retrieved_at_utc=retrieved_at, source=source)
     save_json(path, payload)
 
 
@@ -2670,6 +2748,148 @@ def _extract_field(payload: Any, path: str) -> Optional[Any]:
     return current
 
 
+def _resolve_ws_asset(symbol_value: Any) -> Optional[str]:
+    if symbol_value is None:
+        return None
+    normalized = _normalize_symbol_token(str(symbol_value))
+    asset = _ASSET_SYMBOL_INDEX.get(normalized)
+    if asset and asset in REALTIME_WS_ALLOWED_ASSETS:
+        return asset
+    return None
+
+
+def _update_realtime_spot_cache(
+    asset: str,
+    price: float,
+    *,
+    utc: Optional[str],
+    retrieved_at_utc: str,
+    source: Optional[str],
+) -> None:
+    payload = {
+        "price": price,
+        "utc": utc,
+        "retrieved_at_utc": retrieved_at_utc,
+        "source": source,
+    }
+    with _REALTIME_LAST_PRICE_LOCK:
+        _REALTIME_LAST_PRICE[asset] = payload
+    _upsert_spot_price(asset, price, utc=utc, retrieved_at_utc=retrieved_at_utc, source=source)
+
+
+def _handle_realtime_ws_message(message: Any) -> Optional[str]:
+    if message is None:
+        return None
+    if isinstance(message, bytes):
+        try:
+            message = message.decode("utf-8")
+        except Exception:
+            return None
+    payload: Any
+    if isinstance(message, str):
+        try:
+            payload = json.loads(message)
+        except Exception:
+            return None
+    else:
+        payload = message
+    if not isinstance(payload, dict):
+        return None
+    symbol_value = _extract_field(payload, REALTIME_WS_SYMBOL_FIELD) or payload.get("asset")
+    asset = _resolve_ws_asset(symbol_value)
+    if not asset:
+        return None
+    price_val = _extract_field(payload, REALTIME_WS_PRICE_FIELD)
+    if price_val is None:
+        return None
+    try:
+        price = float(price_val)
+    except (TypeError, ValueError):
+        return None
+    ts_val = _extract_field(payload, REALTIME_WS_TS_FIELD)
+    utc_ts: Optional[str] = None
+    if ts_val is not None:
+        if isinstance(ts_val, (int, float)):
+            try:
+                utc_ts = datetime.fromtimestamp(float(ts_val), timezone.utc).replace(microsecond=0).isoformat()
+            except Exception:
+                utc_ts = None
+        else:
+            utc_ts = str(ts_val)
+    retrieved = now_utc()
+    _update_realtime_spot_cache(
+        asset,
+        price,
+        utc=utc_ts or retrieved,
+        retrieved_at_utc=retrieved,
+        source="websocket",
+    )
+    return asset
+
+
+def _ws_on_message(_ws: Any, message: Any) -> None:
+    try:
+        asset = _handle_realtime_ws_message(message)
+        if asset:
+            LOGGER.debug("Realtime WS tick stored for %s", asset)
+    except Exception:
+        LOGGER.debug("Realtime WS message handling failed", exc_info=True)
+
+
+def _ws_on_error(_ws: Any, error: Any) -> None:
+    LOGGER.warning("Realtime WS error: %s", error)
+
+
+def _ws_on_close(_ws: Any, close_status_code: Any, close_msg: Any) -> None:
+    LOGGER.info("Realtime WS closed: %s %s", close_status_code, close_msg)
+
+
+def _ws_on_open(ws: Any) -> None:
+    subscribe = REALTIME_WS_SUBSCRIBE.strip()
+    if not subscribe:
+        return
+    for asset in REALTIME_WS_ALLOWED_ASSETS:
+        cfg = ASSETS.get(asset, {})
+        symbol = cfg.get("symbol") or asset
+        exchange = cfg.get("exchange") or ""
+        try:
+            ws.send(subscribe.format(asset=asset, symbol=symbol, exchange=exchange))
+        except Exception:
+            LOGGER.debug("Realtime WS subscribe failed for %s", asset, exc_info=True)
+
+
+def _run_realtime_ws_loop() -> None:
+    if not websocket or not hasattr(websocket, "WebSocketApp"):
+        LOGGER.warning("Realtime WS unavailable (missing WebSocketApp)")
+        return
+    app = websocket.WebSocketApp(
+        REALTIME_WS_URL,
+        on_message=_ws_on_message,
+        on_open=_ws_on_open,
+        on_error=_ws_on_error,
+        on_close=_ws_on_close,
+    )
+    app.run_forever(ping_interval=30, ping_timeout=10)
+
+
+def start_realtime_ws_thread() -> None:
+    if not REALTIME_WS_ENABLED or not REALTIME_FLAG:
+        return
+    if not REALTIME_WS_ALLOWED_ASSETS:
+        return
+    with _REALTIME_WS_THREAD_LOCK:
+        global _REALTIME_WS_THREAD
+        if _REALTIME_WS_THREAD and _REALTIME_WS_THREAD.is_alive():
+            return
+        thread = threading.Thread(
+            target=_run_realtime_ws_loop,
+            name="td-realtime-ws",
+            daemon=True,
+        )
+        _REALTIME_WS_THREAD = thread
+        thread.start()
+      
+
 def _collect_http_frames(
     symbol_cycle: List[Tuple[str, Optional[str]]],
     deadline: float,
@@ -3045,6 +3265,14 @@ def _collect_realtime_spot_impl(
                 update_anchor_metrics(asset, anchor_extras)
         except Exception:
             pass
+    if payload.get("price") is not None:
+        _upsert_spot_price(
+            asset,
+            _coerce_float(payload.get("price")),
+            utc=payload.get("utc"),
+            retrieved_at_utc=payload.get("retrieved_at_utc"),
+            source=payload.get("source"),
+        )
     save_json(os.path.join(out_dir, "spot_realtime.json"), payload)
 
 
@@ -4219,6 +4447,7 @@ def main():
         )
     started_at_dt = datetime.now(timezone.utc)
     logger.info("Trading run started for %d assets", len(ASSETS))
+    start_realtime_ws_thread()
     workers = max(1, min(len(ASSETS), TD_MAX_WORKERS))
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
@@ -4287,6 +4516,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
