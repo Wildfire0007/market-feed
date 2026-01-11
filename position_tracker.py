@@ -159,10 +159,45 @@ def _maybe_attach_file_handler() -> None:
 
 
 def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
+    repo_root = _find_repo_root()
     resolved = resolve_repo_path(path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
 
     backup_path = resolved.with_suffix(resolved.suffix + ".bak")
+
+    use_db = False
+    try:
+        resolved.relative_to(repo_root)
+        use_db = True
+    except ValueError:
+        use_db = False
+
+    def _load_positions_from_db() -> Dict[str, Any]:
+        _ensure_db_initialized()
+        connection = state_db.connect()
+        connection.row_factory = sqlite3.Row
+        try:
+            rows = connection.execute(
+                "SELECT * FROM positions WHERE status='OPEN'"
+            ).fetchall()
+        finally:
+            connection.close()
+
+        positions: Dict[str, Any] = {}
+        for row in rows:
+            asset = row["asset"]
+            tp_value = row["tp"]
+            positions[asset] = {
+                "side": row["side"],
+                "entry": row["entry_price"],
+                "sl": row["sl"],
+                "tp1": tp_value,
+                "tp2": tp_value,
+                "opened_at_utc": row["created_at"],
+                "closed_at_utc": None,
+                "cooldown_until_utc": None,
+            }
+        return positions
 
     def _restore_from_backup() -> Optional[Dict[str, Any]]:
         if not backup_path.exists():
@@ -188,6 +223,35 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
                 exception=repr(exc),
             )
         return None
+
+    if use_db:
+        db_path = Path(state_db.DEFAULT_DB_PATH)
+        if db_path.exists():
+            try:
+                positions = _load_positions_from_db()
+                _audit_log(
+                    "positions loaded from db",
+                    event="LOAD_POSITIONS_DB",
+                    positions_file=str(resolved),
+                    db_path=str(db_path),
+                    entries=len(positions),
+                )
+                return positions
+            except Exception as exc:
+                _audit_log(
+                    "positions db read failed; falling back to json",
+                    event="LOAD_POSITIONS_DB_FAILED",
+                    positions_file=str(resolved),
+                    db_path=str(db_path),
+                    exception=repr(exc),
+                )
+        else:
+            _audit_log(
+                "positions db missing; falling back to json",
+                event="LOAD_POSITIONS_DB_MISSING",
+                positions_file=str(resolved),
+                db_path=str(db_path),
+            )
 
     if not resolved.exists():
         if not treat_missing_as_flat:
