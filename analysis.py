@@ -15436,11 +15436,12 @@ def main():
         LOGGER.warning(message)
 
 if __name__ == "__main__":
-    watch_flag = os.getenv("ANALYSIS_WATCH_MARKET_DATA", "1").strip().lower()
+    watch_flag = os.getenv("ANALYSIS_WATCH_MARKET_DATA", "0").strip().lower()
     if watch_flag in {"1", "true", "yes", "on"}:
         run_on_market_updates()
     else:
         main()
+
 
 
 
