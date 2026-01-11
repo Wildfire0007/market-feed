@@ -3213,7 +3213,12 @@ def _collect_realtime_spot_impl(
     duration = max(REALTIME_DURATION, interval)
     http_duration = max(interval, REALTIME_HTTP_DURATION)
 
-    use_ws = REALTIME_WS_ENABLED and REALTIME_FLAG and not force
+    use_ws = (
+        REALTIME_WS_ENABLED
+        and REALTIME_FLAG
+        and not force
+        and asset in REALTIME_WS_ALLOWED_ASSETS
+    )
     if not use_ws:
         duration = min(duration, http_duration)
         if interval > 0:
@@ -3470,7 +3475,12 @@ def collect_realtime_spot(
         _log_plan("skipped", note="empty_symbol_cycle", cycle=attempt_cycle_for_log)
         return
 
-    use_ws = REALTIME_WS_ENABLED and REALTIME_FLAG and not force
+    use_ws = (
+        REALTIME_WS_ENABLED
+        and REALTIME_FLAG
+        and not force
+        and asset in REALTIME_WS_ALLOWED_ASSETS
+    )
     http_background_enabled = (
         _REALTIME_HTTP_BACKGROUND_FLAG
         if _REALTIME_HTTP_BACKGROUND_FLAG is not None
@@ -4635,6 +4645,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
