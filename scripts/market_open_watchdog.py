@@ -271,8 +271,7 @@ def perform_reset(
     backup_dir = backup_dir or DEFAULT_BACKUP_DIR
 
     anchor_result = reset_anchor_state_file(
-        max_age_hours=config.anchor_max_age_hours,
-        path=Path(public_dir) / "_active_anchor.json",
+        max_age_hours=config.anchor_max_age_hours,        
         now=now,
         dry_run=dry_run,
         backup_dir=backup_dir,
