@@ -4,6 +4,7 @@ from pathlib import Path
 
 import analysis
 import position_tracker
+import state_db
 
 
 def test_entry_event_persists_and_is_reloaded():
@@ -56,3 +57,50 @@ def test_entry_event_persists_and_is_reloaded():
         assert manual_state["has_position"] is True
         assert manual_state["side"] == "buy"
         assert positions_path.exists()
+
+
+def test_manual_state_reads_open_position_from_db(monkeypatch):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    now_iso = now.isoformat().replace("+00:00", "Z")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        monkeypatch.chdir(tmpdir)
+        state_db.initialize()
+        connection = state_db.connect()
+        with connection:
+            connection.execute(
+                """
+                INSERT INTO positions (
+                    asset,
+                    side,
+                    entry_price,
+                    sl,
+                    tp,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("BTCUSD", "long", 100.0, 90.0, 120.0, "OPEN", now_iso, now_iso),
+            )
+        connection.close()
+
+        positions_path = Path(tmpdir) / "public" / "_manual_positions.json"
+        stability_cfg = {
+            "manual_position_tracking": {
+                "enabled": True,
+                "positions_file": str(positions_path),
+                "treat_missing_file_as_flat": True,
+            }
+        }
+
+        manual_state = analysis._manual_position_state(
+            "BTCUSD",
+            stability_cfg,
+            now,
+        )
+
+        assert manual_state["has_position"] is True
+        assert manual_state["side"] == "buy"
+
