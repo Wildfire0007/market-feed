@@ -1019,12 +1019,19 @@ def _upsert_spot_price(
             )
             connection.execute(
                 """
-                INSERT INTO market_data (id, last_updated_at)
-                VALUES (1, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    last_updated_at=excluded.last_updated_at
+                INSERT INTO market_data (symbol, price, timestamp, source)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    price=excluded.price,
+                    timestamp=excluded.timestamp,
+                    source=excluded.source
                 """,
-                (now_ts,),
+                (
+                    asset.upper(),
+                    price,
+                    retrieved_at_utc or utc or now_ts,
+                    source,
+                ),
             )
     except sqlite3.Error:
         return
@@ -4405,7 +4412,7 @@ def _reset_out_dir_if_requested(out_dir: str, logger: logging.Logger) -> None:
     manual_state_snapshots = []
     out_dir_path = Path(out_dir)
 
-    for state_name in ("_manual_positions.json", "_manual_positions_audit.jsonl"):
+    for state_name in ("_manual_positions_audit.jsonl",):
         state_path = out_dir_path / state_name
         try:
             if state_path.exists():
@@ -4525,6 +4532,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
