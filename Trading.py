@@ -1017,6 +1017,15 @@ def _upsert_spot_price(
                     now_ts,
                 ),
             )
+            connection.execute(
+                """
+                INSERT INTO market_data (id, last_updated_at)
+                VALUES (1, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    last_updated_at=excluded.last_updated_at
+                """,
+                (now_ts,),
+            )
     except sqlite3.Error:
         return
     finally:
@@ -4516,6 +4525,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
