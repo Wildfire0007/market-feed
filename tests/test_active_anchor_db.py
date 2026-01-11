@@ -7,8 +7,7 @@ import state_db
 
 
 def test_anchor_update_syncs_to_db(tmp_path: Path, monkeypatch) -> None:
-    db_path = tmp_path / "trading_state.db"
-    anchor_path = tmp_path / "_active_anchor.json"
+    db_path = tmp_path / "trading.db"
     monkeypatch.setattr(state_db, "DEFAULT_DB_PATH", db_path)
     active_anchor._DB_INITIALIZED = False
 
@@ -17,16 +16,16 @@ def test_anchor_update_syncs_to_db(tmp_path: Path, monkeypatch) -> None:
         "buy",
         price=101.5,
         timestamp="2024-03-12T14:05:00Z",
-        path=str(anchor_path),
+        db_path=str(db_path),
         extras={"note": "first"},
     )
     active_anchor.update_anchor_metrics(
         "BTCUSD",
         extras={"current_price": 103.0},
-        path=str(anchor_path),
+        db_path=str(db_path),
     )
 
-    connection = state_db.connect()
+    connection = state_db.connect(db_path)
     connection.row_factory = sqlite3.Row
     try:
         row = connection.execute(
