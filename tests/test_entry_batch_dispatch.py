@@ -48,7 +48,7 @@ def _make_entry_record(asset: str, manual_state: dict, positions_path: str) -> n
 def test_successful_batch_dispatch_commits_all_assets(monkeypatch, tmp_path):
     now = datetime.now(timezone.utc)
     now_iso = notify_discord.to_utc_iso(now)
-    positions_path = tmp_path / "positions.json"
+    positions_path = tmp_path / "trading.db"
 
     tracking_cfg = {
         "enabled": True,
@@ -146,7 +146,7 @@ def test_successful_batch_dispatch_commits_all_assets(monkeypatch, tmp_path):
 def test_batch_failure_only_blocks_embeds_in_failed_batch(monkeypatch, tmp_path):
     now = datetime.now(timezone.utc)
     now_iso = notify_discord.to_utc_iso(now)
-    positions_path = tmp_path / "positions.json"
+    positions_path = tmp_path / "trading.db"
     tracking_cfg = {
         "enabled": True,
         "writer": "notify",
@@ -253,7 +253,7 @@ def test_batch_failure_only_blocks_embeds_in_failed_batch(monkeypatch, tmp_path)
 def test_commit_exception_after_dispatch_is_audited(monkeypatch, tmp_path):
     now = datetime.now(timezone.utc)
     now_iso = notify_discord.to_utc_iso(now)
-    positions_path = tmp_path / "positions.json"
+    positions_path = tmp_path / "trading.db"
     tracking_cfg = {
         "enabled": True,
         "writer": "notify",
