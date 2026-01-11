@@ -66,6 +66,12 @@ SCHEMA_STATEMENTS: Iterable[str] = (
         updated_at TEXT NOT NULL
     );
     """,
+    """
+    CREATE TABLE IF NOT EXISTS market_data (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        last_updated_at TEXT NOT NULL
+    );
+    """,
 )
 
 
