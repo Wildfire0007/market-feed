@@ -2,17 +2,12 @@
 """Közös állapottároló az utolsó akcióképes BUY/SELL ("anchor") jelzéshez.
 
 Az analysis.py a végleges jel generálásakor frissíti, a Discord értesítő és
-egyéb komponensek pedig olvashatják. A formátum egyszerű JSON:
-{
-  "USOIL": {"side": "sell", "price": 82.15, "timestamp": "2024-03-12T14:05:00Z"},
-  ...
-}
+egyéb komponensek pedig olvashatják. Az állapot SQLite tárolású.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from statistics import mean
@@ -20,8 +15,6 @@ from typing import Any, Dict, Optional
 
 import state_db
 
-PUBLIC_DIR = os.getenv("PUBLIC_DIR", "public")
-ANCHOR_STATE_PATH = os.path.join(PUBLIC_DIR, "_active_anchor.json")
 _DB_INITIALIZED = False
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -51,17 +44,17 @@ def _utc_now_iso() -> str:
     )
 
 
-def _ensure_db_initialized() -> None:
+def _ensure_db_initialized(db_path: Optional[str] = None) -> None:
     global _DB_INITIALIZED
     if _DB_INITIALIZED:
         return
-    state_db.initialize()
+    state_db.initialize(db_path or state_db.DEFAULT_DB_PATH)
     _DB_INITIALIZED = True
 
 
-def _load_anchor_state_from_db() -> Dict[str, Dict[str, Any]]:
-    _ensure_db_initialized()
-    connection = state_db.connect()
+def _load_anchor_state_from_db(db_path: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    _ensure_db_initialized(db_path)
+    connection = state_db.connect(db_path or state_db.DEFAULT_DB_PATH)
     connection.row_factory = sqlite3.Row
     try:
         rows = connection.execute(
@@ -106,43 +99,14 @@ def _load_anchor_state_from_db() -> Dict[str, Dict[str, Any]]:
     return state
 
 
-def _load_anchor_state_from_json(path: str) -> Dict[str, Dict[str, Any]]:
+def load_anchor_state(db_path: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    return _load_anchor_state_from_db(db_path)
+
+
+def save_anchor_state(state: Dict[str, Dict[str, Any]], db_path: Optional[str] = None) -> None:
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except Exception:
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    norm: Dict[str, Dict[str, Any]] = {}
-    for key, value in raw.items():
-        if not isinstance(value, dict):
-            continue
-        record: Dict[str, Any] = {
-            "side": str(value.get("side") or "").lower(),
-            "price": value.get("price"),
-            "timestamp": value.get("timestamp"),
-        }
-        for extra_key, extra_value in value.items():
-            if extra_key not in record:
-                record[extra_key] = extra_value
-        if not record["side"]:
-            continue
-        norm[key.upper()] = record
-    return norm
-
-
-def load_anchor_state(path: str = ANCHOR_STATE_PATH) -> Dict[str, Dict[str, Any]]:
-    try:
-        return _load_anchor_state_from_db()
-    except Exception:
-        return _load_anchor_state_from_json(path)
-
-
-def save_anchor_state(state: Dict[str, Dict[str, Any]], path: str = ANCHOR_STATE_PATH) -> None:
-    try:
-        _ensure_db_initialized()
-        connection = state_db.connect()
+        _ensure_db_initialized(db_path)
+        connection = state_db.connect(db_path or state_db.DEFAULT_DB_PATH)
     except sqlite3.Error:
         return
     try:
@@ -185,17 +149,17 @@ def record_anchor(
     side: str,
     price: Optional[float] = None,
     timestamp: Optional[str] = None,
-    path: str = ANCHOR_STATE_PATH,
+    db_path: Optional[str] = None,
     extras: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Frissíti az anchor állapotot (ha újabb jel érkezett)."""
 
     if not asset or not side:
-        return load_anchor_state(path)
+        return load_anchor_state(db_path)
 
     asset_key = asset.upper()
     side_norm = side.lower()
-    state = load_anchor_state(path)
+    state = load_anchor_state(db_path)
     current = state.get(asset_key)
 
     ts = timestamp or _utc_now_iso()
@@ -229,7 +193,7 @@ def record_anchor(
             payload["initial_risk_abs"] = extras.get("initial_risk_abs")
         payload["last_update"] = ts
         state[asset_key] = payload
-        save_anchor_state(state, path)
+        save_anchor_state(state, db_path)
 
     return state
 
@@ -239,25 +203,25 @@ def touch_anchor(
     side: str,
     price: Optional[float] = None,
     timestamp: Optional[str] = None,
-    path: str = ANCHOR_STATE_PATH,
+    db_path: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Garantálja, hogy legalább egy alap rekord létezzen (oldja, ha hiányzik)."""
 
-    state = load_anchor_state(path)
+    state = load_anchor_state(db_path)
     asset_key = asset.upper()
     if asset_key in state and state[asset_key].get("side"):
         return state
-    return record_anchor(asset, side, price=price, timestamp=timestamp, path=path)
+    return record_anchor(asset, side, price=price, timestamp=timestamp, db_path=db_path)
 
 
 def update_anchor_metrics(
     asset: str,
     extras: Optional[Dict[str, Any]] = None,
-    path: str = ANCHOR_STATE_PATH,
+    db_path: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     if not extras:
-        return load_anchor_state(path)
-    state = load_anchor_state(path)
+        return load_anchor_state(db_path)
+    state = load_anchor_state(db_path)
     asset_key = asset.upper()
     if asset_key not in state:
         return state
@@ -324,17 +288,17 @@ def update_anchor_metrics(
 
     record["last_update"] = timestamp
     state[asset_key] = record
-    save_anchor_state(state, path)
+    save_anchor_state(state, db_path)
     return state
 
 def reset_anchor_state(
     max_age_hours: Optional[int] = None,
-    path: str = ANCHOR_STATE_PATH,
+    db_path: Optional[str] = None,
     *,
     now: Optional[datetime] = None,
     dry_run: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
-    """Clear or prune the anchor state file.
+    """Clear or prune the anchor state records.
 
     Parameters
     ----------
@@ -342,15 +306,15 @@ def reset_anchor_state(
         If ``None`` or ``<= 0`` every entry is removed.  Otherwise records with a
         ``last_update`` (or ``timestamp``) older than ``now - max_age_hours`` are
         dropped.
-    path:
-        Location of the anchor state JSON file.
+    db_path:
+        SQLite database path to use for anchor state.
     now:
         Reference timestamp used for age comparisons.  Defaults to ``utcnow`` and
         is primarily exposed for deterministic unit tests.
 
     dry_run:
         When ``True`` the function performs calculations without touching the
-        underlying JSON file.
+        underlying database.
 
     Returns
     -------
@@ -358,15 +322,15 @@ def reset_anchor_state(
         The updated anchor state.
     """
 
-    state = load_anchor_state(path)
+    state = load_anchor_state(db_path)
     if not state:
         if not dry_run:
-            save_anchor_state({}, path)
+            save_anchor_state({}, db_path)
         return {}
 
     if max_age_hours is None or max_age_hours <= 0:
         if not dry_run:
-            save_anchor_state({}, path)
+            save_anchor_state({}, db_path)
         return {}
 
     reference = now or datetime.now(timezone.utc)
@@ -380,13 +344,12 @@ def reset_anchor_state(
             pruned[asset] = payload
 
     if pruned != state and not dry_run:
-        save_anchor_state(pruned, path)
+        save_anchor_state(pruned, db_path)
 
     return pruned
 
 
 __all__ = [
-    "ANCHOR_STATE_PATH",
     "load_anchor_state",
     "save_anchor_state",
     "record_anchor",
