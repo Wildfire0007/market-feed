@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-STATE_DB_PATH="${STATE_DB_PATH:-trading.db}"
+STATE_DB_PATH="${STATE_DB_PATH:-trading_state.db}"
 BACKUP_DIR="${BACKUP_DIR:-backups}"
 
 if [[ ! -f "${STATE_DB_PATH}" ]]; then
