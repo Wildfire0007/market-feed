@@ -6,12 +6,12 @@ import Trading
 
 
 def test_ws_tick_updates_spot_price(tmp_path, monkeypatch):
-    db_path = tmp_path / "trading_state.db"
+    db_path = tmp_path / "trading.db"
     monkeypatch.setattr(state_db, "DEFAULT_DB_PATH", db_path)
     Trading._SPOT_DB_INITIALIZED = False
     with Trading._REALTIME_LAST_PRICE_LOCK:
         Trading._REALTIME_LAST_PRICE.clear()
-    state_db.initialize()
+    state_db.initialize(db_path)
 
     payload = {
         "symbol": "BTC/USD",
@@ -23,7 +23,7 @@ def test_ws_tick_updates_spot_price(tmp_path, monkeypatch):
     assert asset == "BTCUSD"
     assert Trading._REALTIME_LAST_PRICE["BTCUSD"]["price"] == 43000.5
 
-    connection = state_db.connect()
+    connection = state_db.connect(db_path)
     connection.row_factory = sqlite3.Row
     try:
         row = connection.execute(
