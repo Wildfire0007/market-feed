@@ -31,7 +31,7 @@ def _base_pending(asset: str, manual_state: dict, signal_payload: dict, entry_re
 def test_entry_commit_blocked_until_dispatch_success(tmp_path):
     now = datetime.now(timezone.utc)
     now_iso = notify_discord.to_utc_iso(now)
-    positions_path = tmp_path / "positions.json"
+    positions_path = tmp_path / "trading.db"
     tracking_cfg = {
         "enabled": True,
         "writer": "notify",
@@ -97,7 +97,7 @@ def test_entry_commit_blocked_until_dispatch_success(tmp_path):
 def test_entry_commit_persists_after_dispatch_success(tmp_path):
     now = datetime.now(timezone.utc)
     now_iso = notify_discord.to_utc_iso(now)
-    positions_path = tmp_path / "positions.json"
+    positions_path = tmp_path / "trading.db"
     tracking_cfg = {
         "enabled": True,
         "writer": "notify",
@@ -164,7 +164,7 @@ def test_entry_commit_persists_after_dispatch_success(tmp_path):
 def test_entry_commit_handles_missing_dispatch_result(tmp_path):
     now = datetime.now(timezone.utc)
     now_iso = notify_discord.to_utc_iso(now)
-    positions_path = tmp_path / "positions.json"
+    positions_path = tmp_path / "trading.db"
     tracking_cfg = {
         "enabled": True,
         "writer": "notify",
@@ -231,7 +231,7 @@ def test_entry_commit_handles_missing_dispatch_result(tmp_path):
 def test_entry_suppressed_when_state_not_loaded(tmp_path):
     now = datetime.now(timezone.utc)
     now_iso = notify_discord.to_utc_iso(now)
-    positions_path = tmp_path / "positions.json"
+    positions_path = tmp_path / "trading.db"
     tracking_cfg = {
         "enabled": True,
         "writer": "notify",
@@ -296,7 +296,7 @@ def test_entry_suppressed_when_state_not_loaded(tmp_path):
 def test_entry_commit_verification_failure(monkeypatch, tmp_path):
     now = datetime.now(timezone.utc)
     now_iso = notify_discord.to_utc_iso(now)
-    positions_path = tmp_path / "positions.json"
+    positions_path = tmp_path / "trading.db"
     tracking_cfg = {
         "enabled": True,
         "writer": "notify",
