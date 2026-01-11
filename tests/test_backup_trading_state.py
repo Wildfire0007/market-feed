@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def test_backup_script_creates_backup(tmp_path: Path) -> None:
-    state_db = tmp_path / "trading_state.db"
+    state_db = tmp_path / "trading.db"
     state_db.write_text("seed", encoding="utf-8")
     backup_dir = tmp_path / "backups"
 
