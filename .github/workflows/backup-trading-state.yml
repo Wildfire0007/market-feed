@@ -1,0 +1,20 @@
+name: Backup Trading State
+
+on:
+  schedule:
+    - cron: "0 * * * *" # hourly (UTC)
+    - cron: "0 3 * * *" # daily (UTC)
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Seed trading state db
+        run: |
+          if [ ! -f trading_state.db ]; then
+            touch trading_state.db
+          fi
+      - name: Run backup
+        run: scripts/backup_trading_state.sh
