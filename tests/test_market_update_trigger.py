@@ -13,19 +13,21 @@ def _set_market_update(db_path: Path, timestamp: str) -> None:
         with connection:
             connection.execute(
                 """
-                INSERT INTO market_data (id, last_updated_at)
-                VALUES (1, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    last_updated_at=excluded.last_updated_at
+                INSERT INTO market_data (symbol, price, timestamp, source)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    price=excluded.price,
+                    timestamp=excluded.timestamp,
+                    source=excluded.source
                 """,
-                (timestamp,),
+                ("BTCUSD", 1.0, timestamp, "test"),
             )
     finally:
         connection.close()
 
 
 def test_analysis_triggers_on_market_update(tmp_path: Path) -> None:
-    db_path = tmp_path / "state.db"
+    db_path = tmp_path / "trading.db"
     state_db.initialize(db_path)
     _set_market_update(db_path, datetime.now(timezone.utc).isoformat())
 
@@ -52,6 +54,3 @@ def test_analysis_triggers_on_market_update(tmp_path: Path) -> None:
 
     updater.join(timeout=1.0)
     assert triggered.is_set()
- 
-EOF
-)
