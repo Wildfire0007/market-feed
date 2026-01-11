@@ -1,4 +1,3 @@
-import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,7 +26,7 @@ def _iso(dt: datetime) -> str:
 
 
 def test_reset_anchor_state_file_prunes_old_entries(tmp_path: Path) -> None:
-    anchor_path = tmp_path / "_active_anchor.json"
+    db_path = tmp_path / "trading.db"
     now = datetime(2025, 1, 15, 12, tzinfo=timezone.utc)
     stale = now - timedelta(days=3)
     fresh = now - timedelta(hours=6)
@@ -45,12 +44,12 @@ def test_reset_anchor_state_file_prunes_old_entries(tmp_path: Path) -> None:
                 "last_update": _iso(fresh),
             },
         },
-        path=str(anchor_path),
+        db_path=str(db_path),
     )
 
     result = reset_anchor_state_file(
         max_age_hours=24,
-        path=anchor_path,
+        db_path=db_path,
         now=now,
         dry_run=False,
         backup_dir=tmp_path / "backups",
@@ -61,30 +60,28 @@ def test_reset_anchor_state_file_prunes_old_entries(tmp_path: Path) -> None:
     assert result.removed == 1
     assert result.changed is True
 
-    persisted = load_anchor_state(str(anchor_path))
+    persisted = load_anchor_state(str(db_path))
     assert list(persisted.keys()) == ["EURUSD"]
 
 
 def test_reset_anchor_state_file_clears_stale_metadata(tmp_path: Path) -> None:
-    anchor_path = tmp_path / "_active_anchor.json"
-    anchor_path.write_text(
-        json.dumps({"_meta": {"foo": "bar"}}, ensure_ascii=False), encoding="utf-8"
-    )
+    db_path = tmp_path / "trading.db"
+    save_anchor_state({"BTCUSD": {"side": "buy"}}, db_path=str(db_path))
 
     result = reset_anchor_state_file(
         max_age_hours=24,
-        path=anchor_path,
+        db_path=db_path,
         now=datetime(2025, 1, 15, 12, tzinfo=timezone.utc),
         dry_run=False,
         backup_dir=tmp_path / "backups",
     )
 
     assert result.changed is True
-    assert load_anchor_state(str(anchor_path)) == {}
+    assert load_anchor_state(str(db_path)) == {}
     
 
 def test_reset_anchor_state_file_dry_run_leaves_file_untouched(tmp_path: Path) -> None:
-    anchor_path = tmp_path / "_active_anchor.json"
+    db_path = tmp_path / "trading.db"
     now = datetime(2025, 1, 15, tzinfo=timezone.utc)
     timestamps = [now - timedelta(hours=3), now - timedelta(days=2)]
 
@@ -101,21 +98,21 @@ def test_reset_anchor_state_file_dry_run_leaves_file_untouched(tmp_path: Path) -
                 "last_update": _iso(timestamps[1]),
             },
         },
-        path=str(anchor_path),
+        db_path=str(db_path),
     )
 
-    original = anchor_path.read_text(encoding="utf-8")
+    original = load_anchor_state(str(db_path))
 
     result = reset_anchor_state_file(
         max_age_hours=24,
-        path=anchor_path,
+        db_path=db_path,
         now=now,
         dry_run=True,
         backup_dir=tmp_path / "backups",
     )
 
     assert result.changed is False
-    assert anchor_path.read_text(encoding="utf-8") == original
+    assert load_anchor_state(str(db_path)) == original
 
 
 def test_build_default_state_sets_reset_metadata() -> None:
