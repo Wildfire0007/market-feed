@@ -10,7 +10,7 @@ A monitoring dashboard `status.json` és `monitoring/health.json` fájljai hétv
 ## Feladat
 Implementálj egy időzített watchdog komponenst, amely:
 1. Felismeri a hétvégi/ünnepnapi zárást követő legelső instrumentum-kereskedési időszak kezdetét (pl. exchange nyitási ablak vagy előre konfigurált cron marker alapján).
-2. A nyitás pillanatában automatikusan futtatja a dashboard reset logikát, biztosítva, hogy a `status.json` és `health.json` (és opcionálisan a `_notify_state.json`/`_active_anchor.json`) frissek legyenek anélkül, hogy emberi beavatkozásra lenne szükség. 【F:scripts/reset_dashboard_state.py†L72-L213】
+2. A nyitás pillanatában automatikusan futtatja a dashboard reset logikát, biztosítva, hogy a `status.json` és `health.json` (és opcionálisan a `_notify_state.json`/anchor tábla) frissek legyenek anélkül, hogy emberi beavatkozásra lenne szükség. 【F:scripts/reset_dashboard_state.py†L72-L213】
 3. Naplózza és opcionálisan riasztja (pl. Slack/Discord log) a reset eredményét, hogy visszakövethető legyen, mikor történt az automatikus tisztítás.
 
 ## Javasolt megoldási irányok
