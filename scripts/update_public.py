@@ -143,9 +143,7 @@ def main() -> int:
 
     preserved = preserve_files(
         target_root,
-        (
-            "_manual_positions.json",
-            "_manual_positions_audit.jsonl",
+        (            
             "_active_position_state.json",
         ),
     )
