@@ -54,13 +54,14 @@ from reports.pipeline_monitor import (
     load_pipeline_payload,
 )
 import position_tracker
+import state_db
 
 LOGGER = logging.getLogger("market_feed.notify")
 ensure_json_stream_handler(LOGGER, static_fields={"component": "notify"})
 
 PUBLIC_DIR = (_REPO_ROOT / "public").resolve()
 PUBLIC_DIR.mkdir(parents=True, exist_ok=True)
-POSITIONS_FILE = PUBLIC_DIR / "_manual_positions.json"
+POSITIONS_FILE = Path(state_db.DEFAULT_DB_PATH)
 AUDIT_FILE = PUBLIC_DIR / "_manual_positions_audit.jsonl"
 ASSETS: List[str] = list(CONFIG_ASSETS)
 STATE_ARCHIVE_PATH = PUBLIC_DIR / "_notify_state.archive.json"
@@ -3863,7 +3864,7 @@ def main():
     state_loaded_env = str(os.getenv("STATE_LOADED", "0")).strip() == "1"
     manual_writer = str(tracking_cfg.get("writer") or "dual").lower()
     redundant_guard = bool(tracking_cfg.get("redundant_write_guard", False))
-    pending_exit_path = tracking_cfg.get("pending_exit_file") or "public/_manual_positions_pending_exit.json"
+    pending_exit_path = tracking_cfg.get("pending_exit_file") or str(state_db.DEFAULT_DB_PATH)
     can_write_positions = manual_writer in {"notify", "dual"} or redundant_guard
     manual_tracking_enabled = bool(tracking_cfg.get("enabled"))
     positions_path = tracking_cfg.get("positions_file") or str(POSITIONS_FILE)
