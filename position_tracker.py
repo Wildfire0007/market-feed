@@ -1,8 +1,8 @@
 """Helpers for deterministic manual/assumed position tracking.
 
 This module centralizes the persistence and state derivation logic for
-``manual_positions.json`` so both analysis and Discord notification layers
-share the same behavior.
+manual positions so both analysis and Discord notification layers share the
+same behavior.
 """
 
 from __future__ import annotations
@@ -37,14 +37,17 @@ _AUDIT_CONTEXT: Dict[str, Any] = {
 _FILE_LOGGER_ATTACHED = False
 
 _DB_INITIALIZED = False
+_DB_PATH: Optional[Path] = None
 
 
-def _ensure_db_initialized() -> None:
-    global _DB_INITIALIZED
-    if _DB_INITIALIZED:
+def _ensure_db_initialized(db_path: Optional[Path] = None) -> None:
+    global _DB_INITIALIZED, _DB_PATH
+    target_path = db_path or state_db.DEFAULT_DB_PATH
+    if _DB_INITIALIZED and _DB_PATH == target_path:
         return
-    state_db.initialize()
+    state_db.initialize(target_path)
     _DB_INITIALIZED = True
+    _DB_PATH = target_path
 
 
 def _find_repo_root(start: Optional[Path] = None) -> Path:
@@ -159,19 +162,11 @@ def _maybe_attach_file_handler() -> None:
 
 
 def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
-    repo_root = _find_repo_root()
-    resolved = resolve_repo_path(path)
-
-    use_db = False
-    try:
-        resolved.relative_to(repo_root)
-        use_db = True
-    except ValueError:
-        use_db = False
+    db_path = Path(path) if path else state_db.DEFAULT_DB_PATH
 
     def _load_positions_from_db() -> Dict[str, Any]:
-        _ensure_db_initialized()
-        connection = state_db.connect()
+        _ensure_db_initialized(db_path)
+        connection = state_db.connect(db_path)
         connection.row_factory = sqlite3.Row
         try:
             rows = connection.execute(
@@ -184,119 +179,84 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
         for row in rows:
             asset = row["asset"]
             tp_value = row["tp"]
+            metadata_raw = row["strategy_metadata"]
+            metadata: Dict[str, Any] = {}
+            if metadata_raw:
+                try:
+                    parsed = json.loads(metadata_raw)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    metadata = parsed
             positions[asset] = {
-                "side": row["side"],
+                "side": metadata.get("side"),
                 "entry": row["entry_price"],
+                "size": row["size"],
                 "sl": row["sl"],
                 "tp1": tp_value,
                 "tp2": tp_value,
-                "opened_at_utc": row["created_at"],
-                "closed_at_utc": None,
-                "cooldown_until_utc": None,
+                "opened_at_utc": metadata.get("opened_at_utc"),
+                "closed_at_utc": metadata.get("closed_at_utc"),
+                "cooldown_until_utc": metadata.get("cooldown_until_utc"),
+                "close_reason": metadata.get("close_reason"),
             }
         return positions
-
-    if use_db:
-        db_path = Path(state_db.DEFAULT_DB_PATH)
-        try:
-            positions = _load_positions_from_db()
-            _audit_log(
-                "positions loaded from db",
-                event="LOAD_POSITIONS_DB",
-                positions_file=str(resolved),
-                db_path=str(db_path),
-                entries=len(positions),
-            )
-            return positions
-        except Exception as exc:
-            _audit_log(
-                "positions db read failed; falling back to json",
-                event="LOAD_POSITIONS_DB_FAILED",
-                positions_file=str(resolved),
-                db_path=str(db_path),
-                exception=repr(exc),
-            )
-
-    if not resolved.exists():
-        if not treat_missing_as_flat:
-            _audit_log(
-                "positions missing and restore unavailable",
-                event="LOAD_POSITIONS_FAILED",
-                positions_file=str(resolved),
-                entries=0,
-                missing_file=True,
-                treat_missing_as_flat=False,
-            )
-            raise PositionFileError(f"Manual positions file missing: {resolved}")
-        _audit_log(
-            "positions missing; returning empty state",
-            event="LOAD_POSITIONS",
-            positions_file=str(resolved),
-            entries=0,
-            missing_file=True,
-            treat_missing_as_flat=bool(treat_missing_as_flat),
-        )
-        return {}
-
     try:
-        data = json.loads(resolved.read_text(encoding="utf-8"))
+        positions = _load_positions_from_db()
+        _audit_log(
+            "positions loaded from db",
+            event="LOAD_POSITIONS_DB",
+            positions_file=str(db_path),
+            db_path=str(db_path),
+            entries=len(positions),
+        )
+        return positions    
     except Exception as exc:
+        _audit_log(
+            "positions db read failed",
+            event="LOAD_POSITIONS_DB_FAILED",
+            positions_file=str(db_path),
+            db_path=str(db_path),
+            exception=repr(exc),
+        )
         if not treat_missing_as_flat:
-            _audit_log(
-                "positions file invalid",
-                event="LOAD_POSITIONS_FAILED",
-                positions_file=str(resolved),
-                entries=0,
-                invalid_file=True,
-                treat_missing_as_flat=False,
-                exception=repr(exc),
-            )
-            raise PositionFileError(f"Manual positions file unreadable: {resolved}") from exc
-        data = {}
-
-    positions = data if isinstance(data, dict) else {}
-    _audit_log(
-        "positions loaded",
-        event="LOAD_POSITIONS",
-        positions_file=str(resolved),
-        entries=len(positions),
-    )
-    return positions
-
+            raise
+        return {}
+        
 
 def save_positions_atomic(path: str, data: Dict[str, Any]) -> Dict[str, Any]:
-    resolved = resolve_repo_path(path)
+    db_path = Path(path) if path else state_db.DEFAULT_DB_PATH
     _audit_log(
         "persisting positions to db",
         event="SAVE_BEGIN",
-        positions_file=str(resolved),        
+        positions_file=str(db_path),
         entries=len(data),
         assets=sorted(data.keys()),
     )    
 
-    db_written = _sync_positions_to_db(data)
+    db_written = _sync_positions_to_db(db_path, data)
     
     _audit_log(
         "positions persisted to db",
         event="SAVE_COMMIT",
-        positions_file=str(resolved),
-        db_path=str(state_db.DEFAULT_DB_PATH),
+        positions_file=str(db_path),
+        db_path=str(db_path),
         entries=len(data),
         db_written=db_written,
     )
 
     return {
-        "positions_file": str(resolved),
+        "positions_file": str(db_path),
         "written_bytes": 0,
-        "db_path": str(state_db.DEFAULT_DB_PATH),
+        "db_path": str(db_path),
         "db_written": db_written,
     }
 
 
-def _sync_positions_to_db(data: Dict[str, Any]) -> bool:
+def _sync_positions_to_db(db_path: Path, data: Dict[str, Any]) -> bool:
     try:
-        _ensure_db_initialized()
-        connection = state_db.connect()
+        _ensure_db_initialized(db_path)
+        connection = state_db.connect(db_path)
     except sqlite3.Error as exc:
         _audit_log(
             "positions db unavailable",
@@ -314,10 +274,16 @@ def _sync_positions_to_db(data: Dict[str, Any]) -> bool:
                 side = payload.get("side")
                 status = "OPEN" if side in {"long", "short"} else "CLOSED"
                 entry_price = payload.get("entry")
+                size = payload.get("size")
                 sl = payload.get("sl")
                 tp = payload.get("tp2") if payload.get("tp2") is not None else payload.get("tp1")
-                created_at = payload.get("opened_at_utc") or now_iso
-                updated_at = payload.get("closed_at_utc") or now_iso
+                strategy_payload = dict(payload)
+                strategy_payload.setdefault("side", side)
+                strategy_payload.setdefault("opened_at_utc", payload.get("opened_at_utc") or now_iso)
+                strategy_payload.setdefault("closed_at_utc", payload.get("closed_at_utc"))
+                strategy_payload.setdefault("cooldown_until_utc", payload.get("cooldown_until_utc"))
+                strategy_payload.setdefault("close_reason", payload.get("close_reason"))
+                strategy_metadata = json.dumps(strategy_payload, ensure_ascii=False)
                 connection.execute(
                     "DELETE FROM positions WHERE asset = ?",
                     (asset,),
@@ -325,26 +291,24 @@ def _sync_positions_to_db(data: Dict[str, Any]) -> bool:
                 connection.execute(
                     """
                     INSERT INTO positions (
-                        asset,
-                        side,
+                        asset,                       
                         entry_price,
+                        size,
                         sl,
                         tp,
                         status,
-                        created_at,
-                        updated_at
+                        strategy_metadata
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        asset,
-                        side or "",
+                        asset,                        
                         entry_price,
+                        size,
                         sl,
                         tp,
                         status,
-                        created_at,
-                        updated_at,
+                        strategy_metadata,
                     ),
                 )
     except sqlite3.Error as exc:
@@ -362,7 +326,7 @@ def _sync_positions_to_db(data: Dict[str, Any]) -> bool:
 def positions_file_snapshot(path: str) -> Dict[str, Any]:
     """Return size/mtime/sha256 for diagnostics; never raises."""
 
-    resolved = resolve_repo_path(path)
+    resolved = Path(path) if path else state_db.DEFAULT_DB_PATH
     payload: Dict[str, Any] = {"positions_file": str(resolved)}
     try:
         stat = resolved.stat()
@@ -520,9 +484,9 @@ def close_position(
     return updated
 
 
-def _load_pending_exits_from_db() -> Dict[str, Dict[str, Any]]:
-    _ensure_db_initialized()
-    connection = state_db.connect()
+def _load_pending_exits_from_db(db_path: Path) -> Dict[str, Dict[str, Any]]:
+    _ensure_db_initialized(db_path)
+    connection = state_db.connect(db_path)
     connection.row_factory = sqlite3.Row
     try:
         rows = connection.execute(
@@ -552,8 +516,9 @@ def _load_pending_exits_from_db() -> Dict[str, Dict[str, Any]]:
 def load_pending_exits(path: str) -> Dict[str, Dict[str, Any]]:
     """Load pending exit requests for deferred application."""
 
+    db_path = Path(path) if path else state_db.DEFAULT_DB_PATH
     try:
-        pending = _load_pending_exits_from_db()
+        pending = _load_pending_exits_from_db(db_path)
         _audit_log(
             "pending exits loaded from db",
             event="PENDING_EXIT_LOAD_DB",
@@ -562,19 +527,12 @@ def load_pending_exits(path: str) -> Dict[str, Dict[str, Any]]:
         return pending
     except Exception as exc:
         _audit_log(
-            "pending exits db load failed; falling back to json",
+            "pending exits db load failed",
             event="PENDING_EXIT_LOAD_DB_FAILED",
-            positions_file=str(resolve_repo_path(path)),
+            positions_file=str(db_path),
             exception=repr(exc),
         )
-
-    resolved = resolve_repo_path(path)
-    try:
-        payload = json.loads(resolved.read_text(encoding="utf-8")) if resolved.exists() else {}
-    except Exception:
-        payload = {}
-
-    return payload if isinstance(payload, dict) else {}
+        return {}
 
 
 def record_pending_exit(
@@ -596,9 +554,10 @@ def record_pending_exit(
         "run_id": _AUDIT_CONTEXT.get("run_id"),
     }
 
+    db_path = Path(path) if path else state_db.DEFAULT_DB_PATH
     try:
-        _ensure_db_initialized()
-        connection = state_db.connect()
+        _ensure_db_initialized(db_path)
+        connection = state_db.connect(db_path)
     except sqlite3.Error as exc:
         _audit_log(
             "pending exit db unavailable",
@@ -663,9 +622,10 @@ def record_pending_exit(
 
 
 def clear_pending_exits(path: str, applied: Optional[Dict[str, Any]] = None) -> None:
+    db_path = Path(path) if path else state_db.DEFAULT_DB_PATH
     try:
-        _ensure_db_initialized()
-        connection = state_db.connect()
+        _ensure_db_initialized(db_path)
+        connection = state_db.connect(db_path)
     except sqlite3.Error as exc:
         _audit_log(
             "pending exit db unavailable",
