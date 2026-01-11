@@ -2,9 +2,6 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any
-import json
-import logging
-from datetime import datetime, timezone
 
 import position_tracker
 
@@ -38,7 +35,7 @@ def test_open_and_save_emit_audit_fields(capfd, tmp_path, monkeypatch):
         opened_at_utc=datetime.now(timezone.utc).isoformat(),
     )
 
-    path = tmp_path / "positions.json"
+    path = tmp_path / "trading.db"
     position_tracker.save_positions_atomic(str(path), positions)
 
     position_tracker.LOGGER.removeHandler(handler)
