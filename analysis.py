@@ -311,6 +311,7 @@ from config.analysis_settings import (
     SMT_PENALTY_VALUE,
     SMT_REQUIRED_BARS,
     SPOT_MAX_AGE_SECONDS,
+    SPOT_SAFE_MODE_SECONDS,
     VWAP_BAND_MULT,
     get_atr_abs_min,
     get_atr_period,
@@ -8218,6 +8219,59 @@ def analyze(asset: str) -> Dict[str, Any]:
     spot_latency: Optional[float] = None
     if spot_ts:
         spot_latency = (now - spot_ts).total_seconds()
+    spot_safe_mode_limit = int(
+        SPOT_SAFE_MODE_SECONDS.get(asset, SPOT_SAFE_MODE_SECONDS.get("default", 60)) or 0
+    )
+    spot_safe_mode_active = False
+    spot_safe_mode_age: Optional[float] = None
+    spot_safe_mode_note: Optional[str] = None
+    spot_safe_mode_position_open = False
+    spot_safe_mode_position_error: Optional[str] = None
+    if spot_ts and spot_safe_mode_limit > 0:
+        spot_safe_mode_age = (now - spot_ts).total_seconds()
+        if spot_safe_mode_age > spot_safe_mode_limit:
+            spot_safe_mode_active = True
+            spot_safe_mode_note = (
+                "SAFE MODE: spot timestamp "
+                f"{int(spot_safe_mode_age)}s old (limit {spot_safe_mode_limit}s)"
+            )
+            try:
+                stability_config = _resolve_signal_stability_config()
+                manual_state = _manual_position_state(asset, stability_config, now)
+                spot_safe_mode_position_open = bool(manual_state.get("has_position"))
+            except Exception as exc:
+                spot_safe_mode_position_error = str(exc)
+                LOGGER.warning("SAFE MODE position check failed: %s", exc)
+            if spot_safe_mode_position_open:
+                alert_meta = {
+                    "spot_timestamp_utc": to_utc_iso(spot_ts),
+                    "spot_age_seconds": float(spot_safe_mode_age),
+                    "limit_seconds": float(spot_safe_mode_limit),
+                    "mode": "safe_mode",
+                }
+                LOGGER.critical(
+                    "SAFE MODE: spot timestamp stale while position open",
+                    extra={"asset": asset, **alert_meta},
+                )
+                try:
+                    record_latency_alert(
+                        asset,
+                        "spot",
+                        f"{asset} SAFE MODE — spot timestamp stale while position open",
+                        metadata=alert_meta,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    LOGGER.warning("SAFE MODE critical alert failed: %s", exc)
+    if spot_safe_mode_active:
+        entry_thresholds_meta["safe_mode"] = {
+            "active": True,
+            "spot_timestamp_utc": to_utc_iso(spot_ts) if spot_ts else None,
+            "spot_age_seconds": spot_safe_mode_age,
+            "limit_seconds": spot_safe_mode_limit,
+            "position_open": spot_safe_mode_position_open,
+            "position_check_error": spot_safe_mode_position_error,
+        }
+
     freshness_limit = spot_max_age
     staleness_max_age = freshness_limit
     # Allow per-asset overrides embedded in the spot snapshot metadata while keeping
@@ -13892,6 +13946,17 @@ def analyze(asset: str) -> Dict[str, Any]:
             )
             session_meta["session_closing_soon"] = True
 
+    if spot_safe_mode_active:
+        safe_mode_msg = spot_safe_mode_note or "SAFE MODE: spot timestamp stale"
+        if safe_mode_msg not in reasons:
+            reasons.insert(0, safe_mode_msg)
+        if decision in {"buy", "sell"}:
+            decision = "no entry"
+            entry = sl = tp1 = tp2 = rr = None
+            mode = "safe_mode"
+            if "safe_mode" not in missing:
+                missing.append("safe_mode")
+
     if not session_ok_flag:
         status_note = session_meta.get("status_note") or "Session zárva"
         if status_note not in reasons:
@@ -15379,6 +15444,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
