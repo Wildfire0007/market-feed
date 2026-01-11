@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from logging_utils import ensure_json_file_handler, ensure_json_stream_handler
+import state_db
 
 
 LOGGER = logging.getLogger("manual_positions")
@@ -33,6 +35,16 @@ _AUDIT_CONTEXT: Dict[str, Any] = {
     "tz_name": "Europe/Budapest",
 }
 _FILE_LOGGER_ATTACHED = False
+
+_DB_INITIALIZED = False
+
+
+def _ensure_db_initialized() -> None:
+    global _DB_INITIALIZED
+    if _DB_INITIALIZED:
+        return
+    state_db.initialize()
+    _DB_INITIALIZED = True
 
 
 def _find_repo_root(start: Optional[Path] = None) -> Path:
@@ -276,6 +288,8 @@ def save_positions_atomic(path: str, data: Dict[str, Any]) -> Dict[str, Any]:
         entries=len(data),
     )
 
+    _sync_positions_to_db(data)
+
     return {
         "positions_file": str(resolved),
         "size": stat.st_size,
@@ -283,6 +297,70 @@ def save_positions_atomic(path: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "written_bytes": len(payload.encode("utf-8")) + 1,  # account for trailing newline
         "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
     }
+
+
+def _sync_positions_to_db(data: Dict[str, Any]) -> None:
+    try:
+        _ensure_db_initialized()
+        connection = state_db.connect()
+    except sqlite3.Error as exc:
+        _audit_log(
+            "positions db unavailable",
+            event="DB_SYNC_FAILED",
+            exception=repr(exc),
+        )
+        return
+
+    now_iso = _to_utc_iso(datetime.now(timezone.utc))
+    try:
+        with connection:
+            for asset, payload in data.items():
+                if not isinstance(payload, dict):
+                    continue
+                side = payload.get("side")
+                status = "OPEN" if side in {"long", "short"} else "CLOSED"
+                entry_price = payload.get("entry")
+                sl = payload.get("sl")
+                tp = payload.get("tp2") if payload.get("tp2") is not None else payload.get("tp1")
+                created_at = payload.get("opened_at_utc") or now_iso
+                updated_at = payload.get("closed_at_utc") or now_iso
+                connection.execute(
+                    "DELETE FROM positions WHERE asset = ?",
+                    (asset,),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO positions (
+                        asset,
+                        side,
+                        entry_price,
+                        sl,
+                        tp,
+                        status,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        asset,
+                        side or "",
+                        entry_price,
+                        sl,
+                        tp,
+                        status,
+                        created_at,
+                        updated_at,
+                    ),
+                )
+    except sqlite3.Error as exc:
+        _audit_log(
+            "positions db sync failed",
+            event="DB_SYNC_FAILED",
+            exception=repr(exc),
+        )
+    finally:
+        connection.close()
 
 
 def positions_file_snapshot(path: str) -> Dict[str, Any]:
