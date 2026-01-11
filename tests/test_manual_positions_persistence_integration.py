@@ -12,7 +12,7 @@ def test_entry_event_persists_and_is_reloaded():
     now_iso = now.isoformat().replace("+00:00", "Z")
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        positions_path = Path(tmpdir) / "public" / "_manual_positions.json"
+        positions_path = Path(tmpdir) / "trading.db"
         stability_cfg = {
             "enabled": False,
                 "manual_position_tracking": {
@@ -65,28 +65,36 @@ def test_manual_state_reads_open_position_from_db(monkeypatch):
 
     with tempfile.TemporaryDirectory() as tmpdir:
         monkeypatch.chdir(tmpdir)
-        state_db.initialize()
-        connection = state_db.connect()
+        db_path = Path(tmpdir) / "trading.db"
+        state_db.initialize(db_path)
+        connection = state_db.connect(db_path)
         with connection:
             connection.execute(
                 """
                 INSERT INTO positions (
                     asset,
-                    side,
                     entry_price,
+                    size,
                     sl,
                     tp,
                     status,
-                    created_at,
-                    updated_at
+                    strategy_metadata
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                ("BTCUSD", "long", 100.0, 90.0, 120.0, "OPEN", now_iso, now_iso),
+                (
+                    "BTCUSD",
+                    100.0,
+                    1.0,
+                    90.0,
+                    120.0,
+                    "OPEN",
+                    '{"side":"long","opened_at_utc":"%s"}' % now_iso,
+                ),
             )
         connection.close()
 
-        positions_path = Path(tmpdir) / "public" / "_manual_positions.json"
+        positions_path = db_path
         stability_cfg = {
             "manual_position_tracking": {
                 "enabled": True,
@@ -103,4 +111,3 @@ def test_manual_state_reads_open_position_from_db(monkeypatch):
 
         assert manual_state["has_position"] is True
         assert manual_state["side"] == "buy"
-
