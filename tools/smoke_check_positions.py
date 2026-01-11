@@ -16,16 +16,16 @@ import sys
 from pathlib import Path
 from typing import Dict, Iterable, List
 
+import sqlite3
+
+import state_db
+
 
 ENTRY_LOOKBACK = int(os.environ.get("ENTRY_LOOKBACK", "25"))
 ENTRY_SIGNALS = {"buy", "sell", "entry", "long", "short"}
 PUBLIC_DIR = Path("public")
 
-# Where manual state may live (support both current and mirrored paths)
-MANUAL_POS_PATHS = [
-    Path("public/_manual_positions.json"),
-    Path("config/manual_positions.json"),
-]
+DB_PATH = Path(os.environ.get("TRADING_DB_PATH", str(state_db.DEFAULT_DB_PATH)))
 
 
 def _load_signal_states() -> List[Dict[str, object]]:
@@ -69,27 +69,36 @@ def _load_recent_journal_entries() -> List[Dict[str, str]]:
 
 
 def _load_manual_positions_state() -> Dict[str, object]:
-    """
-    Returns a dict that is either:
-    - { "ASSET": { ...position fields... }, ... }  (legacy/simple)
-    - or { "positions": { "ASSET": { ... } } }    (wrapped)
-    If missing/invalid, returns {}.
-    """
-    for path in MANUAL_POS_PATHS:
-        if not path.exists():
-            continue
-        try:
-            raw = path.read_text(encoding="utf-8").strip()
-            data = json.loads(raw or "{}")
-        except Exception:
-            return {}
-
-        if isinstance(data, dict) and isinstance(data.get("positions"), dict):
-            return data["positions"]
-        if isinstance(data, dict):
-            return data
+    """Return OPEN positions from SQLite, keyed by asset."""
+    if not DB_PATH.exists():
         return {}
-    return {}
+    try:
+        connection = state_db.connect(DB_PATH)
+    except sqlite3.Error:
+        return {}
+    try:
+        rows = connection.execute(
+            "SELECT asset, strategy_metadata FROM positions WHERE status='OPEN'"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    finally:
+        connection.close()
+
+    result: Dict[str, object] = {}
+    for asset, metadata_raw in rows:
+        if not asset:
+            continue
+        metadata = {}
+        if metadata_raw:
+            try:
+                parsed = json.loads(metadata_raw)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                metadata = parsed
+        result[str(asset).upper()] = metadata
+    return result  
 
 
 def _manual_has_open_position(asset: str, manual_positions: Dict[str, object]) -> bool:
