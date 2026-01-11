@@ -12,6 +12,7 @@ from uuid import uuid4
 from config import analysis_settings as settings
 
 import position_tracker
+import state_db
 
 
 LOGGER = logging.getLogger(__name__)
@@ -91,11 +92,8 @@ def main() -> None:
     manual_writer = str(tracking_cfg.get("writer") or "dual").lower()
     redundant_guard = bool(tracking_cfg.get("redundant_write_guard", False))
     can_write = manual_writer in {"analysis", "dual"} or redundant_guard
-    positions_path = tracking_cfg.get("positions_file") or "public/_manual_positions.json"
-    pending_exit_path = (
-        tracking_cfg.get("pending_exit_file")
-        or "public/_manual_positions_pending_exit.json"
-    )
+    positions_path = tracking_cfg.get("positions_file") or str(state_db.DEFAULT_DB_PATH)
+    pending_exit_path = tracking_cfg.get("pending_exit_file") or str(state_db.DEFAULT_DB_PATH)
     treat_missing = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
     cooldown_default = _cooldown_minutes(tracking_cfg, "default", 20)
 
