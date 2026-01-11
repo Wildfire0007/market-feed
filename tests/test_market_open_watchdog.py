@@ -7,6 +7,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import active_anchor
+import state_db
 from active_anchor import save_anchor_state
 
 from scripts.market_open_watchdog import (
@@ -42,7 +44,7 @@ def test_should_trigger_reset_skips_weekend() -> None:
     )
 
 
-def test_should_trigger_reset_after_open(tmp_path: Path) -> None:
+def test_should_trigger_reset_after_open(tmp_path: Path, monkeypatch) -> None:
     config = WatchdogConfig(
         market_open_time=time(13, 30, tzinfo=UTC),
         allowed_weekdays={0, 1, 2, 3, 4},
@@ -56,6 +58,9 @@ def test_should_trigger_reset_after_open(tmp_path: Path) -> None:
     )
 
     public_dir = tmp_path / "public"
+    db_path = tmp_path / "trading.db"
+    monkeypatch.setattr(state_db, "DEFAULT_DB_PATH", db_path)
+    active_anchor._DB_INITIALIZED = False
     _write(public_dir / "status.json", {"ok": True, "assets": {"EURUSD": {}}})
     _write(
         public_dir / "_notify_state.json",
@@ -73,7 +78,7 @@ def test_should_trigger_reset_after_open(tmp_path: Path) -> None:
                 "last_update": stale_anchor.isoformat().replace("+00:00", "Z"),
             }
         },
-        path=str(public_dir / "_active_anchor.json"),
+        db_path=str(db_path),
     )
     _write(
         public_dir / "monitoring" / "health.json",
@@ -116,7 +121,7 @@ def test_should_trigger_reset_after_open(tmp_path: Path) -> None:
     assert health_payload["notes"][0]["type"] == "reset"
 
 
-def test_should_not_trigger_twice(tmp_path: Path) -> None:
+def test_should_not_trigger_twice(tmp_path: Path, monkeypatch) -> None:
     config = WatchdogConfig(
         market_open_time=time(13, 30, tzinfo=UTC),
         allowed_weekdays={0, 1, 2, 3, 4},
@@ -126,9 +131,12 @@ def test_should_not_trigger_twice(tmp_path: Path) -> None:
 
     monday = datetime(2024, 6, 3, 14, 0, tzinfo=UTC)
     public_dir = tmp_path / "public"
+    db_path = tmp_path / "trading.db"
+    monkeypatch.setattr(state_db, "DEFAULT_DB_PATH", db_path)
+    active_anchor._DB_INITIALIZED = False
     _write(public_dir / "status.json", {"ok": False, "assets": {}})
     _write(public_dir / "_notify_state.json", {"_meta": {}})
-    _write(public_dir / "_active_anchor.json", {})
+    save_anchor_state({}, db_path=str(db_path))
     _write(public_dir / "monitoring" / "health.json", {"generated_utc": "x", "assets": [], "alerts": []})
 
     perform_reset(
