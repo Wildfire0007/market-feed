@@ -13,12 +13,16 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from statistics import mean
 from typing import Any, Dict, Optional
 
+import state_db
+
 PUBLIC_DIR = os.getenv("PUBLIC_DIR", "public")
 ANCHOR_STATE_PATH = os.path.join(PUBLIC_DIR, "_active_anchor.json")
+_DB_INITIALIZED = False
 
 
 def _ensure_dir(path: str) -> None:
@@ -51,7 +55,62 @@ def _utc_now_iso() -> str:
     )
 
 
-def load_anchor_state(path: str = ANCHOR_STATE_PATH) -> Dict[str, Dict[str, Any]]:
+def _ensure_db_initialized() -> None:
+    global _DB_INITIALIZED
+    if _DB_INITIALIZED:
+        return
+    state_db.initialize()
+    _DB_INITIALIZED = True
+
+
+def _load_anchor_state_from_db() -> Dict[str, Dict[str, Any]]:
+    _ensure_db_initialized()
+    connection = state_db.connect()
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            "SELECT asset, anchor_type, price, timestamp, meta_json FROM anchors"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    state: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        asset = str(row["asset"] or "").upper()
+        if not asset:
+            continue
+        payload: Dict[str, Any] = {}
+        meta_json = row["meta_json"]
+        if meta_json:
+            try:
+                parsed = json.loads(meta_json)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                payload.update(parsed)
+        side = str(row["anchor_type"] or payload.get("side") or "").lower()
+        price = row["price"] if row["price"] is not None else payload.get("price")
+        timestamp = row["timestamp"] or payload.get("timestamp")
+        if side:
+            payload["side"] = side
+        if price is not None:
+            payload["price"] = price
+        if timestamp:
+            payload["timestamp"] = timestamp
+        if not payload.get("side"):
+            continue
+        existing = state.get(asset)
+        if existing:
+            new_ts = _parse_iso(payload.get("timestamp"))
+            current_ts = _parse_iso(existing.get("timestamp"))
+            if current_ts and (not new_ts or new_ts <= current_ts):
+                continue
+        state[asset] = payload
+
+    return state
+
+
+def _load_anchor_state_from_json(path: str) -> Dict[str, Dict[str, Any]]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
@@ -77,11 +136,56 @@ def load_anchor_state(path: str = ANCHOR_STATE_PATH) -> Dict[str, Dict[str, Any]
     return norm
 
 
+def load_anchor_state(path: str = ANCHOR_STATE_PATH) -> Dict[str, Dict[str, Any]]:
+    try:
+        return _load_anchor_state_from_db()
+    except Exception:
+        return _load_anchor_state_from_json(path)
+
+
 def save_anchor_state(state: Dict[str, Dict[str, Any]], path: str = ANCHOR_STATE_PATH) -> None:
     _ensure_dir(path)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
-
+    try:
+        _ensure_db_initialized()
+        connection = state_db.connect()
+    except sqlite3.Error:
+        return
+    try:
+        with connection:
+            connection.execute("DELETE FROM anchors")
+            for asset, payload in state.items():
+                if not isinstance(payload, dict):
+                    continue
+                side = str(payload.get("side") or "").lower()
+                if not side:
+                    continue
+                price = payload.get("price")
+                timestamp = payload.get("timestamp") or _utc_now_iso()
+                meta_payload = dict(payload)
+                meta_payload.setdefault("side", side)
+                meta_payload.setdefault("price", price)
+                meta_payload.setdefault("timestamp", timestamp)
+                meta_json = json.dumps(meta_payload, ensure_ascii=False)
+                connection.execute(
+                    """
+                    INSERT INTO anchors (asset, anchor_type, price, timestamp, meta_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        asset.upper(),
+                        side,
+                        price,
+                        timestamp,
+                        meta_json,
+                    ),
+                )
+    except sqlite3.Error:
+        return
+    finally:
+        connection.close()
+      
 
 def record_anchor(
     asset: str,
