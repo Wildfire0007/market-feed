@@ -1,9 +1,5 @@
 import datetime
-import json
-import sqlite3
 from pathlib import Path
-
-import pytest
 
 import position_tracker
 
@@ -25,47 +21,36 @@ def test_open_position_sets_has_position_true():
     assert state["side"] == "buy"
 
 
-def test_load_positions_missing_raises_when_backup_unavailable(tmp_path: Path) -> None:
-    positions_path = tmp_path / "missing.json"
+def test_load_positions_reads_from_db(tmp_path: Path) -> None:
+    db_path = tmp_path / "trading.db"
+    position_tracker.state_db.initialize(db_path)
+    connection = position_tracker.state_db.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO positions (asset, entry_price, size, sl, tp, status, strategy_metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "BTCUSD",
+                100.5,
+                1.25,
+                95.0,
+                120.0,
+                "OPEN",
+                '{"side":"long","opened_at_utc":"2025-01-01T11:00:00Z"}',
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
-    with pytest.raises(position_tracker.PositionFileError):
-        position_tracker.load_positions(str(positions_path), treat_missing_as_flat=False)
+    loaded = position_tracker.load_positions(str(db_path), treat_missing_as_flat=False)
 
-
-def test_load_positions_restores_backup(tmp_path: Path) -> None:
-    positions_path = tmp_path / "positions.json"
-    backup_path = positions_path.with_suffix(positions_path.suffix + ".bak")
-    backup_payload = {"BTCUSD": {"side": "long"}}
-    backup_path.write_text(json.dumps(backup_payload), encoding="utf-8")
-
-    restored = position_tracker.load_positions(str(positions_path), treat_missing_as_flat=False)
-
-    assert restored == backup_payload
-    assert positions_path.exists()
-
-
-def test_load_positions_falls_back_to_json_on_db_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    positions_path = tmp_path / "positions.json"
-    payload = {"BTCUSD": {"side": "long"}}
-    positions_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    db_path = tmp_path / "trading_state.db"
-    db_path.write_text("corrupt", encoding="utf-8")
-
-    monkeypatch.setattr(position_tracker, "_find_repo_root", lambda start=None: tmp_path)
-    monkeypatch.setattr(position_tracker.state_db, "DEFAULT_DB_PATH", db_path)
-    monkeypatch.setattr(position_tracker.state_db, "initialize", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        position_tracker.state_db,
-        "connect",
-        lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.Error("db down")),
-    )
-
-    loaded = position_tracker.load_positions("positions.json", treat_missing_as_flat=False)
-
-    assert loaded == payload
+    assert "BTCUSD" in loaded
+    assert loaded["BTCUSD"]["entry"] == 100.5
+    assert loaded["BTCUSD"]["size"] == 1.25
+    assert loaded["BTCUSD"]["side"] == "long"
 
 
 def test_close_position_sets_cooldown_state():
