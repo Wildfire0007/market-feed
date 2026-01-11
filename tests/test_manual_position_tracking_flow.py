@@ -116,7 +116,7 @@ class ManualPositionFlowTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         now_iso = self._now_iso()
         with tempfile.TemporaryDirectory() as tmpdir:
-            positions_path = Path(tmpdir) / "positions.json"
+            positions_path = Path(tmpdir) / "trading.db"
             stability_cfg = {
                 "enabled": False,
                 "manual_position_tracking": {
@@ -213,7 +213,7 @@ class ManualPositionFlowTests(unittest.TestCase):
         now_iso = self._now_iso()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            positions_path = Path(tmpdir) / "positions.json"
+            positions_path = Path(tmpdir) / "trading.db"
             state_path = Path(tmpdir) / "signal_state.json"
 
             state_path.write_text(
@@ -272,7 +272,7 @@ class ManualPositionFlowTests(unittest.TestCase):
     def test_analysis_is_read_only_when_writer_notify(self) -> None:
         now_iso = self._now_iso()
         with tempfile.TemporaryDirectory() as tmpdir:
-            positions_path = Path(tmpdir) / "positions.json"
+            positions_path = Path(tmpdir) / "trading.db"
             stability_cfg = {
                 "enabled": True,
                 "manual_position_tracking": {
@@ -342,7 +342,7 @@ class ManualPositionFlowTests(unittest.TestCase):
             )
 
             if positions_changed:
-                position_tracker.save_positions_atomic("/tmp/ignore.json", manual_positions)
+                position_tracker.save_positions_atomic("/tmp/ignore.db", manual_positions)
             if positions_changed and entry_opened:
                 entry_level, sl_level, tp1_level, tp2_level = notify_discord.extract_trade_levels(sig)
                 position_tracker.log_audit_event(
@@ -357,7 +357,7 @@ class ManualPositionFlowTests(unittest.TestCase):
                     sl=sl_level,
                     tp1=tp1_level,
                     tp2=tp2_level,
-                    positions_file="/tmp/ignore.json",
+                    positions_file="/tmp/ignore.db",
                     send_kind="normal",
                 )
 
@@ -528,7 +528,7 @@ class ManualPositionFlowTests(unittest.TestCase):
                 sl=sl_level,
                 tp1=tp1_level,
                 tp2=tp2_level,
-                positions_file="/tmp/ignore.json",
+                positions_file="/tmp/ignore.db",
                 send_kind=None,
             )
 
