@@ -68,7 +68,7 @@ def test_hard_exit_embed_uses_closed_state(tmp_path):
         "position_state": manual_state,
     }
 
-    positions_path = str(tmp_path / "positions.json")
+    positions_path = str(tmp_path / "trading.db")
     open_commits = set()
 
     manual_positions, manual_state, _, _, _ = notify_discord._apply_and_persist_manual_transitions(
