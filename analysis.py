@@ -12,7 +12,6 @@ import csv
 import json
 import logging
 import os
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -82,7 +81,6 @@ from ml_model import (
 )
 from news_feed import SentimentSignal, load_sentiment
 import position_tracker
-import state_db
 
 try:  # Optional monitoring utilities; keep analysis resilient if absent.
     from reports.trade_journal import record_signal_event
@@ -5503,49 +5501,7 @@ def _resolve_asset_value(config_map: Any, asset: str, default: int) -> int:
 def _load_manual_positions_from_file(
     positions_path: str, treat_missing_file_as_flat: bool
 ) -> Dict[str, Any]:
-    manual_positions = position_tracker.load_positions(
-        positions_path, treat_missing_file_as_flat
-    )
-    db_positions = _load_open_positions_from_db()
-    if db_positions:
-        manual_positions.update(db_positions)
-    return manual_positions
-
-
-def _load_open_positions_from_db() -> Dict[str, Any]:
-    connection = None
-    try:
-        state_db.initialize()
-        connection = state_db.connect()
-        connection.row_factory = sqlite3.Row
-        rows = connection.execute(
-            "SELECT * FROM positions WHERE status='OPEN'"
-        ).fetchall()
-    except sqlite3.Error as exc:
-        LOGGER.debug("Failed to read manual positions from db: %s", exc)
-        return {}
-    finally:
-        if connection is not None:
-            try:
-                connection.close()
-            except Exception:
-                pass
-
-    positions: Dict[str, Any] = {}
-    for row in rows:
-        asset = row["asset"]
-        tp_value = row["tp"]
-        positions[asset] = {
-            "side": row["side"],
-            "entry": row["entry_price"],
-            "sl": row["sl"],
-            "tp1": tp_value,
-            "tp2": tp_value,
-            "opened_at_utc": row["created_at"],
-            "closed_at_utc": None,
-            "cooldown_until_utc": None,
-        }
-    return positions
+    return position_tracker.load_positions(positions_path, treat_missing_file_as_flat)
 
 
 def _manual_position_state(
@@ -15347,6 +15303,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
