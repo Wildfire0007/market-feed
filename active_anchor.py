@@ -24,10 +24,6 @@ PUBLIC_DIR = os.getenv("PUBLIC_DIR", "public")
 ANCHOR_STATE_PATH = os.path.join(PUBLIC_DIR, "_active_anchor.json")
 _DB_INITIALIZED = False
 
-
-def _ensure_dir(path: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-
 def _safe_float(value: Any) -> Optional[float]:
     try:
         if value is None:
@@ -144,9 +140,6 @@ def load_anchor_state(path: str = ANCHOR_STATE_PATH) -> Dict[str, Dict[str, Any]
 
 
 def save_anchor_state(state: Dict[str, Dict[str, Any]], path: str = ANCHOR_STATE_PATH) -> None:
-    _ensure_dir(path)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
     try:
         _ensure_db_initialized()
         connection = state_db.connect()
