@@ -1443,6 +1443,9 @@ SESSION_WINDOWS_UTC: Dict[str, Dict[str, Optional[List[Tuple[int, int, int, int]
 SPOT_MAX_AGE_SECONDS: Dict[str, int] = {
     k: int(v) for k, v in dict(_get_config_value("spot_max_age_seconds") or {}).items()
 }
+SPOT_SAFE_MODE_SECONDS: Dict[str, int] = {
+    k: int(v) for k, v in dict(_get_config_value("spot_safe_mode_seconds") or {}).items()
+}
 _RAW_LATENCY_GUARD = dict(_get_config_value("data_latency_guard") or {})
 DATA_LATENCY_GUARD: Dict[str, Dict[str, Any]] = {}
 for key, value in _RAW_LATENCY_GUARD.items():
