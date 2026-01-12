@@ -33,6 +33,19 @@ Környezeti változók:
   TD_MAX_WORKERS      = "5"      (max. párhuzamos eszköz feldolgozás)
   TD_REQUEST_CONCURRENCY = "4"   (egyszerre futó TD hívások plafonja)
   PIPELINE_MAX_LAG_SECONDS = "240" (Trading → Analysis log figyelmeztetés küszöbe)
+  ORDER_FLOW_TICKS_ENABLED = "0/1" (tick/order-flow gyűjtés bekapcsolása)
+  ORDER_FLOW_TICKS_ASSETS  = ""    (komma-szeparált lista; üres = mind)
+  ORDER_FLOW_WS_URL        = ""    (WebSocket tick feed URL)
+  ORDER_FLOW_WS_SUBSCRIBE  = ""    (subscribe üzenet; formázható {asset}/{symbol}/{exchange})
+  ORDER_FLOW_WS_PRICE_FIELD = "price" (ár mező útvonala)
+  ORDER_FLOW_WS_VOLUME_FIELD = "volume" (volumen mező útvonala)
+  ORDER_FLOW_WS_SIDE_FIELD = "side" (agresszor mező útvonala)
+  ORDER_FLOW_WS_TS_FIELD = "timestamp" (időbélyeg mező útvonala)
+  ORDER_FLOW_WS_SYMBOL_FIELD = "symbol" (szimbólum mező útvonala)
+  ORDER_FLOW_WS_MAX_SAMPLES = "500" (max tick minták száma)
+  ORDER_FLOW_WS_DURATION = "15" (tick gyűjtési ablak sec)
+  ORDER_FLOW_WS_IDLE_GRACE = "10" (WebSocket idle türelem sec)
+  ORDER_FLOW_WS_TIMEOUT = "20" (WebSocket timeout sec)
 """
 
 import os, json, time, math, logging, shutil, sqlite3
@@ -46,6 +59,7 @@ import requests
 from requests.adapters import HTTPAdapter
 
 from logging_utils import ensure_json_file_handler
+from order_flow import aggregate_tick_rows
 import state_db
 
 try:
@@ -147,6 +161,25 @@ REALTIME_WS_ENABLED = bool(REALTIME_WS_URL and websocket is not None)
 REALTIME_HTTP_MAX_SAMPLES = int(os.getenv("TD_REALTIME_HTTP_MAX_SAMPLES", "6"))
 REALTIME_HTTP_DURATION = max(1.0, _env_float("TD_REALTIME_HTTP_DURATION", 8.0))
 _REALTIME_HTTP_BACKGROUND_FLAG = _env_flag("TD_REALTIME_HTTP_BACKGROUND")
+ORDER_FLOW_TICKS_ENABLED = os.getenv("ORDER_FLOW_TICKS_ENABLED", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+ORDER_FLOW_TICKS_ASSETS = os.getenv("ORDER_FLOW_TICKS_ASSETS", "")
+ORDER_FLOW_WS_URL = os.getenv("ORDER_FLOW_WS_URL", "").strip()
+ORDER_FLOW_WS_SUBSCRIBE = os.getenv("ORDER_FLOW_WS_SUBSCRIBE", "").strip()
+ORDER_FLOW_WS_PRICE_FIELD = os.getenv("ORDER_FLOW_WS_PRICE_FIELD", "price")
+ORDER_FLOW_WS_VOLUME_FIELD = os.getenv("ORDER_FLOW_WS_VOLUME_FIELD", "volume")
+ORDER_FLOW_WS_SIDE_FIELD = os.getenv("ORDER_FLOW_WS_SIDE_FIELD", "side")
+ORDER_FLOW_WS_TS_FIELD = os.getenv("ORDER_FLOW_WS_TS_FIELD", "timestamp")
+ORDER_FLOW_WS_SYMBOL_FIELD = os.getenv("ORDER_FLOW_WS_SYMBOL_FIELD", "symbol")
+ORDER_FLOW_WS_MAX_SAMPLES = int(os.getenv("ORDER_FLOW_WS_MAX_SAMPLES", "500"))
+ORDER_FLOW_WS_DURATION = float(os.getenv("ORDER_FLOW_WS_DURATION", "15"))
+ORDER_FLOW_WS_IDLE_GRACE = float(os.getenv("ORDER_FLOW_WS_IDLE_GRACE", "10"))
+ORDER_FLOW_WS_TIMEOUT = float(os.getenv("ORDER_FLOW_WS_TIMEOUT", str(max(ORDER_FLOW_WS_DURATION, 20.0))))
+ORDER_FLOW_WS_ENABLED = bool(ORDER_FLOW_WS_URL and websocket is not None)
 FORCED_SNAPSHOT_MAX_AGE = 300.0
 RESET_PUBLIC_ON_TRADING_START = os.getenv("RESET_PUBLIC_ON_TRADING_START", "").strip().lower() in {
     "1",
@@ -3091,6 +3124,183 @@ def _extract_bid_ask(frame: Dict[str, Any]) -> Tuple[Optional[float], Optional[f
     return bid_val, ask_val
 
 
+def _parse_tick_timestamp(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), timezone.utc).replace(microsecond=0).isoformat()
+        except Exception:
+            return None
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _normalize_tick_side(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    raw = str(value).strip().lower()
+    if not raw:
+        return None
+    if raw in {"1", "+1", "buy", "b", "bid", "buyer", "long"}:
+        return "buy"
+    if raw in {"-1", "sell", "s", "ask", "seller", "short"}:
+        return "sell"
+    return raw
+
+
+def _collect_ws_ticks(
+    asset: str,
+    symbol: str,
+    exchange: Optional[str],
+    deadline: float,
+) -> List[Dict[str, Any]]:
+    if not ORDER_FLOW_WS_ENABLED:
+        return []
+    ws = websocket.create_connection(ORDER_FLOW_WS_URL, timeout=ORDER_FLOW_WS_TIMEOUT)
+    rows: List[Dict[str, Any]] = []
+    try:
+        if ORDER_FLOW_WS_SUBSCRIBE:
+            try:
+                ws.send(
+                    ORDER_FLOW_WS_SUBSCRIBE.format(
+                        asset=asset,
+                        symbol=symbol,
+                        exchange=exchange or "",
+                    )
+                )
+            except Exception:
+                pass
+        ws.settimeout(max(1.0, min(ORDER_FLOW_WS_DURATION, 15.0)))
+        idle_grace = max(0.0, ORDER_FLOW_WS_IDLE_GRACE)
+        last_progress = time.time()
+        while time.time() < deadline and len(rows) < ORDER_FLOW_WS_MAX_SAMPLES:
+            try:
+                raw = ws.recv()
+                last_progress = time.time()
+            except websocket.WebSocketTimeoutException:
+                if idle_grace == 0.0:
+                    break
+                if time.time() - last_progress >= idle_grace:
+                    break
+                continue
+            except Exception:
+                break
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                continue
+            batch: List[Any]
+            if isinstance(payload, list):
+                batch = payload
+            elif isinstance(payload, dict) and isinstance(payload.get("data"), list):
+                batch = payload.get("data") or []
+            else:
+                batch = [payload]
+            for item in batch:
+                price_val = _extract_field(item, ORDER_FLOW_WS_PRICE_FIELD)
+                volume_val = _extract_field(item, ORDER_FLOW_WS_VOLUME_FIELD)
+                if price_val is None or volume_val is None:
+                    continue
+                try:
+                    price = float(price_val)
+                    volume = float(volume_val)
+                except (TypeError, ValueError):
+                    continue
+                ts_val = _extract_field(item, ORDER_FLOW_WS_TS_FIELD)
+                ts_iso = _parse_tick_timestamp(ts_val) or now_utc()
+                side_val = _extract_field(item, ORDER_FLOW_WS_SIDE_FIELD)
+                side_norm = _normalize_tick_side(side_val)
+                symbol_val = _extract_field(item, ORDER_FLOW_WS_SYMBOL_FIELD)
+                if symbol_val is not None and str(symbol_val).strip():
+                    if str(symbol_val).strip().lower() != symbol.lower():
+                        continue
+                row = {
+                    "timestamp": ts_iso,
+                    "price": price,
+                    "volume": volume,
+                }
+                if side_norm:
+                    row["side"] = side_norm
+                rows.append(row)
+                last_progress = time.time()
+                if len(rows) >= ORDER_FLOW_WS_MAX_SAMPLES:
+                    break
+            if len(rows) >= ORDER_FLOW_WS_MAX_SAMPLES:
+                break
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+    return rows
+
+
+def _collect_realtime_order_flow_impl(
+    asset: str,
+    symbol_cycle: List[Tuple[str, Optional[str]]],
+    out_dir: str,
+) -> None:
+    if not ORDER_FLOW_TICKS_ENABLED:
+        return
+    if not ORDER_FLOW_WS_ENABLED:
+        LOGGER.info(
+            "Order-flow ticks disabled for %s: websocket unavailable or URL missing",
+            asset,
+        )
+        return
+    allowed_assets = {
+        a.strip().upper()
+        for a in ORDER_FLOW_TICKS_ASSETS.split(",")
+        if a.strip()
+    }
+    if allowed_assets and asset.upper() not in allowed_assets:
+        return
+    if not symbol_cycle:
+        LOGGER.info("Order-flow tick capture skipped for %s: no symbol cycle", asset)
+        return
+    symbol, exchange = symbol_cycle[0]
+    duration = max(1.0, ORDER_FLOW_WS_DURATION)
+    deadline = time.time() + duration
+    rows = _collect_ws_ticks(asset, symbol, exchange, deadline)
+    if not rows:
+        LOGGER.info("Order-flow tick capture empty for %s (%s)", asset, symbol)
+        return
+    try:
+        metrics = aggregate_tick_rows(rows)
+    except Exception as exc:
+        LOGGER.warning("Order-flow tick aggregation failed for %s: %s", asset, exc)
+        return
+    metrics.update(
+        {
+            "asset": asset,
+            "symbol": symbol,
+            "exchange": exchange,
+            "retrieved_at_utc": now_utc(),
+            "source": "websocket",
+            "ticks_source": ORDER_FLOW_WS_URL,
+        }
+    )
+    ensure_dir(out_dir)
+    save_json(os.path.join(out_dir, "order_flow_ticks.json"), metrics)
+
+
+def collect_realtime_order_flow(
+    asset: str,
+    attempts: List[Tuple[str, Optional[str]]],
+    out_dir: str,
+) -> None:
+    if not ORDER_FLOW_TICKS_ENABLED:
+        return
+    base_cycle = list(attempts) if attempts else []
+    if not base_cycle:
+        return
+    _collect_realtime_order_flow_impl(asset, base_cycle, out_dir)
+
+
 def _collect_realtime_spot_impl(
     asset: str,
     symbol_cycle: List[Tuple[str, Optional[str]]],
@@ -4280,6 +4490,7 @@ def process_asset(asset: str, cfg: Dict[str, Any]) -> None:
         force=bool(force_reason),
         reason=force_reason,
     )
+    collect_realtime_order_flow(asset, attempts, adir)
 
     spot_payload = spot if isinstance(spot, dict) else {}
     sorted_series_items = sorted(series_payloads.items(), key=lambda item: item[0])
