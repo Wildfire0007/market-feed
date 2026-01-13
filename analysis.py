@@ -14207,6 +14207,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         momentum_trailing_plan = None
 
     missing = list(dict.fromkeys(missing))
+    entry_missing_snapshot = list(missing)
     log_entry_gate_decision(asset, last5_closed_ts, missing)
 
     analysis_timestamp = nowiso()
@@ -14217,10 +14218,9 @@ def analyze(asset: str) -> Dict[str, Any]:
     gates_payload: Dict[str, Any] = {
         "mode": gate_mode_value,
         "required": required_list,
-        "missing": missing,
+        "missing": entry_missing_snapshot,
     }
     entry_required_snapshot = list(gates_payload.get("required") or [])
-    entry_missing_snapshot = list(gates_payload.get("missing") or [])
     if intraday_relaxed_guards:
         gates_payload["relaxed_guards"] = list(intraday_relaxed_guards)
         gates_payload["relax_size_scale"] = intraday_relax_scale
@@ -14310,7 +14310,12 @@ def analyze(asset: str) -> Dict[str, Any]:
         "momentum_diagnostics": momentum_diagnostics,
         "diagnostics": diagnostics_payload(tf_meta, source_files, latency_flags),
         "reasons": (
-            reasons + ([f"missing: {', '.join(missing)}"] if missing else [])
+            reasons
+            + (
+                [f"missing: {', '.join(entry_missing_snapshot)}"]
+                if entry_missing_snapshot
+                else []
+            )
         ) or ["no signal"],
         "realtime_transport": realtime_transport,
     }
@@ -15447,6 +15452,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
