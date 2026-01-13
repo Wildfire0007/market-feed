@@ -891,6 +891,12 @@ ML_FEATURE_SNAPSHOT_DIRNAME = "ml_features"
 PRECISION_SCORE_PROFILE_OVERRIDES: Dict[str, Dict[str, float]] = {
     "NVDA": {"suppressed": 52.0},
     "GOLD_CFD": {"relaxed": 50.0},
+    "XAGUSD": {
+        "baseline": 50.0,
+        "relaxed": 50.0,
+        "intraday": 50.0,
+        "suppressed": 50.0,
+    },
 }
 ENTRY_GATE_EXTRA_LOGS_DISABLE = "DISABLE_ENTRY_GATE_EXTRA_LOGS"
 MACRO_DATA_DIR = Path("data") / "macro"
@@ -1141,7 +1147,7 @@ PRECISION_ARMING_TIMEOUT_DEFAULT = 20
 PRECISION_TRIGGER_NEAR_MULT = 0.2
 PRECISION_TRIGGER_FALLBACK_MIN_MINUTES = 5.0
 PRECISION_TRIGGER_FALLBACK_MAX_MINUTES = 10.0
-PRECISION_FALLBACK_SCORE_BUFFER = float(os.getenv("PRECISION_FALLBACK_SCORE_BUFFER", "4.0"))
+PRECISION_FALLBACK_SCORE_BUFFER = float(os.getenv("PRECISION_FALLBACK_SCORE_BUFFER", "3.0"))
 PRECISION_FALLBACK_POSITION_SCALE = float(
     os.getenv("PRECISION_FALLBACK_POSITION_SCALE", "0.6")
 )
@@ -15441,6 +15447,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
