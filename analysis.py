@@ -12116,6 +12116,12 @@ def analyze(asset: str) -> Dict[str, Any]:
                 if isinstance(soft_gates_cfg.get("p_score"), dict)
                 else {}
             )
+    if p_score_soft_cfg:
+        asset_overrides = p_score_soft_cfg.get("asset_overrides")
+        if isinstance(asset_overrides, dict):
+            asset_override = asset_overrides.get(asset) or asset_overrides.get(str(asset).upper())
+            if isinstance(asset_override, dict):
+                p_score_soft_cfg = {**p_score_soft_cfg, **asset_override}
     p_score_soft_gate_used = False
     if p_score_soft_cfg.get("enabled") and p_score_min_local is not None:
         try:
@@ -15452,6 +15458,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
