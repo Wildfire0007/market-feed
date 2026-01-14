@@ -47,7 +47,7 @@ TRADING_ARTIFACT_LAG: Optional[Dict[str, Any]] = None
 POSITION_SIZE_SCALE_FLOOR_BY_ASSET = {
     "EURUSD": 0.05,
     "XAGUSD": 0.03,
-    "GOLD_CFD": 0.05,
+    "GOLD_CFD": 0.03,
     "USOIL": 0.04,
     "BTCUSD": 0.04,
     # NVDA itt nem kritikus, de legyen konzisztens:
@@ -15452,6 +15452,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
