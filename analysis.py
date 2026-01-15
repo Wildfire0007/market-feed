@@ -12412,7 +12412,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 if "order_flow_missing" not in momentum_soft_flags:
                     momentum_soft_flags.append("order_flow_missing")
             if asset == "GOLD_CFD":
-                momentum_adx_ok = regime_adx is not None and regime_adx >= 20.0
+                momentum_adx_ok = regime_adx is not None and regime_adx >= 18.0
                 if not momentum_adx_ok:
                     missing_mom.append("adx")
             ofi_confirm = True
@@ -15472,6 +15472,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
