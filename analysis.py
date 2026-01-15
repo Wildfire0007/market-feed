@@ -890,7 +890,7 @@ LATENCY_GUARD_PROFILE_LIMIT_SECONDS: Dict[str, int] = {"suppressed": 420}
 ML_FEATURE_SNAPSHOT_DIRNAME = "ml_features"
 PRECISION_SCORE_PROFILE_OVERRIDES: Dict[str, Dict[str, float]] = {
     "NVDA": {"suppressed": 52.0},
-    "GOLD_CFD": {"relaxed": 50.0},
+    "GOLD_CFD": {"relaxed": 45.0},
     "XAGUSD": {
         "baseline": 50.0,
         "relaxed": 50.0,
@@ -15472,6 +15472,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
