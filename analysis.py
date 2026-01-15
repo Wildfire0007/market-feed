@@ -9021,7 +9021,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         reasons.append(
             "Intraday relax: 1h/4h késés engedve (kockázatcsökkentés a későbbi kapuknál)"
         )
-    if core_data_gap or (other_critical_blocks and not allow_higher_tf_stale):  
+    if core_data_gap or (other_critical_blocks and not allow_higher_tf_stale):
         reasons_payload = ["Critical data latency — belépés tiltva"]
         if spot_critical and spot_stale_reason:
             reasons_payload.append(spot_stale_reason)
@@ -14342,6 +14342,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         "core_data_ok": bool(core_data_ok),
         "precision_data_ok": bool(precision_data_ok),
         "precision_disabled_due_to_data_gap": bool(precision_disabled_due_to_data_gap),
+        "intraday_relax_applied": bool(entry_thresholds_meta.get("data_integrity_relax")),
         "core_required_sources": ["spot", "k5m"],
         "precision_required_sources": ["spot", "k5m", "k1m"],
         "spot": tf_meta.get("spot"),
@@ -15471,6 +15472,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
