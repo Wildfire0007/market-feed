@@ -9009,7 +9009,9 @@ def analyze(asset: str) -> Dict[str, Any]:
     core_data_gap = not core_data_ok
     other_critical_blocks = critical_flags.get("k1h") or critical_flags.get("k4h")
     intraday_data_relax = is_intraday_relax_enabled(asset)
-    allow_higher_tf_stale = bool(intraday_data_relax and not core_data_gap and other_critical_blocks)
+    allow_higher_tf_stale = bool(
+        intraday_data_relax and asset == "GOLD_CFD" and not core_data_gap and other_critical_blocks
+    )
     if allow_higher_tf_stale:
         entry_thresholds_meta["data_integrity_relax"] = {
             "mode": "intraday",
@@ -9019,7 +9021,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         reasons.append(
             "Intraday relax: 1h/4h késés engedve (kockázatcsökkentés a későbbi kapuknál)"
         )
-    if core_data_gap or (other_critical_blocks and not allow_higher_tf_stale):
+    if core_data_gap or (other_critical_blocks and not allow_higher_tf_stale):  
         reasons_payload = ["Critical data latency — belépés tiltva"]
         if spot_critical and spot_stale_reason:
             reasons_payload.append(spot_stale_reason)
@@ -15469,6 +15471,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
