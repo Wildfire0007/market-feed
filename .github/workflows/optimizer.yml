@@ -1,24 +1,41 @@
-name: Optimizer Manual Run
+name: Market Feed Optimizer
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:      # Kézzel indítható gomb
+  schedule:
+    - cron: '0 8 * * 1'   # Minden Hétfőn reggel 8-kor (UTC) lefut
+
+permissions:
+  contents: write         # FONTOS: Ez engedi, hogy visszaírjon a repóba
 
 jobs:
-  run:
-    runs-on: ubuntu-24.04
+  optimize:
+    runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: "pip"
-          cache-dependency-path: requirements.lock
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.lock
-      - name: Run optimizer
-        run: |
-          python optimizer.py
+    # 1. Kód letöltése
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    # 2. Python beállítása
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    # 3. Csomagok telepítése
+    - name: Install dependencies
+      run: |
+        pip install pandas numpy
+
+    # 4. Optimizer futtatása
+    - name: Run Optimizer Script
+      run: |
+        python optimizer.py --force-recalc
+
+    # 5. Változások visszaküldése (Commit & Push)
+    - name: Commit and Push changes
+      uses: stefanzweifel/git-auto-commit-action@v4
+      with:
+        commit_message: "Auto-update: adaptive parameters (Weekly Optimization)"
+        file_pattern: public/adaptive_params.json
