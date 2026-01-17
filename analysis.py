@@ -7493,7 +7493,7 @@ def compute_precision_entry(
                     trigger_progress = 1.0
                     plan["trigger_reasons"].append("price inside window (flow ready)")
                 else:
-                   trigger_state = "arming"
+                    trigger_state = "arming"
                     trigger_progress = max(trigger_progress, 0.85)
                     plan["trigger_reasons"].append("price inside window")
             elif tolerance and price_val <= window_hi + tolerance:
@@ -15489,6 +15489,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
