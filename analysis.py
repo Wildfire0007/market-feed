@@ -9571,7 +9571,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         entry_thresholds_meta["btc_atr_gate_threshold_usd"] = btc_gate_threshold_usd
         entry_thresholds_meta["btc_atr_value_usd"] = atr5_abs if np.isfinite(atr5_abs) else None
         atr_gate_passed = btc_atr_gate_ok(btc_profile, asset, atr5_abs, analysis_now)
-        entry_thresholds_meta["btc_atr_gate_ok"] = btc_atr_gate_passed
+        entry_thresholds_meta["btc_atr_gate_ok"] = atr_gate_passed
     else:
         atr_gate_passed = True
     entry_thresholds_meta["atr_multiplier"] = atr_profile_multiplier
@@ -15741,6 +15741,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
