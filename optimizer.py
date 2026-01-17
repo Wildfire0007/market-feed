@@ -16,15 +16,17 @@ import pandas as pd
 
 LOGGER = logging.getLogger(__name__)
 
-BASE_DIR = Path(__file__).resolve().parent
-def _resolve_repo_root(start: Path) -> Path:
+def _resolve_repo_root(start: Path, fallback: Path) -> Path:
     for candidate in (start, *start.parents):
+        if (candidate / "public").exists():
+            return candidate
+    for candidate in (fallback, *fallback.parents):
         if (candidate / "public").exists():
             return candidate
     return start
 
 
-BASE_DIR = _resolve_repo_root(Path.cwd())
+BASE_DIR = _resolve_repo_root(Path(__file__).resolve().parent, Path.cwd())
 PUBLIC_DIR = BASE_DIR / "public"
 OUTPUT_PATH = PUBLIC_DIR / "adaptive_params.json"
 
