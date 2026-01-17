@@ -1142,10 +1142,10 @@ PRECISION_FLOW_STALLED_DELTA_EPS = float(os.getenv("PRECISION_FLOW_STALLED_DELTA
 SPOT_REALTIME_TTL_SECONDS = int(os.getenv("SPOT_REALTIME_TTL_SECONDS", "300"))
 PRECISION_SCORE_THRESHOLD_DEFAULT = 55.0
 PRECISION_SCORE_THRESHOLD = PRECISION_SCORE_THRESHOLD_DEFAULT
-PRECISION_READY_TIMEOUT_DEFAULT = 15
-PRECISION_ARMING_TIMEOUT_DEFAULT = 20
-PRECISION_TRIGGER_NEAR_MULT = 0.2
-PRECISION_TRIGGER_FALLBACK_MIN_MINUTES = 5.0
+PRECISION_READY_TIMEOUT_DEFAULT = 10
+PRECISION_ARMING_TIMEOUT_DEFAULT = 12
+PRECISION_TRIGGER_NEAR_MULT = 0.35
+PRECISION_TRIGGER_FALLBACK_MIN_MINUTES = 1.0
 PRECISION_TRIGGER_FALLBACK_MAX_MINUTES = 10.0
 PRECISION_FALLBACK_SCORE_BUFFER = float(os.getenv("PRECISION_FALLBACK_SCORE_BUFFER", "3.0"))
 PRECISION_FALLBACK_POSITION_SCALE = float(
@@ -7134,7 +7134,12 @@ def compute_precision_entry(
     }
 
     metrics_status = str(order_flow_metrics.get("status") or "unavailable")
-    flow_optional = metrics_status in {"volume_unavailable", "unavailable", "stale"}
+    flow_optional = metrics_status in {
+        "volume_unavailable",
+        "unavailable",
+        "stale",
+        "synthetic_volume",
+    }
     plan["order_flow_status"] = metrics_status
     plan["order_flow_optional"] = flow_optional
 
@@ -7151,9 +7156,9 @@ def compute_precision_entry(
     pressure_margin = float(
         flow_rules.get("pressure_margin", PRECISION_FLOW_PRESSURE_MARGIN)
     )
-    min_flow_signals = max(0, int(flow_rules.get("min_signals", 1)))
+    min_flow_signals = max(0, int(flow_rules.get("min_signals", 0)))
     strength_floor = max(
-        0.0, float(flow_rules.get("strength_floor", PRECISION_FLOW_STRENGTH_BASE))
+        0.0, float(flow_rules.get("strength_floor", PRECISION_FLOW_STRENGTH_MIN))
     )
     block_ratio = float(flow_rules.get("block_ratio", 0.0))
     delta_blocker_abs_max_raw = flow_rules.get("delta_blocker_abs_max")
@@ -7483,9 +7488,14 @@ def compute_precision_entry(
                 trigger_progress = 1.0
                 plan["trigger_reasons"].append("price hit entry")
             elif price_val <= window_hi:
-                trigger_state = "arming"
-                trigger_progress = max(trigger_progress, 0.85)
-                plan["trigger_reasons"].append("price inside window")
+                if plan["order_flow_ready"] and plan["score_ready"]:
+                    trigger_state = "fire"
+                    trigger_progress = 1.0
+                    plan["trigger_reasons"].append("price inside window (flow ready)")
+                else:
+                   trigger_state = "arming"
+                    trigger_progress = max(trigger_progress, 0.85)
+                    plan["trigger_reasons"].append("price inside window")
             elif tolerance and price_val <= window_hi + tolerance:
                 trigger_progress = max(trigger_progress, 0.7)
                 plan["trigger_reasons"].append("price near window")
@@ -7496,9 +7506,14 @@ def compute_precision_entry(
                 trigger_progress = 1.0
                 plan["trigger_reasons"].append("price hit entry")
             elif price_val >= window_lo:
-                trigger_state = "arming"
-                trigger_progress = max(trigger_progress, 0.85)
-                plan["trigger_reasons"].append("price inside window")
+                if plan["order_flow_ready"] and plan["score_ready"]:
+                    trigger_state = "fire"
+                    trigger_progress = 1.0
+                    plan["trigger_reasons"].append("price inside window (flow ready)")
+                else:
+                    trigger_state = "arming"
+                    trigger_progress = max(trigger_progress, 0.85)
+                    plan["trigger_reasons"].append("price inside window")
             elif tolerance and price_val >= window_lo - tolerance:
                 trigger_progress = max(trigger_progress, 0.7)
                 plan["trigger_reasons"].append("price near window")
@@ -13357,7 +13372,9 @@ def analyze(asset: str) -> Dict[str, Any]:
         if isinstance(wait_anchor, datetime):
             precision_trigger_wait_since = wait_anchor
 
-        if precision_trigger_gate_needed and not precision_trigger_ready:
+        if precision_trigger_gate_needed and (
+            not precision_trigger_ready or precision_trigger_state == "arming"
+        ):
             if precision_trigger_wait_since is None:
                 precision_trigger_wait_since = analysis_now
                 precision_runtime["trigger_wait_since"] = analysis_now
@@ -15472,6 +15489,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
