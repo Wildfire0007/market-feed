@@ -16,7 +16,8 @@ import pandas as pd
 
 LOGGER = logging.getLogger(__name__)
 
-PUBLIC_DIR = Path("public")
+BASE_DIR = Path(__file__).resolve().parent
+PUBLIC_DIR = BASE_DIR / "public"
 OUTPUT_PATH = PUBLIC_DIR / "adaptive_params.json"
 
 PREFERRED_KLINES = ("klines_4h.json", "klines_1h.json")
