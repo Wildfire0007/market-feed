@@ -55,6 +55,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Optional, List, Tuple, Callable, Set
 
+import redis
 import requests
 from requests.adapters import HTTPAdapter
 
@@ -444,6 +445,22 @@ class TDError(RuntimeError):
 # ───────────────────────────────── ASSETS ────────────────────────────────
 # GER40 helyett USOIL. A fő ticker a WTI/USD, fallbackokra már nincs szükség.
 LOGGER = logging.getLogger("market_feed.trading")
+
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = _env_int("REDIS_PORT", 6379)
+
+
+def _init_redis_client(logger: logging.Logger) -> Optional["redis.Redis"]:
+    try:
+        client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        client.ping()
+        return client
+    except Exception as exc:
+        logger.warning("Redis kapcsolat nem elérhető: %s", exc)
+        return None
+
+
+REDIS_CLIENT = _init_redis_client(LOGGER)
 
 
 ASSETS = {
@@ -1128,6 +1145,26 @@ def _fallback_state_info(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return info
 
 
+def _redis_channel(asset: str, data_type: str) -> str:
+    return f"market_data:channel:{asset}:{data_type}"
+
+
+def _publish_market_payload(asset: str, data_type: str, payload: Dict[str, Any]) -> bool:
+    if not REDIS_CLIENT:
+        return False
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        return False
+    try:
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        REDIS_CLIENT.publish(_redis_channel(asset, data_type), raw)
+        return True
+    except Exception as exc:
+        LOGGER.warning(
+            "Redis publish sikertelen (%s/%s): %s", asset, data_type, exc
+        )
+        return False
+
+
 def _write_spot_payload(adir: str, asset: str, payload: Dict[str, Any]) -> None:
     path = os.path.join(adir, "spot.json")
     info = _fallback_state_info(payload)
@@ -1145,6 +1182,7 @@ def _write_spot_payload(adir: str, asset: str, payload: Dict[str, Any]) -> None:
     retrieved_at = payload.get("retrieved_at_utc") if isinstance(payload, dict) else None
     source = payload.get("source") if isinstance(payload, dict) else None
     _upsert_spot_price(asset, price, utc=utc, retrieved_at_utc=retrieved_at, source=source)
+    _publish_market_payload(asset, "spot", payload)
     save_json(path, payload)
 
 
@@ -1403,12 +1441,13 @@ def save_series_payload(out_dir: str, name: str, payload: Dict[str, Any]) -> Non
     meta_path = os.path.join(out_dir, f"{name}_meta.json")
     info = _fallback_state_info(payload)
     state_key = f"series:{name}"
+    asset_name = os.path.basename(out_dir) or "<asset>"
+    data_type = name.replace("klines_", "kline_")
     if _should_preserve_cache([raw_path, meta_path], payload):
         if info:
             _store_fallback_state(out_dir, state_key, info)
         else:
             _store_fallback_state(out_dir, state_key, None)
-        asset_name = os.path.basename(out_dir) or "<asset>"
         LOGGER.debug(
             "Preserving existing %s cache for %s due to fallback reuse",
             name,
@@ -1426,6 +1465,8 @@ def save_series_payload(out_dir: str, name: str, payload: Dict[str, Any]) -> Non
         if isinstance(raw_candidate, dict):
             raw = _sort_series_values(raw_candidate)
         meta = {k: v for k, v in payload.items() if k != "raw"}
+    if asset_name != "<asset>":
+        _publish_market_payload(asset_name, data_type, payload)
     save_json(raw_path, raw)
     if meta:
         save_json(meta_path, meta)
@@ -4742,6 +4783,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
