@@ -158,16 +158,7 @@ import numpy as np
 
 # === BTCUSD 5m intraday finomhangolás – profilkonstansok ===
 
-BTC_OFI_Z = {"trigger": 0.8, "strong": 1.0, "weakening": -0.4, "lookback_bars": 60}
 BTC_ADX_TREND_MIN = 20.0
-
-# ATR floor + napszak-percentilis (TOD = time-of-day buckets) – baseline/relaxed/suppressed
-BTC_ATR_FLOOR_USD = {
-    "baseline": 80.0,
-    "relaxed": 80.0,
-    "intraday": 80.0,
-    "suppressed": 75.0,
-}
 BTC_ATR_PCT_TOD = {  # percentilis minimum a nap adott szakaszára
     "baseline": {"open": 0.34, "mid": 0.34, "close": 0.34},
     "relaxed": {"open": 0.34, "mid": 0.34, "close": 0.34},
@@ -359,6 +350,75 @@ BTC_PROFILE_CONFIG: Dict[str, Any] = dict(
 
 SETTINGS: Dict[str, Any] = load_config()
 
+ADAPTIVE_PARAMS_PATH = Path("public") / "adaptive_params.json"
+_ADAPTIVE_PARAMS_MISSING: Set[str] = set()
+
+
+@lru_cache(maxsize=1)
+def _load_adaptive_params() -> Dict[str, Any]:
+    if not ADAPTIVE_PARAMS_PATH.exists():
+        LOGGER.warning("Adaptive paraméterek hiányoznak: %s", ADAPTIVE_PARAMS_PATH)
+        return {}
+    try:
+        with ADAPTIVE_PARAMS_PATH.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception as exc:
+        LOGGER.warning("Adaptive paraméterek betöltése sikertelen: %s", exc)
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _adaptive_params_for_asset(asset: str) -> Dict[str, Any]:
+    payload = _load_adaptive_params()
+    if not payload:
+        return {}
+    return dict(payload.get(asset) or payload.get(asset.upper()) or {})
+
+
+def _warn_missing_adaptive(asset: str) -> None:
+    if asset in _ADAPTIVE_PARAMS_MISSING:
+        return
+    _ADAPTIVE_PARAMS_MISSING.add(asset)
+    LOGGER.warning("Adaptive paraméter hiányzik az assethez (%s); fallback használva.", asset)
+
+
+def get_adaptive_atr_floor(asset: str, default: float = 0.0) -> float:
+    params = _adaptive_params_for_asset(asset)
+    if not params:
+        _warn_missing_adaptive(asset)
+        return default
+    value = params.get("atr_floor")
+    if value is None:
+        _warn_missing_adaptive(asset)
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        _warn_missing_adaptive(asset)
+        return default
+
+
+def get_adaptive_ofi_settings(asset: str) -> Dict[str, float]:
+    defaults = {
+        "trigger": float(OFI_Z_SETTINGS.get("trigger") or 0.0),
+        "strong": float(OFI_Z_SETTINGS.get("strong") or 1.0),
+        "weakening": float(OFI_Z_SETTINGS.get("weakening") or -0.4),
+        "lookback_bars": int(OFI_Z_SETTINGS.get("lookback_bars") or 60),
+    }
+    params = _adaptive_params_for_asset(asset)
+    if not params:
+        _warn_missing_adaptive(asset)
+        return defaults
+    trigger = params.get("ofi_trigger")
+    if trigger is not None:
+        try:
+            defaults["trigger"] = abs(float(trigger))
+        except (TypeError, ValueError):
+            pass
+    return defaults
+
+
+_load_adaptive_params()
 
 def btc_rr_min_with_adx(profile: str, asset: str, adx_5m_val: float) -> Tuple[Optional[float], Dict[str, Any]]:
     """Return BTC RR-min override + metadata based on 5m ADX regime."""
@@ -428,10 +488,11 @@ def btc_core_triggers_ok(asset: str, side: str) -> Tuple[bool, Dict[str, Any]]:
     except (TypeError, ValueError):
         z_float = float("nan")
 
+    ofi_settings = get_adaptive_ofi_settings(asset)
     try:
-        ofi_threshold = float(BTC_OFI_Z.get("trigger", 1.0))
+        ofi_threshold = float(ofi_settings.get("trigger", 0.0))
     except (TypeError, ValueError):
-        ofi_threshold = 1.0
+        ofi_threshold = 0.0
     if ofi_threshold < 0:
         ofi_threshold = abs(ofi_threshold)
 
@@ -503,12 +564,13 @@ def btc_momentum_override(profile: str, asset: str, side: str, atr_ok: bool) -> 
                 ema_ok = bool(ema_state.get(side))
 
     z_value: Optional[float] = None
+    ofi_settings = get_adaptive_ofi_settings(asset)
     ofi_fn = globals().get("ofi_zscore")
     if callable(ofi_fn):
         try:
-            lookback = int(BTC_OFI_Z.get("lookback_bars", 60))
+            lookback = int(ofi_settings.get("lookback_bars", 0))
         except (TypeError, ValueError):
-            lookback = 60
+            lookback = 0
         try:
             z_val = ofi_fn(asset, lookback=lookback)
         except Exception:
@@ -531,7 +593,7 @@ def btc_momentum_override(profile: str, asset: str, side: str, atr_ok: bool) -> 
         z_value = float("nan")
 
     cfg_state = globals().get("_BTC_MOMENTUM_RUNTIME", {})
-    ofi_strong_th = BTC_OFI_Z.get("strong", 0.0)
+    ofi_strong_th = ofi_settings.get("strong", 0.0)
     rr_override: Optional[float] = None
     if isinstance(cfg_state, dict):
         cfg = cfg_state.get("cfg")
@@ -574,7 +636,7 @@ def btc_momentum_override(profile: str, asset: str, side: str, atr_ok: bool) -> 
         )
 
     if not np.isfinite(ofi_strong_th):
-        ofi_strong_th = BTC_OFI_Z.get("strong", 0.0)
+        ofi_strong_th = ofi_settings.get("strong", 0.0)
 
     if np.isnan(z_value):
         ofi_strong = False
@@ -761,12 +823,13 @@ def _btc_profile_section(name: str) -> Dict[str, Any]:
     section = BTC_PROFILE_CONFIG.get(name)
     defaults: Dict[str, Any] = {}
     profile = _btc_active_profile()
+    ofi_settings = get_adaptive_ofi_settings("BTCUSD")
     if name == "momentum_override":
         defaults = {
-            "ofi_z": BTC_OFI_Z["trigger"],
-            "ofi_strong": BTC_OFI_Z["strong"],
-            "ofi_weakening": BTC_OFI_Z["weakening"],
-            "lookback_bars": BTC_OFI_Z["lookback_bars"],
+            "ofi_z": ofi_settings["trigger"],
+            "ofi_strong": ofi_settings["strong"],
+            "ofi_weakening": ofi_settings["weakening"],
+            "lookback_bars": ofi_settings["lookback_bars"],
             "rr_min": BTC_MOMENTUM_RR_MIN.get(profile),
             "no_chase_r": BTC_NO_CHASE_R.get(profile),
         }
@@ -782,7 +845,7 @@ def _btc_profile_section(name: str) -> Dict[str, Any]:
         }
     elif name == "structure":
         defaults = {
-            "ofi_gate": BTC_OFI_Z["trigger"],
+            "ofi_gate": ofi_settings["trigger"],
         }
     result = dict(defaults)
     if isinstance(section, dict):
@@ -1762,9 +1825,7 @@ def btc_atr_gate_threshold(profile: str, asset: str, now_utc: Optional[datetime]
             except (TypeError, ValueError):
                 floor = None
     if floor is None:
-        floor = BTC_ATR_FLOOR_USD.get(profile)
-    if floor is None:
-        floor = BTC_ATR_FLOOR_USD.get("baseline", 0.0)
+        floor = get_adaptive_atr_floor(asset, default=0.0)
     tod = time_of_day_bucket(now_utc)
     pct = None
     if isinstance(profile_cfg, dict):
@@ -2757,7 +2818,7 @@ def build_action_plan(
                     if p_score_min_local is not None
                     else float("nan"),
                     "ofi_z": ofi_zscore if ofi_zscore is not None else float("nan"),
-                    "ofi_trig": BTC_OFI_Z.get("trigger", 1.0),
+                    "ofi_trig": get_adaptive_ofi_settings(asset).get("trigger", 0.0),
                     "adx": float(adx_val) if adx_val is not None else float("nan"),
                     "adx_trend_min": float(BTC_ADX_TREND_MIN),
                     "rr": float(rr_actual) if rr_actual is not None else float("nan"),
@@ -8532,16 +8593,17 @@ def analyze(asset: str) -> Dict[str, Any]:
         except Exception:
             ofi_zscore = None
         if asset == "BTCUSD":
-            lookback = int(BTC_OFI_Z.get("lookback_bars") or 0)
+            ofi_settings = get_adaptive_ofi_settings(asset)
+            lookback = int(ofi_settings.get("lookback_bars") or 0)
             if lookback > 0:
                 btc_ofi_val = compute_ofi_zscore(k1m_closed, lookback)
                 if btc_ofi_val is not None and np.isfinite(btc_ofi_val):
                     ofi_zscore = float(btc_ofi_val)
                     order_flow_metrics["imbalance_z"] = ofi_zscore
             entry_thresholds_meta["btc_ofi_thresholds"] = {
-                "trigger": BTC_OFI_Z["trigger"],
-                "strong": BTC_OFI_Z["strong"],
-                "weakening": BTC_OFI_Z["weakening"],
+                "trigger": ofi_settings["trigger"],
+                "strong": ofi_settings["strong"],
+                "weakening": ofi_settings["weakening"],
             }
     if asset == "BTCUSD":
         momentum_state = globals().setdefault("_BTC_MOMENTUM_RUNTIME", {})
@@ -8552,10 +8614,11 @@ def analyze(asset: str) -> Dict[str, Any]:
     ofi_available = ofi_zscore is not None
 
     if asset == "BTCUSD" and ofi_zscore is not None:
+        ofi_settings = get_adaptive_ofi_settings(asset)
         state = "neutral"
-        if ofi_zscore >= BTC_OFI_Z["strong"]:
+        if ofi_zscore >= ofi_settings["strong"]:
             state = "strong"
-        elif ofi_zscore <= BTC_OFI_Z["weakening"]:
+        elif ofi_zscore <= ofi_settings["weakening"]:
             state = "weakening"
         entry_thresholds_meta["btc_ofi_state"] = {
             "z": float(ofi_zscore),
@@ -9368,7 +9431,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 atr_floor_usd = None
         if atr_floor_usd is None:
             profile_key = btc_profile_name or "baseline"
-            atr_floor_usd = BTC_ATR_FLOOR_USD.get(profile_key, BTC_ATR_FLOOR_USD.get("baseline"))
+            atr_floor_usd = get_adaptive_atr_floor(asset, default=0.0)
         if atr_floor_usd is not None:
             entry_thresholds_meta["btc_atr_floor_usd"] = float(atr_floor_usd)
         if atr_floor_usd is not None and price_for_calc:
@@ -9393,10 +9456,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         btc_gate_threshold_usd = btc_atr_gate_threshold(btc_profile, asset, analysis_now)
         entry_thresholds_meta["btc_atr_gate_threshold_usd"] = btc_gate_threshold_usd
         entry_thresholds_meta["btc_atr_value_usd"] = atr5_abs if np.isfinite(atr5_abs) else None
-        btc_atr_gate_passed = btc_atr_gate_ok(btc_profile, asset, atr5_abs, analysis_now)
+        atr_gate_passed = btc_atr_gate_ok(btc_profile, asset, atr5_abs, analysis_now)
         entry_thresholds_meta["btc_atr_gate_ok"] = btc_atr_gate_passed
     else:
-        btc_atr_gate_passed = True
+        atr_gate_passed = True
     entry_thresholds_meta["atr_multiplier"] = atr_profile_multiplier
     if atr_profile_multiplier not in {None, 0.0}:
         try:
@@ -9535,21 +9598,47 @@ def analyze(asset: str) -> Dict[str, Any]:
         except Exception:
             xag_atr_floor_triggered = False
 
+    dynamic_atr_floor = get_adaptive_atr_floor(asset, default=0.0)
+    current_atr = safe_float(atr5)
+    volatility_gate_ok = True
+    if dynamic_atr_floor and current_atr is not None:
+        try:
+            floor_val = float(dynamic_atr_floor)
+        except (TypeError, ValueError):
+            floor_val = 0.0
+        if floor_val > 0 and current_atr < floor_val:
+            volatility_gate_ok = False
+            precision_raw = (_adaptive_params_for_asset(asset) or {}).get("precision")
+            precision = precision_raw if isinstance(precision_raw, int) else 6
+            reasons.append(
+                "Low Volatility (Current: "
+                f"{current_atr:.{precision}f} < Floor: {floor_val:.{precision}f})"
+            )
+    else:
+        floor_val = None
+
     atr_ok = bool(atr_ratio_ok and atr_abs_ok)
     if xag_atr_floor_triggered:
+        atr_ok = False
+    if not volatility_gate_ok:
         atr_ok = False
     entry_thresholds_meta["atr_ratio_ok"] = bool(atr_ratio_ok)
     if not spread_gate_ok:
         atr_ok = False
     if not atr_overlay_gate:
         atr_ok = False
-    if not btc_atr_gate_passed:
+    if not atr_gate_passed:
         atr_ok = False
     if stale_timeframes.get("k5m"):
         atr_ok = False
 
     entry_thresholds_meta["atr_threshold_effective"] = atr_threshold
     entry_thresholds_meta["spread_gate_ok"] = spread_gate_ok
+    entry_thresholds_meta["volatility_gate"] = {
+        "ok": bool(volatility_gate_ok),
+        "current_atr": current_atr if current_atr is not None else None,
+        "floor": floor_val,
+    }
     cost_model = settings.ASSET_COST_MODEL.get(asset) or settings.DEFAULT_COST_MODEL
     risk_cap_pct = get_max_risk_pct(asset)
     if asset == "EURUSD" and eurusd_range_mode:
@@ -9587,7 +9676,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                     "threshold": float(atr_threshold) if atr_threshold is not None else None,
                     "abs_ok": bool(atr_abs_ok),
                     "overlay_ok": bool(atr_overlay_gate),
-                    "btc_atr_gate": bool(btc_atr_gate_passed),
+                    "btc_atr_gate": bool(atr_gate_passed),
                     **_gate_timestamp_fields(analysis_now),
                 },
                 "spread_kapu": {
@@ -10603,13 +10692,14 @@ def analyze(asset: str) -> Dict[str, Any]:
             P -= 4.0
             reasons.append("Order flow ellentétes irányba tolódik (−4)")
 
-    if ofi_zscore is not None and effective_bias in {"long", "short"} and OFI_Z_TRIGGER > 0:
-        if effective_bias == "long" and ofi_zscore <= -OFI_Z_TRIGGER:
-            penalty = min(8.0, (abs(ofi_zscore) - OFI_Z_TRIGGER + 1.0) * 3.0)
+    ofi_trigger = get_adaptive_ofi_settings(asset).get("trigger", 0.0)
+    if ofi_zscore is not None and effective_bias in {"long", "short"} and ofi_trigger > 0:
+        if effective_bias == "long" and ofi_zscore <= -ofi_trigger:
+            penalty = min(8.0, (abs(ofi_zscore) - ofi_trigger + 1.0) * 3.0)
             P -= penalty
             reasons.append(f"OFI toxikus long irányra (−{penalty:.1f})")
-        elif effective_bias == "short" and ofi_zscore >= OFI_Z_TRIGGER:
-            penalty = min(8.0, (abs(ofi_zscore) - OFI_Z_TRIGGER + 1.0) * 3.0)
+        elif effective_bias == "short" and ofi_zscore >= ofi_trigger:
+            penalty = min(8.0, (abs(ofi_zscore) - ofi_trigger + 1.0) * 3.0)
             P -= penalty
             reasons.append(f"OFI toxikus short irányra (−{penalty:.1f})")
 
@@ -11025,9 +11115,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             if eurusd_price_below_vwap or vwap_confluence.get("trend_pullback"):
                 structure_components["liquidity"] = True
         if ofi_zscore is not None and structure_components["bos"]:
-            if effective_bias == "long" and ofi_zscore >= OFI_Z_TRIGGER:
+            if effective_bias == "long" and ofi_zscore >= ofi_trigger:
                 structure_notes.append("OFI long irányt támogatja — EURUSD konfluencia")
-            elif effective_bias == "short" and ofi_zscore <= -OFI_Z_TRIGGER:
+            elif effective_bias == "short" and ofi_zscore <= -ofi_trigger:
                 structure_notes.append("OFI short irányt támogatja — EURUSD konfluencia")
     if asset == "USOIL" and effective_bias in {"long", "short"}:
         if usoil_vwap_bias == "long" and effective_bias == "long":
@@ -11206,11 +11296,11 @@ def analyze(asset: str) -> Dict[str, Any]:
             note = "NVDA: nyitási BOS/momentum elfogadva — early session bias"
             if note not in structure_notes:
                 structure_notes.append(note)
-    if ofi_zscore is not None and OFI_Z_TRIGGER > 0:
+    if ofi_zscore is not None and ofi_trigger > 0:
         if effective_bias == "long":
-            structure_components["ofi"] = ofi_zscore >= OFI_Z_TRIGGER
+            structure_components["ofi"] = ofi_zscore >= ofi_trigger
         elif effective_bias == "short":
-            structure_components["ofi"] = ofi_zscore <= -OFI_Z_TRIGGER
+            structure_components["ofi"] = ofi_zscore <= -ofi_trigger
     if structure_components.get("ofi") and ofi_zscore is not None:
         structure_notes.append(f"OFI z-score {ofi_zscore:.2f} támogatja az irányt")
     structure_hit_count = sum(1 for flag in structure_components.values() if flag)
@@ -12431,11 +12521,11 @@ def analyze(asset: str) -> Dict[str, Any]:
                 if not momentum_adx_ok:
                     missing_mom.append("adx")
             ofi_confirm = True
-            if ofi_available and OFI_Z_TRIGGER > 0 and direction in {"long", "short"}:
+            if ofi_available and ofi_trigger > 0 and direction in {"long", "short"}:
                 if direction == "long":
-                    ofi_confirm = ofi_zscore >= OFI_Z_TRIGGER
+                    ofi_confirm = ofi_zscore >= ofi_trigger
                 else:
-                    ofi_confirm = ofi_zscore <= -OFI_Z_TRIGGER
+                    ofi_confirm = ofi_zscore <= -ofi_trigger
             if not ofi_confirm:
                 if "ofi" not in momentum_soft_flags:
                     momentum_soft_flags.append("ofi")
@@ -15489,4 +15579,5 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
