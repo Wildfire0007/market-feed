@@ -6418,6 +6418,68 @@ def load_tick_order_flow(asset: str, outdir: str) -> Dict[str, Any]:
     metrics["source"] = path
     return metrics
   
+
+class VolumeProfile:
+    def __init__(self, bins: int = 80, value_area_pct: float = 0.7) -> None:
+        self.bins = max(10, int(bins))
+        self.value_area_pct = max(0.5, min(0.9, float(value_area_pct)))
+
+    def compute(self, df: pd.DataFrame) -> Dict[str, Any]:
+        if df.empty or not {"high", "low", "close", "volume"}.issubset(df.columns):
+            return {}
+        price = (df["high"].astype(float) + df["low"].astype(float) + df["close"].astype(float)) / 3.0
+        volume = df["volume"].astype(float)
+        valid = np.isfinite(price) & np.isfinite(volume) & (volume > 0)
+        if not valid.any():
+            return {}
+        hi = float(df.loc[valid, "high"].max())
+        lo = float(df.loc[valid, "low"].min())
+        if not np.isfinite(hi) or not np.isfinite(lo) or hi <= lo:
+            return {}
+        edges = np.linspace(lo, hi, self.bins + 1)
+        edges = np.unique(edges)
+        if edges.size < 2:
+            return {}
+        bin_idx = pd.cut(price[valid], bins=edges, labels=False, include_lowest=True)
+        idx = bin_idx.to_numpy()
+        vol = volume[valid].to_numpy()
+        mask = np.isfinite(idx)
+        if not mask.any():
+            return {}
+        counts = np.bincount(idx[mask].astype(int), weights=vol[mask], minlength=len(edges) - 1)
+        if not counts.size or float(np.nansum(counts)) <= 0:
+            return {}
+        centers = (edges[:-1] + edges[1:]) / 2.0
+        poc_idx = int(np.nanargmax(counts))
+        poc = float(centers[poc_idx])
+        peak_mask = np.zeros_like(counts, dtype=bool)
+        if counts.size >= 3:
+            peak_mask[1:-1] = (counts[1:-1] > counts[:-2]) & (counts[1:-1] > counts[2:])
+        peak_idx = np.where(peak_mask)[0]
+        if peak_idx.size == 0:
+            peak_idx = np.argsort(counts)[::-1][:3]
+        else:
+            peak_idx = peak_idx[np.argsort(counts[peak_idx])[::-1]]
+            peak_idx = peak_idx[:3]
+        hvn_levels = [float(centers[i]) for i in peak_idx if np.isfinite(centers[i])]
+        sorted_idx = np.argsort(counts)[::-1]
+        total = float(np.nansum(counts))
+        cum = 0.0
+        va_idx: List[int] = []
+        for i in sorted_idx:
+            cum += float(counts[i])
+            va_idx.append(int(i))
+            if total > 0 and cum / total >= self.value_area_pct:
+                break
+        va_low = float(edges[min(va_idx)]) if va_idx else None
+        va_high = float(edges[max(va_idx) + 1]) if va_idx else None
+        return {
+            "poc": poc,
+            "hvn_levels": hvn_levels,
+            "value_area": {"low": va_low, "high": va_high, "pct": self.value_area_pct},
+            "bins": int(len(edges) - 1),
+        }
+  
 # --- TA: EMA/RSI/ATR, swingek, sweep, BOS, Fib zóna ----------------------------
 
 def ema(s: pd.Series, n: int) -> pd.Series:
@@ -9285,6 +9347,58 @@ def analyze(asset: str) -> Dict[str, Any]:
         float(atr_series_5.tail(48).mean()) if not atr_series_5.empty else None
     )
     rel_atr = float(atr5 / price_for_calc) if (atr5 and price_for_calc) else float("nan")
+    market_structure: Dict[str, Any] = {}
+    liquidity_gate_meta: Dict[str, Any] = {"status": "unavailable"}
+    liquidity_gate_available = False
+    liquidity_gate_ok: Optional[bool] = None
+    nearest_liquidity_level: Optional[float] = None
+    nearest_liquidity_type: Optional[str] = None
+    liquidity_distance_pct: Optional[float] = None
+    liquidity_threshold: Optional[float] = None
+    if price_for_calc is not None and np.isfinite(price_for_calc) and not k5m_closed.empty:
+        vp_window = k5m_closed.tail(288)
+        vp = VolumeProfile(bins=80, value_area_pct=0.7)
+        market_structure = vp.compute(vp_window)
+        levels: List[Tuple[str, float]] = []
+        poc_val = market_structure.get("poc")
+        if poc_val is not None and np.isfinite(poc_val):
+            levels.append(("poc", float(poc_val)))
+        hvn_vals = market_structure.get("hvn_levels") or []
+        for hvn in hvn_vals:
+            try:
+                hvn_float = float(hvn)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(hvn_float):
+                levels.append(("hvn", hvn_float))
+        if levels:
+            liquidity_gate_available = True
+            level_type, level_val = min(levels, key=lambda item: abs(price_for_calc - item[1]))
+            nearest_liquidity_level = float(level_val)
+            nearest_liquidity_type = level_type
+            liquidity_distance_pct = abs(price_for_calc - level_val) / float(price_for_calc)
+            base_threshold = float(price_for_calc) * 0.005
+            atr_threshold = None
+            if atr5 is not None and np.isfinite(float(atr5)):
+                atr_threshold = 0.5 * float(atr5)
+            liquidity_threshold = (
+                max(base_threshold, atr_threshold)
+                if atr_threshold is not None
+                else base_threshold
+            )
+            liquidity_gate_meta = {
+                "status": "pending",
+                "nearest_level": nearest_liquidity_level,
+                "nearest_level_type": nearest_liquidity_type,
+                "distance_pct": liquidity_distance_pct,
+                "threshold": liquidity_threshold,
+            }
+        else:
+            if "liquidity_profile_no_levels" not in gate_skips:
+                gate_skips.append("liquidity_profile_no_levels")
+    else:
+        if "liquidity_profile_no_data" not in gate_skips:
+            gate_skips.append("liquidity_profile_no_data")
     bid = safe_float(spot.get("bid")) if isinstance(spot, dict) else None
     ask = safe_float(spot.get("ask")) if isinstance(spot, dict) else None
     spread_abs = (float(ask) - float(bid)) if (ask is not None and bid is not None) else None
@@ -13326,6 +13440,43 @@ def analyze(asset: str) -> Dict[str, Any]:
                     msg_net = f"TP1 nettó profit ≈ {tp1_net_pct_value*100:.2f}%"
                     if msg_net not in reasons:
                         reasons.append(msg_net)
+    if liquidity_gate_available:
+        if "liquidity_structure" not in required_list:
+            required_list.append("liquidity_structure")
+        if (
+            decision in ("buy", "sell")
+            and nearest_liquidity_level is not None
+            and price_for_calc is not None
+        ):
+            threshold_val = liquidity_threshold if liquidity_threshold is not None else 0.0
+            distance_val = abs(price_for_calc - nearest_liquidity_level)
+            if decision == "buy":
+                liquidity_gate_ok = (
+                    distance_val <= threshold_val and price_for_calc >= nearest_liquidity_level
+                )
+            else:
+                liquidity_gate_ok = (
+                    distance_val <= threshold_val and price_for_calc <= nearest_liquidity_level
+                )
+            liquidity_gate_meta.update(
+                {
+                    "status": "open" if liquidity_gate_ok else "closed",
+                    "direction": decision,
+                    "distance_abs": distance_val,
+                }
+            )
+            if not liquidity_gate_ok:
+                if "liquidity_structure" not in missing:
+                    missing.append("liquidity_structure")
+                block_msg = "No Liquidity Structure (Price far from POC/HVN)"
+                if block_msg not in reasons:
+                    reasons.append(block_msg)
+                decision = "no entry"
+                entry = sl = tp1 = tp2 = rr = None
+                momentum_used = False
+        entry_thresholds_meta["liquidity_gate"] = dict(liquidity_gate_meta)
+    elif market_structure:
+        entry_thresholds_meta["liquidity_gate"] = {"status": "no_levels"}
     execution_playbook: List[Dict[str, Any]] = []
     if decision in ("buy", "sell"):
         precision_direction = decision
@@ -14494,6 +14645,17 @@ def analyze(asset: str) -> Dict[str, Any]:
     decision_obj["dynamic_tp_profile"] = dynamic_tp_profile
     decision_obj["order_flow_metrics"] = order_flow_metrics
     decision_obj["intraday_profile"] = intraday_profile
+    if market_structure:
+        decision_obj["market_structure"] = {
+            "poc": market_structure.get("poc"),
+            "hvn_levels": market_structure.get("hvn_levels"),
+            "value_area": market_structure.get("value_area"),
+            "nearest_level": nearest_liquidity_level,
+            "nearest_level_type": nearest_liquidity_type,
+            "distance_to_level": liquidity_distance_pct,
+            "threshold": liquidity_threshold,
+            "gate": liquidity_gate_meta.get("status"),
+        }
     if asset == "BTCUSD" and btc_level_checks_state:
         entry_thresholds_meta["btc_level_checks"] = btc_level_checks_state
     entry_thresholds_meta.setdefault("atr_threshold_effective", atr_threshold)
@@ -15579,5 +15741,6 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
