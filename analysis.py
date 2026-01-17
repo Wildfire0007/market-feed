@@ -27,7 +27,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Set
 from zoneinfo import ZoneInfo
-import redis
  
 LOCAL_TZ = ZoneInfo("Europe/Budapest")
 
@@ -35,36 +34,6 @@ from logging_utils import ensure_json_file_handler
 
 LOGGER = logging.getLogger(__name__)
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    raw_str = str(raw).strip()
-    if not raw_str:
-        return default
-    try:
-        return int(float(raw_str))
-    except Exception:
-        return default
-
-
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = _env_int("REDIS_PORT", 6379)
-
-
-def _init_redis_client(logger: logging.Logger) -> Optional["redis.Redis"]:
-    try:
-        client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-        client.ping()
-        return client
-    except Exception as exc:
-        logger.warning("Redis kapcsolat nem elérhető: %s", exc)
-        return None
-
-
-REDIS_CLIENT = _init_redis_client(LOGGER)
-REDIS_CACHE_LOCK = threading.Lock()
-REDIS_PAYLOAD_CACHE: Dict[str, Dict[str, Dict[str, Any]]] = {}
 # Track optional dependencies that fell back to no-op stubs so the summary
 # can surface degraded guardrails.
 MISSING_OPTIONAL_DEPENDENCIES: Set[str] = set()
@@ -5525,42 +5494,6 @@ def load_json(path: str) -> Optional[Any]:
         return None
 
 
-def _normalize_channel_type(data_type: str) -> str:
-    if data_type.startswith("klines_"):
-        return data_type.replace("klines_", "kline_", 1)
-    return data_type
-
-
-def _cache_redis_payload(asset: str, data_type: str, payload: Dict[str, Any]) -> None:
-    normalized = _normalize_channel_type(data_type)
-    with REDIS_CACHE_LOCK:
-        asset_cache = REDIS_PAYLOAD_CACHE.setdefault(asset, {})
-        asset_cache[normalized] = payload
-
-
-def _get_cached_payload(asset: str, data_type: str) -> Optional[Dict[str, Any]]:
-    normalized = _normalize_channel_type(data_type)
-    with REDIS_CACHE_LOCK:
-        asset_cache = REDIS_PAYLOAD_CACHE.get(asset)
-        if not asset_cache:
-            return None
-        cached = asset_cache.get(normalized)
-        return cached if isinstance(cached, dict) else None
-
-
-def _get_cached_series_payload(
-    asset: str, series_name: str
-) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
-    data_type = series_name.replace("klines_", "kline_", 1)
-    payload = _get_cached_payload(asset, data_type)
-    if not isinstance(payload, dict):
-        return None, {}
-    raw_candidate = payload.get("raw")
-    raw = raw_candidate if isinstance(raw_candidate, dict) else None
-    meta = {k: v for k, v in payload.items() if k != "raw"} if isinstance(payload, dict) else {}
-    return raw, meta
-
-
 def _resolve_signal_stability_config() -> Dict[str, Any]:
     config = settings.load_config().get("signal_stability") or {}
     return config if isinstance(config, dict) else {}
@@ -8208,28 +8141,23 @@ def analyze(asset: str) -> Dict[str, Any]:
     latency_profile = load_latency_profile(outdir)
     latency_guard_state = load_latency_guard_state(outdir)
     avg_delay: float = float(latency_profile.get("ema_delay", 0.0) or 0.0)
-    cached_spot = _get_cached_payload(asset, "spot")
-    spot = cached_spot if isinstance(cached_spot, dict) else (load_json(os.path.join(outdir, "spot.json")) or {})
-    spot_realtime = load_json(os.path.join(outdir, "spot_realtime.json")) or {} 
+    spot = load_json(os.path.join(outdir, "spot.json")) or {}
+    spot_realtime = load_json(os.path.join(outdir, "spot_realtime.json")) or {}
     funding_rate_snapshot = load_funding_snapshot(asset)
     spot_meta = spot if isinstance(spot, dict) else {}
     realtime_stats = spot_realtime.get("statistics") if isinstance(spot_realtime, dict) else {}
-    k1m_cached_raw, k1m_cached_meta = _get_cached_series_payload(asset, "klines_1m")
-    k5m_cached_raw, k5m_cached_meta = _get_cached_series_payload(asset, "klines_5m")
-    k1h_cached_raw, k1h_cached_meta = _get_cached_series_payload(asset, "klines_1h")
-    k4h_cached_raw, k4h_cached_meta = _get_cached_series_payload(asset, "klines_4h")
-    k1m_raw = k1m_cached_raw or load_json(os.path.join(outdir, "klines_1m.json"))
-    k5m_raw = k5m_cached_raw or load_json(os.path.join(outdir, "klines_5m.json"))
-    k1h_raw = k1h_cached_raw or load_json(os.path.join(outdir, "klines_1h.json"))
-    k4h_raw = k4h_cached_raw or load_json(os.path.join(outdir, "klines_4h.json"))
-  
+    k1m_raw = load_json(os.path.join(outdir, "klines_1m.json"))
+    k5m_raw = load_json(os.path.join(outdir, "klines_5m.json"))
+    k1h_raw = load_json(os.path.join(outdir, "klines_1h.json"))
+    k4h_raw = load_json(os.path.join(outdir, "klines_4h.json"))
+
     def _ensure_meta(obj: Optional[Any]) -> Dict[str, Any]:
         return obj if isinstance(obj, dict) else {}
 
-    k1m_meta = _ensure_meta(k1m_cached_meta) if k1m_cached_meta else _ensure_meta(load_json(os.path.join(outdir, "klines_1m_meta.json")))
-    k5m_meta = _ensure_meta(k5m_cached_meta) if k5m_cached_meta else _ensure_meta(load_json(os.path.join(outdir, "klines_5m_meta.json")))
-    k1h_meta = _ensure_meta(k1h_cached_meta) if k1h_cached_meta else _ensure_meta(load_json(os.path.join(outdir, "klines_1h_meta.json")))
-    k4h_meta = _ensure_meta(k4h_cached_meta) if k4h_cached_meta else _ensure_meta(load_json(os.path.join(outdir, "klines_4h_meta.json")))
+    k1m_meta = _ensure_meta(load_json(os.path.join(outdir, "klines_1m_meta.json")))
+    k5m_meta = _ensure_meta(load_json(os.path.join(outdir, "klines_5m_meta.json")))
+    k1h_meta = _ensure_meta(load_json(os.path.join(outdir, "klines_1h_meta.json")))
+    k4h_meta = _ensure_meta(load_json(os.path.join(outdir, "klines_4h_meta.json")))
 
     k1m, k5m, k1h, k4h = as_df_klines(k1m_raw), as_df_klines(k5m_raw), as_df_klines(k1h_raw), as_df_klines(k4h_raw)
 
@@ -15078,65 +15006,6 @@ def _fetch_market_update_timestamp(
     return parse_utc_timestamp(row[0])
 
 
-def _normalize_asset_from_channel(asset: str) -> str:
-    compact = asset.replace("/", "").replace("-", "").upper()
-    return compact if compact in ASSETS else asset
-
-
-def _parse_redis_channel(channel: str) -> Tuple[Optional[str], Optional[str]]:
-    parts = channel.split(":")
-    if len(parts) < 4:
-        return None, None
-    if parts[0] != "market_data" or parts[1] != "channel":
-        return None, None
-    return parts[2], parts[3]
-
-
-def run_on_redis_updates(
-    *,
-    stop_event: Optional[threading.Event] = None,
-) -> bool:
-    if not REDIS_CLIENT:
-        return False
-    pubsub = REDIS_CLIENT.pubsub(ignore_subscribe_messages=True)
-    pubsub.psubscribe("market_data:channel:*")
-    worker_count = _determine_analysis_workers(len(ASSETS))
-    LOGGER.info("Redis event loop indítás (%d worker)", worker_count)
-    try:
-        with ThreadPoolExecutor(max_workers=worker_count) as pool:
-            for message in pubsub.listen():
-                if stop_event and stop_event.is_set():
-                    break
-                if not isinstance(message, dict):
-                    continue
-                channel = message.get("channel")
-                payload_raw = message.get("data")
-                if not channel or payload_raw is None:
-                    continue
-                asset_raw, data_type = _parse_redis_channel(str(channel))
-                if not asset_raw or not data_type:
-                    continue
-                asset = _normalize_asset_from_channel(asset_raw)
-                if asset not in ASSETS:
-                    continue
-                payload: Optional[Dict[str, Any]] = None
-                if isinstance(payload_raw, str):
-                    try:
-                        payload = json.loads(payload_raw)
-                    except json.JSONDecodeError:
-                        LOGGER.warning("Redis payload JSON decode hiba (%s/%s)", asset, data_type)
-                        continue
-                elif isinstance(payload_raw, dict):
-                    payload = payload_raw
-                if isinstance(payload, dict):
-                    _cache_redis_payload(asset, data_type, payload)
-                pool.submit(_analyze_asset_guard, asset)
-    except Exception as exc:
-        LOGGER.warning("Redis event loop megszakadt: %s", exc)
-        return False
-    return True
-  
-
 def run_on_market_updates(
     *,
     run_cycle: Optional[Callable[[], None]] = None,
@@ -15616,77 +15485,8 @@ def main():
 
 if __name__ == "__main__":
     watch_flag = os.getenv("ANALYSIS_WATCH_MARKET_DATA", "0").strip().lower()
-    redis_flag = os.getenv("ANALYSIS_USE_REDIS", "1").strip().lower()
-    use_redis = redis_flag in {"1", "true", "yes", "on"}
-    if use_redis and REDIS_CLIENT:
-        if not run_on_redis_updates():
-            if watch_flag in {"1", "true", "yes", "on"}:
-                run_on_market_updates()
-            else:
-                main()
+    if watch_flag in {"1", "true", "yes", "on"}:
+        run_on_market_updates()
     else:
-        if watch_flag in {"1", "true", "yes", "on"}:
-            run_on_market_updates()
-        else:
-            main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        main()
 
