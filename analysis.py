@@ -2101,6 +2101,8 @@ def next_session_open(asset: str, now: Optional[datetime] = None) -> Optional[da
     return None
 
 def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dict[str, Any]]:
+    if now is not None and now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     h, m = now_utc.hour, now_utc.minute
     now_budapest = now_utc.astimezone(BUDAPEST_TIMEZONE)
@@ -15800,6 +15802,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
