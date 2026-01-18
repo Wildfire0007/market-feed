@@ -14584,6 +14584,11 @@ def analyze(asset: str) -> Dict[str, Any]:
         if not os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
             entry_gate_context_hu["soft_gate_reasons"] = list(dict.fromkeys(soft_gate_reasons))
 
+    dyn_score_meta = entry_thresholds_meta.get("dynamic_score_engine")
+    p_score_final = safe_float(P)
+    if isinstance(dyn_score_meta, dict) and p_score_final is not None:
+        dyn_score_meta["final_score"] = p_score_final
+
     decision_obj = {
         "asset": asset,
         "ok": True,
@@ -15780,6 +15785,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
