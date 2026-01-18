@@ -1238,6 +1238,18 @@ def resolve_session_status_for_asset(
 
     asset_key = str(asset or "").strip().upper()
     profile_name = SESSION_STATUS_PROFILE_NAME
+    if profile_name == "default" and when is not None and weekday_ok is not True:
+        try:
+            when_weekday = when.weekday()
+        except Exception:
+            when_weekday = None
+        if when_weekday is not None and when_weekday >= 5:
+            for name, meta in SESSION_STATUS_PROFILES.items():
+                if meta.get("auto_activate_weekend") and session_status_profile_targets_asset(
+                    name, asset_key
+                ):
+                    profile_name = name
+                    break
     if not session_status_profile_targets_asset(profile_name, asset_key):
         default_profile = dict(SESSION_STATUS_PROFILES.get("default", {}))
         return "default", default_profile
