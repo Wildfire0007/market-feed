@@ -268,15 +268,14 @@ def _spot_freshness_limit(asset: str) -> float:
 # overrides are served through ``_spot_freshness_limit``.
 SPOT_FRESHNESS_LIMIT = _SPOT_FRESHNESS_DEFAULT
 
-# Reduce the volume of large timeframe requests to keep latency in check.  The
-# short-term series now default to a lighter 300 bar history, while the heavier
-# 1h and 4h payloads stay lean as well.  All values can be overridden from the
+# Request deeper history for longer timeframes to cover rolling windows while
+# keeping intraday payloads lighter. All values can be overridden from the
 # environment if necessary.
 SERIES_OUTPUT_SIZES = {
-    "1min": max(50, _env_int("TD_OUTPUTSIZE_1MIN", 300)),
-    "5min": max(50, _env_int("TD_OUTPUTSIZE_5MIN", 300)),
-    "1h": max(50, _env_int("TD_OUTPUTSIZE_1H", 240)),
-    "4h": max(50, _env_int("TD_OUTPUTSIZE_4H", 180)),
+    "1min": max(50, _env_int("TD_OUTPUTSIZE_1MIN", 500)),
+    "5min": max(50, _env_int("TD_OUTPUTSIZE_5MIN", 500)),
+    "1h": max(50, _env_int("TD_OUTPUTSIZE_1H", 5000)),
+    "4h": max(50, _env_int("TD_OUTPUTSIZE_4H", 5000)),
 }
 
 SERIES_FETCH_PLAN = [
@@ -1685,11 +1684,12 @@ def _refresh_series_if_stale(
     best_latency = latency
     attempts_made = 0
 
+    outputsize = SERIES_OUTPUT_SIZES.get(interval, 500)
     for _ in range(max(0, extra_attempts)):
         time.sleep(max(TD_RATE_LIMITER.current_delay, 0.2))
         refreshed = try_symbols(
             attempts,
-            lambda s, ex: td_time_series(s, interval, 180, ex, "desc"),
+            lambda s, ex: td_time_series(s, interval, outputsize, ex, "desc"),
             freshness_limit=None,
             attempt_memory=attempt_memory,
             raise_on_all_client_errors=True,
@@ -4742,4 +4742,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
