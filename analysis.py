@@ -167,7 +167,22 @@ BTC_ATR_PCT_TOD = {  # percentilis minimum a nap adott szakaszára
 }
 
 # P-score / RR / TP / SL / no-chase per profile
-BTC_P_SCORE_MIN = {"baseline": 34, "relaxed": 34, "intraday": 34, "suppressed": 32}
+def _btc_p_score_min_from_config() -> Dict[str, float]:
+    fallback = {"baseline": 34.0, "relaxed": 34.0, "intraday": 34.0, "suppressed": 32.0}
+    try:
+        profiles = getattr(settings, "ENTRY_THRESHOLD_PROFILES", {}) or {}
+        resolved: Dict[str, float] = {}
+        for key, fallback_value in fallback.items():
+            profile = profiles.get(key) or {}
+            p_score_map = profile.get("p_score_min") or {}
+            value = p_score_map.get("BTCUSD", p_score_map.get("default", fallback_value))
+            resolved[key] = float(value) if value is not None else float(fallback_value)
+        return resolved
+    except Exception:
+        return fallback
+
+
+BTC_P_SCORE_MIN = _btc_p_score_min_from_config()
 BTC_RR_MIN_TREND = {"baseline": 1.50, "relaxed": 1.50, "intraday": 1.50, "suppressed": 1.45}
 BTC_RR_MIN_RANGE = {"baseline": 1.50, "relaxed": 1.50, "intraday": 1.50, "suppressed": 1.45}
 
@@ -15785,6 +15800,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
