@@ -6423,7 +6423,8 @@ class VolumeProfile:
     def __init__(self, bins: int = 80, value_area_pct: float = 0.7) -> None:
         self.bins = max(10, int(bins))
         self.value_area_pct = max(0.5, min(0.9, float(value_area_pct)))
-
+        self.profile: Dict[str, Any] = {}
+      
     def compute(self, df: pd.DataFrame) -> Dict[str, Any]:
         if df.empty or not {"high", "low", "close", "volume"}.issubset(df.columns):
             return {}
@@ -6473,12 +6474,44 @@ class VolumeProfile:
                 break
         va_low = float(edges[min(va_idx)]) if va_idx else None
         va_high = float(edges[max(va_idx) + 1]) if va_idx else None
-        return {
+        self.profile = {
             "poc": poc,
             "hvn_levels": hvn_levels,
             "value_area": {"low": va_low, "high": va_high, "pct": self.value_area_pct},
             "bins": int(len(edges) - 1),
         }
+        return dict(self.profile)
+
+    def check_liquidity_proximity(
+        self, current_price: Optional[float], current_atr: Optional[float]
+    ) -> Tuple[bool, Optional[float], Optional[float]]:
+        if (
+            current_price is None
+            or current_atr is None
+            or not np.isfinite(current_price)
+            or not np.isfinite(current_atr)
+            or current_atr <= 0
+        ):
+            return False, None, None
+        profile = self.profile if isinstance(self.profile, dict) else {}
+        levels: List[float] = []
+        poc_val = profile.get("poc")
+        if poc_val is not None and np.isfinite(poc_val):
+            levels.append(float(poc_val))
+        hvn_vals = profile.get("hvn_levels") or []
+        for hvn in hvn_vals:
+            try:
+                hvn_float = float(hvn)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(hvn_float):
+                levels.append(hvn_float)
+        if not levels:
+            return False, None, None
+        nearest = min(levels, key=lambda lvl: abs(current_price - lvl))
+        distance_atr = abs(current_price - nearest) / float(current_atr)
+        is_near = distance_atr <= 0.5
+        return bool(is_near), float(distance_atr), float(nearest)
   
 # --- TA: EMA/RSI/ATR, swingek, sweep, BOS, Fib zóna ----------------------------
 
@@ -9352,50 +9385,33 @@ def analyze(asset: str) -> Dict[str, Any]:
     liquidity_gate_available = False
     liquidity_gate_ok: Optional[bool] = None
     nearest_liquidity_level: Optional[float] = None
-    nearest_liquidity_type: Optional[str] = None
-    liquidity_distance_pct: Optional[float] = None
-    liquidity_threshold: Optional[float] = None
-    if price_for_calc is not None and np.isfinite(price_for_calc) and not k5m_closed.empty:
-        vp_window = k5m_closed.tail(288)
-        vp = VolumeProfile(bins=80, value_area_pct=0.7)
-        market_structure = vp.compute(vp_window)
-        levels: List[Tuple[str, float]] = []
-        poc_val = market_structure.get("poc")
-        if poc_val is not None and np.isfinite(poc_val):
-            levels.append(("poc", float(poc_val)))
-        hvn_vals = market_structure.get("hvn_levels") or []
-        for hvn in hvn_vals:
-            try:
-                hvn_float = float(hvn)
-            except (TypeError, ValueError):
-                continue
-            if np.isfinite(hvn_float):
-                levels.append(("hvn", hvn_float))
-        if levels:
-            liquidity_gate_available = True
-            level_type, level_val = min(levels, key=lambda item: abs(price_for_calc - item[1]))
-            nearest_liquidity_level = float(level_val)
-            nearest_liquidity_type = level_type
-            liquidity_distance_pct = abs(price_for_calc - level_val) / float(price_for_calc)
-            base_threshold = float(price_for_calc) * 0.005
-            atr_threshold = None
-            if atr5 is not None and np.isfinite(float(atr5)):
-                atr_threshold = 0.5 * float(atr5)
-            liquidity_threshold = (
-                max(base_threshold, atr_threshold)
-                if atr_threshold is not None
-                else base_threshold
-            )
-            liquidity_gate_meta = {
-                "status": "pending",
-                "nearest_level": nearest_liquidity_level,
-                "nearest_level_type": nearest_liquidity_type,
-                "distance_pct": liquidity_distance_pct,
-                "threshold": liquidity_threshold,
-            }
-        else:
-            if "liquidity_profile_no_levels" not in gate_skips:
-                gate_skips.append("liquidity_profile_no_levels")
+    liquidity_distance_atr: Optional[float] = None
+    if price_for_calc is not None and np.isfinite(price_for_calc) and not k1h_closed.empty:
+        vp_window = k1h_closed.tail(500)
+        vp = VolumeProfile(bins=100, value_area_pct=0.7)
+        try:
+            market_structure = vp.compute(vp_window)
+            if market_structure:
+                liquidity_gate_available = True
+                is_near, distance_atr, nearest_level = vp.check_liquidity_proximity(
+                    price_for_calc, safe_float(atr5)
+                )
+                liquidity_gate_ok = bool(is_near) if distance_atr is not None else None
+                nearest_liquidity_level = nearest_level
+                liquidity_distance_atr = distance_atr
+                liquidity_gate_meta = {
+                    "status": "pending",
+                    "nearest_level": nearest_liquidity_level,
+                    "distance_atr": liquidity_distance_atr,
+                    "zone_width_atr": 0.5,
+                }
+            else:
+                if "liquidity_profile_no_levels" not in gate_skips:
+                    gate_skips.append("liquidity_profile_no_levels")
+        except Exception as exc:
+            LOGGER.warning("Liquidity profile calc failed for %s: %s", asset, exc)
+            if "liquidity_profile_failed" not in gate_skips:
+                gate_skips.append("liquidity_profile_failed")
     else:
         if "liquidity_profile_no_data" not in gate_skips:
             gate_skips.append("liquidity_profile_no_data")
@@ -10607,6 +10623,56 @@ def analyze(asset: str) -> Dict[str, Any]:
     else:
         reasons.append("ATR nincs rendben (relatív vagy abszolút küszöb)")
         P -= 8.0
+
+    liquidity_secondary_ok: Optional[bool] = None
+    if liquidity_gate_available:
+        vol_ok = None
+        if momentum_vol_ratio is not None and np.isfinite(float(momentum_vol_ratio)):
+            vol_ok = float(momentum_vol_ratio) >= MOMENTUM_VOLUME_RATIO_TH
+        flow_ok = None
+        if order_flow_imbalance is not None and np.isfinite(float(order_flow_imbalance)):
+            flow_ok = abs(float(order_flow_imbalance)) >= ORDER_FLOW_IMBALANCE_TH
+        if order_flow_pressure is not None and np.isfinite(float(order_flow_pressure)):
+            flow_ok = bool(flow_ok) or (
+                abs(float(order_flow_pressure)) >= ORDER_FLOW_PRESSURE_TH
+            )
+        if vol_ok is not None or flow_ok is not None:
+            liquidity_secondary_ok = bool(
+                (vol_ok if vol_ok is not None else False)
+                or (flow_ok if flow_ok is not None else False)
+            )
+
+    if liquidity_gate_available and liquidity_gate_ok is not None:
+        if liquidity_gate_ok:
+            if nearest_liquidity_level is not None and liquidity_distance_atr is not None:
+                reasons.append(
+                    "Liquidity Support Confirmed "
+                    f"(Level: {nearest_liquidity_level:.6f}, Dist: {liquidity_distance_atr:.2f}ATR)"
+                )
+            if liquidity_secondary_ok is False:
+                percentile_proxy = min(1.0, max(0.0, P / 100.0))
+                liquidity_penalty = 0.35 + 0.85 * percentile_proxy
+                P -= liquidity_penalty * 0.5
+                reasons.append("WARNING: Liquidity másodlagos megerősítés hiányzik")
+                liquidity_gate_meta["status"] = "soft_warn"
+                liquidity_gate_meta["penalty"] = liquidity_penalty * 0.5
+            else:
+                liquidity_gate_meta["status"] = "soft_pass"
+            liquidity_gate_meta["secondary_ok"] = liquidity_secondary_ok
+        else:
+            percentile_proxy = min(1.0, max(0.0, P / 100.0))
+            liquidity_penalty = 0.35 + 0.85 * percentile_proxy
+            P -= liquidity_penalty
+            if nearest_liquidity_level is not None and liquidity_distance_atr is not None:
+                reasons.append(
+                    "WARNING: No Liquidity Structure "
+                    f"(Nearest: {nearest_liquidity_level:.6f}, Dist: {liquidity_distance_atr:.2f}ATR)"
+                )
+            else:
+                reasons.append("WARNING: No Liquidity Structure (HVN/POC nincs közel)")
+            liquidity_gate_meta["status"] = "soft_fail"
+            liquidity_gate_meta["penalty"] = liquidity_penalty
+            liquidity_gate_meta["secondary_ok"] = liquidity_secondary_ok
 
     if volatility_adjustments:
         for note in volatility_adjustments:
@@ -13441,40 +13507,13 @@ def analyze(asset: str) -> Dict[str, Any]:
                     if msg_net not in reasons:
                         reasons.append(msg_net)
     if liquidity_gate_available:
-        if "liquidity_structure" not in required_list:
-            required_list.append("liquidity_structure")
-        if (
-            decision in ("buy", "sell")
-            and nearest_liquidity_level is not None
-            and price_for_calc is not None
-        ):
-            threshold_val = liquidity_threshold if liquidity_threshold is not None else 0.0
-            distance_val = abs(price_for_calc - nearest_liquidity_level)
-            if decision == "buy":
-                liquidity_gate_ok = (
-                    distance_val <= threshold_val and price_for_calc >= nearest_liquidity_level
-                )
-            else:
-                liquidity_gate_ok = (
-                    distance_val <= threshold_val and price_for_calc <= nearest_liquidity_level
-                )
+        if decision in ("buy", "sell"):
             liquidity_gate_meta.update(
                 {
-                    "status": "open" if liquidity_gate_ok else "closed",
                     "direction": decision,
-                    "distance_abs": distance_val,
                 }
             )
-            if not liquidity_gate_ok:
-                if "liquidity_structure" not in missing:
-                    missing.append("liquidity_structure")
-                block_msg = "No Liquidity Structure (Price far from POC/HVN)"
-                if block_msg not in reasons:
-                    reasons.append(block_msg)
-                decision = "no entry"
-                entry = sl = tp1 = tp2 = rr = None
-                momentum_used = False
-        entry_thresholds_meta["liquidity_gate"] = dict(liquidity_gate_meta)
+        entry_thresholds_meta["liquidity_gate"] = dict(liquidity_gate_meta)    
     elif market_structure:
         entry_thresholds_meta["liquidity_gate"] = {"status": "no_levels"}
     execution_playbook: List[Dict[str, Any]] = []
@@ -14651,9 +14690,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             "hvn_levels": market_structure.get("hvn_levels"),
             "value_area": market_structure.get("value_area"),
             "nearest_level": nearest_liquidity_level,
-            "nearest_level_type": nearest_liquidity_type,
-            "distance_to_level": liquidity_distance_pct,
-            "threshold": liquidity_threshold,
+            "distance_to_level_atr": liquidity_distance_atr,
+            "zone_width_atr": liquidity_gate_meta.get("zone_width_atr"),
+            "secondary_ok": liquidity_gate_meta.get("secondary_ok"),
             "gate": liquidity_gate_meta.get("status"),
         }
     if asset == "BTCUSD" and btc_level_checks_state:
@@ -15741,6 +15780,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
