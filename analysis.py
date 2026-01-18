@@ -2066,6 +2066,8 @@ def convert_minutes_to_local_range(
 def session_weekday_ok(asset: str, now: Optional[datetime] = None) -> bool:
     if now is None:
         now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     allowed = SESSION_WEEKDAYS.get(asset)
     if not allowed:
         return True
@@ -15802,6 +15804,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
