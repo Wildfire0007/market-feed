@@ -1254,7 +1254,10 @@ def resolve_session_status_for_asset(
         default_profile = dict(SESSION_STATUS_PROFILES.get("default", {}))
         return "default", default_profile
         
-    profile = dict(SESSION_STATUS_PROFILE)
+    if profile_name == SESSION_STATUS_PROFILE_NAME:
+        profile = dict(SESSION_STATUS_PROFILE)
+    else:
+        profile = dict(SESSION_STATUS_PROFILES.get(profile_name, {}))
     if profile_name != "default" and profile.get("auto_activate_weekend"):
         should_fallback = False
         if weekday_ok is True:
