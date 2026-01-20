@@ -471,6 +471,9 @@ def build_limit_setup_embed(
     spot_raw: Any,
     atr_raw: Any,
     probability_raw: Any = None,
+    sl_raw: Any = None,
+    tp1_raw: Any = None,
+    tp2_raw: Any = None,
 ) -> Dict[str, Any]:
     entry = _coerce_price(entry_raw)
     spot = _coerce_price(spot_raw)
@@ -484,7 +487,11 @@ def build_limit_setup_embed(
     sl_txt = "Calc failed"
     tp1_txt = "Calc failed"
     tp2_txt = "Calc failed"
-    if can_calc:
+    if all(v is not None for v in (sl_raw, tp1_raw, tp2_raw)):
+        sl_txt = format_price(sl_raw, asset)
+        tp1_txt = format_price(tp1_raw, asset)
+        tp2_txt = format_price(tp2_raw, asset)
+    elif can_calc:
         direction = "buy" if side == "BUY LIMIT" else "sell"
         sl, tp1, tp2 = calculate_smart_levels(entry, atr, direction)
         sl_txt = format_price(sl, asset)
@@ -500,10 +507,10 @@ def build_limit_setup_embed(
         warn_txt = "⚠️ Alacsony valószínűség"
 
     if side == "BUY LIMIT":
-        title = f"🔵 LIMIT BUY: {asset}"
+        title = f"🔵 LIMIT BUY SETUP: {asset}"
         color = 0x3498DB
     elif side == "SELL LIMIT":
-        title = f"🟠 LIMIT SELL: {asset}"
+        title = f"🟠 LIMIT SELL SETUP: {asset}"
         color = 0xE67E22
     else:
         title = f"⚠️ LIMIT SETUP: {asset}"
@@ -4106,6 +4113,9 @@ def main():
 
         is_stable = st["count"] >= STABILITY_RUNS
         display_stable = is_stable and not core_bos_pending
+        if sig.get("signal") == "precision_arming":
+            is_stable = True
+            display_stable = True
         per_asset_is_stable[asset] = display_stable
         is_actionable_now = (eff in ("buy","sell")) and is_stable and not core_bos_pending
 
@@ -4460,6 +4470,19 @@ def main():
             continue
         atr_raw = (((sig.get("intervention_watch") or {}).get("metrics") or {}).get("atr5_usd"))
         spot_raw, _ = spot_from_sig_or_file(asset_name, sig)
+        entry_val = _coerce_price(entry_raw)
+        spot_val = _coerce_price(spot_raw)
+        atr_val = _coerce_price(atr_raw)
+        sl_level = tp1_level = tp2_level = None
+        if entry_val is not None and spot_val is not None and atr_val is not None:
+            if entry_val < spot_val:
+                direction = "buy"
+            elif entry_val > spot_val:
+                direction = "sell"
+            else:
+                direction = None
+            if direction is not None:
+                sl_level, tp1_level, tp2_level = calculate_smart_levels(entry_val, atr_val, direction)
         if atr_raw is None or spot_raw is None:
             log_event(
                 "limit_setup_calc_failed",
@@ -4474,6 +4497,9 @@ def main():
                 spot_raw,
                 atr_raw,
                 sig.get("probability_raw", sig.get("probability")),
+                sl_raw=sl_level,
+                tp1_raw=tp1_level,
+                tp2_raw=tp2_level,
             )
         )
         if LIMIT_COOLDOWN_MIN > 0:
