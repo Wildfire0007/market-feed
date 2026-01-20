@@ -4416,6 +4416,13 @@ def main():
             if isinstance(cooldown_until, (int, float)) and now_ep < int(cooldown_until):
                 continue
         entry_raw = (sig.get("trigger_levels") or {}).get("fire")
+        if entry_raw is None:
+            log_event(
+                "limit_setup_calc_failed",
+                asset=asset_name,
+                entry_missing=True,
+            )
+            continue
         atr_raw = (((sig.get("intervention_watch") or {}).get("metrics") or {}).get("atr5_usd"))
         spot_raw, _ = spot_from_sig_or_file(asset_name, sig)
         if atr_raw is None or spot_raw is None:
