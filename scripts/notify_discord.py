@@ -447,6 +447,24 @@ def format_price(val: Any, asset: str) -> str:
     except Exception:
         return str(val)
 
+def calculate_smart_levels(entry_price: float, atr: float, direction: str) -> Tuple[float, float, float]:
+    """Kiszámolja a SL/TP szinteket limit belépőhöz (1.5x ATR SL, 1.0x ATR TP1, 2.5x ATR TP2)."""
+
+    entry = float(entry_price)
+    vol = float(atr)
+    stop_dist = 1.5 * vol
+    tp1_dist = 1.0 * vol
+    tp2_dist = 2.5 * vol
+    if direction == "buy":
+        sl = entry - stop_dist
+        tp1 = entry + tp1_dist
+        tp2 = entry + tp2_dist
+    else:
+        sl = entry + stop_dist
+        tp1 = entry - tp1_dist
+        tp2 = entry - tp2_dist
+    return sl, tp1, tp2
+
 
 def build_limit_setup_embed(
     asset: str,
@@ -468,14 +486,8 @@ def build_limit_setup_embed(
     tp1_txt = "Calc failed"
     tp2_txt = "Calc failed"
     if can_calc:
-        if side == "BUY LIMIT":
-            sl = entry - (1.5 * atr)
-            tp1 = entry + (1.0 * atr)
-            tp2 = entry + (2.5 * atr)
-        else:
-            sl = entry + (1.5 * atr)
-            tp1 = entry - (1.0 * atr)
-            tp2 = entry - (2.5 * atr)
+        direction = "buy" if side == "BUY LIMIT" else "sell"
+        sl, tp1, tp2 = calculate_smart_levels(entry, atr, direction)
         sl_txt = format_price(sl, asset)
         tp1_txt = format_price(tp1, asset)
         tp2_txt = format_price(tp2, asset)
