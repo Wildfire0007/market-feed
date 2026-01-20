@@ -452,6 +452,7 @@ def build_limit_setup_embed(
     entry_raw: Any,
     spot_raw: Any,
     atr_raw: Any,
+    probability_raw: Any = None,
 ) -> Dict[str, Any]:
     entry = _coerce_price(entry_raw)
     spot = _coerce_price(spot_raw)
@@ -479,17 +480,38 @@ def build_limit_setup_embed(
         tp2_txt = format_price(tp2, asset)
 
     entry_txt = format_price(entry, asset) if entry is not None else "n/a"
+    spot_txt = format_price(spot, asset) if spot is not None else "n/a"
+    prob_val = safe_float(probability_raw)
+    prob_txt = f"{prob_val:.0f}%" if prob_val is not None else "n/a"
+    warn_txt = ""
+    if prob_val is not None and prob_val < 60:
+        warn_txt = "⚠️ Alacsony valószínűség"
 
+    if side == "BUY LIMIT":
+        title = f"🔵 LIMIT BUY: {asset}"
+        color = 0x3498DB
+    elif side == "SELL LIMIT":
+        title = f"🟠 LIMIT SELL: {asset}"
+        color = 0xE67E22
+    else:
+        title = f"⚠️ LIMIT SETUP: {asset}"
+        color = 0xF1C40F
+
+    fields = [
+        {"name": "🔵 Limit ár (Entry)", "value": f"`{entry_txt}`", "inline": False},
+        {"name": "🛑 Stop Loss", "value": f"`{sl_txt}`", "inline": True},
+        {"name": "🎯 TP1 / TP2", "value": f"`{tp1_txt}`\n`{tp2_txt}`", "inline": True},
+        {"name": "Jelenlegi ár", "value": f"`{spot_txt}`", "inline": True},
+        {"name": "Esély", "value": f"`{prob_txt}`", "inline": True},
+    ]
+    if warn_txt:
+        fields.append({"name": "Figyelmeztetés", "value": warn_txt, "inline": False})
+      
     return {
-        "title": f"⚠️ LIMIT SETUP: {asset}",
-        "description": (
-            f"Type: **{side}**\n"
-            f"Entry: `{entry_txt}`\n"
-            f"SL: `{sl_txt}`\n"
-            f"TP1: `{tp1_txt}`\n"
-            f"TP2: `{tp2_txt}`"
-        ),
-        "color": 0xF1C40F,
+        "title": title,
+        "description": "Limit megbízás előkészítés",
+        "color": color,
+        "fields": fields,
     }
 
   
@@ -4415,7 +4437,8 @@ def main():
             cooldown_until = limit_cooldowns.get(asset_name)
             if isinstance(cooldown_until, (int, float)) and now_ep < int(cooldown_until):
                 continue
-        entry_raw = (sig.get("trigger_levels") or {}).get("fire")
+        trigger_levels = last_step.get("trigger_levels") or sig.get("trigger_levels") or {}
+        entry_raw = trigger_levels.get("fire")
         if entry_raw is None:
             log_event(
                 "limit_setup_calc_failed",
@@ -4438,6 +4461,7 @@ def main():
                 entry_raw,
                 spot_raw,
                 atr_raw,
+                sig.get("probability_raw", sig.get("probability")),
             )
         )
         if LIMIT_COOLDOWN_MIN > 0:
