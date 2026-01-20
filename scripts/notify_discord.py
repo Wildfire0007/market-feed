@@ -447,6 +447,52 @@ def format_price(val: Any, asset: str) -> str:
         return str(val)
 
 
+def build_limit_setup_embed(
+    asset: str,
+    entry_raw: Any,
+    spot_raw: Any,
+    atr_raw: Any,
+) -> Dict[str, Any]:
+    entry = _coerce_price(entry_raw)
+    spot = _coerce_price(spot_raw)
+    atr = _coerce_price(atr_raw)
+
+    side = "LIMIT"
+    if entry is not None and spot is not None:
+        side = "BUY LIMIT" if entry < spot else "SELL LIMIT"
+
+    can_calc = entry is not None and atr is not None and side in {"BUY LIMIT", "SELL LIMIT"}
+    sl_txt = "Calc failed"
+    tp1_txt = "Calc failed"
+    tp2_txt = "Calc failed"
+    if can_calc:
+        if side == "BUY LIMIT":
+            sl = entry - (1.5 * atr)
+            tp1 = entry + (1.0 * atr)
+            tp2 = entry + (2.5 * atr)
+        else:
+            sl = entry + (1.5 * atr)
+            tp1 = entry - (1.0 * atr)
+            tp2 = entry - (2.5 * atr)
+        sl_txt = format_price(sl, asset)
+        tp1_txt = format_price(tp1, asset)
+        tp2_txt = format_price(tp2, asset)
+
+    entry_txt = format_price(entry, asset) if entry is not None else "n/a"
+
+    return {
+        "title": f"⚠️ LIMIT SETUP: {asset}",
+        "description": (
+            f"Type: **{side}**\n"
+            f"Entry: `{entry_txt}`\n"
+            f"SL: `{sl_txt}`\n"
+            f"TP1: `{tp1_txt}`\n"
+            f"TP2: `{tp2_txt}`"
+        ),
+        "color": 0xF1C40F,
+    }
+
+  
 def _coerce_price(value: Any) -> Optional[float]:
     """Convert a spot/price value to float, tolerating thousands separators.
 
@@ -1264,6 +1310,7 @@ def _collect_channel_embeds(
     asset_channels: Dict[str, str],
     watcher_embeds: List[Dict[str, Any]],
     auto_close_embeds: List[Dict[str, Any]],
+    limit_embeds: List[Dict[str, Any]],
     heartbeat_snapshots: List[Dict[str, Any]],
     gate_embed: Optional[Dict[str, Any]],
     pipeline_embed: Optional[Dict[str, Any]],
@@ -1293,6 +1340,7 @@ def _collect_channel_embeds(
         for a in ASSETS
         if a in asset_embeds and asset_channels.get(a, "market_scan") == "market_scan"
     ]
+    market_scan_embeds.extend((None, embed) for embed in limit_embeds)
     market_scan_embeds.extend((None, embed) for embed in heartbeat_snapshots)
     if gate_embed:
         market_scan_embeds.append((None, gate_embed))
@@ -1683,6 +1731,7 @@ def build_pipeline_diag_embed(
 
 COOLDOWN_MIN   = int_env("DISCORD_COOLDOWN_MIN", 5)  # perc; 0 = off
 MOMENTUM_COOLDOWN_MIN = int_env("DISCORD_COOLDOWN_MOMENTUM_MIN", 5)
+LIMIT_COOLDOWN_MIN = int_env("DISCORD_LIMIT_COOLDOWN_MIN", 10)
 FLIP_COOLDOWN_MINUTES_BY_ASSET = {
     "EURUSD": 30,
 }
@@ -3931,6 +3980,10 @@ def main():
 
     last_heartbeat_prev = meta.get("last_heartbeat_key")
     last_heartbeat_iso = meta.get("last_heartbeat_utc")
+    limit_cooldowns = meta.get("limit_cooldowns")
+    if not isinstance(limit_cooldowns, dict):
+        limit_cooldowns = {}
+    meta["limit_cooldowns"] = limit_cooldowns
     asset_embeds = {}
     asset_channels: Dict[str, str] = {}
     now_dt  = datetime.now(timezone.utc)
@@ -3943,6 +3996,7 @@ def main():
     per_asset_is_stable = {}
     watcher_embeds: List[Dict[str, Any]] = []
     auto_close_embeds: List[Dict[str, Any]] = []
+    limit_embeds: List[Dict[str, Any]] = []
     manual_open_assets: Set[str] = set()
     asset_send_records: Dict[str, Dict[str, Any]] = {}
 
@@ -4339,6 +4393,49 @@ def main():
         if manual_tracking_enabled and manual_state.get("has_position"):
             manual_open_assets.add(asset)
 
+    for asset_dir in sorted(PUBLIC_DIR.iterdir()):
+        if not asset_dir.is_dir():
+            continue
+        signal_path = asset_dir / "signal.json"
+        if not signal_path.exists():
+            continue
+        asset_name = asset_dir.name
+        sig = load(str(signal_path))
+        if not isinstance(sig, dict):
+            continue
+        if sig.get("signal") != "precision_arming":
+            continue
+        playbook = sig.get("execution_playbook") or []
+        if not isinstance(playbook, list) or not playbook:
+            continue
+        last_step = playbook[-1] if isinstance(playbook[-1], dict) else {}
+        if last_step.get("state") != "fire":
+            continue
+        if LIMIT_COOLDOWN_MIN > 0 and not force_send:
+            cooldown_until = limit_cooldowns.get(asset_name)
+            if isinstance(cooldown_until, (int, float)) and now_ep < int(cooldown_until):
+                continue
+        entry_raw = (sig.get("trigger_levels") or {}).get("fire")
+        atr_raw = (((sig.get("intervention_watch") or {}).get("metrics") or {}).get("atr5_usd"))
+        spot_raw, _ = spot_from_sig_or_file(asset_name, sig)
+        if atr_raw is None or spot_raw is None:
+            log_event(
+                "limit_setup_calc_failed",
+                asset=asset_name,
+                atr_missing=atr_raw is None,
+                spot_missing=spot_raw is None,
+            )
+        limit_embeds.append(
+            build_limit_setup_embed(
+                asset_name,
+                entry_raw,
+                spot_raw,
+                atr_raw,
+            )
+        )
+        if LIMIT_COOLDOWN_MIN > 0:
+            limit_cooldowns[asset_name] = now_ep + (LIMIT_COOLDOWN_MIN * 60)
+  
     audit_path = position_tracker.resolve_repo_path(str(AUDIT_FILE))
     prior_open_commits = _load_prior_open_commits(audit_path)
     for asset, mstate in manual_states.items():
@@ -4424,6 +4521,7 @@ def main():
         asset_channels=asset_channels,
         watcher_embeds=watcher_embeds,
         auto_close_embeds=auto_close_embeds,
+        limit_embeds=limit_embeds,
         heartbeat_snapshots=heartbeat_snapshots,
         gate_embed=gate_embed,
         pipeline_embed=pipeline_embed,
