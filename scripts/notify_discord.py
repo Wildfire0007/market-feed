@@ -1,24 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-notify_discord.py — AGRESSZÍV Értesítő (Limit Order Fix)
-Ez a verzió KIKAPCSOL minden stabilitási szűrőt.
-Ha a rendszer azt mondja "FIRE", ez azonnal küld.
+notify_discord.py — AGRESSZÍV Értesítő (Path-Fixed Verzió)
+Javítva: Automatikusan megtalálja a public mappát, bárhol is fut a script.
 """
 
 import os
 import json
-import requests
+import sys
 from pathlib import Path
 from datetime import datetime, timezone
 
-# --- KONFIGURÁCIÓ ---
-# Ha nincs ENV változó, ide írd be a Webhook URL-edet:
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "") 
+# 1. Requests modul ellenőrzése
+try:
+    import requests
+except ImportError:
+    print("HIBA: Hiányzik a 'requests' modul! (pip install requests)")
+    sys.exit(1)
 
-# Mappák
+# --- KONFIGURÁCIÓ ---
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+
+# --- MAPPÁK INTELLIGENS BEÁLLÍTÁSA ---
 BASE_DIR = Path(__file__).resolve().parent
-PUBLIC_DIR = BASE_DIR / "public"
+
+# Megkeressük a 'public' mappát:
+# 1. Először megnézzük a script mellett (ha root-ban fut)
+if (BASE_DIR / "public").exists():
+    PUBLIC_DIR = BASE_DIR / "public"
+# 2. Ha ott nincs, megnézzük eggyel feljebb (ha a script a /scripts mappában van)
+elif (BASE_DIR.parent / "public").exists():
+    PUBLIC_DIR = BASE_DIR.parent / "public"
+# 3. Végső esetben feltételezzük a relatív utat (de logolunk, ha nincs meg)
+else:
+    PUBLIC_DIR = BASE_DIR / "public"
 
 # Színek és Ikonok
 ICON_BUY_MARKET  = "🟢"
@@ -38,10 +53,12 @@ def load_json(path):
     except: return {}
 
 def send_discord_embed(webhook_url, embed_data):
-    if not webhook_url: return
+    if not webhook_url: 
+        print(" [!] FIGYELEM: Nincs beállítva Discord Webhook URL (környezeti változó)!")
+        return
     try:
         requests.post(webhook_url, json={"embeds": [embed_data]}, timeout=5)
-    except Exception as e: print(f"Hiba: {e}")
+    except Exception as e: print(f"Hiba a küldéskor: {e}")
 
 def format_price(price):
     if price is None: return "N/A"
@@ -57,7 +74,6 @@ def calculate_smart_levels(entry_price, atr, direction):
     if not entry_price or not atr: return None, None, None
     entry, vol = float(entry_price), float(atr)
     
-    # 1.5x ATR Stop, 1.0x ATR TP1, 2.5x ATR TP2
     stop_dist = 1.5 * vol
     tp1_dist  = 1.0 * vol
     tp2_dist  = 2.5 * vol
@@ -68,8 +84,17 @@ def calculate_smart_levels(entry_price, atr, direction):
         return entry + stop_dist, entry - tp1_dist, entry - tp2_dist
 
 def check_and_notify():
+    # Végső ellenőrzés
+    if not PUBLIC_DIR.exists():
+        print(f"KRITIKUS HIBA: Nem találom a 'public' mappát!")
+        print(f"Keresési helyek:\n 1. {BASE_DIR / 'public'}\n 2. {BASE_DIR.parent / 'public'}")
+        return
+
+    print(f"Adatok olvasása innen: {PUBLIC_DIR}")
     assets = [d for d in PUBLIC_DIR.iterdir() if d.is_dir() and not d.name.startswith("_")]
     print(f"--- Ellenőrzés: {len(assets)} eszköz ---")
+    
+    sent_count = 0
     
     for asset_dir in assets:
         asset_name = asset_dir.name
@@ -90,7 +115,7 @@ def check_and_notify():
         should_notify = False
         embed = {}
 
-        # --- 1. MARKET SIGNAL (Azonnali) ---
+        # --- 1. MARKET SIGNAL ---
         if signal in ["buy", "sell"]:
             should_notify = True
             is_buy = (signal == "buy")
@@ -107,39 +132,35 @@ def check_and_notify():
                 "footer": {"text": "Market Order"}
             }
 
-        # --- 2. LIMIT SIGNAL (Precision Arming) ---
+        # --- 2. LIMIT SIGNAL ---
         elif signal == "precision_arming":
             playbook = data.get("execution_playbook", [])
             last_step = playbook[-1] if playbook else {}
             state = last_step.get("state", "unknown")
             trigger_levels = last_step.get("trigger_levels", {})
             
-            # HA A STÁTUSZ 'FIRE', AZONNAL KÜLDÜNK!
             if state == "fire":
                 should_notify = True
                 limit_price = trigger_levels.get("fire")
                 
-                # Irány: Ha a Limit ár kisebb mint a mostani -> Buy Limit
                 direction = "buy"
                 if limit_price and spot and limit_price > spot:
                     direction = "sell"
                 
-                # Számítás (Smart Levels)
                 c_sl, c_tp1, c_tp2 = calculate_smart_levels(limit_price, atr, direction)
                 
                 title_text = f"{ICON_BUY_LIMIT} LIMIT BUY: {asset_name}" if direction == "buy" else f"{ICON_SELL_LIMIT} LIMIT SELL: {asset_name}"
-                desc_text = "**Vételi Limit (Pullback)**" if direction == "buy" else "**Eladási Limit (Pullback)**"
                 color_code = COLOR_BLUE if direction == "buy" else COLOR_ORANGE
 
                 embed = {
                     "title": title_text,
-                    "description": desc_text + f"\nStátusz: **{state.upper()}** (Tüzelés)",
+                    "description": f"Státusz: **{state.upper()}** (Tüzelés)",
                     "color": color_code,
                     "fields": [
                         {"name": "🔵 Limit Ár (Entry)", "value": f"`{format_price(limit_price)}`", "inline": False},
                         {"name": "🛑 SL (Becsült)", "value": f"`{format_price(c_sl)}`", "inline": True},
                         {"name": "🎯 TP1 / TP2", "value": f"`{format_price(c_tp1)}`\n`{format_price(c_tp2)}`", "inline": True},
-                        {"name": "Jelenlegi Ár", "value": f"{format_price(spot)}", "inline": True},
+                        {"name": "Spot Ár", "value": f"{format_price(spot)}", "inline": True},
                         {"name": "Esély", "value": f"{prob}%", "inline": True}
                     ],
                     "footer": {"text": "Limit Order Setup"}
@@ -148,6 +169,10 @@ def check_and_notify():
         if should_notify:
             print(f" -> ÉRTESÍTÉS KÜLDÉSE: {asset_name}")
             send_discord_embed(DISCORD_WEBHOOK_URL, embed)
+            sent_count += 1
+
+    if sent_count == 0:
+        print("Nincs aktív jelzés egyik eszközön sem.")
 
 if __name__ == "__main__":
     check_and_notify()
