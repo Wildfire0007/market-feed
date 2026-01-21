@@ -4454,11 +4454,7 @@ def main():
             continue
         last_step = playbook[-1] if isinstance(playbook[-1], dict) else {}
         if last_step.get("state") != "fire":
-            continue
-        if LIMIT_COOLDOWN_MIN > 0 and not force_send:
-            cooldown_until = limit_cooldowns.get(asset_name)
-            if isinstance(cooldown_until, (int, float)) and now_ep < int(cooldown_until):
-                continue
+            continue    
         trigger_levels = last_step.get("trigger_levels") or sig.get("trigger_levels") or {}
         entry_raw = trigger_levels.get("fire")
         if entry_raw is None:
@@ -4501,9 +4497,7 @@ def main():
                 tp1_raw=tp1_level,
                 tp2_raw=tp2_level,
             )
-        )
-        if LIMIT_COOLDOWN_MIN > 0:
-            limit_cooldowns[asset_name] = now_ep + (LIMIT_COOLDOWN_MIN * 60)
+        )      
   
     audit_path = position_tracker.resolve_repo_path(str(AUDIT_FILE))
     prior_open_commits = _load_prior_open_commits(audit_path)
