@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-notify_discord.py — AGRESSZÍV Értesítő (Path-Fixed Verzió)
-Javítva: Automatikusan megtalálja a public mappát, bárhol is fut a script.
+notify_discord.py — INTELLIGENS Értesítő v3.0
+Javítva: Limit megbízásoknál kiolvassa a "precision_plan" pontos értékeit a JSON-ből.
 """
 
 import os
@@ -23,15 +23,10 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 # --- MAPPÁK INTELLIGENS BEÁLLÍTÁSA ---
 BASE_DIR = Path(__file__).resolve().parent
-
-# Megkeressük a 'public' mappát:
-# 1. Először megnézzük a script mellett (ha root-ban fut)
 if (BASE_DIR / "public").exists():
     PUBLIC_DIR = BASE_DIR / "public"
-# 2. Ha ott nincs, megnézzük eggyel feljebb (ha a script a /scripts mappában van)
 elif (BASE_DIR.parent / "public").exists():
     PUBLIC_DIR = BASE_DIR.parent / "public"
-# 3. Végső esetben feltételezzük a relatív utat (de logolunk, ha nincs meg)
 else:
     PUBLIC_DIR = BASE_DIR / "public"
 
@@ -54,7 +49,7 @@ def load_json(path):
 
 def send_discord_embed(webhook_url, embed_data):
     if not webhook_url: 
-        print(" [!] FIGYELEM: Nincs beállítva Discord Webhook URL (környezeti változó)!")
+        print(" [!] FIGYELEM: Nincs beállítva Discord Webhook URL!")
         return
     try:
         requests.post(webhook_url, json={"embeds": [embed_data]}, timeout=5)
@@ -69,30 +64,25 @@ def format_price(price):
         return f"{p:.5f}"
     except: return str(price)
 
-def calculate_smart_levels(entry_price, atr, direction):
-    """Kiszámolja az SL/TP-t, ha a JSON-ben nincs benne"""
+# Fallback számítás, ha a JSON-ben mégsem lenne benne a terv
+def calculate_fallback_levels(entry_price, atr, direction):
     if not entry_price or not atr: return None, None, None
     entry, vol = float(entry_price), float(atr)
-    
     stop_dist = 1.5 * vol
     tp1_dist  = 1.0 * vol
     tp2_dist  = 2.5 * vol
-    
     if direction == "buy":
         return entry - stop_dist, entry + tp1_dist, entry + tp2_dist
     else:
         return entry + stop_dist, entry - tp1_dist, entry - tp2_dist
 
 def check_and_notify():
-    # Végső ellenőrzés
     if not PUBLIC_DIR.exists():
-        print(f"KRITIKUS HIBA: Nem találom a 'public' mappát!")
-        print(f"Keresési helyek:\n 1. {BASE_DIR / 'public'}\n 2. {BASE_DIR.parent / 'public'}")
+        print(f"HIBA: Nem találom a 'public' mappát: {PUBLIC_DIR}")
         return
 
     print(f"Adatok olvasása innen: {PUBLIC_DIR}")
     assets = [d for d in PUBLIC_DIR.iterdir() if d.is_dir() and not d.name.startswith("_")]
-    print(f"--- Ellenőrzés: {len(assets)} eszköz ---")
     
     sent_count = 0
     
@@ -107,7 +97,7 @@ def check_and_notify():
         prob = data.get("probability", 0)
         spot = data.get("spot", {}).get("price")
         
-        # ATR kinyerése
+        # ATR kinyerése fallback esetére
         atr = 0
         try: atr = data.get("intervention_watch", {}).get("metrics", {}).get("atr5_usd", 0)
         except: pass
@@ -115,7 +105,7 @@ def check_and_notify():
         should_notify = False
         embed = {}
 
-        # --- 1. MARKET SIGNAL ---
+        # --- 1. MARKET SIGNAL (Azonnali) ---
         if signal in ["buy", "sell"]:
             should_notify = True
             is_buy = (signal == "buy")
@@ -132,38 +122,57 @@ def check_and_notify():
                 "footer": {"text": "Market Order"}
             }
 
-        # --- 2. LIMIT SIGNAL ---
+        # --- 2. LIMIT SIGNAL (Precision Arming) ---
         elif signal == "precision_arming":
-            playbook = data.get("execution_playbook", [])
-            last_step = playbook[-1] if playbook else {}
-            state = last_step.get("state", "unknown")
-            trigger_levels = last_step.get("trigger_levels", {})
+            # Megnézzük a precíziós tervet (ITT VAN A KINCS!)
+            plan = data.get("precision_plan", {})
+            trigger_state = "unknown"
             
-            if state == "fire":
+            # Státusz ellenőrzése a playbook-ból
+            playbook = data.get("execution_playbook", [])
+            if playbook:
+                trigger_state = playbook[-1].get("state", "unknown")
+            
+            # Ha TÜZELÉS van (fire)
+            if trigger_state == "fire":
                 should_notify = True
-                limit_price = trigger_levels.get("fire")
                 
-                direction = "buy"
-                if limit_price and spot and limit_price > spot:
-                    direction = "sell"
+                # 1. Próbáljuk meg kivenni a pontos adatokat a precision_plan-ből
+                limit_price = plan.get("entry")
+                sl_val = plan.get("stop_loss")
+                tp1_val = plan.get("take_profit_1")
+                tp2_val = plan.get("take_profit_2")
+                direction = plan.get("direction", "buy") # buy vagy sell
                 
-                c_sl, c_tp1, c_tp2 = calculate_smart_levels(limit_price, atr, direction)
-                
-                title_text = f"{ICON_BUY_LIMIT} LIMIT BUY: {asset_name}" if direction == "buy" else f"{ICON_SELL_LIMIT} LIMIT SELL: {asset_name}"
-                color_code = COLOR_BLUE if direction == "buy" else COLOR_ORANGE
+                # Ha véletlenül üres a plan, akkor fallback a trigger levels-re
+                if not limit_price:
+                    limit_price = playbook[-1].get("trigger_levels", {}).get("fire")
+                    # És számolunk ATR alapon
+                    if not sl_val:
+                        sl_val, tp1_val, tp2_val = calculate_fallback_levels(limit_price, atr, direction)
+
+                # Cím és Szín beállítása
+                if direction == "buy":
+                    title_text = f"{ICON_BUY_LIMIT} LIMIT BUY: {asset_name}"
+                    desc_text = "**Vételi Limit (Pullback)**"
+                    color_code = COLOR_BLUE
+                else:
+                    title_text = f"{ICON_SELL_LIMIT} LIMIT SELL: {asset_name}"
+                    desc_text = "**Eladási Limit (Pullback)**"
+                    color_code = COLOR_ORANGE
 
                 embed = {
                     "title": title_text,
-                    "description": f"Státusz: **{state.upper()}** (Tüzelés)",
+                    "description": f"{desc_text}\nStátusz: **FIRE** (Aktív)",
                     "color": color_code,
                     "fields": [
                         {"name": "🔵 Limit Ár (Entry)", "value": f"`{format_price(limit_price)}`", "inline": False},
-                        {"name": "🛑 SL (Becsült)", "value": f"`{format_price(c_sl)}`", "inline": True},
-                        {"name": "🎯 TP1 / TP2", "value": f"`{format_price(c_tp1)}`\n`{format_price(c_tp2)}`", "inline": True},
+                        {"name": "🛑 SL", "value": f"`{format_price(sl_val)}`", "inline": True},
+                        {"name": "🎯 TP1 / TP2", "value": f"`{format_price(tp1_val)}`\n`{format_price(tp2_val)}`", "inline": True},
                         {"name": "Spot Ár", "value": f"{format_price(spot)}", "inline": True},
                         {"name": "Esély", "value": f"{prob}%", "inline": True}
                     ],
-                    "footer": {"text": "Limit Order Setup"}
+                    "footer": {"text": "Limit Order Setup (Precision Plan)"}
                 }
 
         if should_notify:
@@ -172,7 +181,7 @@ def check_and_notify():
             sent_count += 1
 
     if sent_count == 0:
-        print("Nincs aktív jelzés egyik eszközön sem.")
+        print("Nincs aktív jelzés.")
 
 if __name__ == "__main__":
     check_and_notify()
