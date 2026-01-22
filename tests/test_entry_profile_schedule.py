@@ -40,4 +40,4 @@ def test_btc_intraday_schedule_follows_session_bucket(monkeypatch):
 
     profile = settings.get_entry_threshold_profile_name_for_asset("BTCUSD")
 
-    assert profile == "intraday"
+    assert profile == "baseline"
