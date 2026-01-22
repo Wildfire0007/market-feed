@@ -1904,9 +1904,12 @@ def df_last_timestamp(df: pd.DataFrame) -> Optional[datetime]:
     return None
 
 
-def ensure_closed_candles(df: pd.DataFrame,
-                          now: Optional[datetime] = None,
-                          tolerance_seconds: int = 5) -> pd.DataFrame:
+def ensure_closed_candles(
+    df: pd.DataFrame,
+    now: Optional[datetime] = None,
+    tolerance_seconds: int = 5,
+    candle_seconds: Optional[int] = None,
+) -> pd.DataFrame:
     """Return a dataframe that contains only candles that have already closed.
 
     A Twelve Data time_series lekérés teljesen zárt gyertyákat ad vissza, de a
@@ -1943,7 +1946,22 @@ def ensure_closed_candles(df: pd.DataFrame,
 
     # Távolítsuk el a jövőbeli sorokat; ha mindet kidobtuk volna, adjunk üres df-et.
     filtered = df.loc[mask]
-    return filtered.copy() if not filtered.empty else df.iloc[0:0].copy()
+    if filtered.empty:
+        return df.iloc[0:0].copy()
+
+    if candle_seconds:
+        last_ts = df_last_timestamp(filtered)
+        if last_ts is not None:
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.replace(tzinfo=timezone.utc)
+            cutoff_ts = last_ts + timedelta(seconds=int(candle_seconds))
+            if now + timedelta(seconds=max(tolerance_seconds, 0)) < cutoff_ts:
+                if len(filtered) > 1:
+                    filtered = filtered.iloc[:-1]
+                else:
+                    return filtered.iloc[0:0].copy()
+
+    return filtered.copy()
 
 def file_mtime(path: str) -> Optional[str]:
     try:
@@ -8673,10 +8691,10 @@ def analyze(asset: str) -> Dict[str, Any]:
             realtime_confidence = float(min(1.0, realtime_confidence + 0.05))
 
     display_spot = safe_float(spot_price)
-    k1m_closed = ensure_closed_candles(k1m, now)
-    k5m_closed = ensure_closed_candles(k5m, now)
-    k1h_closed = ensure_closed_candles(k1h, now)
-    k4h_closed = ensure_closed_candles(k4h, now)
+    k1m_closed = ensure_closed_candles(k1m, now, candle_seconds=60)
+    k5m_closed = ensure_closed_candles(k5m, now, candle_seconds=300)
+    k1h_closed = ensure_closed_candles(k1h, now, candle_seconds=3600)
+    k4h_closed = ensure_closed_candles(k4h, now, candle_seconds=14400)
 
     tick_order_flow = load_tick_order_flow(asset, outdir)
     order_flow_metrics = compute_order_flow_metrics(k1m_closed, k5m_closed, tick_order_flow)
@@ -15804,6 +15822,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
