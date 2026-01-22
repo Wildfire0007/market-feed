@@ -1,27 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-notify_discord.py — INTELLIGENS Értesítő v3.0
-Javítva: Limit megbízásoknál kiolvassa a "precision_plan" pontos értékeit a JSON-ből.
+notify_discord.py — V6.0 (PRO Dashboard - Psychology Free)
+Ez a verzió minden döntést meghoz helyetted.
 """
 
 import os
 import json
 import sys
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-# 1. Requests modul ellenőrzése
+# Requests modul ellenőrzése
 try:
     import requests
 except ImportError:
-    print("HIBA: Hiányzik a 'requests' modul! (pip install requests)")
     sys.exit(1)
+
+# Időzóna (Budapest)
+try:
+    from zoneinfo import ZoneInfo
+    BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
+except ImportError:
+    BUDAPEST_TZ = timezone(timedelta(hours=1)) 
 
 # --- KONFIGURÁCIÓ ---
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-# --- MAPPÁK INTELLIGENS BEÁLLÍTÁSA ---
+# --- MAPPÁK ---
 BASE_DIR = Path(__file__).resolve().parent
 if (BASE_DIR / "public").exists():
     PUBLIC_DIR = BASE_DIR / "public"
@@ -48,12 +54,10 @@ def load_json(path):
     except: return {}
 
 def send_discord_embed(webhook_url, embed_data):
-    if not webhook_url: 
-        print(" [!] FIGYELEM: Nincs beállítva Discord Webhook URL!")
-        return
+    if not webhook_url: return
     try:
         requests.post(webhook_url, json={"embeds": [embed_data]}, timeout=5)
-    except Exception as e: print(f"Hiba a küldéskor: {e}")
+    except Exception as e: print(f"Hiba: {e}")
 
 def format_price(price):
     if price is None: return "N/A"
@@ -64,7 +68,14 @@ def format_price(price):
         return f"{p:.5f}"
     except: return str(price)
 
-# Fallback számítás, ha a JSON-ben mégsem lenne benne a terv
+def get_budapest_time(utc_iso_string):
+    if not utc_iso_string or utc_iso_string == "-": return "N/A"
+    try:
+        dt_utc = datetime.fromisoformat(utc_iso_string.replace('Z', '+00:00'))
+        dt_bp = dt_utc.astimezone(BUDAPEST_TZ)
+        return dt_bp.strftime("%H:%M:%S")
+    except: return "Idő?"
+
 def calculate_fallback_levels(entry_price, atr, direction):
     if not entry_price or not atr: return None, None, None
     entry, vol = float(entry_price), float(atr)
@@ -76,15 +87,17 @@ def calculate_fallback_levels(entry_price, atr, direction):
     else:
         return entry + stop_dist, entry - tp1_dist, entry - tp2_dist
 
-def check_and_notify():
-    if not PUBLIC_DIR.exists():
-        print(f"HIBA: Nem találom a 'public' mappát: {PUBLIC_DIR}")
-        return
+def get_trend_icon(bias_str):
+    if not bias_str: return "⚪"
+    b = bias_str.lower()
+    if "long" in b: return "⬆️ BULL (Emelkedő)"
+    if "short" in b: return "⬇️ BEAR (Eső)"
+    return "➡️ RANGE (Oldalazás)"
 
-    print(f"Adatok olvasása innen: {PUBLIC_DIR}")
+def check_and_notify():
+    if not PUBLIC_DIR.exists(): return
+
     assets = [d for d in PUBLIC_DIR.iterdir() if d.is_dir() and not d.name.startswith("_")]
-    
-    sent_count = 0
     
     for asset_dir in assets:
         asset_name = asset_dir.name
@@ -95,93 +108,115 @@ def check_and_notify():
 
         signal = data.get("signal", "no entry")
         prob = data.get("probability", 0)
-        spot = data.get("spot", {}).get("price")
+        spot_obj = data.get("spot", {})
+        spot_price = spot_obj.get("price")
+        bp_time = get_budapest_time(spot_obj.get("utc"))
         
-        # ATR kinyerése fallback esetére
         atr = 0
         try: atr = data.get("intervention_watch", {}).get("metrics", {}).get("atr5_usd", 0)
+        except: pass
+
+        # --- EXTRA ADATOK KINYERÉSE ---
+        leverage = data.get("leverage", "N/A")
+        
+        # Trend (Bias)
+        bias_4h = data.get("biases", {}).get("adjusted_4h", "neutral")
+        trend_display = get_trend_icon(bias_4h)
+        
+        # Okok (Reasons) - Csak az első 3
+        reasons_list = data.get("reasons", [])
+        if not reasons_list: reasons_list = ["Nincs részletezve."]
+        reasons_display = "\n".join([f"• {r}" for r in reasons_list[:3]])
+
+        # Precision Score
+        p_score = 0
+        p_threshold = 0
+        try:
+            pg = data.get("entry_thresholds", {}).get("precision_gate_state", {})
+            p_score = pg.get("score", 0)
+            p_threshold = pg.get("threshold", 0)
         except: pass
 
         should_notify = False
         embed = {}
 
-        # --- 1. MARKET SIGNAL (Azonnali) ---
+        # ---------------------------
+        # 1. MARKET SIGNAL
+        # ---------------------------
         if signal in ["buy", "sell"]:
             should_notify = True
             is_buy = (signal == "buy")
             embed = {
                 "title": f"{ICON_BUY_MARKET if is_buy else ICON_SELL_MARKET} MARKET {'BUY' if is_buy else 'SELL'}: {asset_name}",
-                "description": "**AZONNALI BELÉPŐ!**",
+                "description": f"**VÉGREHAJTÁS AZONNAL!**\n\n**Miért?**\n{reasons_display}",
                 "color": COLOR_GREEN if is_buy else COLOR_RED,
                 "fields": [
-                    {"name": "Ár", "value": f"`{format_price(spot)}`", "inline": True},
-                    {"name": "Esély", "value": f"`{prob}%`", "inline": True},
-                    {"name": "🛑 SL", "value": f"`{format_price(data.get('sl'))}`", "inline": True},
-                    {"name": "🎯 TP1 / TP2", "value": f"`{format_price(data.get('tp1'))}`\n`{format_price(data.get('tp2'))}`", "inline": True}
+                    {"name": "Árfolyam & Idő", "value": f"`{format_price(spot_price)}`\n🕒 {bp_time}", "inline": True},
+                    {"name": "Minőség & Trend", "value": f"🎲 Esély: `{prob}%`\n{trend_display}", "inline": True},
+                    {"name": "⚙️ Setup", "value": f"Kar: `x{leverage}`\nScore: `{p_score}/{p_threshold}`", "inline": True},
+                    
+                    {"name": "🛑 STOP LOSS", "value": f"`{format_price(data.get('sl'))}`", "inline": True},
+                    {"name": "🎯 CÉLÁRAK (TP)", "value": f"TP1: `{format_price(data.get('tp1'))}`\nTP2: `{format_price(data.get('tp2'))}`", "inline": True}
                 ],
-                "footer": {"text": "Market Order"}
+                "footer": {"text": f"Market Order • {asset_name} • Kockázatkezelés: Kötelező!"}
             }
 
-        # --- 2. LIMIT SIGNAL (Precision Arming) ---
+        # ---------------------------
+        # 2. LIMIT SIGNAL (Precision)
+        # ---------------------------
         elif signal == "precision_arming":
-            # Megnézzük a precíziós tervet (ITT VAN A KINCS!)
             plan = data.get("precision_plan", {})
-            trigger_state = "unknown"
-            
-            # Státusz ellenőrzése a playbook-ból
             playbook = data.get("execution_playbook", [])
-            if playbook:
-                trigger_state = playbook[-1].get("state", "unknown")
+            trigger_state = "unknown"
+            if playbook: trigger_state = playbook[-1].get("state", "unknown")
             
-            # Ha TÜZELÉS van (fire)
             if trigger_state == "fire":
                 should_notify = True
                 
-                # 1. Próbáljuk meg kivenni a pontos adatokat a precision_plan-ből
                 limit_price = plan.get("entry")
                 sl_val = plan.get("stop_loss")
                 tp1_val = plan.get("take_profit_1")
                 tp2_val = plan.get("take_profit_2")
-                direction = plan.get("direction", "buy") # buy vagy sell
+                direction = plan.get("direction", "buy")
                 
-                # Ha véletlenül üres a plan, akkor fallback a trigger levels-re
                 if not limit_price:
                     limit_price = playbook[-1].get("trigger_levels", {}).get("fire")
-                    # És számolunk ATR alapon
                     if not sl_val:
                         sl_val, tp1_val, tp2_val = calculate_fallback_levels(limit_price, atr, direction)
 
-                # Cím és Szín beállítása
+                rr_display = "N/A"
+                try:
+                    risk = abs(limit_price - sl_val)
+                    reward = abs(tp1_val - limit_price)
+                    if risk > 0: rr_display = f"1:{reward/risk:.1f}"
+                except: pass
+
                 if direction == "buy":
                     title_text = f"{ICON_BUY_LIMIT} LIMIT BUY: {asset_name}"
-                    desc_text = "**Vételi Limit (Pullback)**"
                     color_code = COLOR_BLUE
                 else:
                     title_text = f"{ICON_SELL_LIMIT} LIMIT SELL: {asset_name}"
-                    desc_text = "**Eladási Limit (Pullback)**"
                     color_code = COLOR_ORANGE
 
                 embed = {
                     "title": title_text,
-                    "description": f"{desc_text}\nStátusz: **FIRE** (Aktív)",
+                    "description": f"**LIMIT MEGBÍZÁS ELHELYEZÉSE!**\n(Visszateszt Zóna)\n\n**Miért?**\n{reasons_display}",
                     "color": color_code,
                     "fields": [
                         {"name": "🔵 Limit Ár (Entry)", "value": f"`{format_price(limit_price)}`", "inline": False},
-                        {"name": "🛑 SL", "value": f"`{format_price(sl_val)}`", "inline": True},
-                        {"name": "🎯 TP1 / TP2", "value": f"`{format_price(tp1_val)}`\n`{format_price(tp2_val)}`", "inline": True},
-                        {"name": "Spot Ár", "value": f"{format_price(spot)}", "inline": True},
-                        {"name": "Esély", "value": f"{prob}%", "inline": True}
+                        {"name": "🛑 STOP LOSS", "value": f"`{format_price(sl_val)}`", "inline": True},
+                        {"name": "🎯 CÉLÁRAK (TP)", "value": f"TP1: `{format_price(tp1_val)}`\nTP2: `{format_price(tp2_val)}`", "inline": True},
+                        
+                        {"name": "Jelenlegi Ár", "value": f"{format_price(spot_price)}\n🕒 {bp_time}", "inline": True},
+                        {"name": "Minőség", "value": f"Score: `{p_score}`\nR/R: `{rr_display}`", "inline": True},
+                        {"name": "Trend", "value": f"{trend_display}", "inline": True}
                     ],
-                    "footer": {"text": "Limit Order Setup (Precision Plan)"}
+                    "footer": {"text": f"Limit Order • {asset_name} • 'Set & Forget' Mód"}
                 }
 
         if should_notify:
-            print(f" -> ÉRTESÍTÉS KÜLDÉSE: {asset_name}")
+            print(f" -> KÜLDÉS: {asset_name}")
             send_discord_embed(DISCORD_WEBHOOK_URL, embed)
-            sent_count += 1
-
-    if sent_count == 0:
-        print("Nincs aktív jelzés.")
 
 if __name__ == "__main__":
     check_and_notify()
