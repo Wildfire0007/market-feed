@@ -1137,6 +1137,13 @@ TP2_R   = 3.0
 TP1_R_MOMENTUM = 1.5
 TP2_R_MOMENTUM = 2.4
 MIN_STOPLOSS_PCT = 0.01
+ATR_STOP_MULTIPLIERS: Dict[str, Dict[str, Tuple[float, float]]] = {
+    "default": {"atr1h": (0.7, 1.0), "atr5m": (1.8, 2.4)},
+    "GOLD_CFD": {"atr1h": (0.9, 1.3), "atr5m": (2.2, 3.0)},
+    "XAGUSD": {"atr1h": (0.9, 1.3), "atr5m": (2.2, 3.0)},
+    "USOIL": {"atr1h": (0.8, 1.15), "atr5m": (2.0, 2.6)},
+    "EURUSD": {"atr1h": (0.6, 0.9), "atr5m": (1.5, 2.0)},
+}
 # Momentum structure check window (5m candles × lookback bars)
 DEFAULT_BOS_LOOKBACK = get_bos_lookback()
 # Number of recent bars to inspect for EMA cross momentum confirmation
@@ -12895,6 +12902,12 @@ def analyze(asset: str) -> Dict[str, Any]:
         current_tp2_mult = tp2_mult
         atr5_val  = float(atr5 or 0.0)
         rr_required_effective = rr_required
+        profile_name = ENTRY_THRESHOLD_PROFILE_NAME
+        mode_scale = 1.0
+        if profile_name == "day":
+            mode_scale = 1.15
+        elif profile_name == "swing":
+            mode_scale = 1.35
 
         buf_rule = dict(sl_buffer_defaults) if isinstance(sl_buffer_defaults, dict) else {}
         if asset == "BTCUSD":
@@ -12952,9 +12965,20 @@ def analyze(asset: str) -> Dict[str, Any]:
             tp1_dist = entry - tp1
             ok_math = (tp2 <= tp1 < entry < sl)
 
-        if asset == "GOLD_CFD" and atr5_val > 0:
-            desired_min = 2.0 * atr5_val
-            desired_max = (3.0 if strong_momentum else 2.4) * atr5_val
+        if asset not in {"BTCUSD", "NVDA"} and (
+            atr5_val > 0 or (atr1h is not None and atr1h > 0)
+        ):
+            atr_basis = float(atr1h) if (atr1h is not None and atr1h > 0) else float(atr5_val)
+            profile = ATR_STOP_MULTIPLIERS.get(asset, ATR_STOP_MULTIPLIERS["default"])
+            key = "atr1h" if atr1h is not None and atr1h > 0 else "atr5m"
+            min_mult, max_mult = profile.get(key, ATR_STOP_MULTIPLIERS["default"][key])
+            min_mult *= mode_scale
+            max_mult *= mode_scale
+            if strong_momentum:
+                min_mult *= 1.05
+                max_mult *= 1.15
+            desired_min = min_mult * atr_basis
+            desired_max = max_mult * atr_basis
             target_risk = risk
             if risk < desired_min:
                 target_risk = desired_min
@@ -12975,22 +12999,35 @@ def analyze(asset: str) -> Dict[str, Any]:
                     tp2 = entry - tp2_mult * risk
                     tp1_dist = entry - tp1
                     ok_math = (tp2 <= tp1 < entry < sl)
-                if atr5_val > 0:
-                    risk_ratio = target_risk / atr5_val
-                    adjust_note = f"GOLD stop lazítás: ATR alapú kockázat ×{risk_ratio:.2f}"
+                if atr_basis > 0:
+                    risk_ratio = target_risk / atr_basis
+                    asset_label = (
+                        "GOLD"
+                        if asset == "GOLD_CFD"
+                        else "XAG"
+                        if asset == "XAGUSD"
+                        else asset
+                    )
+                    source_label = "ATR1h" if atr1h is not None and atr1h > 0 else "ATR5m"
+                    adjust_note = (
+                        f"{asset_label} stop lazítás: {source_label} alapú kockázat ×{risk_ratio:.2f}"
+                    )
                     if adjust_note not in reasons:
                         reasons.append(adjust_note)
 
         if asset == "NVDA":
             atr_basis = None
+            source_label = None
             if atr1h is not None and atr1h > 0:
                 atr_basis = float(atr1h)
+                source_label = "ATR1h"
             elif atr5_val > 0:
                 atr_basis = float(atr5_val) * 12.0
+                source_label = "ATR5m"
             if atr_basis and NVDA_STOP_ATR_MIN > 0:
-                desired_min = NVDA_STOP_ATR_MIN * atr_basis
+                desired_min = NVDA_STOP_ATR_MIN * atr_basis * mode_scale
                 desired_max = (
-                    NVDA_STOP_ATR_MAX * atr_basis
+                    NVDA_STOP_ATR_MAX * atr_basis * mode_scale
                     if NVDA_STOP_ATR_MAX and NVDA_STOP_ATR_MAX >= NVDA_STOP_ATR_MIN
                     else desired_min * 1.5
                 )
@@ -13011,15 +13048,17 @@ def analyze(asset: str) -> Dict[str, Any]:
                         tp1_dist = entry - tp1
                         ok_math = (tp2 <= tp1 < entry < sl)
                     ratio = target_risk / atr_basis if atr_basis else 0.0
-                    adjust_note = f"NVDA stop igazítás: kockázat ×{ratio:.2f} ATR"
+                    basis_label = source_label or "ATR"
+                    adjust_note = f"NVDA {basis_label} stop igazítás: kockázat ×{ratio:.2f}"
                     if adjust_note not in reasons:
                         reasons.append(adjust_note)
 
-        if asset == "BTCUSD" and atr5_val > 0:
-            lower_mult = 0.9 if btc_momentum_override_active else 1.0
-            upper_mult = 1.6 if btc_momentum_override_active else 2.2
-            desired_min = lower_mult * atr5_val
-            desired_max = upper_mult * atr5_val
+        if asset == "BTCUSD" and (atr5_val > 0 or (atr1h is not None and atr1h > 0)):
+            atr_basis = float(atr1h) if (atr1h is not None and atr1h > 0) else float(atr5_val)
+            lower_mult = (0.9 if btc_momentum_override_active else 1.0) * mode_scale
+            upper_mult = (1.6 if btc_momentum_override_active else 2.2) * mode_scale
+            desired_min = lower_mult * atr_basis
+            desired_max = upper_mult * atr_basis
             target_risk = risk
             if risk < desired_min:
                 target_risk = desired_min
@@ -13040,8 +13079,9 @@ def analyze(asset: str) -> Dict[str, Any]:
                     tp2 = entry - tp2_mult * risk
                     tp1_dist = entry - tp1
                     ok_math = (tp2 <= tp1 < entry < sl)
-                risk_ratio = target_risk / atr5_val if atr5_val else 0.0
-                adjust_note = f"BTC ATR stop igazítás: kockázat ×{risk_ratio:.2f}"
+                risk_ratio = target_risk / atr_basis if atr_basis else 0.0
+                source_label = "ATR1h" if atr1h is not None and atr1h > 0 else "ATR5m"
+                adjust_note = f"BTC {source_label} stop igazítás: kockázat ×{risk_ratio:.2f}"
                 if adjust_note not in reasons:
                     reasons.append(adjust_note)
 
@@ -15822,6 +15862,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
