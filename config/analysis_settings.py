@@ -129,6 +129,24 @@ def _build_session_time_rules(raw: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 def load_config(path: Optional[str] = None) -> Dict[str, Any]:
     """Return a validated analysis configuration dictionary."""
     raw = _load_raw_config(path)
+    entry_logic = raw.get("entry_logic")
+    if isinstance(entry_logic, dict):
+        tp_min_profit_pct = entry_logic.get("tp_min_profit_pct")
+        if tp_min_profit_pct is not None:
+            try:
+                tp_min_profit_pct = float(tp_min_profit_pct)
+            except (TypeError, ValueError):
+                tp_min_profit_pct = None
+        if tp_min_profit_pct is not None:
+            tp_min_pct_cfg = raw.get("tp_min_pct")
+            if isinstance(tp_min_pct_cfg, dict):
+                tp_min_pct_cfg.setdefault("default", tp_min_profit_pct)
+            elif tp_min_pct_cfg is None:
+                raw["tp_min_pct"] = {"default": tp_min_profit_pct}
+            else:
+                LOGGER.warning(
+                    "Ignoring entry_logic tp_min_profit_pct override; tp_min_pct is not a mapping"
+                )
 
     assets = raw.get("assets")
     if not isinstance(assets, list) or not assets:
