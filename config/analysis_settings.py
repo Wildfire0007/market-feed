@@ -919,6 +919,14 @@ def _load_asset_entry_profile_map() -> Dict[str, str]:
     
 _ENV_PROFILE = os.getenv("ENTRY_THRESHOLD_PROFILE")
 _ENV_ACTIVE_PROFILE = os.getenv("ACTIVE_ENTRY_PROFILE")
+_TRADING_MODE = os.getenv("TRADING_MODE", "").strip().lower()
+_MODE_PROFILE_MAP = {
+    "day": "day",
+    "day_trading": "day",
+    "swing": "swing",
+    "swing_trading": "swing",
+}
+_ENV_MODE_PROFILE = _MODE_PROFILE_MAP.get(_TRADING_MODE)
 _CFG_ACTIVE_PROFILE = _get_config_value("active_entry_threshold_profile")
 _CFG_WEEKDAY_PROFILE = _get_config_value("weekday_entry_threshold_profile")
 _ENTRY_PROFILE_SCHEDULE = _get_config_value("entry_profile_schedule_by_tod") or {}
@@ -937,7 +945,8 @@ def _weekday_profile_candidate() -> Optional[str]:
 
 
 _ACTIVE_PROFILE_NAME = (
-    _ENV_ACTIVE_PROFILE
+    _ENV_MODE_PROFILE
+    or _ENV_ACTIVE_PROFILE
     or _ENV_PROFILE
     or _weekday_profile_candidate()
     or (_CFG_ACTIVE_PROFILE if isinstance(_CFG_ACTIVE_PROFILE, str) else None)
