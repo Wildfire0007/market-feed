@@ -139,6 +139,7 @@ def check_and_notify():
 
         should_notify = False
         embed = {}
+        notify_payload = data.get("notify") if isinstance(data, dict) else None
 
         # ---------------------------
         # 1. MARKET SIGNAL
@@ -213,6 +214,11 @@ def check_and_notify():
                     ],
                     "footer": {"text": f"Limit Order • {asset_name} • 'Set & Forget' Mód"}
                 }
+
+        if isinstance(notify_payload, dict) and notify_payload.get("should_notify") is False:
+            reason = notify_payload.get("reason")
+            print(f" -> BLOKKOLVA: {asset_name} ({reason})")
+            should_notify = False
 
         if should_notify:
             print(f" -> KÜLDÉS: {asset_name}")
