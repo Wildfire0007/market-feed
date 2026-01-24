@@ -26,6 +26,9 @@ except ImportError:
 
 # --- KONFIGURÁCIÓ ---
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+SNIPER_MIN_P_SCORE = 35.0
+SNIPER_RR_REQUIRED = 2.0
+SNIPER_TP_MIN_PROFIT_PCT = 0.0035
 
 # --- MAPPÁK ---
 BASE_DIR = Path(__file__).resolve().parent
@@ -68,6 +71,12 @@ def format_price(price):
         return f"{p:.5f}"
     except: return str(price)
 
+def safe_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
 def get_budapest_time(utc_iso_string):
     if not utc_iso_string or utc_iso_string == "-": return "N/A"
     try:
@@ -108,6 +117,7 @@ def check_and_notify():
 
         signal = data.get("signal", "no entry")
         prob = data.get("probability", 0)
+        prob_raw = data.get("probability_raw")
         spot_obj = data.get("spot", {})
         spot_price = spot_obj.get("price")
         bp_time = get_budapest_time(spot_obj.get("utc"))
@@ -146,6 +156,25 @@ def check_and_notify():
             p_score = pg.get("score", 0)
             p_threshold = pg.get("threshold", 0)
         except: pass
+        effective_thresholds = data.get("effective_thresholds", {})
+        if not isinstance(effective_thresholds, dict):
+            effective_thresholds = {}
+        sniper_guard_reasons = []
+        prob_raw_value = safe_float(prob_raw)
+        if prob_raw_value is None or prob_raw_value < SNIPER_MIN_P_SCORE:
+            sniper_guard_reasons.append("P-score < 35")
+        rr_required = safe_float(effective_thresholds.get("rr_required"))
+        if rr_required is None or rr_required < SNIPER_RR_REQUIRED:
+            sniper_guard_reasons.append("RR < 2.0")
+        tp_min_profit_pct = safe_float(effective_thresholds.get("tp_min_profit_pct"))
+        if tp_min_profit_pct is None or tp_min_profit_pct < SNIPER_TP_MIN_PROFIT_PCT:
+            sniper_guard_reasons.append("TP min profit < 0.35%")
+        tp_net_min = safe_float(effective_thresholds.get("tp_net_min"))
+        if tp_net_min is None or tp_net_min < SNIPER_TP_MIN_PROFIT_PCT:
+            sniper_guard_reasons.append("TP net min < 0.35%")
+        if sniper_guard_reasons:
+            print(f"{asset_name}: Sniper guard blokkolta: {', '.join(sniper_guard_reasons)}")
+            continue
 
         should_notify = False
         embed = {}
