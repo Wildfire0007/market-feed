@@ -1111,6 +1111,9 @@ FIB_TOL = 0.02
 # --- Kereskedési/egz. küszöbök (RR/TP) ---
 MIN_R_CORE      = 2.0
 MIN_R_MOMENTUM  = 1.6
+SNIPER_MIN_P_SCORE = 35.0
+SNIPER_RR_REQUIRED = 2.0
+SNIPER_TP_MIN_PROFIT_PCT = 0.0035
 
 # --- EURUSD-specifikus volatilitási paraméterek ----------------------------
 EURUSD_PIP = 0.0001
@@ -11754,6 +11757,15 @@ def analyze(asset: str) -> Dict[str, Any]:
         entry_thresholds_meta["p_score_min_intervention_add"] = INTERVENTION_P_SCORE_ADD
     entry_thresholds_meta["bias_meta"] = meta_bias
     entry_thresholds_meta["bias_micro"] = micro_bias
+    sniper_guard: Dict[str, Any] = {}
+    if p_score_min_local is not None and p_score_min_local < SNIPER_MIN_P_SCORE:
+        p_score_min_local = SNIPER_MIN_P_SCORE
+        sniper_guard["p_score_min"] = SNIPER_MIN_P_SCORE
+        note = "Mesterlövész mód: P-score minimum 35 érvényesítve"
+        if note not in reasons:
+            reasons.append(note)
+    if sniper_guard:
+        entry_thresholds_meta["sniper_guard"] = sniper_guard
     if intraday_p_score_relax is not None:
         entry_thresholds_meta["p_score_intraday_relax"] = intraday_p_score_relax
     entry_thresholds_meta["p_score_min_effective"] = p_score_min_local
@@ -12901,7 +12913,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         current_tp1_mult = tp1_mult
         current_tp2_mult = tp2_mult
         atr5_val  = float(atr5 or 0.0)
-        rr_required_effective = rr_required
+        rr_required_effective = max(float(rr_required), SNIPER_RR_REQUIRED)
         profile_name = ENTRY_THRESHOLD_PROFILE_NAME
         mode_scale = 1.0
         if profile_name == "day":
@@ -13141,7 +13153,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 "risk_abs": risk_val,
                 "tp1_mult": float(tp1_mult),
                 "tp2_mult": float(tp2_mult),
-                "rr_required": float(rr_required),
+                "rr_required": float(rr_required_effective),
             }
             btc_sl_tp_checks(
                 profile_used,
@@ -13150,7 +13162,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 entry_val,
                 sl_val,
                 tp1_val,
-                float(rr_required),
+                float(rr_required_effective),
                 info_payload,
                 btc_level_blockers,
             )
@@ -13173,11 +13185,16 @@ def analyze(asset: str) -> Dict[str, Any]:
         tp_min_pct = tp_min_base
         if low_atr_tp_override is not None:
             tp_min_pct = min(tp_min_base, low_atr_tp_override)
+        if tp_min_pct < SNIPER_TP_MIN_PROFIT_PCT:
+            tp_min_pct = SNIPER_TP_MIN_PROFIT_PCT
+            note = "Mesterlövész mód: TP minimum profit 0.35% érvényesítve"
+            if note not in reasons:
+                reasons.append(note)
         if low_atr_meta:
             entry_thresholds_meta.setdefault("low_atr_override", {}).update(
                 {
                     "tp_min_pct_effective": tp_min_pct,
-                    "rr_required_effective": rr_required,
+                    "rr_required_effective": rr_required_effective,
                 }
             )
         tp_min_profit_pct = tp_min_pct
@@ -13196,9 +13213,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             atr5_min_mult * atr5_val,
         )
 
-        if (not ok_math) or (rr is None) or (rr < rr_required) or (tp1_dist < min_profit_abs) or (net_pct < tp_net_threshold):
-            if rr is None or rr < rr_required:
-                missing.append(f"rr_math>={rr_required:.1f}")
+        if (not ok_math) or (rr is None) or (rr < rr_required_effective) or (tp1_dist < min_profit_abs) or (net_pct < tp_net_threshold):
+            if rr is None or rr < rr_required_effective:
+                missing.append(f"rr_math>={rr_required_effective:.1f}")
             if tp1_dist < min_profit_abs:
                 missing.append("tp_min_profit")
             if net_pct < tp_net_threshold:
@@ -15862,6 +15879,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
