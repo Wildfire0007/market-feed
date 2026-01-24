@@ -111,6 +111,7 @@ def check_and_notify():
         spot_obj = data.get("spot", {})
         spot_price = spot_obj.get("price")
         bp_time = get_budapest_time(spot_obj.get("utc"))
+        time_label = bp_time or "N/A"
         
         atr = 0
         try: atr = data.get("intervention_watch", {}).get("metrics", {}).get("atr5_usd", 0)
@@ -122,6 +123,15 @@ def check_and_notify():
         # Trend (Bias)
         bias_4h = data.get("biases", {}).get("adjusted_4h", "neutral")
         trend_display = get_trend_icon(bias_4h)
+        bias_label = str(bias_4h or "").lower()
+        if any(token in bias_label for token in ("choppy", "range", "neutral")):
+            prev_side = data.get("position_state", {}).get("side")
+            if not prev_side:
+                prev_side = data.get("active_position_meta", {}).get("anchor_side")
+            prev_map = {"long": "BUY", "short": "SELL", "buy": "BUY", "sell": "SELL"}
+            prev_signal = prev_map.get(str(prev_side or "").lower())
+            if prev_signal:
+                trend_display = f"{trend_display}\n↩️ Előző jel: {prev_signal}"
         
         # Okok (Reasons) - Csak az első 3
         reasons_list = data.get("reasons", [])
@@ -148,7 +158,7 @@ def check_and_notify():
             should_notify = True
             is_buy = (signal == "buy")
             embed = {
-                "title": f"{ICON_BUY_MARKET if is_buy else ICON_SELL_MARKET} MARKET {'BUY' if is_buy else 'SELL'}: {asset_name}",
+                "title": f"{ICON_BUY_MARKET if is_buy else ICON_SELL_MARKET} MARKET {'BUY' if is_buy else 'SELL'}: {asset_name} • {time_label}",
                 "description": f"**VÉGREHAJTÁS AZONNAL!**\n\n**Miért?**\n{reasons_display}",
                 "color": COLOR_GREEN if is_buy else COLOR_RED,
                 "fields": [
@@ -193,10 +203,10 @@ def check_and_notify():
                 except: pass
 
                 if direction == "buy":
-                    title_text = f"{ICON_BUY_LIMIT} LIMIT BUY: {asset_name}"
+                    title_text = f"{ICON_BUY_LIMIT} LIMIT BUY: {asset_name} • {time_label}"
                     color_code = COLOR_BLUE
                 else:
-                    title_text = f"{ICON_SELL_LIMIT} LIMIT SELL: {asset_name}"
+                    title_text = f"{ICON_SELL_LIMIT} LIMIT SELL: {asset_name} • {time_label}"
                     color_code = COLOR_ORANGE
 
                 embed = {
@@ -214,6 +224,11 @@ def check_and_notify():
                     ],
                     "footer": {"text": f"Limit Order • {asset_name} • 'Set & Forget' Mód"}
                 }
+                
+        if isinstance(notify_payload, dict) and notify_payload.get("should_notify") is False:
+            reason = notify_payload.get("reason")
+            print(f" -> BLOKKOLVA: {asset_name} ({reason})")
+            should_notify = False
 
         if isinstance(notify_payload, dict) and notify_payload.get("should_notify") is False:
             reason = notify_payload.get("reason")
