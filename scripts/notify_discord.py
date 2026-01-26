@@ -179,6 +179,7 @@ def check_and_notify():
         should_notify = False
         embed = {}
         notify_payload = data.get("notify") if isinstance(data, dict) else None
+        allow_limit_override = False
 
         # ---------------------------
         # 1. MARKET SIGNAL
@@ -225,11 +226,20 @@ def check_and_notify():
                         sl_val, tp1_val, tp2_val = calculate_fallback_levels(limit_price, atr, direction)
 
                 rr_display = "N/A"
+                rr_value = None
                 try:
                     risk = abs(limit_price - sl_val)
                     reward = abs(tp1_val - limit_price)
-                    if risk > 0: rr_display = f"1:{reward/risk:.1f}"
+                    if risk > 0:
+                        rr_value = reward / risk
+                        rr_display = f"1:{rr_value:.1f}"
                 except: pass
+
+                rr_min = safe_float(effective_thresholds.get("rr_required"))
+                if rr_min is None:
+                    rr_min = SNIPER_RR_REQUIRED
+                min_score = p_threshold or safe_float(plan.get("score_threshold")) or 0
+                allow_limit_override = rr_value is not None and rr_value >= rr_min and p_score >= min_score
 
                 if direction == "buy":
                     title_text = f"{ICON_BUY_LIMIT} LIMIT BUY: {asset_name} • {time_label}"
@@ -254,12 +264,12 @@ def check_and_notify():
                     "footer": {"text": f"Limit Order • {asset_name} • 'Set & Forget' Mód"}
                 }
                 
-        if isinstance(notify_payload, dict) and notify_payload.get("should_notify") is False:
+        if isinstance(notify_payload, dict) and notify_payload.get("should_notify") is False and not allow_limit_override:
             reason = notify_payload.get("reason")
             print(f" -> BLOKKOLVA: {asset_name} ({reason})")
             should_notify = False
 
-        if isinstance(notify_payload, dict) and notify_payload.get("should_notify") is False:
+        if isinstance(notify_payload, dict) and notify_payload.get("should_notify") is False and not allow_limit_override:
             reason = notify_payload.get("reason")
             print(f" -> BLOKKOLVA: {asset_name} ({reason})")
             should_notify = False
