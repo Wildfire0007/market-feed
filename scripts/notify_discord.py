@@ -161,6 +161,8 @@ def check_and_notify():
             effective_thresholds = {}
         sniper_guard_reasons = []
         prob_raw_value = safe_float(prob_raw)
+        if prob_raw_value is None:
+            prob_raw_value = safe_float(p_score)
         if prob_raw_value is None or prob_raw_value < SNIPER_MIN_P_SCORE:
             sniper_guard_reasons.append("P-score < 35")
         rr_required = safe_float(effective_thresholds.get("rr_required"))
