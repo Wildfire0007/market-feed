@@ -63,7 +63,7 @@ def _load_recent_journal_entries() -> List[Dict[str, str]]:
     if not journal_path.exists():
         return []
 
-    with journal_path.open(newline="", encoding="utf-8") as handle:
+    with journal_path.open(newline="", encoding="utf-8", errors="replace") as handle:
         reader = list(csv.DictReader(handle))
 
     if ENTRY_LOOKBACK > 0:
