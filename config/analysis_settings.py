@@ -132,22 +132,109 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
     entry_logic = raw.get("entry_logic")
     if isinstance(entry_logic, dict):
         tp_min_profit_pct = entry_logic.get("tp_min_profit_pct")
-        if tp_min_profit_pct is not None:
+        if isinstance(tp_min_profit_pct, dict):
+            tp_min_pct_cfg = raw.get("tp_min_pct")
+            if not isinstance(tp_min_pct_cfg, dict):
+                tp_min_pct_cfg = {}
+            for asset, value in tp_min_profit_pct.items():
+                try:
+                    tp_override = float(value)
+                except (TypeError, ValueError):
+                    continue
+                asset_key = str(asset).upper()
+                existing = tp_min_pct_cfg.get(asset_key)
+                if existing is None:
+                    existing = tp_min_pct_cfg.get("default")
+                tp_min_pct_cfg[asset_key] = (
+                    max(float(existing), tp_override)
+                    if existing is not None
+                    else tp_override
+                )
+            raw["tp_min_pct"] = tp_min_pct_cfg
+        elif tp_min_profit_pct is not None:
             try:
                 tp_min_profit_pct = float(tp_min_profit_pct)
             except (TypeError, ValueError):
                 tp_min_profit_pct = None
-        if tp_min_profit_pct is not None:
-            tp_min_pct_cfg = raw.get("tp_min_pct")
-            if isinstance(tp_min_pct_cfg, dict):
-                tp_min_pct_cfg.setdefault("default", tp_min_profit_pct)
-            elif tp_min_pct_cfg is None:
-                raw["tp_min_pct"] = {"default": tp_min_profit_pct}
-            else:
-                LOGGER.warning(
-                    "Ignoring entry_logic tp_min_profit_pct override; tp_min_pct is not a mapping"
-                )
+            if tp_min_profit_pct is not None:
+                tp_min_pct_cfg = raw.get("tp_min_pct")
+                if isinstance(tp_min_pct_cfg, dict):
+                    tp_min_pct_cfg.setdefault("default", tp_min_profit_pct)
+                elif tp_min_pct_cfg is None:
+                    raw["tp_min_pct"] = {"default": tp_min_profit_pct}
+                else:
+                    LOGGER.warning(
+                        "Ignoring entry_logic tp_min_profit_pct override; tp_min_pct is not a mapping"
+                    )
 
+        min_stoploss_pct = entry_logic.get("min_stoploss_pct")
+        if isinstance(min_stoploss_pct, dict):
+            sl_cfg = raw.get("min_stoploss_pct")
+            if not isinstance(sl_cfg, dict):
+                sl_cfg = {}
+            for asset, value in min_stoploss_pct.items():
+                try:
+                    sl_override = float(value)
+                except (TypeError, ValueError):
+                    continue
+                asset_key = str(asset).upper()
+                existing = sl_cfg.get(asset_key)
+                if existing is None:
+                    existing = sl_cfg.get("default")
+                sl_cfg[asset_key] = (
+                    max(float(existing), sl_override)
+                    if existing is not None
+                    else sl_override
+                )
+            raw["min_stoploss_pct"] = sl_cfg
+
+        spread_override = entry_logic.get("spread_max_atr_pct")
+        if isinstance(spread_override, dict):
+            spread_cfg = raw.get("spread_max_atr_pct")
+            if not isinstance(spread_cfg, dict):
+                spread_cfg = {}
+            for asset, value in spread_override.items():
+                try:
+                    sp_override = float(value)
+                except (TypeError, ValueError):
+                    continue
+                asset_key = str(asset).upper()
+                existing = spread_cfg.get(asset_key)
+                if existing is None:
+                    existing = spread_cfg.get("default")
+                spread_cfg[asset_key] = (
+                    max(float(existing), sp_override)
+                    if existing is not None
+                    else sp_override
+                )
+            raw["spread_max_atr_pct"] = spread_cfg
+
+        p_score_override = entry_logic.get("p_score_min")
+        if isinstance(p_score_override, dict):
+            profile_name = str(raw.get("active_entry_threshold_profile") or "").strip()
+            profiles = raw.get("entry_threshold_profiles")
+            if profile_name and isinstance(profiles, dict):
+                profile_cfg = profiles.get(profile_name)
+                if isinstance(profile_cfg, dict):
+                    score_cfg = profile_cfg.get("p_score_min")
+                    if not isinstance(score_cfg, dict):
+                        score_cfg = {}
+                    for asset, value in p_score_override.items():
+                        try:
+                            score_override = float(value)
+                        except (TypeError, ValueError):
+                            continue
+                        asset_key = str(asset).upper()
+                        existing = score_cfg.get(asset_key)
+                        if existing is None:
+                            existing = score_cfg.get("default")
+                        score_cfg[asset_key] = (
+                            min(float(existing), score_override)
+                            if existing is not None
+                            else score_override
+                        )
+                    profile_cfg["p_score_min"] = score_cfg
+                    
     assets = raw.get("assets")
     if not isinstance(assets, list) or not assets:
         raise AnalysisConfigError("Config must define a non-empty 'assets' list")
@@ -1317,6 +1404,12 @@ TP_NET_MIN_DEFAULT: float = float(_get_config_value("tp_net_min_default") or 0.0
 TP_NET_MIN_ASSET: Dict[str, float] = dict(_get_config_value("tp_net_min") or {})
 TP_MIN_PCT: Dict[str, float] = dict(_get_config_value("tp_min_pct") or {})
 TP_MIN_ABS: Dict[str, float] = dict(_get_config_value("tp_min_abs") or {})
+MIN_STOPLOSS_PCT_DEFAULT: float = float(
+    _get_config_value("min_stoploss_pct_default") or 0.01
+)
+MIN_STOPLOSS_PCT_ASSET: Dict[str, float] = dict(
+    _get_config_value("min_stoploss_pct") or {}
+)
 SL_BUFFER_RULES: Dict[str, Any] = dict(_get_config_value("sl_buffer_rules") or {})
 RISK_TEMPLATES: Dict[str, Dict[str, Any]] = _normalize_risk_templates(
     _get_config_value("risk_templates")
@@ -1697,6 +1790,12 @@ def get_tp_min_pct_value(asset: str, profile: Optional[str] = None) -> float:
                 "Invalid tp_min_pct %r in risk template for %s", template_value, asset
             )
     return float(TP_MIN_PCT.get(asset, TP_MIN_PCT.get("default", 0.0)))
+
+
+def get_min_stoploss_pct(asset: str) -> float:
+    """Return the configured minimum stop-loss percentage for ``asset``."""
+
+    return float(MIN_STOPLOSS_PCT_ASSET.get(asset, MIN_STOPLOSS_PCT_DEFAULT))
 
 
 def get_tp_min_abs_value(asset: str, profile: Optional[str] = None) -> float:
