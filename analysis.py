@@ -326,9 +326,10 @@ from config.analysis_settings import (
     get_fib_tolerance,
     get_max_slippage_r,
     get_max_risk_pct,
+    get_min_stoploss_pct,
     get_p_score_min,
     get_realtime_price_guard,
-    get_sl_buffer_config,
+    get_sl_buffer_config, 
     get_spread_max_atr_pct,
     get_low_atr_override,
     get_tp_min_abs_value,
@@ -12872,7 +12873,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     profile_slippage_limit = get_max_slippage_r(asset)
     rr_required_effective: Optional[float] = None
     tp_min_profit_pct: Optional[float] = None
-    min_stoploss_pct = MIN_STOPLOSS_PCT
+    min_stoploss_pct = get_min_stoploss_pct(asset)
 
     def compute_slippage_state(decision_side: str, limit_r: Optional[float]) -> Optional[Dict[str, float]]:
         if (
@@ -13099,7 +13100,7 @@ def analyze(asset: str) -> Dict[str, Any]:
 
         risk_min = max(
             MIN_RISK_ABS.get(asset, MIN_RISK_ABS["default"]),
-            entry * MIN_STOPLOSS_PCT,
+            entry * min_stoploss_pct,
             buf,
         )
         if risk < risk_min:
@@ -13111,7 +13112,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 risk = sl - entry
 
         risk = max(risk, 1e-6)
-        min_stop_distance = entry * MIN_STOPLOSS_PCT
+        min_stop_distance = entry * min_stoploss_pct
         if asset == "EURUSD":
             min_stop_distance = 10 * EURUSD_PIP
         min_stoploss_ok_local = risk >= min_stop_distance - 1e-9
@@ -15879,6 +15880,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
