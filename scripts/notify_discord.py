@@ -29,6 +29,8 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 SNIPER_MIN_P_SCORE = 35.0
 SNIPER_RR_REQUIRED = 2.0
 SNIPER_TP_MIN_PROFIT_PCT = 0.0035
+LIMIT_TO_MARKET_DISTANCE_PCT = 0.0005
+MIN_TP_ENTRY_PCT = 0.003
 
 # --- MAPPÁK ---
 BASE_DIR = Path(__file__).resolve().parent
@@ -96,6 +98,15 @@ def calculate_fallback_levels(entry_price, atr, direction):
     else:
         return entry + stop_dist, entry - tp1_dist, entry - tp2_dist
 
+def calculate_tp_profit_pct(entry_price, tp1_price, direction):
+    entry_val = safe_float(entry_price)
+    tp1_val = safe_float(tp1_price)
+    if entry_val is None or tp1_val is None or entry_val == 0:
+        return None
+    if direction == "sell":
+        return (entry_val - tp1_val) / entry_val
+    return (tp1_val - entry_val) / entry_val
+    
 def get_trend_icon(bias_str):
     if not bias_str: return "⚪"
     b = bias_str.lower()
@@ -187,6 +198,10 @@ def check_and_notify():
         # 1. MARKET SIGNAL
         # ---------------------------
         if signal in ["buy", "sell"]:
+            tp_profit_pct = calculate_tp_profit_pct(spot_price, data.get("tp1"), signal)
+            if tp_profit_pct is not None and tp_profit_pct < MIN_TP_ENTRY_PCT:
+                print(f"{asset_name}: TP-profit < 0.30%, jelzés eldobva.")
+                continue
             should_notify = True
             is_buy = (signal == "buy")
             embed = {
@@ -199,7 +214,8 @@ def check_and_notify():
                     {"name": "⚙️ Setup", "value": f"Kar: `x{leverage}`\nScore: `{p_score}/{p_threshold}`", "inline": True},
                     
                     {"name": "🛑 STOP LOSS", "value": f"`{format_price(data.get('sl'))}`", "inline": True},
-                    {"name": "🎯 CÉLÁRAK (TP)", "value": f"TP1: `{format_price(data.get('tp1'))}`\nTP2: `{format_price(data.get('tp2'))}`", "inline": True}
+                    {"name": "🎯 TP (PROFIT)", "value": f"TP1: `{format_price(data.get('tp1'))}`\nTP2: `{format_price(data.get('tp2'))}`", "inline": True},
+                    {"name": "Trend (Bias)", "value": trend_display, "inline": True}                
                 ],
                 "footer": {"text": f"Market Order • {asset_name} • Kockázatkezelés: Kötelező!"}
             }
@@ -243,34 +259,45 @@ def check_and_notify():
                 min_score = p_threshold or safe_float(plan.get("score_threshold")) or 0
                 allow_limit_override = rr_value is not None and rr_value >= rr_min and p_score >= min_score
 
+                spot_val = safe_float(spot_price)
+                limit_val = safe_float(limit_price)
+                use_market = False
+                if spot_val is not None and limit_val is not None and spot_val > 0:
+                    distance_pct = abs(limit_val - spot_val) / spot_val
+                    use_market = distance_pct < LIMIT_TO_MARKET_DISTANCE_PCT
+
+                entry_for_filter = limit_val if limit_val is not None else spot_val
+                tp_profit_pct = calculate_tp_profit_pct(entry_for_filter, tp1_val, direction)
+                if tp_profit_pct is not None and tp_profit_pct < MIN_TP_ENTRY_PCT:
+                    print(f"{asset_name}: TP-profit < 0.30%, jelzés eldobva.")
+                    continue
+
                 if direction == "buy":
-                    title_text = f"{ICON_BUY_LIMIT} LIMIT BUY: {asset_name} • {time_label}"
-                    color_code = COLOR_BLUE
+                    title_text = f"{ICON_BUY_MARKET if use_market else ICON_BUY_LIMIT} {'MARKET' if use_market else 'LIMIT'} BUY: {asset_name} • {time_label}"
+                    color_code = COLOR_GREEN if use_market else COLOR_BLUE
                 else:
-                    title_text = f"{ICON_SELL_LIMIT} LIMIT SELL: {asset_name} • {time_label}"
-                    color_code = COLOR_ORANGE
+                    title_text = f"{ICON_SELL_MARKET if use_market else ICON_SELL_LIMIT} {'MARKET' if use_market else 'LIMIT'} SELL: {asset_name} • {time_label}"
+                    color_code = COLOR_RED if use_market else COLOR_ORANGE
 
                 embed = {
                     "title": title_text,
-                    "description": f"**LIMIT MEGBÍZÁS ELHELYEZÉSE!**\n(Visszateszt Zóna)\n\n**Miért?**\n{reasons_display}",
+                    "description": (
+                        "**AZONNALI BELÉPÉS!**" if use_market
+                        else "**LIMIT MEGBÍZÁS ELHELYEZÉSE!**\n(Visszateszt Zóna)"
+                    ) + f"\n\n**Miért?**\n{reasons_display}",    
                     "color": color_code,
                     "fields": [
-                        {"name": "🔵 Limit Ár (Entry)", "value": f"`{format_price(limit_price)}`", "inline": False},
+                        {"name": "Belépő (Entry)", "value": f"`{format_price(spot_val if use_market else limit_price)}`", "inline": False},
                         {"name": "🛑 STOP LOSS", "value": f"`{format_price(sl_val)}`", "inline": True},
-                        {"name": "🎯 CÉLÁRAK (TP)", "value": f"TP1: `{format_price(tp1_val)}`\nTP2: `{format_price(tp2_val)}`", "inline": True},
+                        {"name": "🎯 TP (PROFIT)", "value": f"TP1: `{format_price(tp1_val)}`\nTP2: `{format_price(tp2_val)}`", "inline": True},
                         
                         {"name": "Jelenlegi Ár", "value": f"{format_price(spot_price)}\n🕒 {bp_time}", "inline": True},
                         {"name": "Minőség", "value": f"Score: `{p_score}`\nR/R: `{rr_display}`", "inline": True},
-                        {"name": "Trend", "value": f"{trend_display}", "inline": True}
+                        {"name": "Trend (Bias)", "value": f"{trend_display}", "inline": True}
                     ],
-                    "footer": {"text": f"Limit Order • {asset_name} • 'Set & Forget' Mód"}
+                    "footer": {"text": f"{'Market' if use_market else 'Limit'} Order • {asset_name} • 'Set & Forget' Mód"}
                 }
                 
-        if isinstance(notify_payload, dict) and notify_payload.get("should_notify") is False and not allow_limit_override:
-            reason = notify_payload.get("reason")
-            print(f" -> BLOKKOLVA: {asset_name} ({reason})")
-            should_notify = False
-
         if isinstance(notify_payload, dict) and notify_payload.get("should_notify") is False and not allow_limit_override:
             reason = notify_payload.get("reason")
             print(f" -> BLOKKOLVA: {asset_name} ({reason})")
