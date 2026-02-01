@@ -106,6 +106,26 @@ def calculate_tp_profit_pct(entry_price, tp1_price, direction):
     if direction == "sell":
         return (entry_val - tp1_val) / entry_val
     return (tp1_val - entry_val) / entry_val
+
+def format_exit_actions(actions):
+    if not actions:
+        return "n/a"
+    labels = []
+    for action in actions:
+        action_type = str(action.get("type") or "").lower()
+        if action_type == "close":
+            labels.append("Teljes zárás")
+        elif action_type == "scale_out":
+            size = safe_float(action.get("size"))
+            if size is not None:
+                labels.append(f"Részleges zárás ({size * 100:.0f}%)")
+            else:
+                labels.append("Részleges zárás")
+        elif action_type == "tighten_stop":
+            labels.append("SL szűkítés")
+    if not labels:
+        return "n/a"
+    return "\n".join(f"• {label}" for label in labels)
     
 def get_trend_icon(bias_str):
     if not bias_str: return "⚪"
@@ -127,6 +147,9 @@ def check_and_notify():
         if not data: continue
 
         signal = data.get("signal", "no entry")
+        exit_signal = data.get("position_exit_signal")
+        if not exit_signal:
+            exit_signal = data.get("active_position_meta", {}).get("exit_signal")
         prob = data.get("probability", 0)
         prob_raw = data.get("probability_raw")
         spot_obj = data.get("spot", {})
@@ -170,29 +193,31 @@ def check_and_notify():
         effective_thresholds = data.get("effective_thresholds", {})
         if not isinstance(effective_thresholds, dict):
             effective_thresholds = {}
-        sniper_guard_reasons = []
-        prob_raw_value = safe_float(prob_raw)
-        if prob_raw_value is None:
-            prob_raw_value = safe_float(p_score)
-        if prob_raw_value is None or prob_raw_value < SNIPER_MIN_P_SCORE:
-            sniper_guard_reasons.append("P-score < 35")
-        rr_required = safe_float(effective_thresholds.get("rr_required"))
-        if rr_required is None or rr_required < SNIPER_RR_REQUIRED:
-            sniper_guard_reasons.append("RR < 2.0")
-        tp_min_profit_pct = safe_float(effective_thresholds.get("tp_min_profit_pct"))
-        if tp_min_profit_pct is None or tp_min_profit_pct < SNIPER_TP_MIN_PROFIT_PCT:
-            sniper_guard_reasons.append("TP min profit < 0.35%")
-        tp_net_min = safe_float(effective_thresholds.get("tp_net_min"))
-        if tp_net_min is None or tp_net_min < SNIPER_TP_MIN_PROFIT_PCT:
-            sniper_guard_reasons.append("TP net min < 0.35%")
-        if sniper_guard_reasons:
-            print(f"{asset_name}: Sniper guard blokkolta: {', '.join(sniper_guard_reasons)}")
-            continue
-
         should_notify = False
         embed = {}
         notify_payload = data.get("notify") if isinstance(data, dict) else None
         allow_limit_override = False
+        is_entry_signal = signal in ["buy", "sell", "precision_arming"]
+
+        if is_entry_signal:
+            sniper_guard_reasons = []
+            prob_raw_value = safe_float(prob_raw)
+            if prob_raw_value is None:
+                prob_raw_value = safe_float(p_score)
+            if prob_raw_value is None or prob_raw_value < SNIPER_MIN_P_SCORE:
+                sniper_guard_reasons.append("P-score < 35")
+            rr_required = safe_float(effective_thresholds.get("rr_required"))
+            if rr_required is None or rr_required < SNIPER_RR_REQUIRED:
+                sniper_guard_reasons.append("RR < 2.0")
+            tp_min_profit_pct = safe_float(effective_thresholds.get("tp_min_profit_pct"))
+            if tp_min_profit_pct is None or tp_min_profit_pct < SNIPER_TP_MIN_PROFIT_PCT:
+                sniper_guard_reasons.append("TP min profit < 0.35%")
+            tp_net_min = safe_float(effective_thresholds.get("tp_net_min"))
+            if tp_net_min is None or tp_net_min < SNIPER_TP_MIN_PROFIT_PCT:
+                sniper_guard_reasons.append("TP net min < 0.35%")
+            if sniper_guard_reasons:
+                print(f"{asset_name}: Sniper guard blokkolta: {', '.join(sniper_guard_reasons)}")
+                continue
 
         # ---------------------------
         # 1. MARKET SIGNAL
@@ -297,7 +322,42 @@ def check_and_notify():
                     ],
                     "footer": {"text": f"{'Market' if use_market else 'Limit'} Order • {asset_name} • 'Set & Forget' Mód"}
                 }
-                
+
+        # ---------------------------
+        # 3. EXIT SIGNAL
+        # ---------------------------
+        elif exit_signal:
+            exit_state = str(exit_signal.get("state") or exit_signal.get("action") or "").lower()
+            exit_actions = exit_signal.get("actions") or []
+            exit_reasons = exit_signal.get("reasons") or []
+            exit_direction = exit_signal.get("direction")
+            state_label = {
+                "hard_exit": "HARD EXIT",
+                "scale_out": "RÉSZLEGES ZÁRÁS",
+                "tighten_stop": "SL SZŰKÍTÉS",
+            }.get(exit_state, "POZÍCIÓ MENEDZSMENT")
+            color_code = (
+                COLOR_RED
+                if exit_state == "hard_exit" or exit_signal.get("action") == "close"
+                else COLOR_ORANGE
+            )
+            reasons_display = "\n".join(
+                [f"• {r}" for r in (exit_reasons[:4] if exit_reasons else ["Nincs részletezve."])]
+            )
+            should_notify = True
+            embed = {
+                "title": f"⚠️ {state_label}: {asset_name} • {time_label}",
+                "description": "**FIGYELMEZTETÉS – Pozíció védelem**",
+                "color": color_code,
+                "fields": [
+                    {"name": "Árfolyam & Idő", "value": f"`{format_price(spot_price)}`\n🕒 {bp_time}", "inline": True},
+                    {"name": "Irány", "value": f"`{str(exit_direction or 'n/a').upper()}`", "inline": True},
+                    {"name": "Akciók", "value": format_exit_actions(exit_actions), "inline": False},
+                    {"name": "Okok", "value": reasons_display, "inline": False},
+                ],
+                "footer": {"text": f"Pozíció menedzsment • {asset_name}"}
+            }
+
         if isinstance(notify_payload, dict) and notify_payload.get("should_notify") is False and not allow_limit_override:
             reason = notify_payload.get("reason")
             print(f" -> BLOKKOLVA: {asset_name} ({reason})")
