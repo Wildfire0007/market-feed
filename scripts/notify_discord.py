@@ -323,12 +323,16 @@ def check_and_notify():
 
                 rr_display = "N/A"
                 rr_value = None
+                limit_val_calc = safe_float(limit_price)
+                sl_val_calc = safe_float(sl_val)
+                tp1_val_calc = safe_float(tp1_val)
                 try:
-                    risk = abs(limit_price - sl_val)
-                    reward = abs(tp1_val - limit_price)
-                    if risk > 0:
-                        rr_value = reward / risk
-                        rr_display = f"1:{rr_value:.1f}"
+                    if None not in (limit_val_calc, sl_val_calc, tp1_val_calc):
+                        risk = abs(limit_val_calc - sl_val_calc)
+                        reward = abs(tp1_val_calc - limit_val_calc)
+                        if risk > 0:
+                            rr_value = reward / risk
+                            rr_display = f"1:{rr_value:.1f}"
                 except: pass
 
                 rr_min = safe_float(effective_thresholds.get("rr_required"))
