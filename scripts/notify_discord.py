@@ -31,6 +31,7 @@ SNIPER_RR_REQUIRED = 2.0
 SNIPER_TP_MIN_PROFIT_PCT = 0.0035
 LIMIT_TO_MARKET_DISTANCE_PCT = 0.0005
 MIN_TP_ENTRY_PCT = 0.003
+EXIT_NOTIFY_COOLDOWN_MINUTES = 10
 
 # --- MAPPÁK ---
 BASE_DIR = Path(__file__).resolve().parent
@@ -57,6 +58,13 @@ def load_json(path):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except: return {}
+
+def save_json(path, payload):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Hiba: {e}")
 
 def send_discord_embed(webhook_url, embed_data):
     if not webhook_url: return
@@ -126,6 +134,45 @@ def format_exit_actions(actions):
     if not labels:
         return "n/a"
     return "\n".join(f"• {label}" for label in labels)
+
+def format_exit_context(exit_signal):
+    if not isinstance(exit_signal, dict):
+        return ""
+    lines = []
+    current_pnl_r = safe_float(exit_signal.get("current_pnl_r"))
+    max_fav_r = safe_float(exit_signal.get("max_favorable_r"))
+    profit_drawdown_ratio = safe_float(exit_signal.get("profit_drawdown_ratio"))
+    if current_pnl_r is not None:
+        lines.append(f"PnL: `{current_pnl_r:+.2f}R`")
+    if max_fav_r is not None:
+        lines.append(f"MFE: `{max_fav_r:.2f}R`")
+    if profit_drawdown_ratio is not None:
+        pct = max(0.0, min(1.0, profit_drawdown_ratio))
+        lines.append(f"Visszaadás: `{pct * 100:.0f}%`")
+    return "\n".join(lines)
+
+def to_utc_iso(dt):
+    return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+def _exit_signature(exit_signal):
+    if not isinstance(exit_signal, dict):
+        return {}
+    actions = []
+    for action in exit_signal.get("actions") or []:
+        if not isinstance(action, dict):
+            continue
+        action_type = str(action.get("type") or "").lower()
+        size = safe_float(action.get("size"))
+        if size is not None:
+            size = round(size, 3)
+        actions.append({"type": action_type, "size": size})
+    reasons = [str(r) for r in (exit_signal.get("reasons") or []) if r]
+    return {
+        "state": str(exit_signal.get("state") or exit_signal.get("action") or "").lower(),
+        "direction": str(exit_signal.get("direction") or "").lower(),
+        "actions": actions,
+        "reasons": reasons[:4],
+    }
     
 def get_trend_icon(bias_str):
     if not bias_str: return "⚪"
@@ -136,6 +183,12 @@ def get_trend_icon(bias_str):
 
 def check_and_notify():
     if not PUBLIC_DIR.exists(): return
+
+    notify_state_path = PUBLIC_DIR / "_notify_state.json"
+    notify_state = load_json(notify_state_path)
+    if not isinstance(notify_state, dict):
+        notify_state = {}
+    notify_state_changed = False
 
     assets = [d for d in PUBLIC_DIR.iterdir() if d.is_dir() and not d.name.startswith("_")]
     
@@ -331,6 +384,8 @@ def check_and_notify():
             exit_actions = exit_signal.get("actions") or []
             exit_reasons = exit_signal.get("reasons") or []
             exit_direction = exit_signal.get("direction")
+            exit_context = format_exit_context(exit_signal)
+            exit_signature = _exit_signature(exit_signal)
             state_label = {
                 "hard_exit": "HARD EXIT",
                 "scale_out": "RÉSZLEGES ZÁRÁS",
@@ -345,6 +400,22 @@ def check_and_notify():
                 [f"• {r}" for r in (exit_reasons[:4] if exit_reasons else ["Nincs részletezve."])]
             )
             should_notify = True
+            now_dt = datetime.now(timezone.utc)
+            asset_state = notify_state.get(asset_name)
+            if not isinstance(asset_state, dict):
+                asset_state = {}
+            last_exit_signature = asset_state.get("last_exit_signature")
+            last_exit_sent_utc = asset_state.get("last_exit_sent_utc")
+            if last_exit_signature == exit_signature and last_exit_sent_utc:
+                try:
+                    last_exit_dt = datetime.fromisoformat(
+                        str(last_exit_sent_utc).replace("Z", "+00:00")
+                    )
+                except Exception:
+                    last_exit_dt = None
+                if last_exit_dt and now_dt - last_exit_dt < timedelta(minutes=EXIT_NOTIFY_COOLDOWN_MINUTES):
+                    should_notify = False
+                    print(f" -> EXIT DEDUP: {asset_name} ({EXIT_NOTIFY_COOLDOWN_MINUTES}m)")
             embed = {
                 "title": f"⚠️ {state_label}: {asset_name} • {time_label}",
                 "description": "**FIGYELMEZTETÉS – Pozíció védelem**",
@@ -353,11 +424,16 @@ def check_and_notify():
                     {"name": "Árfolyam & Idő", "value": f"`{format_price(spot_price)}`\n🕒 {bp_time}", "inline": True},
                     {"name": "Irány", "value": f"`{str(exit_direction or 'n/a').upper()}`", "inline": True},
                     {"name": "Akciók", "value": format_exit_actions(exit_actions), "inline": False},
+                    *(
+                        [{"name": "Kontekstus", "value": exit_context, "inline": False}]
+                        if exit_context
+                        else []
+                    ),
                     {"name": "Okok", "value": reasons_display, "inline": False},
                 ],
                 "footer": {"text": f"Pozíció menedzsment • {asset_name}"}
             }
-
+  
         if isinstance(notify_payload, dict) and notify_payload.get("should_notify") is False and not allow_limit_override:
             reason = notify_payload.get("reason")
             print(f" -> BLOKKOLVA: {asset_name} ({reason})")
@@ -366,6 +442,17 @@ def check_and_notify():
         if should_notify:
             print(f" -> KÜLDÉS: {asset_name}")
             send_discord_embed(DISCORD_WEBHOOK_URL, embed)
+            if exit_signal:
+                asset_state = notify_state.get(asset_name)
+                if not isinstance(asset_state, dict):
+                    asset_state = {}
+                asset_state["last_exit_signature"] = _exit_signature(exit_signal)
+                asset_state["last_exit_sent_utc"] = to_utc_iso(datetime.now(timezone.utc))
+                notify_state[asset_name] = asset_state
+                notify_state_changed = True
 
+    if notify_state_changed:
+        save_json(notify_state_path, notify_state)
+        
 if __name__ == "__main__":
     check_and_notify()
