@@ -14998,9 +14998,6 @@ def analyze(asset: str) -> Dict[str, Any]:
     )
 
     sentiment_exit_summary: Optional[Dict[str, Any]] = None
-    if exit_signal and exit_signal.get("category") == "sentiment_risk":    
-
-    sentiment_exit_summary: Optional[Dict[str, Any]] = None
     if exit_signal and exit_signal.get("category") == "sentiment_risk":
         sentiment_exit_summary = {
             "state": exit_signal.get("state"),
@@ -16039,6 +16036,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
