@@ -14986,6 +14986,19 @@ def analyze(asset: str) -> Dict[str, Any]:
         k1m_closed,
         k5m_closed,
     )
+    # Rövid távú diagnosztika: zárt gyertyákból számolt mikrotrend + TP/SL-ATR viszony.
+    decision_obj["short_term_diagnostics_note_hu"] = (
+        "A rövid távú diagnosztika kizárólag zárt 1m/5m gyertyákat használ; "
+        "nincs look-ahead vagy jövőbeli adat. Ez irány- és kockázat-ellenőrzés, "
+        "nem garantált árfolyam-előrejelzés."
+    )
+    decision_obj["short_term_diagnostics_summary_hu"] = (
+        "Hozzáadott 1m/5m mikrotrend snapshotok, trend- és döntés-illeszkedés, "
+        "TP/SL távolságok és ATR-normalizált viszonyok a döntési payloadban."
+    )
+
+    sentiment_exit_summary: Optional[Dict[str, Any]] = None
+    if exit_signal and exit_signal.get("category") == "sentiment_risk":    
 
     sentiment_exit_summary: Optional[Dict[str, Any]] = None
     if exit_signal and exit_signal.get("category") == "sentiment_risk":
@@ -16026,6 +16039,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
