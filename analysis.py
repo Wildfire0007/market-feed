@@ -6566,6 +6566,142 @@ class VolumeProfile:
 def ema(s: pd.Series, n: int) -> pd.Series:
     return s.ewm(span=n, adjust=False).mean()
 
+
+def _micro_trend_snapshot(
+    df: pd.DataFrame,
+    bars: int = 5,
+    ema_fast: int = 9,
+    ema_slow: int = 21,
+) -> Dict[str, Any]:
+    if df.empty or "close" not in df.columns:
+        return {"status": "missing"}
+
+    closes = df["close"].astype(float)
+    last_close = safe_float(closes.iloc[-1])
+    if last_close is None or not np.isfinite(last_close):
+        return {"status": "invalid_close"}
+
+    if len(closes) < 2:
+        return {"status": "insufficient_bars", "last_close": last_close}
+
+    lookback = max(1, min(int(bars), len(closes) - 1))
+    start_close = safe_float(closes.iloc[-1 - lookback])
+    if start_close is None or not np.isfinite(start_close):
+        start_close = safe_float(closes.iloc[-2])
+
+    delta = None if start_close is None else float(last_close - start_close)
+    if delta is None or abs(delta) < 1e-9:
+        direction = "flat"
+    else:
+        direction = "up" if delta > 0 else "down"
+
+    ema_fast_series = ema(closes, ema_fast)
+    ema_slow_series = ema(closes, ema_slow)
+    ema_fast_val = safe_float(ema_fast_series.iloc[-1]) if not ema_fast_series.empty else None
+    ema_slow_val = safe_float(ema_slow_series.iloc[-1]) if not ema_slow_series.empty else None
+
+    ema_relation = None
+    if ema_fast_val is not None and ema_slow_val is not None:
+        if ema_fast_val > ema_slow_val:
+            ema_relation = "fast_above"
+        elif ema_fast_val < ema_slow_val:
+            ema_relation = "fast_below"
+        else:
+            ema_relation = "equal"
+
+    slope_val = None
+    if len(ema_slow_series) >= 2 and ema_slow_val is not None:
+        prev = safe_float(ema_slow_series.iloc[-2])
+        if prev is not None and np.isfinite(prev):
+            slope_val = float(ema_slow_val - prev)
+
+    if slope_val is None or abs(slope_val) < 1e-9:
+        slope_direction = "flat"
+    else:
+        slope_direction = "up" if slope_val > 0 else "down"
+
+    return {
+        "status": "ok",
+        "last_close": float(last_close),
+        "start_close": float(start_close) if start_close is not None else None,
+        "bars": lookback,
+        "direction": direction,
+        "delta": float(delta) if delta is not None else None,
+        "ema_fast": float(ema_fast_val) if ema_fast_val is not None else None,
+        "ema_slow": float(ema_slow_val) if ema_slow_val is not None else None,
+        "ema_relation": ema_relation,
+        "ema_slow_slope": float(slope_val) if slope_val is not None else None,
+        "ema_slow_slope_direction": slope_direction,
+    }
+
+
+def _build_short_term_diagnostics(
+    decision: str,
+    entry: Optional[float],
+    sl: Optional[float],
+    tp1: Optional[float],
+    atr5: Optional[float],
+    k1m_closed: pd.DataFrame,
+    k5m_closed: pd.DataFrame,
+) -> Dict[str, Any]:
+    k1m_last_closed = df_last_timestamp(k1m_closed)
+    k5m_last_closed = df_last_timestamp(k5m_closed)
+    diag: Dict[str, Any] = {
+        "k1m": _micro_trend_snapshot(k1m_closed, bars=5),
+        "k5m": _micro_trend_snapshot(k5m_closed, bars=3),
+        "k1m_last_closed_utc": to_utc_iso(k1m_last_closed) if k1m_last_closed else None,
+        "k5m_last_closed_utc": to_utc_iso(k5m_last_closed) if k5m_last_closed else None,
+    }
+
+    direction_1m = diag["k1m"].get("direction")
+    direction_5m = diag["k5m"].get("direction")
+    if direction_1m in {"up", "down"} and direction_5m in {"up", "down"}:
+        diag["trend_alignment"] = (
+            "aligned" if direction_1m == direction_5m else "conflict"
+        )
+    else:
+        diag["trend_alignment"] = "unknown"
+
+    if decision in {"buy", "sell"}:
+        desired = "up" if decision == "buy" else "down"
+        if direction_1m in {"up", "down"} and direction_5m in {"up", "down"}:
+            diag["decision_alignment"] = (
+                "aligned" if direction_1m == direction_5m == desired else "against"
+            )
+        elif direction_5m in {"up", "down"}:
+            diag["decision_alignment"] = (
+                "aligned" if direction_5m == desired else "against"
+            )
+        elif direction_1m in {"up", "down"}:
+            diag["decision_alignment"] = (
+                "aligned" if direction_1m == desired else "against"
+            )
+        else:
+            diag["decision_alignment"] = "unknown"
+
+    if entry is not None and tp1 is not None:
+        tp_dist = abs(float(tp1) - float(entry))
+        diag["tp1_distance_abs"] = tp_dist
+        diag["tp1_distance_pct"] = (tp_dist / float(entry)) * 100.0 if entry else None
+    if entry is not None and sl is not None:
+        sl_dist = abs(float(entry) - float(sl))
+        diag["sl_distance_abs"] = sl_dist
+        diag["sl_distance_pct"] = (sl_dist / float(entry)) * 100.0 if entry else None
+
+    if atr5 is not None:
+        try:
+            atr_val = float(atr5)
+        except (TypeError, ValueError):
+            atr_val = None
+        if atr_val is not None and np.isfinite(atr_val) and atr_val > 0:
+            if diag.get("tp1_distance_abs") is not None:
+                diag["tp1_distance_atr5"] = float(diag["tp1_distance_abs"]) / atr_val
+            if diag.get("sl_distance_abs") is not None:
+                diag["sl_distance_atr5"] = float(diag["sl_distance_abs"]) / atr_val
+
+    return diag
+
+
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
     up = np.where(delta > 0, delta, 0.0)
@@ -14841,6 +14977,16 @@ def analyze(asset: str) -> Dict[str, Any]:
     if exit_signal:
         decision_obj["position_exit_signal"] = exit_signal
 
+    decision_obj["short_term_diagnostics"] = _build_short_term_diagnostics(
+        decision,
+        entry,
+        sl,
+        tp1,
+        atr5,
+        k1m_closed,
+        k5m_closed,
+    )
+
     sentiment_exit_summary: Optional[Dict[str, Any]] = None
     if exit_signal and exit_signal.get("category") == "sentiment_risk":
         sentiment_exit_summary = {
@@ -15880,6 +16026,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
