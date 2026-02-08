@@ -125,6 +125,44 @@ def _build_session_time_rules(raw: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     return processed
 
 
+def _normalize_manual_trade_model(raw: Any) -> Dict[str, Any]:
+    defaults = {
+        "equity_usd": 100.0,
+        "leverage": 20.0,
+        "tp1_close_fraction": 1.0,
+        "tp1_min_net_usd": 5.0,
+        "tp2_min_net_usd": 10.0,
+        "sl_risk_usd": 10.0,
+        "assets": ["GOLD_CFD", "XAGUSD"],
+    }
+    if not isinstance(raw, dict):
+        return dict(defaults)
+    model: Dict[str, Any] = dict(defaults)
+    for key in ("equity_usd", "leverage", "tp1_close_fraction", "tp1_min_net_usd", "tp2_min_net_usd", "sl_risk_usd"):
+        value = raw.get(key, defaults[key])
+        try:
+            model[key] = float(value)
+        except (TypeError, ValueError):
+            model[key] = defaults[key]
+    if model["equity_usd"] <= 0:
+        model["equity_usd"] = defaults["equity_usd"]
+    if model["leverage"] <= 0:
+        model["leverage"] = defaults["leverage"]
+    if not (0 < model["tp1_close_fraction"] <= 1.0):
+        model["tp1_close_fraction"] = defaults["tp1_close_fraction"]
+    assets_raw = raw.get("assets", defaults["assets"])
+    if not isinstance(assets_raw, (list, tuple)):
+        assets_raw = defaults["assets"]
+    assets: List[str] = []
+    for asset in assets_raw:
+        if asset:
+            assets.append(str(asset).upper())
+    model["assets"] = assets or defaults["assets"]
+    return model
+
+
+
+
 @lru_cache(maxsize=1)
 def load_config(path: Optional[str] = None) -> Dict[str, Any]:
     """Return a validated analysis configuration dictionary."""
@@ -348,7 +386,10 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
             sorted(removed_momentum),
         )
     config["enable_momentum_assets"] = filtered_momentum_assets
-
+    config["manual_trade_model"] = _normalize_manual_trade_model(
+        raw.get("manual_trade_model")
+    )
+    
     return config
 
 
@@ -1418,6 +1459,9 @@ MIN_RISK_ABS: Dict[str, float] = dict(_get_config_value("min_risk_abs") or {})
 ACTIVE_INVALID_BUFFER_ABS: Dict[str, float] = dict(_get_config_value("active_invalid_buffer_abs") or {})
 ASSET_COST_MODEL: Dict[str, Any] = dict(_get_config_value("asset_cost_model") or {})
 DEFAULT_COST_MODEL: Dict[str, Any] = dict(_get_config_value("default_cost_model") or {})
+MANUAL_TRADE_MODEL: Dict[str, Any] = _normalize_manual_trade_model(
+    _get_config_value("manual_trade_model")
+)
 COST_MULT_DEFAULT: float = float(_get_config_value("cost_mult_default") or 0.0)
 COST_MULT_HIGH_VOL: float = float(_get_config_value("cost_mult_high_vol") or 0.0)
 ATR5_MIN_MULT: float = float(_get_config_value("atr5_min_mult") or 0.0)
@@ -1437,6 +1481,42 @@ XAGUSD_ATR_5M_FLOOR: float = float(_get_config_value("xagusd_atr_5m_floor") or 0
 XAGUSD_ATR_5M_FLOOR_ENABLED: bool = bool(
     _get_config_value("xagusd_atr_5m_floor_enabled")
 )
+
+
+def _round_trip_pct_from_model(asset: str, asset_cost_model: Dict[str, Any]) -> float:
+    model = asset_cost_model.get(asset) or asset_cost_model.get(asset.upper()) or DEFAULT_COST_MODEL
+    mtype = str(model.get("type") or "pct").lower()
+    if mtype == "pip":
+        LOGGER.warning(
+            "Manual trade model: pip-based cost model for %s cannot be expressed without price; using 0.",
+            asset,
+        )
+        return 0.0
+    try:
+        return float(model.get("round_trip_pct", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def compute_required_gross_tp_pct(
+    asset: str,
+    tp_min_net_usd: float,
+    equity_usd: float,
+    leverage: float,
+    tp_close_fraction: float,
+    asset_cost_model: Dict[str, Any],
+) -> Optional[float]:
+    try:
+        notional = float(equity_usd) * float(leverage)
+        fraction = float(tp_close_fraction)
+        net_usd = float(tp_min_net_usd)
+    except (TypeError, ValueError):
+        return None
+    if notional <= 0 or fraction <= 0:
+        return None
+    net_pct = net_usd / (notional * fraction)
+    gross_pct = net_pct + _round_trip_pct_from_model(asset, asset_cost_model)
+    return max(0.0, float(gross_pct))
 CORE_RR_MIN: Dict[str, float] = dict(_get_config_value("core_rr_min") or {})
 MOMENTUM_RR_MIN: Dict[str, float] = dict(_get_config_value("momentum_rr_min") or {})
 FX_TP_TARGETS: Dict[str, float] = dict(_get_config_value("fx_tp_targets") or {})
