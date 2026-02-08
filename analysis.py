@@ -260,6 +260,7 @@ def classify_gate_failure(gate: str) -> str:
 from config.analysis_settings import (
     ACTIVE_INVALID_BUFFER_ABS,
     ASSET_COST_MODEL,
+    MANUAL_TRADE_MODEL,
     ATR5_MIN_MULT,
     ATR5_MIN_MULT_ASSET,
     ATR_LOW_TH_ASSET,
@@ -336,6 +337,7 @@ from config.analysis_settings import (
     get_tp_min_pct_value,
     get_tp_net_min,
     get_risk_template,
+    compute_required_gross_tp_pct,
     load_config,
 )
 
@@ -3954,6 +3956,26 @@ def compute_cost_components(asset: str, entry: float, overnight_days: int) -> Tu
         rt = float(model.get("round_trip_pct", 0.0) or 0.0)
         overnight = float(model.get("overnight_pct", 0.0) or 0.0) * overnight_days
     return rt, overnight
+
+
+def alignment_state_for_signal(
+    signal_side: Optional[str],
+    bias4h: Optional[str],
+    bias1h: Optional[str],
+    bias5m: Optional[str] = None,
+) -> str:
+    if signal_side not in {"buy", "sell"}:
+        return "MIXED"
+    desired = "long" if signal_side == "buy" else "short"
+    opposite = "short" if desired == "long" else "long"
+    biases = [bias for bias in (bias4h, bias1h, bias5m) if bias in {"long", "short"}]
+    pos = sum(1 for bias in biases if bias == desired)
+    neg = sum(1 for bias in biases if bias == opposite)
+    if pos and not neg:
+        return "TREND"
+    if neg and not pos:
+        return "COUNTER"
+    return "MIXED"  
 
 
 def estimate_overnight_days(asset: str, now: Optional[datetime] = None) -> int:
@@ -13010,6 +13032,37 @@ def analyze(asset: str) -> Dict[str, Any]:
     rr_required_effective: Optional[float] = None
     tp_min_profit_pct: Optional[float] = None
     min_stoploss_pct = get_min_stoploss_pct(asset)
+    manual_trade_model = MANUAL_TRADE_MODEL if isinstance(MANUAL_TRADE_MODEL, dict) else {}
+    manual_trade_assets = {
+        str(item).upper() for item in (manual_trade_model.get("assets") or []) if item
+    }
+    manual_trade_required_tp1_pct: Optional[float] = None
+    manual_trade_context: Dict[str, Any] = {}
+    if asset in manual_trade_assets:
+        mt_equity = safe_float(manual_trade_model.get("equity_usd"))
+        mt_leverage = safe_float(manual_trade_model.get("leverage"))
+        mt_tp1_frac = safe_float(manual_trade_model.get("tp1_close_fraction"))
+        mt_tp1_min_net = safe_float(manual_trade_model.get("tp1_min_net_usd"))
+        mt_tp2_min_net = safe_float(manual_trade_model.get("tp2_min_net_usd"))
+        mt_sl_risk = safe_float(manual_trade_model.get("sl_risk_usd"))
+        if None not in (mt_equity, mt_leverage, mt_tp1_frac, mt_tp1_min_net):
+            manual_trade_required_tp1_pct = compute_required_gross_tp_pct(
+                asset,
+                mt_tp1_min_net,
+                mt_equity,
+                mt_leverage,
+                mt_tp1_frac,
+                ASSET_COST_MODEL,
+            )
+        manual_trade_context = {
+            "equity_usd": mt_equity,
+            "leverage": mt_leverage,
+            "tp1_close_fraction": mt_tp1_frac,
+            "tp1_min_net_usd": mt_tp1_min_net,
+            "tp2_min_net_usd": mt_tp2_min_net,
+            "sl_risk_usd": mt_sl_risk,
+            "required_gross_tp1_pct": manual_trade_required_tp1_pct,
+        }
 
     def compute_slippage_state(decision_side: str, limit_r: Optional[float]) -> Optional[Dict[str, float]]:
         if (
@@ -13322,6 +13375,26 @@ def analyze(asset: str) -> Dict[str, Any]:
         tp_min_pct = tp_min_base
         if low_atr_tp_override is not None:
             tp_min_pct = min(tp_min_base, low_atr_tp_override)
+        if manual_trade_context:
+            entry_thresholds_meta.setdefault("manual_trade_model", manual_trade_context)
+        if (
+            manual_trade_required_tp1_pct is not None
+            and tp_min_pct < manual_trade_required_tp1_pct
+        ):
+            tp_min_pct = manual_trade_required_tp1_pct
+            note = (
+                "Manual trade model: TP1 bruttó minimum emelve "
+                f"{manual_trade_required_tp1_pct * 100:.2f}%-ra"
+            )
+            if note not in reasons:
+                reasons.append(note)
+        if asset in {"GOLD_CFD", "XAGUSD"}:
+            alignment_state_local = alignment_state_for_signal(decision_side, bias4h, bias1h)
+            if alignment_state_local == "COUNTER":
+                tp_min_pct += 0.0007
+                note = "Trend alignment: COUNTER — TP1 minimum szigorítva (+0.07%)"
+                if note not in reasons:
+                    reasons.append(note)
         if tp_min_pct < SNIPER_TP_MIN_PROFIT_PCT:
             tp_min_pct = SNIPER_TP_MIN_PROFIT_PCT
             note = "Mesterlövész mód: TP minimum profit 0.35% érvényesítve"
@@ -14733,9 +14806,27 @@ def analyze(asset: str) -> Dict[str, Any]:
         P, ml_probability, ml_enabled=bool(ML_PROBABILITY_ACTIVE)
     )
 
+    alignment_state = alignment_state_for_signal(decision, bias4h, bias1h)
+    alignment_detail = {
+        "bias_4h": bias4h,
+        "bias_1h": bias1h,
+        "signal": decision if decision in {"buy", "sell"} else None,
+        "effective_bias": effective_bias,
+    }
+    if (
+        asset in {"GOLD_CFD", "XAGUSD"}
+        and decision in {"buy", "sell"}
+        and alignment_state == "COUNTER"
+    ):
+        entry_thresholds_meta["alignment_gate"] = {
+            "state": alignment_state,
+            "detail": alignment_detail,
+            "action": "soft",
+        }
+
     ml_confidence_block = False
     if (
-        decision in ("buy", "sell")
+        decision in ("buy", "sell")      
         and ml_probability is not None
         and ml_threshold is not None
         and ml_probability < ml_threshold
@@ -14797,7 +14888,11 @@ def analyze(asset: str) -> Dict[str, Any]:
         "tp_net_min": float(tp_net_threshold) if tp_net_threshold is not None else None,
         "rr_required": float(rr_required_effective) if rr_required_effective is not None else None,
         "tp_min_profit_pct": float(tp_min_profit_pct) if tp_min_profit_pct is not None else None,
-        "min_stoploss_pct": float(min_stoploss_pct) if min_stoploss_pct is not None else None,
+        "manual_trade_required_tp1_gross_pct": float(manual_trade_required_tp1_pct)
+        if manual_trade_required_tp1_pct is not None
+        else None,
+        "manual_trade_model": manual_trade_context or None,
+        "min_stoploss_pct": float(min_stoploss_pct) if min_stoploss_pct is not None else None,  
         "atr_abs_min_used": float(atr_abs_min) if atr_abs_min is not None else None,
         "atr_low_threshold": float(atr_threshold) if atr_threshold is not None else None,
         "atr_overlay_min": float(atr_overlay_min) if atr_overlay_min is not None else None,
@@ -14856,7 +14951,9 @@ def analyze(asset: str) -> Dict[str, Any]:
             "adjusted_4h": bias4h,
             "adjusted_1h": bias1h,
         },
-        "gates": gates_payload,
+        "alignment_state": alignment_state,
+        "alignment_detail": alignment_detail,
+        "gates": gates_payload,  
         "gate_skips": list(gate_skips),
         "session_info": session_meta,
         "momentum_diagnostics": momentum_diagnostics,
@@ -16036,6 +16133,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
