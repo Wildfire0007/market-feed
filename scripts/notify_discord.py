@@ -1,189 +1,195 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-notify_discord.py — V6.0 (PRO Dashboard - Psychology Free)
-Ez a verzió minden döntést meghoz helyetted.
+notify_discord.py — Manual Trader Friendly (v7)
+Belépési jelzések átlátható, kézi kereskedő-barát összegzése.
 """
 
-import os
+from __future__ import annotations
+
+import importlib
+import importlib.util
 import json
-import sys
-from pathlib import Path
+import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
-# Requests modul ellenőrzése
-try:
-    import requests
-except ImportError:
-    sys.exit(1)
+from zoneinfo import ZoneInfo
 
-# Időzóna (Budapest)
-try:
-    from zoneinfo import ZoneInfo
-    BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
-except ImportError:
-    BUDAPEST_TZ = timezone(timedelta(hours=1)) 
+requests = None
+if importlib.util.find_spec("requests") is not None:
+    requests = importlib.import_module("requests")
 
-# --- KONFIGURÁCIÓ ---
+BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
+
+from config import analysis_settings as settings
+
+
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
-SNIPER_MIN_P_SCORE = 35.0
-SNIPER_RR_REQUIRED = 2.0
-SNIPER_TP_MIN_PROFIT_PCT = 0.0035
-LIMIT_TO_MARKET_DISTANCE_PCT = 0.0005
-MIN_TP_ENTRY_PCT = 0.003
+DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
+ENTRY_COOLDOWN_MINUTES = 5
 EXIT_NOTIFY_COOLDOWN_MINUTES = 10
 
-# --- MAPPÁK ---
 BASE_DIR = Path(__file__).resolve().parent
-if (BASE_DIR / "public").exists():
-    PUBLIC_DIR = BASE_DIR / "public"
-elif (BASE_DIR.parent / "public").exists():
-    PUBLIC_DIR = BASE_DIR.parent / "public"
-else:
-    PUBLIC_DIR = BASE_DIR / "public"
+PUBLIC_DIR = Path(os.getenv("NOTIFY_PUBLIC_DIR", "")) if os.getenv("NOTIFY_PUBLIC_DIR") else None
+if not PUBLIC_DIR:
+    if (BASE_DIR / "public").exists():
+        PUBLIC_DIR = BASE_DIR / "public"
+    elif (BASE_DIR.parent / "public").exists():
+        PUBLIC_DIR = BASE_DIR.parent / "public"
+    else:
+        PUBLIC_DIR = BASE_DIR / "public"
 
-# Színek és Ikonok
-ICON_BUY_MARKET  = "🟢"
+
+ICON_BUY_MARKET = "🟢"
 ICON_SELL_MARKET = "🔴"
-ICON_BUY_LIMIT   = "🔵" 
-ICON_SELL_LIMIT  = "🟠"
+ICON_BUY_LIMIT = "🔵"
+ICON_SELL_LIMIT = "🟠"
 
-COLOR_GREEN  = 0x2ecc71
-COLOR_RED    = 0xe74c3c
-COLOR_BLUE   = 0x3498db
-COLOR_ORANGE = 0xe67e22
+COLOR_GREEN = 0x2ECC71
+COLOR_RED = 0xE74C3C
+COLOR_BLUE = 0x3498DB
+COLOR_ORANGE = 0xE67E22
+COLOR_YELLOW = 0xF1C40F
 
-def load_json(path):
+
+def load_json(path: Path) -> Dict[str, Any]:
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except: return {}
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
-def save_json(path, payload):
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Hiba: {e}")
 
-def send_discord_embed(webhook_url, embed_data):
-    if not webhook_url: return
+def save_json(path: Path, payload: Dict[str, Any]) -> None:
     try:
-        requests.post(webhook_url, json={"embeds": [embed_data]}, timeout=5)
-    except Exception as e: print(f"Hiba: {e}")
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"Hiba: {exc}")
 
-def format_price(price):
-    if price is None: return "N/A"
-    try:
-        p = float(price)
-        if p > 1000: return f"{p:,.1f}"
-        if p > 10: return f"{p:.2f}"
-        return f"{p:.5f}"
-    except: return str(price)
 
-def safe_float(value):
+def safe_float(value: Any) -> Optional[float]:
     try:
-        return float(value)
+        result = float(value)
     except (TypeError, ValueError):
         return None
+    if result != result:  # NaN
+        return None
+    return result
 
-def get_budapest_time(utc_iso_string):
-    if not utc_iso_string or utc_iso_string == "-": return "N/A"
+
+def format_price(price: Any) -> str:
+    value = safe_float(price)
+    if value is None:
+        return "N/A"
+    if value > 1000:
+        return f"{value:,.1f}"
+    if value > 10:
+        return f"{value:.2f}"
+    return f"{value:.5f}"
+
+
+def to_utc_iso(dt: datetime) -> str:
+    return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    
+
+def get_budapest_time(utc_iso_string: Optional[str]) -> str:
+    if not utc_iso_string or utc_iso_string == "-":
+        return "N/A"
     try:
-        dt_utc = datetime.fromisoformat(utc_iso_string.replace('Z', '+00:00'))
+        dt_utc = datetime.fromisoformat(str(utc_iso_string).replace("Z", "+00:00"))
         dt_bp = dt_utc.astimezone(BUDAPEST_TZ)
         return dt_bp.strftime("%H:%M:%S")
-    except: return "Idő?"
+    except Exception:
+        return "Idő?"
 
-def calculate_fallback_levels(entry_price, atr, direction):
-    if not entry_price or not atr: return None, None, None
-    entry, vol = float(entry_price), float(atr)
-    stop_dist = 1.5 * vol
-    tp1_dist  = 1.0 * vol
-    tp2_dist  = 2.5 * vol
-    if direction == "buy":
-        return entry - stop_dist, entry + tp1_dist, entry + tp2_dist
-    else:
-        return entry + stop_dist, entry - tp1_dist, entry - tp2_dist
 
-def calculate_tp_profit_pct(entry_price, tp1_price, direction):
-    entry_val = safe_float(entry_price)
-    tp1_val = safe_float(tp1_price)
-    if entry_val is None or tp1_val is None or entry_val == 0:
+def send_discord_embed(embed_data: Dict[str, Any]) -> None:
+    if DRY_RUN or not DISCORD_WEBHOOK_URL:
+        print(f"[DRY RUN] Embed title: {embed_data.get('title')}")
+        return
+    if requests is None:
+        print("Hiba: a 'requests' modul hiányzik; webhook küldés kihagyva.")
+        return
+    try:
+        requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed_data]}, timeout=5)
+    except Exception as exc:
+        print(f"Hiba: {exc}")
+
+
+def round_trip_pct(asset: str) -> float:
+    model = settings.ASSET_COST_MODEL.get(asset) or settings.DEFAULT_COST_MODEL
+    if str(model.get("type") or "pct").lower() == "pip":
+        return 0.0
+    return float(model.get("round_trip_pct", 0.0) or 0.0)
+
+
+def calc_gross_pct(entry: float, target: float, side: str) -> Optional[float]:
+    if entry <= 0:
         return None
-    if direction == "sell":
-        return (entry_val - tp1_val) / entry_val
-    return (tp1_val - entry_val) / entry_val
+    if side == "sell":
+        return (entry - target) / entry
+    return (target - entry) / entry
 
-def format_exit_actions(actions):
-    if not actions:
-        return "n/a"
-    labels = []
-    for action in actions:
-        action_type = str(action.get("type") or "").lower()
-        if action_type == "close":
-            labels.append("Teljes zárás")
-        elif action_type == "scale_out":
-            size = safe_float(action.get("size"))
-            if size is not None:
-                labels.append(f"Részleges zárás ({size * 100:.0f}%)")
-            else:
-                labels.append("Részleges zárás")
-        elif action_type == "tighten_stop":
-            labels.append("SL szűkítés")
-    if not labels:
-        return "n/a"
-    return "\n".join(f"• {label}" for label in labels)
 
-def format_exit_context(exit_signal):
-    if not isinstance(exit_signal, dict):
-        return ""
-    lines = []
-    current_pnl_r = safe_float(exit_signal.get("current_pnl_r"))
-    max_fav_r = safe_float(exit_signal.get("max_favorable_r"))
-    profit_drawdown_ratio = safe_float(exit_signal.get("profit_drawdown_ratio"))
-    if current_pnl_r is not None:
-        lines.append(f"PnL: `{current_pnl_r:+.2f}R`")
-    if max_fav_r is not None:
-        lines.append(f"MFE: `{max_fav_r:.2f}R`")
-    if profit_drawdown_ratio is not None:
-        pct = max(0.0, min(1.0, profit_drawdown_ratio))
-        lines.append(f"Visszaadás: `{pct * 100:.0f}%`")
-    return "\n".join(lines)
+def calc_points(entry: float, target: float) -> float:
+    return abs(target - entry)
 
-def to_utc_iso(dt):
-    return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-def _exit_signature(exit_signal):
-    if not isinstance(exit_signal, dict):
-        return {}
-    actions = []
-    for action in exit_signal.get("actions") or []:
-        if not isinstance(action, dict):
-            continue
-        action_type = str(action.get("type") or "").lower()
-        size = safe_float(action.get("size"))
-        if size is not None:
-            size = round(size, 3)
-        actions.append({"type": action_type, "size": size})
+def calc_rr(entry: float, sl: float, target: float) -> Optional[float]:
+    risk = abs(entry - sl)
+    reward = abs(target - entry)
+    if risk <= 0:
+        return None
+    return reward / risk
+
+
+def _entry_signature(signal: str, entry: Optional[float], order_type: str) -> Dict[str, Any]:
+    return {
+        "signal": signal,
+        "entry": round(entry, 2) if entry is not None else None,
+        "order_type": order_type,
+    }
+
+
+def _exit_signature(exit_signal: Dict[str, Any]) -> Dict[str, Any]:
+    state = str(exit_signal.get("state") or exit_signal.get("action") or "").lower()
+    direction = str(exit_signal.get("direction") or "").lower()
     reasons = [str(r) for r in (exit_signal.get("reasons") or []) if r]
     return {
-        "state": str(exit_signal.get("state") or exit_signal.get("action") or "").lower(),
-        "direction": str(exit_signal.get("direction") or "").lower(),
-        "actions": actions,
+        "state": state,
+        "direction": direction,
         "reasons": reasons[:4],
     }
+
+
+def _format_biases(biases: Dict[str, Any]) -> str:
+    bias_4h = str(biases.get("adjusted_4h") or "n/a")
+    bias_1h = str(biases.get("adjusted_1h") or "n/a")
+    bias_5m = str(biases.get("adjusted_5m") or "n/a")
+    return f"4H: `{bias_4h}` | 1H: `{bias_1h}` | 5m: `{bias_5m}`"
+
+
+def _spread_gate_status(gates: Dict[str, Any]) -> str:
+    missing = set(str(item) for item in (gates.get("missing") or []) if item)
+    return "BLOCK" if "spread_guard" in missing else "OK"
+
+
+def check_and_notify() -> None:
+    if not PUBLIC_DIR.exists():
+        return
+
+    manual_trade_model = settings.MANUAL_TRADE_MODEL or {}
+    equity_usd = safe_float(manual_trade_model.get("equity_usd")) or 100.0
+    leverage = safe_float(manual_trade_model.get("leverage")) or 20.0
+    tp1_close_fraction = safe_float(manual_trade_model.get("tp1_close_fraction")) or 1.0
+    tp1_min_net_usd = safe_float(manual_trade_model.get("tp1_min_net_usd")) or 5.0
+    tp2_min_net_usd = safe_float(manual_trade_model.get("tp2_min_net_usd")) or 10.0
+    sl_risk_usd = safe_float(manual_trade_model.get("sl_risk_usd")) or 10.0
     
-def get_trend_icon(bias_str):
-    if not bias_str: return "⚪"
-    b = bias_str.lower()
-    if "long" in b: return "⬆️ BULL (Emelkedő)"
-    if "short" in b: return "⬇️ BEAR (Eső)"
-    return "➡️ RANGE (Oldalazás)"
-
-def check_and_notify():
-    if not PUBLIC_DIR.exists(): return
-
     notify_state_path = PUBLIC_DIR / "_notify_state.json"
     notify_state = load_json(notify_state_path)
     if not isinstance(notify_state, dict):
@@ -194,269 +200,241 @@ def check_and_notify():
     
     for asset_dir in assets:
         asset_name = asset_dir.name
-        signal_path = asset_dir / "signal.json"
-        
+        signal_path = asset_dir / "signal.json"        
         data = load_json(signal_path)
-        if not data: continue
+        if not data:
+            continue
 
-        signal = data.get("signal", "no entry")
-        exit_signal = data.get("position_exit_signal")
-        if not exit_signal:
-            exit_signal = data.get("active_position_meta", {}).get("exit_signal")
-        prob = data.get("probability", 0)
-        prob_raw = data.get("probability_raw")
-        spot_obj = data.get("spot", {})
-        spot_price = spot_obj.get("price")
-        bp_time = get_budapest_time(spot_obj.get("utc"))
-        time_label = bp_time or "N/A"
-        
-        atr = 0
-        try: atr = data.get("intervention_watch", {}).get("metrics", {}).get("atr5_usd", 0)
-        except: pass
+        signal = str(data.get("signal") or "no entry").lower()
+        exit_signal = data.get("position_exit_signal") or data.get("active_position_meta", {}).get("exit_signal")
+        if signal not in {"buy", "sell", "precision_arming"} and not exit_signal:
+            continue
 
-        # --- EXTRA ADATOK KINYERÉSE ---
-        leverage = data.get("leverage", "N/A")
-        
-        # Trend (Bias)
-        bias_4h = data.get("biases", {}).get("adjusted_4h", "neutral")
-        trend_display = get_trend_icon(bias_4h)
-        bias_label = str(bias_4h or "").lower()
-        if any(token in bias_label for token in ("choppy", "range", "neutral")):
-            prev_side = data.get("position_state", {}).get("side")
-            if not prev_side:
-                prev_side = data.get("active_position_meta", {}).get("anchor_side")
-            prev_map = {"long": "BUY", "short": "SELL", "buy": "BUY", "sell": "SELL"}
-            prev_signal = prev_map.get(str(prev_side or "").lower())
-            if prev_signal:
-                trend_display = f"{trend_display}\n↩️ Előző jel: {prev_signal}"
-        
-        # Okok (Reasons) - Csak az első 3
-        reasons_list = data.get("reasons", [])
-        if not reasons_list: reasons_list = ["Nincs részletezve."]
-        reasons_display = "\n".join([f"• {r}" for r in reasons_list[:3]])
+        biases = data.get("biases") if isinstance(data.get("biases"), dict) else {}
+        gates = data.get("gates") if isinstance(data.get("gates"), dict) else {}
+        effective_thresholds = (
+            data.get("effective_thresholds")
+            if isinstance(data.get("effective_thresholds"), dict)
+            else {}
+        )
+        alignment_state = str(data.get("alignment_state") or "MIXED").upper()
+        alignment_gate_note = "OK"
+        if alignment_state == "COUNTER":
+            alignment_gate_note = "BLOCK"
 
-        # Precision Score
-        p_score = 0
-        p_threshold = 0
-        try:
-            pg = data.get("entry_thresholds", {}).get("precision_gate_state", {})
-            p_score = pg.get("score", 0)
-            p_threshold = pg.get("threshold", 0)
-        except: pass
-        effective_thresholds = data.get("effective_thresholds", {})
-        if not isinstance(effective_thresholds, dict):
-            effective_thresholds = {}
-        should_notify = False
-        embed = {}
-        notify_payload = data.get("notify") if isinstance(data, dict) else None
-        allow_limit_override = False
-        is_entry_signal = signal in ["buy", "sell", "precision_arming"]
+        atr1h = safe_float(data.get("atr1h"))
+        probability = safe_float(data.get("probability"))
+        p_score = safe_float(data.get("probability_raw"))
+        reasons = [str(r) for r in (data.get("reasons") or []) if r][:4]
 
-        if is_entry_signal:
-            sniper_guard_reasons = []
-            prob_raw_value = safe_float(prob_raw)
-            if prob_raw_value is None:
-                prob_raw_value = safe_float(p_score)
-            if prob_raw_value is None or prob_raw_value < SNIPER_MIN_P_SCORE:
-                sniper_guard_reasons.append("P-score < 35")
-            rr_required = safe_float(effective_thresholds.get("rr_required"))
-            if rr_required is None or rr_required < SNIPER_RR_REQUIRED:
-                sniper_guard_reasons.append("RR < 2.0")
-            tp_min_profit_pct = safe_float(effective_thresholds.get("tp_min_profit_pct"))
-            if tp_min_profit_pct is None or tp_min_profit_pct < SNIPER_TP_MIN_PROFIT_PCT:
-                sniper_guard_reasons.append("TP min profit < 0.35%")
-            tp_net_min = safe_float(effective_thresholds.get("tp_net_min"))
-            if tp_net_min is None or tp_net_min < SNIPER_TP_MIN_PROFIT_PCT:
-                sniper_guard_reasons.append("TP net min < 0.35%")
-            if sniper_guard_reasons:
-                print(f"{asset_name}: Sniper guard blokkolta: {', '.join(sniper_guard_reasons)}")
-                continue
+        entry = safe_float(data.get("entry"))
+        sl = safe_float(data.get("sl"))
+        tp1 = safe_float(data.get("tp1"))
+        tp2 = safe_float(data.get("tp2"))
 
-        # ---------------------------
-        # 1. MARKET SIGNAL
-        # ---------------------------
-        if signal in ["buy", "sell"]:
-            tp_profit_pct = calculate_tp_profit_pct(spot_price, data.get("tp1"), signal)
-            if tp_profit_pct is not None and tp_profit_pct < MIN_TP_ENTRY_PCT:
-                print(f"{asset_name}: TP-profit < 0.30%, jelzés eldobva.")
-                continue
-            should_notify = True
-            is_buy = (signal == "buy")
-            embed = {
-                "title": f"{ICON_BUY_MARKET if is_buy else ICON_SELL_MARKET} MARKET {'BUY' if is_buy else 'SELL'}: {asset_name} • {time_label}",
-                "description": f"**VÉGREHAJTÁS AZONNAL!**\n\n**Miért?**\n{reasons_display}",
-                "color": COLOR_GREEN if is_buy else COLOR_RED,
-                "fields": [
-                    {"name": "Árfolyam & Idő", "value": f"`{format_price(spot_price)}`\n🕒 {bp_time}", "inline": True},
-                    {"name": "Minőség & Trend", "value": f"🎲 Esély: `{prob}%`\n{trend_display}", "inline": True},
-                    {"name": "⚙️ Setup", "value": f"Kar: `x{leverage}`\nScore: `{p_score}/{p_threshold}`", "inline": True},
-                    
-                    {"name": "🛑 STOP LOSS", "value": f"`{format_price(data.get('sl'))}`", "inline": True},
-                    {"name": "🎯 TP (PROFIT)", "value": f"TP1: `{format_price(data.get('tp1'))}`\nTP2: `{format_price(data.get('tp2'))}`", "inline": True},
-                    {"name": "Trend (Bias)", "value": trend_display, "inline": True}                
-                ],
-                "footer": {"text": f"Market Order • {asset_name} • Kockázatkezelés: Kötelező!"}
-            }
+        order_type = "MARKET"
+        direction = signal
+        if signal == "precision_arming":
+            plan = data.get("precision_plan") if isinstance(data.get("precision_plan"), dict) else {}
+            direction = str(plan.get("direction") or data.get("signal") or "buy").lower()
+            order_type = "LIMIT"
+            entry = safe_float(plan.get("entry") or entry)
+            sl = safe_float(plan.get("stop_loss") or sl)
+            tp1 = safe_float(plan.get("take_profit_1") or tp1)
+            tp2 = safe_float(plan.get("take_profit_2") or tp2)
 
-        # ---------------------------
-        # 2. LIMIT SIGNAL (Precision)
-        # ---------------------------
-        elif signal == "precision_arming":
-            plan = data.get("precision_plan", {})
-            playbook = data.get("execution_playbook", [])
-            trigger_state = "unknown"
-            if playbook: trigger_state = playbook[-1].get("state", "unknown")
-            
-            if trigger_state == "fire":
-                should_notify = True
-                
-                limit_price = plan.get("entry")
-                sl_val = plan.get("stop_loss")
-                tp1_val = plan.get("take_profit_1")
-                tp2_val = plan.get("take_profit_2")
-                direction = plan.get("direction", "buy")
-                
-                if not limit_price:
-                    limit_price = playbook[-1].get("trigger_levels", {}).get("fire")
-                    if not sl_val:
-                        sl_val, tp1_val, tp2_val = calculate_fallback_levels(limit_price, atr, direction)
+        if direction not in {"buy", "sell"}:
+            direction = "buy"
 
-                rr_display = "N/A"
-                rr_value = None
-                limit_val_calc = safe_float(limit_price)
-                sl_val_calc = safe_float(sl_val)
-                tp1_val_calc = safe_float(tp1_val)
+        if exit_signal:
+            exit_state = str(exit_signal.get("state") or exit_signal.get("action") or "").lower()            
+            exit_signature = _exit_signature(exit_signal)            
+            now_dt = datetime.now(timezone.utc)
+            asset_state = notify_state.get(asset_name) if isinstance(notify_state.get(asset_name), dict) else {}
+            last_exit_signature = asset_state.get("last_exit_signature")
+            last_exit_sent_utc = asset_state.get("last_exit_sent_utc")
+            if last_exit_signature == exit_signature and last_exit_sent_utc:
                 try:
-                    if None not in (limit_val_calc, sl_val_calc, tp1_val_calc):
-                        risk = abs(limit_val_calc - sl_val_calc)
-                        reward = abs(tp1_val_calc - limit_val_calc)
-                        if risk > 0:
-                            rr_value = reward / risk
-                            rr_display = f"1:{rr_value:.1f}"
-                except: pass
-
-                rr_min = safe_float(effective_thresholds.get("rr_required"))
-                if rr_min is None:
-                    rr_min = SNIPER_RR_REQUIRED
-                min_score = p_threshold or safe_float(plan.get("score_threshold")) or 0
-                allow_limit_override = rr_value is not None and rr_value >= rr_min and p_score >= min_score
-
-                spot_val = safe_float(spot_price)
-                limit_val = safe_float(limit_price)
-                use_market = False
-                if spot_val is not None and limit_val is not None and spot_val > 0:
-                    distance_pct = abs(limit_val - spot_val) / spot_val
-                    use_market = distance_pct < LIMIT_TO_MARKET_DISTANCE_PCT
-
-                entry_for_filter = limit_val if limit_val is not None else spot_val
-                tp_profit_pct = calculate_tp_profit_pct(entry_for_filter, tp1_val, direction)
-                if tp_profit_pct is not None and tp_profit_pct < MIN_TP_ENTRY_PCT:
-                    print(f"{asset_name}: TP-profit < 0.30%, jelzés eldobva.")
+                    last_exit_dt = datetime.fromisoformat(str(last_exit_sent_utc).replace("Z", "+00:00"))
+                except Exception:
+                    last_exit_dt = None
+                if last_exit_dt and now_dt - last_exit_dt < timedelta(minutes=EXIT_NOTIFY_COOLDOWN_MINUTES):                    
+                    print(f" -> EXIT DEDUP: {asset_name} ({EXIT_NOTIFY_COOLDOWN_MINUTES}m)")
                     continue
-
-                if direction == "buy":
-                    title_text = f"{ICON_BUY_MARKET if use_market else ICON_BUY_LIMIT} {'MARKET' if use_market else 'LIMIT'} BUY: {asset_name} • {time_label}"
-                    color_code = COLOR_GREEN if use_market else COLOR_BLUE
-                else:
-                    title_text = f"{ICON_SELL_MARKET if use_market else ICON_SELL_LIMIT} {'MARKET' if use_market else 'LIMIT'} SELL: {asset_name} • {time_label}"
-                    color_code = COLOR_RED if use_market else COLOR_ORANGE
-
-                embed = {
-                    "title": title_text,
-                    "description": (
-                        "**AZONNALI BELÉPÉS!**" if use_market
-                        else "**LIMIT MEGBÍZÁS ELHELYEZÉSE!**\n(Visszateszt Zóna)"
-                    ) + f"\n\n**Miért?**\n{reasons_display}",    
-                    "color": color_code,
-                    "fields": [
-                        {"name": "Belépő (Entry)", "value": f"`{format_price(spot_val if use_market else limit_price)}`", "inline": False},
-                        {"name": "🛑 STOP LOSS", "value": f"`{format_price(sl_val)}`", "inline": True},
-                        {"name": "🎯 TP (PROFIT)", "value": f"TP1: `{format_price(tp1_val)}`\nTP2: `{format_price(tp2_val)}`", "inline": True},
-                        
-                        {"name": "Jelenlegi Ár", "value": f"{format_price(spot_price)}\n🕒 {bp_time}", "inline": True},
-                        {"name": "Minőség", "value": f"Score: `{p_score}`\nR/R: `{rr_display}`", "inline": True},
-                        {"name": "Trend (Bias)", "value": f"{trend_display}", "inline": True}
-                    ],
-                    "footer": {"text": f"{'Market' if use_market else 'Limit'} Order • {asset_name} • 'Set & Forget' Mód"}
-                }
-
-        # ---------------------------
-        # 3. EXIT SIGNAL
-        # ---------------------------
-        elif exit_signal:
-            exit_state = str(exit_signal.get("state") or exit_signal.get("action") or "").lower()
-            exit_actions = exit_signal.get("actions") or []
-            exit_reasons = exit_signal.get("reasons") or []
-            exit_direction = exit_signal.get("direction")
-            exit_context = format_exit_context(exit_signal)
-            exit_signature = _exit_signature(exit_signal)
             state_label = {
                 "hard_exit": "HARD EXIT",
                 "scale_out": "RÉSZLEGES ZÁRÁS",
                 "tighten_stop": "SL SZŰKÍTÉS",
             }.get(exit_state, "POZÍCIÓ MENEDZSMENT")
-            color_code = (
-                COLOR_RED
-                if exit_state == "hard_exit" or exit_signal.get("action") == "close"
-                else COLOR_ORANGE
-            )
-            reasons_display = "\n".join(
-                [f"• {r}" for r in (exit_reasons[:4] if exit_reasons else ["Nincs részletezve."])]
-            )
-            should_notify = True
-            now_dt = datetime.now(timezone.utc)
-            asset_state = notify_state.get(asset_name)
-            if not isinstance(asset_state, dict):
-                asset_state = {}
-            last_exit_signature = asset_state.get("last_exit_signature")
-            last_exit_sent_utc = asset_state.get("last_exit_sent_utc")
-            if last_exit_signature == exit_signature and last_exit_sent_utc:
-                try:
-                    last_exit_dt = datetime.fromisoformat(
-                        str(last_exit_sent_utc).replace("Z", "+00:00")
-                    )
-                except Exception:
-                    last_exit_dt = None
-                if last_exit_dt and now_dt - last_exit_dt < timedelta(minutes=EXIT_NOTIFY_COOLDOWN_MINUTES):
-                    should_notify = False
-                    print(f" -> EXIT DEDUP: {asset_name} ({EXIT_NOTIFY_COOLDOWN_MINUTES}m)")
             embed = {
-                "title": f"⚠️ {state_label}: {asset_name} • {time_label}",
-                "description": "**FIGYELMEZTETÉS – Pozíció védelem**",
-                "color": color_code,
+                "title": f"⚠️ {state_label}: {asset_name}",
+                "description": "**Pozíció menedzsment jelzés**",
+                "color": COLOR_ORANGE if exit_state != "hard_exit" else COLOR_RED,
                 "fields": [
-                    {"name": "Árfolyam & Idő", "value": f"`{format_price(spot_price)}`\n🕒 {bp_time}", "inline": True},
-                    {"name": "Irány", "value": f"`{str(exit_direction or 'n/a').upper()}`", "inline": True},
-                    {"name": "Akciók", "value": format_exit_actions(exit_actions), "inline": False},
-                    *(
-                        [{"name": "Kontekstus", "value": exit_context, "inline": False}]
-                        if exit_context
-                        else []
-                    ),
-                    {"name": "Okok", "value": reasons_display, "inline": False},
+                    {"name": "Irány", "value": str(exit_signal.get("direction") or "n/a").upper(), "inline": True},
+                    {"name": "Okok", "value": "\n".join(f"• {r}" for r in reasons) or "N/A", "inline": False},
                 ],
-                "footer": {"text": f"Pozíció menedzsment • {asset_name}"}
+                "footer": {"text": f"Exit • {asset_name}"},
             }
-  
-        if isinstance(notify_payload, dict) and notify_payload.get("should_notify") is False and not allow_limit_override:
-            reason = notify_payload.get("reason")
-            print(f" -> BLOKKOLVA: {asset_name} ({reason})")
-            should_notify = False
+            send_discord_embed(embed)
+            asset_state["last_exit_signature"] = exit_signature
+            asset_state["last_exit_sent_utc"] = to_utc_iso(now_dt)
+            notify_state[asset_name] = asset_state
+            notify_state_changed = True
+            continue
 
-        if should_notify:
-            print(f" -> KÜLDÉS: {asset_name}")
-            send_discord_embed(DISCORD_WEBHOOK_URL, embed)
-            if exit_signal:
-                asset_state = notify_state.get(asset_name)
-                if not isinstance(asset_state, dict):
-                    asset_state = {}
-                asset_state["last_exit_signature"] = _exit_signature(exit_signal)
-                asset_state["last_exit_sent_utc"] = to_utc_iso(datetime.now(timezone.utc))
-                notify_state[asset_name] = asset_state
-                notify_state_changed = True
+        if entry is None or sl is None or tp1 is None:
+            print(f"{asset_name}: hiányzó entry/SL/TP1 — jelzés eldobva.")
+            continue
 
-    if notify_state_changed:
+        notional = equity_usd * leverage
+        rt_pct = round_trip_pct(asset_name)
+        tp1_gross_pct = calc_gross_pct(entry, tp1, direction) or 0.0
+        tp2_gross_pct = calc_gross_pct(entry, tp2, direction) if tp2 is not None else None
+        tp1_net_pct = tp1_gross_pct - rt_pct
+        tp2_net_pct = (tp2_gross_pct - rt_pct) if tp2_gross_pct is not None else None
+
+        tp1_net_usd = tp1_net_pct * notional * tp1_close_fraction
+        tp2_net_usd = (tp2_net_pct * notional) if tp2_net_pct is not None else None
+        sl_gross_pct = calc_gross_pct(entry, sl, "sell" if direction == "buy" else "buy") or 0.0
+        sl_usd = sl_gross_pct * notional
+
+        rr_tp1 = calc_rr(entry, sl, tp1)
+        rr_tp2 = calc_rr(entry, sl, tp2) if tp2 is not None else None
+        rr_tp1_display = f"{rr_tp1:.2f}" if rr_tp1 is not None else "n/a"
+        rr_tp2_display = f"{rr_tp2:.2f}" if rr_tp2 is not None else "n/a"
+
+        counter_min_net = max(tp2_min_net_usd, tp1_min_net_usd * 1.5)
+        allow_entry = tp1_net_usd >= tp1_min_net_usd
+        if alignment_state == "COUNTER":
+            allow_entry = tp1_net_usd >= counter_min_net
+
+        asset_state = notify_state.get(asset_name) if isinstance(notify_state.get(asset_name), dict) else {}
+        now_dt = datetime.now(timezone.utc)
+        entry_signature = _entry_signature(signal, entry, order_type)
+        last_entry_signature = asset_state.get("last_entry_signature")
+        last_entry_sent_utc = asset_state.get("last_entry_sent_utc")
+       if allow_entry and last_entry_signature == entry_signature and last_entry_sent_utc:
+            try:
+                last_entry_dt = datetime.fromisoformat(str(last_entry_sent_utc).replace("Z", "+00:00"))
+            except Exception:
+                last_entry_dt = None
+            if last_entry_dt and now_dt - last_entry_dt < timedelta(minutes=ENTRY_COOLDOWN_MINUTES):
+                print(f" -> ENTRY DEDUP: {asset_name} ({ENTRY_COOLDOWN_MINUTES}m)")
+                allow_entry = False
+
+        if not allow_entry:
+            print(
+                f"{asset_name}: belépő blokkolva (TP1 net USD {tp1_net_usd:.2f} / min {tp1_min_net_usd}, alignment {alignment_state})."
+            )
+            continue
+
+        icon = ICON_BUY_MARKET if direction == "buy" else ICON_SELL_MARKET
+        color = COLOR_GREEN if direction == "buy" else COLOR_RED
+        if order_type == "LIMIT":
+            icon = ICON_BUY_LIMIT if direction == "buy" else ICON_SELL_LIMIT
+            color = COLOR_BLUE if direction == "buy" else COLOR_ORANGE
+        if alignment_state == "COUNTER":
+            color = COLOR_YELLOW
+
+        spot = data.get("spot") if isinstance(data.get("spot"), dict) else {}
+        spot_price = spot.get("price")
+        time_label = get_budapest_time(spot.get("utc"))
+        spread_status = _spread_gate_status(gates)
+
+        fields = [
+            {
+                "name": "Setup",
+                "value": (
+                    f"Entry: `{format_price(entry)}`\n"
+                    f"SL: `{format_price(sl)}`\n"
+                    f"TP1: `{format_price(tp1)}`\n"
+                    f"TP2: `{format_price(tp2)}`"
+                ),
+                "inline": True,
+            },
+            {
+                "name": "Δ ár (points)",
+                "value": (
+                    f"TP1: `{calc_points(entry, tp1):.4f}`\n"
+                    f"TP2: `{calc_points(entry, tp2):.4f}`" if tp2 is not None else "TP2: `n/a`"
+                ),
+                "inline": True,
+            },
+            {
+                "name": "TP1/TP2 % (gross/net)",
+                "value": (
+                    f"TP1: `{tp1_gross_pct*100:.2f}% / {tp1_net_pct*100:.2f}%`\n"
+                    f"TP2: `{(tp2_gross_pct or 0)*100:.2f}% / {(tp2_net_pct or 0)*100:.2f}%`"
+                    if tp2 is not None
+                    else f"TP1: `{tp1_gross_pct*100:.2f}% / {tp1_net_pct*100:.2f}%`"
+                ),
+                "inline": True,
+            },
+            {
+                "name": "PnL (USD) & R",
+                "value": (
+                    f"TP1: `${tp1_net_usd:.2f}` | R: `{rr_tp1_display}`\n"
+                    f"TP2: `${tp2_net_usd:.2f}` | R: `{rr_tp2_display}`\n"
+                    f"SL: `-${sl_usd:.2f}` | Risk cap: `${sl_risk_usd:.2f}`"
+                    if tp2_net_usd is not None
+                    else f"TP1: `${tp1_net_usd:.2f}` | R: `{rr_tp1_display}`\nSL: `-${sl_usd:.2f}` | Risk cap: `${sl_risk_usd:.2f}`"
+                ),
+                "inline": False,
+            },
+            {
+                "name": "Bias / ATR / Spread",
+                "value": (
+                    f"{_format_biases(biases)}\n"
+                    f"ATR(1H): `{atr1h:.4f}`\n"
+                    f"Spread gate: `{spread_status}`"
+                    if atr1h is not None
+                    else f"{_format_biases(biases)}\nATR(1H): `n/a`\nSpread gate: `{spread_status}`"
+                ),
+                "inline": False,
+            },
+            {
+                "name": "Alignment",
+                "value": f"State: `{alignment_state}` | Gate: `{alignment_gate_note}`",
+                "inline": True,
+            },
+            {
+                "name": "Probability / P-score",
+                "value": (
+                    f"Prob: `{probability:.0f}%`\nP-score: `{p_score:.0f}`"
+                    if probability is not None and p_score is not None
+                    else f"Prob: `{probability}` | P-score: `{p_score}`"
+                ),
+                "inline": True,
+            },
+        ]
+
+        if reasons:
+            fields.append(
+                {
+                    "name": "Miért",
+                    "value": "\n".join(f"• {reason}" for reason in reasons),
+                    "inline": False,
+                }
+            )
+
+        embed = {
+            "title": f"{icon} {order_type} {direction.upper()} — {asset_name}",
+            "description": f"Spot: `{format_price(spot_price)}` • 🕒 {time_label}",
+            "color": color,
+            "fields": fields,
+            "footer": {"text": f"{asset_name} • Manual trade model"},
+        }
+
+        send_discord_embed(embed)
+        asset_state["last_entry_signature"] = entry_signature
+        asset_state["last_entry_sent_utc"] = to_utc_iso(now_dt)
+        notify_state[asset_name] = asset_state
+        notify_state_changed = True
+
+    if notify_state_changed and not DRY_RUN:  
         save_json(notify_state_path, notify_state)
-        
+
+
 if __name__ == "__main__":
     check_and_notify()
