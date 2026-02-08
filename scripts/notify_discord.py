@@ -314,7 +314,7 @@ def check_and_notify() -> None:
         entry_signature = _entry_signature(signal, entry, order_type)
         last_entry_signature = asset_state.get("last_entry_signature")
         last_entry_sent_utc = asset_state.get("last_entry_sent_utc")
-       if allow_entry and last_entry_signature == entry_signature and last_entry_sent_utc:
+        if allow_entry and last_entry_signature == entry_signature and last_entry_sent_utc:
             try:
                 last_entry_dt = datetime.fromisoformat(str(last_entry_sent_utc).replace("Z", "+00:00"))
             except Exception:
