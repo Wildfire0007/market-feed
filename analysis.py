@@ -10432,7 +10432,8 @@ def analyze(asset: str) -> Dict[str, Any]:
             "adx_value": adx_value_safe,
         }
 
-        short_conditions = all(
+        trend_weak = adx_value_safe is None or adx_value_safe < 20.0
+        short_conditions_base = all(
             (
                 rsi_extreme_short,
                 pct_up_move is not None and pct_up_move >= 1.5,
@@ -10441,7 +10442,7 @@ def analyze(asset: str) -> Dict[str, Any]:
                 bos_short,
             )
         )
-        long_conditions = all(
+        long_conditions_base = all(
             (
                 rsi_extreme_long,
                 pct_down_move is not None and pct_down_move <= -1.5,
@@ -10450,10 +10451,15 @@ def analyze(asset: str) -> Dict[str, Any]:
                 bos_long,
             )
         )
+        short_conditions = short_conditions_base and trend_weak
+        long_conditions = long_conditions_base and trend_weak
 
         trend_blocked = False
         trend_strong = adx_value_safe is not None and adx_value_safe >= 22.0
-        if short_conditions:
+        if not trend_weak and (short_conditions_base or long_conditions_base):
+            trend_blocked = True
+            xag_reversal_meta["blocked_reason"] = "adx_strong"
+        elif short_conditions:
             if trend_bias == "long" and trend_strong:
                 trend_blocked = True
                 xag_reversal_meta["blocked_reason"] = "strong_trend_against"
@@ -10472,9 +10478,14 @@ def analyze(asset: str) -> Dict[str, Any]:
 
         if trend_blocked:
             xag_reversal_meta["trend_bias"] = trend_bias
-            reasons.append(
-                "XAGUSD reversal blokkolva: erős trend ellen (ADX≥22)"
-            )
+            if xag_reversal_meta.get("blocked_reason") == "adx_strong":
+                reasons.append(
+                    "XAGUSD reversal blokkolva: ADX túl erős (>=20)"
+                )
+            else:
+                reasons.append(
+                    "XAGUSD reversal blokkolva: erős trend ellen (ADX≥22)"
+                )
 
         if xag_reversal_active:
             xag_reversal_meta["active"] = True
@@ -16153,6 +16164,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
