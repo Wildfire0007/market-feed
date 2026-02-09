@@ -10342,6 +10342,9 @@ def analyze(asset: str) -> Dict[str, Any]:
         if not k5m_closed.empty:
             swings = find_swings(k5m_closed, lb=2)
             swing_hi, swing_lo = last_swing_levels(swings)
+        adx_value_safe: Optional[float] = None
+        if adx_value is not None and np.isfinite(adx_value):
+            adx_value_safe = float(adx_value)
 
         pct_up_move = pct_down_move = None
         if price_now and not recent_window.empty:
@@ -10426,6 +10429,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             "pattern_long": pattern_long,
             "bos_short": bos_short,
             "bos_long": bos_long,
+            "adx_value": adx_value_safe,
         }
 
         short_conditions = all(
@@ -10447,14 +10451,30 @@ def analyze(asset: str) -> Dict[str, Any]:
             )
         )
 
+        trend_blocked = False
+        trend_strong = adx_value_safe is not None and adx_value_safe >= 22.0
         if short_conditions:
-            xag_reversal_active = True
-            xag_reversal_side = "sell"
-            xag_reversal_meta["direction"] = "short"
+            if trend_bias == "long" and trend_strong:
+                trend_blocked = True
+                xag_reversal_meta["blocked_reason"] = "strong_trend_against"
+            else:
+                xag_reversal_active = True
+                xag_reversal_side = "sell"
+                xag_reversal_meta["direction"] = "short"
         elif long_conditions:
-            xag_reversal_active = True
-            xag_reversal_side = "buy"
-            xag_reversal_meta["direction"] = "long"
+            if trend_bias == "short" and trend_strong:
+                trend_blocked = True
+                xag_reversal_meta["blocked_reason"] = "strong_trend_against"
+            else:
+                xag_reversal_active = True
+                xag_reversal_side = "buy"
+                xag_reversal_meta["direction"] = "long"
+
+        if trend_blocked:
+            xag_reversal_meta["trend_bias"] = trend_bias
+            reasons.append(
+                "XAGUSD reversal blokkolva: erős trend ellen (ADX≥22)"
+            )
 
         if xag_reversal_active:
             xag_reversal_meta["active"] = True
@@ -16133,6 +16153,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
