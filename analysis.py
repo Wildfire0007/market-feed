@@ -13541,9 +13541,23 @@ def analyze(asset: str) -> Dict[str, Any]:
         else:
             decision = "no entry"
 
+    usoil_strong_trend_block = False
+    if asset == "USOIL" and trend_bias in {"long", "short"} and effective_bias in {"long", "short"}:
+        adx_safe = float(adx_value) if adx_value is not None and np.isfinite(adx_value) else None
+        if adx_safe is not None and adx_safe >= 22.0 and trend_bias != effective_bias:
+            usoil_strong_trend_block = True
+            entry_thresholds_meta.setdefault("usoil_trend_guard", {})["blocked_reason"] = "strong_trend_against"
+            entry_thresholds_meta["usoil_trend_guard"]["adx_value"] = adx_safe
+            entry_thresholds_meta["usoil_trend_guard"]["trend_bias"] = trend_bias
+            entry_thresholds_meta["usoil_trend_guard"]["effective_bias"] = effective_bias
+            msg = "USOIL belépés blokkolva: erős trend ellen (ADX≥22)"
+            if msg not in reasons:
+                reasons.append(msg)
+
     if (
         not can_enter_core
         and not reversal_mode_used
+        and not usoil_strong_trend_block
         and _nvda_precision_override_ready(
             asset,
             precision_plan=precision_plan,
@@ -13568,7 +13582,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             else:
                 decision = "no entry"
 
-    if can_enter_core and not reversal_mode_used:
+    if can_enter_core and not reversal_mode_used and not usoil_strong_trend_block:
         if effective_bias == "long":
             decision = "buy"
         elif effective_bias == "short":
@@ -16164,6 +16178,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
