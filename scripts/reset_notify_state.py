@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from scripts.notify_discord import build_default_state, _default_asset_state
+from config.analysis_settings import ASSETS
 
 __all__ = [
     "NotifyStateUpdate",
@@ -42,6 +42,31 @@ def _now() -> datetime:
 
 def _to_iso(dt: datetime) -> str:
     return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _default_asset_state() -> Dict[str, Any]:
+    return {
+        "last": "no entry",
+        "count": 0,
+        "last_sent": None,
+        "last_sent_decision": None,
+        "last_sent_mode": None,
+        "last_sent_known": False,
+        "cooldown_until": None,
+    }
+
+
+def build_default_state(*, now: Optional[datetime] = None, reason: str = "initialise") -> Dict[str, Any]:
+    now = now or _now()
+    payload: Dict[str, Any] = {
+        "_meta": {
+            "last_reset_utc": _to_iso(now),
+            "last_reset_reason": reason,
+        }
+    }
+    for asset in ASSETS:
+        payload[asset] = _default_asset_state()
+    return payload
 
 
 def _reset_asset_state(asset: str, payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
