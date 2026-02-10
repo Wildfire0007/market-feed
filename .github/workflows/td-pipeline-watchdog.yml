@@ -85,6 +85,12 @@ jobs:
             for r in queued
             if r.get("created_at")
           )
+          stale_queued_runs = [
+            r for r in queued
+            if r.get("created_at") and (
+              (now - datetime.fromisoformat(r.get("created_at").replace("Z", "+00:00"))).total_seconds() / 60.0 >= max_queued_minutes
+            )
+          ]
 
           print(f"latest_age_min={latest_age_minutes:.2f}" if latest_age_minutes != float("inf") else "latest_age_min=none")
           print(f"in_progress={len(in_progress)} queued={len(queued)}")
@@ -100,6 +106,35 @@ jobs:
           if queued and not stale_queued:
             print("freshness=ok reason=fresh_queue")
             raise SystemExit(0)
+
+          # Clear stale queued runs to avoid lock-in where old queued items block recovery.
+          for run in stale_queued_runs:
+            run_id = run.get("id")
+            if not run_id:
+              continue
+            cancel_url = f"{api_base}/actions/runs/{run_id}/cancel"
+            cancel_error = ""
+            try:
+              cancel_status, _ = github_request("POST", cancel_url, os.environ["GH_TOKEN"])
+              if cancel_status not in {202, 409}:
+                cancel_error = f"GH_TOKEN HTTP {cancel_status}"
+            except urllib.error.HTTPError as exc:
+              cancel_error = f"GH_TOKEN HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')}"
+
+            if cancel_error and os.environ.get("TD_BOT_PAT"):
+              try:
+                cancel_status, _ = github_request("POST", cancel_url, os.environ["TD_BOT_PAT"])
+                if cancel_status not in {202, 409}:
+                  cancel_error = f"TD_BOT_PAT HTTP {cancel_status}"
+                else:
+                  cancel_error = ""
+              except urllib.error.HTTPError as exc:
+                cancel_error = f"TD_BOT_PAT HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')}"
+
+            if cancel_error:
+              print(f"queued_cancel_warning run_id={run_id} error={cancel_error}")
+            else:
+              print(f"queued_cancel_ok run_id={run_id}")
 
           dispatch_url = f"{api_base}/actions/workflows/{workflow_id}/dispatches"
           dispatch_payload = {"ref": branch, "inputs": {"force_public_sync": "true"}}
@@ -143,7 +178,7 @@ jobs:
                 break
             if dispatched:
               break
-
+ 
           if not dispatched:
             raise SystemExit("dispatch_requested_but_no_new_queued_run_detected")
 
