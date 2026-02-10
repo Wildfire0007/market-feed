@@ -19,73 +19,125 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Check TD pipeline freshness and dispatch if stale
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const workflow_id = 'td-pipeline.yml';
-            const maxGapMinutes = 7;
-            const maxRunningMinutes = 8;
-            const maxQueuedMinutes = 3;
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TD_BOT_PAT: ${{ secrets.TD_BOT_PAT }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+          from datetime import datetime, timezone
 
-            const runsResp = await github.rest.actions.listWorkflowRuns({
-              owner,
-              repo,
-              workflow_id,
-              branch: 'main',
-              per_page: 20,
-            });
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
+          if "/" not in repo:
+            raise SystemExit(f"Invalid GITHUB_REPOSITORY: {repo}")
 
-            const runs = runsResp.data.workflow_runs || [];
-            const now = Date.now();
-            const inProgress = runs.filter((r) => r.status === 'in_progress');
-            const queued = runs.filter((r) => r.status === 'queued');
+          owner, name = repo.split("/", 1)
+          workflow_id = "td-pipeline.yml"
+          branch = "main"
+          max_gap_minutes = 7
+          max_running_minutes = 8
+          max_queued_minutes = 3
+          api_base = f"https://api.github.com/repos/{owner}/{name}"
 
-            const latestEffective =
-              runs.find((r) => r.run_started_at || r.status === 'completed') || null;
-
-            const latestAgeMin = latestEffective
-              ? (now - new Date(latestEffective.run_started_at || latestEffective.created_at).getTime()) / 60000  
-              : Number.POSITIVE_INFINITY;
-
-            const hasHealthyRunning = inProgress.some((r) => {
-              const age = (now - new Date(r.run_started_at || r.created_at).getTime()) / 60000;
-              return age <= maxRunningMinutes;
-            });
-
-            const hasStaleQueued = queued.some((r) => {
-              const age = (now - new Date(r.created_at).getTime()) / 60000;
-              return age >= maxQueuedMinutes;
-            });
-
-            core.info(`TD latest run age: ${Number.isFinite(latestAgeMin) ? latestAgeMin.toFixed(1) : 'none'} min`);
-            core.info(`TD in-progress runs: ${inProgress.length}`);
-            core.info(`TD queued runs: ${queued.length}`);
-
-            if (hasHealthyRunning) {
-              core.info('TD pipeline already running in healthy window; no dispatch needed.');
-              return;
+          def github_request(method: str, url: str, token: str, payload: dict | None = None):
+            data = None
+            headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
             }
+            if payload is not None:
+              data = json.dumps(payload).encode("utf-8")
+              headers["Content-Type"] = "application/json"
+            req = urllib.request.Request(url, data=data, method=method, headers=headers)
+            with urllib.request.urlopen(req, timeout=30) as resp:
+              return resp.status, json.loads(resp.read().decode("utf-8"))
 
-            if (latestAgeMin <= maxGapMinutes) {
-              core.info(`TD pipeline freshness within ${maxGapMinutes} min; no dispatch needed.`);
-              return;
-            }
+          def list_runs(token: str):
+            url = f"{api_base}/actions/workflows/{workflow_id}/runs?branch={branch}&per_page=20"
+            status, payload = github_request("GET", url, token)
+            if status != 200:
+              raise SystemExit(f"Failed listing runs ({status})")
+            return payload.get("workflow_runs", [])
 
-            if (queued.length > 0 && !hasStaleQueued) {
-              core.info(`TD pipeline has fresh queued run(s) (<${maxQueuedMinutes} min); no dispatch yet.`);
-              return;
-            }
+          runs = list_runs(os.environ["GH_TOKEN"])
+          now = datetime.now(timezone.utc)
+          in_progress = [r for r in runs if r.get("status") == "in_progress"]
+          queued = [r for r in runs if r.get("status") == "queued"]
+          latest_effective = next((r for r in runs if r.get("run_started_at") or r.get("status") == "completed"), None)
 
+          if latest_effective:
+            basis = latest_effective.get("run_started_at") or latest_effective.get("created_at")
+            latest_age_minutes = (now - datetime.fromisoformat(basis.replace("Z", "+00:00"))).total_seconds() / 60.0
+          else:
+            latest_age_minutes = float("inf")
 
-            await github.rest.actions.createWorkflowDispatch({
-              owner,
-              repo,
-              workflow_id,
-              ref: 'main',
-              inputs: {
-                force_public_sync: 'true',
-              },
-            });
-            core.notice(`Triggered fallback dispatch for ${workflow_id}; latest age=${latestAgeMin.toFixed(1)} min`);
+          healthy_running = any(
+            (now - datetime.fromisoformat((r.get("run_started_at") or r.get("created_at")).replace("Z", "+00:00"))).total_seconds() / 60.0 <= max_running_minutes
+            for r in in_progress
+          )
+          stale_queued = any(
+            (now - datetime.fromisoformat(r.get("created_at", "").replace("Z", "+00:00"))).total_seconds() / 60.0 >= max_queued_minutes
+            for r in queued
+            if r.get("created_at")
+          )
+
+          print(f"latest_age_min={latest_age_minutes:.2f}" if latest_age_minutes != float("inf") else "latest_age_min=none")
+          print(f"in_progress={len(in_progress)} queued={len(queued)}")
+
+          if healthy_running:
+            print("freshness=ok reason=healthy_running")
+            raise SystemExit(0)
+
+          if latest_age_minutes <= max_gap_minutes:
+            print("freshness=ok reason=within_gap")
+            raise SystemExit(0)
+
+          if queued and not stale_queued:
+            print("freshness=ok reason=fresh_queue")
+            raise SystemExit(0)
+
+          dispatch_url = f"{api_base}/actions/workflows/{workflow_id}/dispatches"
+          dispatch_payload = {"ref": branch, "inputs": {"force_public_sync": "true"}}
+
+          dispatch_error = ""
+          dispatched_with = "GH_TOKEN"
+          try:
+            status, _ = github_request("POST", dispatch_url, os.environ["GH_TOKEN"], dispatch_payload)
+            if status != 204:
+              dispatch_error = f"GH_TOKEN HTTP {status}"
+          except urllib.error.HTTPError as exc:
+            dispatch_error = f"GH_TOKEN HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')}"
+
+          if dispatch_error and os.environ.get("TD_BOT_PAT"):
+            try:
+              status, _ = github_request("POST", dispatch_url, os.environ["TD_BOT_PAT"], dispatch_payload)
+              if status == 204:
+                dispatch_error = ""
+                dispatched_with = "TD_BOT_PAT"
+              else:
+                dispatch_error = f"TD_BOT_PAT HTTP {status}"
+            except urllib.error.HTTPError as exc:
+              dispatch_error = f"TD_BOT_PAT HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')}"
+
+          if dispatch_error:
+            raise SystemExit(f"dispatch_failed={dispatch_error}")
+
+          # Validate: within ~25 seconds a new queued/in_progress run should appear.
+          dispatched = False
+          for _ in range(5):
+            time.sleep(5)
+            refreshed = list_runs(os.environ["GH_TOKEN"])
+            if any(r.get("status") in {"queued", "in_progress"} for r in refreshed):
+              dispatched = True
+              break
+
+          if not dispatched:
+            raise SystemExit("dispatch_requested_but_no_new_queued_run_detected")
+            
+          print(f"dispatch=ok token={dispatched_with}")
+          PY  
