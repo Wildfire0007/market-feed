@@ -18,13 +18,13 @@ permissions:
 
 concurrency:
   group: manual-positions-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   trading_and_analysis:
     name: 1) Trading.py → Analysis (egy runneren)
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 20
     env:
       TZ: UTC
       OUT_DIR: public
@@ -144,14 +144,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p public
-          if curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions.json?ts=${GITHUB_RUN_ID}" -o public/_manual_positions.json; then
+          if curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions.json?ts=${GITHUB_RUN_ID}" -o public/_manual_positions.json; then
             echo "manual positions restored from public"
           else
             echo '{}' > public/_manual_positions.json
             echo "manual positions fallback created"
           fi
-          curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true
-
+          curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true
+  
       - name: Upload pipeline artifact bundle
         uses: actions/upload-artifact@v4
         with:
@@ -264,13 +264,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p public
-          if curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions.json?ts=${GITHUB_RUN_ID}" -o public/_manual_positions.json; then
+          if curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions.json?ts=${GITHUB_RUN_ID}" -o public/_manual_positions.json; then  
               echo "STATE_LOADED=1" >> $GITHUB_ENV
           else
               echo '{}' > public/_manual_positions.json
               echo "STATE_LOADED=0" >> $GITHUB_ENV
           fi
-          curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true
+          curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true  
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -431,4 +431,3 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
-
