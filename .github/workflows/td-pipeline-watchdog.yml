@@ -1,11 +1,8 @@
 name: TD Pipeline Watchdog
 
 on:
-  workflow_run:
-    workflows:
-      - Macro Calendar Lockout
-    types:
-      - completed
+  schedule:
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -16,7 +13,6 @@ jobs:
   ensure_td_pipeline_fresh:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Check TD pipeline freshness and dispatch if stale
         uses: actions/github-script@v7
@@ -25,8 +21,8 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const workflow_id = 'td-pipeline.yml';
-            const maxGapMinutes = 12;
-            const maxRunningMinutes = 25;
+            const maxGapMinutes = 7;
+            const maxRunningMinutes = 8;
 
             const runsResp = await github.rest.actions.listWorkflowRuns({
               owner,
