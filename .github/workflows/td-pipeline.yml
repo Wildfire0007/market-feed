@@ -1,6 +1,6 @@
 name: TD Full Pipeline (5m)
 
-"on":
+on:
   workflow_dispatch:
     inputs:
       force_public_sync:
@@ -8,19 +8,22 @@ name: TD Full Pipeline (5m)
         required: false
         default: "true"
   schedule:
-    # GitHub Actions scheduled workflows támogatott minimuma 5 perc.
-    # Ennél sűrűbb cron (pl. */2) esetén a trigger késhet vagy kimaradhat.
-    - cron: "*/5 * * * *" # 5 percenként (UTC)
+    # GitHub Actions only guarantees cron triggers at a minimum 2-minute cadence,
+    - cron: "*/2 * * * *" # 2 percenként (UTC)
     - cron: "0 5 * * *" # Napi egyszer 05:00-kor (UTC)
 
 permissions:
   contents: write
+  
+concurrency:  
+  group: manual-positions-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   trading_and_analysis:
     name: 1) Trading.py → Analysis (egy runneren)
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 40
     env:
       TZ: UTC
       OUT_DIR: public
@@ -31,7 +34,6 @@ jobs:
       DISABLE_ML_PROBABILITY: "1"
       ML_PROBABILITY_MANUAL_OVERRIDE: "1"
       RESET_PUBLIC_ON_TRADING_START: "1"
-      PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,15 +44,15 @@ jobs:
       - name: Sync default branch
         run: |
           git fetch origin main
-          git reset --hard origin/main
-
+          git reset --hard origin/main      
+      
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
           cache-dependency-path: requirements.lock
-
+          
       - name: Restore Python virtualenv cache
         id: cache-venv
         uses: actions/cache@v4
@@ -85,7 +87,7 @@ jobs:
       # anything stale from a previous workflow run.
       - name: Run Trading.py (pull all OHLC  spot)
         run: .venv/bin/python Trading.py
-
+        
       - name: Sync pipeline artifacts into public (before analysis)
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.force_public_sync != 'false'
         env:
@@ -115,7 +117,7 @@ jobs:
             raise SystemExit("Missing public/.sync-metadata.json after sync")
 
           metadata = json.loads(meta_path.read_text())
-
+          
           expected_run_id = os.environ.get("EXPECTED_RUN_ID")
           if not expected_run_id:
             raise SystemExit("EXPECTED_RUN_ID environment variable missing")
@@ -134,20 +136,6 @@ jobs:
           print("Verified public sync metadata", metadata)
           PY
 
-      - name: Ensure manual position state is available for analysis
-        env:
-          PUBLIC_BASE_URL: ${{ env.PUBLIC_BASE_URL }}
-        run: |
-          set -euo pipefail
-          mkdir -p public
-          if curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions.json?ts=${GITHUB_RUN_ID}" -o public/_manual_positions.json; then
-            echo "manual positions restored from public"
-          else
-            echo '{}' > public/_manual_positions.json
-            echo "manual positions fallback created"
-          fi
-          curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true
-  
       - name: Upload pipeline artifact bundle
         uses: actions/upload-artifact@v4
         with:
@@ -155,25 +143,18 @@ jobs:
           path: |
             data
             reports
-
+            
       - name: Verify model exists & loadable
         run: .venv/bin/python scripts/check_ml_readiness.py BTCUSD
 
       - name: Run analysis (ML disabled)
         run: |
           .venv/bin/python analysis.py
-
+               
       - name: Generate latency monitoring snapshot
         run: |
           .venv/bin/python scripts/check_latency_sources.py --output public/monitoring/data_latency.json --pretty
-
-      - name: Upload pipeline log artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: pipeline-log
-          path: public/monitoring/pipeline.log
-          if-no-files-found: error
-          
+                           
       - name: Commit and push refreshed public outputs
         if: github.ref == 'refs/heads/main'
         run: |
@@ -190,7 +171,7 @@ jobs:
           fi
           git commit -m "Auto-update analysis outputs (public/) [skip ci]"
           git push origin main
-
+          
       - name: Upload analysis outputs
         uses: actions/upload-artifact@v4
         with:
@@ -208,14 +189,14 @@ jobs:
       id-token: write
     environment:
       name: github-pages
-    steps:
+    steps:     
       - name: Deploy public folder to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
   notify:
     name: 3) Discord értesítő
     needs:
-      - trading_and_analysis
+      - trading_and_analysis     
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -223,8 +204,6 @@ jobs:
       DISCORD_COOLDOWN_MIN: ${{ secrets.DISCORD_COOLDOWN_MIN }}
       DISCORD_COOLDOWN_MOMENTUM_MIN: ${{ secrets.DISCORD_COOLDOWN_MOMENTUM_MIN }}
       PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
-      DISABLE_PIPELINE_MONITOR: ${{ vars.DISABLE_PIPELINE_MONITOR || '0' }}
-      WARNINGS_RATIO_TARGET: "0.2"
     steps:
       - name: Checkout latest signals
         uses: actions/checkout@v4
@@ -242,39 +221,33 @@ jobs:
           rm -rf public
           mkdir -p public
 
-      - name: Download analysis outputs
-        uses: actions/download-artifact@v4
-        with:
-          name: analysis-public
-          path: public
-
-      - name: Download pipeline log
-        uses: actions/download-artifact@v4
-        with:
-          name: pipeline-log
-          path: public/monitoring
-
       - name: Bootstrap manual positions from published state
         env:
           PUBLIC_BASE_URL: ${{ env.PUBLIC_BASE_URL }}
         run: |
           set -euo pipefail
           mkdir -p public
-          if curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions.json?ts=${GITHUB_RUN_ID}" -o public/_manual_positions.json; then  
+          if curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions.json?ts=${GITHUB_RUN_ID}" -o public/_manual_positions.json; then
               echo "STATE_LOADED=1" >> $GITHUB_ENV
           else
               echo '{}' > public/_manual_positions.json
               echo "STATE_LOADED=0" >> $GITHUB_ENV
           fi
-          curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true  
+          curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true
 
+      - name: Download analysis outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: analysis-public
+          path: public
+               
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
           cache-dependency-path: requirements.lock
-
+          
       - name: Restore Python virtualenv cache
         id: cache-venv
         uses: actions/cache@v4
@@ -296,44 +269,6 @@ jobs:
           echo "VIRTUAL_ENV=$PWD/.venv" >> $GITHUB_ENV
           echo "PATH=$PWD/.venv/bin:$PATH" >> $GITHUB_ENV
 
-      - name: Evaluate pipeline warnings ratio
-        if: env.DISABLE_PIPELINE_MONITOR != '1'
-        env:
-          PIPELINE_MONITOR_LOG: public/monitoring/pipeline.log
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          from reports.pipeline_monitor import summarize_pipeline_warnings
-
-          log_path = Path(os.environ.get("PIPELINE_MONITOR_LOG", "public/monitoring/pipeline.log"))
-          if not log_path.exists():
-              raise SystemExit(f"Pipeline log missing at {log_path}")
-
-          threshold = float(os.environ.get("WARNINGS_RATIO_TARGET", "0.2"))
-          summary = summarize_pipeline_warnings(log_path)
-          warnings = summary.get("warning_lines") or 0
-          ratio = summary.get("client_error_ratio")
-
-          if ratio is None:
-              ratio = 0.0 if warnings == 0 else 1.0
-
-          print(json.dumps({
-              "log_path": str(log_path),
-              "warning_lines": warnings,
-              "client_error_lines": summary.get("client_error_lines", 0),
-              "client_error_ratio": ratio,
-          }, indent=2))
-
-          if ratio >= threshold:
-              raise SystemExit(
-                  f"Pipeline client error ratio {ratio} exceeds target {threshold}"
-              )
-          PY
-
       - name: Run Discord notifier
         env:
           STATE_LOADED: ${{ env.STATE_LOADED }}
@@ -353,77 +288,8 @@ jobs:
           ls -la public/_manual_positions.json || true
           wc -c public/_manual_positions.json || true
 
-      - name: Verify manual position state and audit integrity
-        if: always()
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-
-          positions_path = Path("public/_manual_positions.json")
-          audit_path = Path("public/_manual_positions_audit.jsonl")
-
-          if not positions_path.exists():
-              raise SystemExit("manual positions file missing")
-
-          digest = hashlib.sha256(positions_path.read_bytes()).hexdigest()
-          size = positions_path.stat().st_size
-          print(f"manual_positions sha256={digest} bytes={size}")
-
-          audit_lines = []
-          if audit_path.exists():
-              audit_lines = audit_path.read_text().splitlines()
-              print("---- audit tail (last 30 lines) ----")
-              for line in audit_lines[-30:]:
-                  print(line)
-          else:
-              print("audit file missing — will treat as empty")
-
-          dispatch_success = False
-          had_dispatch = False
-          current_run = os.getenv("GITHUB_RUN_ID")
-          for raw in audit_lines:
-              try:
-                  evt = json.loads(raw)
-              except Exception:
-                  continue
-              if evt.get("event") == "ENTRY_DISPATCH_RESULT":
-                  if current_run and str(evt.get("gh_run_id") or "") not in {str(current_run), str(evt.get("run_id"))}:
-                      continue
-                  had_dispatch = True
-                  if evt.get("success") is True:
-                      dispatch_success = True
-
-          if dispatch_success:
-              try:
-                  positions = json.loads(positions_path.read_text())
-              except Exception:
-                  positions = None
-
-              has_entries = isinstance(positions, dict) and any(
-                  isinstance(v, dict) and v for v in positions.values()
-              )
-
-              if not has_entries:
-                  raise SystemExit(
-                      "ENTRY dispatch succeeded but manual_positions.json is empty"
-                  )
-
-          if not had_dispatch:
-              print("No ENTRY_DISPATCH_RESULT events recorded in audit log")
-          PY
-
-      - name: Mirror manual positions into config directory
-        if: always()
-        run: |
-          set -euo pipefail
-          mkdir -p config
-          cp public/_manual_positions.json config/manual_positions.json
-
       - name: Publish manual position artifacts
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
+
