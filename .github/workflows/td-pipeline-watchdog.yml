@@ -5,6 +5,8 @@ on:
     # GitHub Actions schedule minimum: 5 perc.
     # Watchdog fallback dispatch-eli a TD pipeline-t, ha kimarad egy ütem.
     - cron: "*/5 * * * *"
+    # Második, eltolva futó ütem: kisebb esélye van annak, hogy egyszerre maradnak ki.
+    - cron: "2-59/5 * * * *"  
   workflow_dispatch:
 
 permissions:
@@ -23,8 +25,9 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const workflow_id = 'td-pipeline.yml';
-            const maxGapMinutes = 5;
+            const maxGapMinutes = 7;
             const maxRunningMinutes = 8;
+            const maxQueuedMinutes = 3;
 
             const runsResp = await github.rest.actions.listWorkflowRuns({
               owner,
@@ -36,20 +39,29 @@ jobs:
 
             const runs = runsResp.data.workflow_runs || [];
             const now = Date.now();
-            const inProgress = runs.filter((r) => r.status !== 'completed');
-            const latest = runs[0] || null;
+            const inProgress = runs.filter((r) => r.status === 'in_progress');
+            const queued = runs.filter((r) => r.status === 'queued');
 
-            const latestAgeMin = latest
-              ? (now - new Date(latest.created_at).getTime()) / 60000
+            const latestEffective =
+              runs.find((r) => r.run_started_at || r.status === 'completed') || null;
+
+            const latestAgeMin = latestEffective
+              ? (now - new Date(latestEffective.run_started_at || latestEffective.created_at).getTime()) / 60000  
               : Number.POSITIVE_INFINITY;
 
             const hasHealthyRunning = inProgress.some((r) => {
-              const age = (now - new Date(r.created_at).getTime()) / 60000;
+              const age = (now - new Date(r.run_started_at || r.created_at).getTime()) / 60000;
               return age <= maxRunningMinutes;
+            });
+
+            const hasStaleQueued = queued.some((r) => {
+              const age = (now - new Date(r.created_at).getTime()) / 60000;
+              return age >= maxQueuedMinutes;
             });
 
             core.info(`TD latest run age: ${Number.isFinite(latestAgeMin) ? latestAgeMin.toFixed(1) : 'none'} min`);
             core.info(`TD in-progress runs: ${inProgress.length}`);
+            core.info(`TD queued runs: ${queued.length}`);
 
             if (hasHealthyRunning) {
               core.info('TD pipeline already running in healthy window; no dispatch needed.');
@@ -60,6 +72,12 @@ jobs:
               core.info(`TD pipeline freshness within ${maxGapMinutes} min; no dispatch needed.`);
               return;
             }
+
+            if (queued.length > 0 && !hasStaleQueued) {
+              core.info(`TD pipeline has fresh queued run(s) (<${maxQueuedMinutes} min); no dispatch yet.`);
+              return;
+            }
+
 
             await github.rest.actions.createWorkflowDispatch({
               owner,
