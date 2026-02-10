@@ -103,6 +103,7 @@ jobs:
 
           dispatch_url = f"{api_base}/actions/workflows/{workflow_id}/dispatches"
           dispatch_payload = {"ref": branch, "inputs": {"force_public_sync": "true"}}
+          dispatch_started_at = datetime.now(timezone.utc)
 
           dispatch_error = ""
           dispatched_with = "GH_TOKEN"
@@ -127,17 +128,24 @@ jobs:
           if dispatch_error:
             raise SystemExit(f"dispatch_failed={dispatch_error}")
 
-          # Validate: within ~25 seconds a new queued/in_progress run should appear.
+          # Validate: within ~25 seconds a NEW queued/in_progress run should appear.
           dispatched = False
           for _ in range(5):
             time.sleep(5)
             refreshed = list_runs(os.environ["GH_TOKEN"])
-            if any(r.get("status") in {"queued", "in_progress"} for r in refreshed):
-              dispatched = True
+            for run in refreshed:
+              created_at = run.get("created_at")
+              if run.get("status") not in {"queued", "in_progress"} or not created_at:
+                continue
+              created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+              if created_dt >= dispatch_started_at:
+                dispatched = True
+                break
+            if dispatched:
               break
 
           if not dispatched:
             raise SystemExit("dispatch_requested_but_no_new_queued_run_detected")
-            
+
           print(f"dispatch=ok token={dispatched_with}")
-          PY  
+          PY
