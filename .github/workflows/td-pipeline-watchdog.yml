@@ -2,6 +2,8 @@ name: TD Pipeline Watchdog
 
 on:
   schedule:
+    # GitHub Actions schedule minimum: 5 perc.
+    # Watchdog fallback dispatch-eli a TD pipeline-t, ha kimarad egy ütem.
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
@@ -21,7 +23,7 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const workflow_id = 'td-pipeline.yml';
-            const maxGapMinutes = 7;
+            const maxGapMinutes = 5;
             const maxRunningMinutes = 8;
 
             const runsResp = await github.rest.actions.listWorkflowRuns({
