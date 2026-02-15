@@ -9519,8 +9519,10 @@ def analyze(asset: str) -> Dict[str, Any]:
     # 2) Bias 4H→1H (zárt 1h/4h)
     raw_bias4h = bias_from_emas(k4h_closed)
     raw_bias1h = bias_from_emas(k1h_closed)
+    raw_bias5m = bias_from_emas(k5m_closed)
     bias4h = "neutral" if stale_timeframes.get("k4h") else raw_bias4h
     bias1h = "neutral" if stale_timeframes.get("k1h") else raw_bias1h
+    bias5m = "neutral" if stale_timeframes.get("k5m") else raw_bias5m
     trend_bias = (
         "long"
         if (bias4h == "long" and bias1h != "short")
@@ -10524,10 +10526,31 @@ def analyze(asset: str) -> Dict[str, Any]:
         bias_override_reason = "Bias override: NVDA 1h trend cash-session megerősítés"
 
     if mean_reversion_bias:
-        if effective_bias != mean_reversion_bias:
-            bias_override_used = True
-            bias_override_reason = "Mean reversion bias override"
-        effective_bias = mean_reversion_bias
+        apply_mean_reversion_bias = True
+        if asset in {"GOLD_CFD", "XAGUSD"}:
+            adx_now: Optional[float] = None
+            if adx_value is not None and np.isfinite(adx_value):
+                adx_now = float(adx_value)
+            htf_bias = trend_bias if trend_bias in {"long", "short"} else bias1h
+            trend_conflict = htf_bias in {"long", "short"} and htf_bias != mean_reversion_bias
+            if trend_conflict and (adx_now is None or adx_now >= 18.0):
+                apply_mean_reversion_bias = False
+                entry_thresholds_meta["metal_mean_reversion_guard"] = {
+                    "active": True,
+                    "blocked": True,
+                    "asset": asset,
+                    "trend_bias": htf_bias,
+                    "mean_reversion_bias": mean_reversion_bias,
+                    "adx": adx_now,
+                }
+                reasons.append(
+                    "Mean reversion bias blokkolva: fém instrumentumon a H1 trenddel ellentétes irány (ADX nem gyenge)"
+                )
+        if apply_mean_reversion_bias:
+            if effective_bias != mean_reversion_bias:
+                bias_override_used = True
+                bias_override_reason = "Mean reversion bias override"
+            effective_bias = mean_reversion_bias
 
     btc_bias_cfg = _btc_profile_section("bias_relax") if asset == "BTCUSD" else {}
     btc_momentum_cfg = _btc_profile_section("momentum_override") if asset == "BTCUSD" else {}
@@ -14851,10 +14874,11 @@ def analyze(asset: str) -> Dict[str, Any]:
         P, ml_probability, ml_enabled=bool(ML_PROBABILITY_ACTIVE)
     )
 
-    alignment_state = alignment_state_for_signal(decision, bias4h, bias1h)
+    alignment_state = alignment_state_for_signal(decision, bias4h, bias1h, bias5m)
     alignment_detail = {
         "bias_4h": bias4h,
         "bias_1h": bias1h,
+        "bias_5m": bias5m,
         "signal": decision if decision in {"buy", "sell"} else None,
         "effective_bias": effective_bias,
     }
@@ -14993,8 +15017,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         "biases": {
             "raw_4h": raw_bias4h,
             "raw_1h": raw_bias1h,
+            "raw_5m": raw_bias5m,
             "adjusted_4h": bias4h,
             "adjusted_1h": bias1h,
+            "adjusted_5m": bias5m,
         },
         "alignment_state": alignment_state,
         "alignment_detail": alignment_detail,
@@ -16178,6 +16204,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
