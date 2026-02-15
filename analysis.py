@@ -253,7 +253,7 @@ def classify_gate_failure(gate: str) -> str:
     preventing a trade outright.
     """
 
-    critical = {"session", "session_open", "data_integrity", "spread", "spread_guard", "risk_reward"}
+    critical = {"session", "session_open", "data_integrity", "spread", "spread_guard", "risk_reward", "metal_bias_5m_alignment"}
     return "critical" if gate in critical else "soft"
 
 # --- Elemzendő eszközök ---
@@ -12592,12 +12592,21 @@ def analyze(asset: str) -> Dict[str, Any]:
     intraday_relaxed_guards: List[str] = []
     intraday_relax_scale = get_intraday_relax_size_scale(asset)
 
+    metal_bias_5m_alignment_ok = True
+    if (
+        asset in {"GOLD_CFD", "XAGUSD"}
+        and effective_bias in {"long", "short"}
+        and bias5m in {"long", "short"}
+    ):
+        metal_bias_5m_alignment_ok = bias5m == effective_bias
+  
     conds_core = {
         "session": bool(session_ok_flag),
         "spread_guard": bool(spread_gate_ok),
         "data_integrity": bool(data_integrity_ok),
         "regime": bool(regime_ok),
         "bias": effective_bias in ("long", "short"),
+        "metal_bias_5m_alignment": bool(metal_bias_5m_alignment_ok),
         structure_label: bool(soft_structure_gate),
         "atr": bool(atr_ok),
         range_guard_label: range_guard_ok,
@@ -12648,7 +12657,9 @@ def analyze(asset: str) -> Dict[str, Any]:
         reasons.append("Data integrity gate: adatfrissítés >2 perc vagy hiányzik")
     if not spread_gate_ok:
         reasons.append("Spread gate: aktuális spread meghaladja az ATR arány limitet")
-
+    if not metal_bias_5m_alignment_ok:
+        reasons.append("Fém irány guard: 5m trend ellentétes a belépési biasszal")
+      
     if not regime_ok and "regime" in conds_core:
         P -= 10.0
         reasons.append("Regime kapu: CHOPPY miatt −10 P-score, pozícióskálázás csökkentve")
@@ -16204,6 +16215,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
