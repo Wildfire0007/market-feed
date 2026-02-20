@@ -1115,8 +1115,16 @@ FIB_TOL = 0.02
 MIN_R_CORE      = 2.0
 MIN_R_MOMENTUM  = 1.6
 SNIPER_MIN_P_SCORE = 35.0
+SNIPER_MIN_P_SCORE_BY_ASSET = {
+    "GOLD_CFD": 30.0,
+    "XAGUSD": 28.0,
+}
 SNIPER_RR_REQUIRED = 2.0
 SNIPER_TP_MIN_PROFIT_PCT = 0.0035
+
+
+def _sniper_min_p_score_for_asset(asset: str) -> float:
+    return float(SNIPER_MIN_P_SCORE_BY_ASSET.get(str(asset).upper(), SNIPER_MIN_P_SCORE))
 
 # --- EURUSD-specifikus volatilitási paraméterek ----------------------------
 EURUSD_PIP = 0.0001
@@ -11971,10 +11979,11 @@ def analyze(asset: str) -> Dict[str, Any]:
     entry_thresholds_meta["bias_meta"] = meta_bias
     entry_thresholds_meta["bias_micro"] = micro_bias
     sniper_guard: Dict[str, Any] = {}
-    if p_score_min_local is not None and p_score_min_local < SNIPER_MIN_P_SCORE:
-        p_score_min_local = SNIPER_MIN_P_SCORE
-        sniper_guard["p_score_min"] = SNIPER_MIN_P_SCORE
-        note = "Mesterlövész mód: P-score minimum 35 érvényesítve"
+    sniper_min_p_score = _sniper_min_p_score_for_asset(asset)
+    if p_score_min_local is not None and p_score_min_local < sniper_min_p_score:
+        p_score_min_local = sniper_min_p_score
+        sniper_guard["p_score_min"] = sniper_min_p_score
+        note = f"Mesterlövész mód: P-score minimum {sniper_min_p_score:g} érvényesítve"
         if note not in reasons:
             reasons.append(note)
     if sniper_guard:
@@ -16215,6 +16224,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
