@@ -12229,6 +12229,40 @@ def analyze(asset: str) -> Dict[str, Any]:
     if range_giveback_ratio is not None and np.isfinite(range_giveback_ratio):
         entry_thresholds_meta["range_giveback_ratio"] = float(range_giveback_ratio)
 
+    if asset == "XAGUSD" and isinstance(intraday_profile, dict):
+        range_state = str(intraday_profile.get("range_state") or "").lower()
+        if range_state == "expansion":
+            if range_time_stop_plan is None:
+                range_time_stop_plan = {}
+            existing_timeout = safe_float(range_time_stop_plan.get("timeout"))
+            target_timeout = 14
+            if existing_timeout is None or existing_timeout <= 0:
+                range_time_stop_plan["timeout"] = target_timeout
+            else:
+                range_time_stop_plan["timeout"] = int(min(existing_timeout, target_timeout))
+            existing_be = safe_float(range_time_stop_plan.get("breakeven_trigger"))
+            target_be = 0.55
+            if existing_be is None or existing_be <= 0:
+                range_time_stop_plan["breakeven_trigger"] = target_be
+            else:
+                range_time_stop_plan["breakeven_trigger"] = min(existing_be, target_be)
+            existing_giveback = safe_float(range_time_stop_plan.get("giveback_ratio"))
+            target_giveback = 0.20
+            if existing_giveback is None or existing_giveback <= 0:
+                range_time_stop_plan["giveback_ratio"] = target_giveback
+            else:
+                range_time_stop_plan["giveback_ratio"] = min(existing_giveback, target_giveback)
+            entry_thresholds_meta["xag_failed_breakout_guard"] = {
+                "active": True,
+                "range_state": range_state,
+                "timeout_minutes": int(range_time_stop_plan.get("timeout") or target_timeout),
+                "breakeven_trigger_r": float(range_time_stop_plan.get("breakeven_trigger") or target_be),
+                "giveback_ratio": float(range_time_stop_plan.get("giveback_ratio") or target_giveback),
+            }
+            note = "XAGUSD breakout-védelem: gyors BE + 20% giveback limit expanziós szakaszban"
+            if note not in reasons:
+                reasons.append(note)
+  
     if asset == "EURUSD" and atr1h is not None and atr1h > 0:
         atr1h_pips = float(atr1h) / EURUSD_PIP
         eurusd_overrides.setdefault("atr1h_pips", atr1h_pips)
@@ -16224,6 +16258,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
