@@ -11656,12 +11656,31 @@ def analyze(asset: str) -> Dict[str, Any]:
             "micro_long": micro_long,
             "micro_short": micro_short,
         }
+        xag_micro_flow_long_ok = bool(
+            (ofi_trigger > 0 and ofi_zscore is not None and ofi_zscore >= ofi_trigger)
+            or (
+                order_flow_imbalance is not None
+                and np.isfinite(float(order_flow_imbalance))
+                and float(order_flow_imbalance) >= ORDER_FLOW_IMBALANCE_TH
+            )
+        )
+        xag_micro_flow_short_ok = bool(
+            (ofi_trigger > 0 and ofi_zscore is not None and ofi_zscore <= -ofi_trigger)
+            or (
+                order_flow_imbalance is not None
+                and np.isfinite(float(order_flow_imbalance))
+                and float(order_flow_imbalance) <= -ORDER_FLOW_IMBALANCE_TH
+            )
+        )
         xag_overrides.setdefault("structure", {}).update(xag_structure_meta)
         if effective_bias == "long":
             long_break = bool(higher_break_long and price_above_vwap and not recent_break_short)
             if not long_break and price_above_vwap and micro_long and (strong_momentum or xag_momentum_override):
-                long_break = True
-                structure_notes.append("XAG: mikro HL/HH + VWAP felett — gyors long reakció")
+                if not xag_micro_flow_long_ok:
+                    structure_notes.append("XAG: mikro breakout tiltva, hiányzó Order Flow megerősítés (fals kitörés védelem)")
+                else:
+                    long_break = True
+                    structure_notes.append("XAG: mikro HL/HH + VWAP felett — gyors long reakció")
             elif not price_above_vwap:
                 structure_notes.append("XAG: VWAP alatt — long setup türelmet igényel")
             structure_components["bos"] = long_break
@@ -11670,8 +11689,11 @@ def analyze(asset: str) -> Dict[str, Any]:
         elif effective_bias == "short":
             short_break = bool(higher_break_short and price_below_vwap and not recent_break_long)
             if not short_break and price_below_vwap and micro_short and (strong_momentum or xag_momentum_override):
-                short_break = True
-                structure_notes.append("XAG: mikro LH/LL + VWAP alatt — gyors short reakció")
+                if not xag_micro_flow_short_ok:
+                    structure_notes.append("XAG: mikro breakout tiltva, hiányzó Order Flow megerősítés (fals kitörés védelem)")
+                else:
+                    short_break = True
+                    structure_notes.append("XAG: mikro LH/LL + VWAP alatt — gyors short reakció")
             elif not price_below_vwap:
                 structure_notes.append("XAG: VWAP felett — short setup türelmet igényel")
             structure_components["bos"] = short_break
@@ -16304,6 +16326,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
