@@ -6054,8 +6054,8 @@ def apply_signal_stability_layer(
             entry_thresholds_payload["adx_prev"] = adx_prev_value
           
     if analysis_can_write and manual_state.get("tracking_enabled") and manual_state.get("has_position"):
-       spot_price = _extract_spot_price(payload)
-       changed, reason, manual_positions = position_tracker.check_close_by_levels(
+        spot_price = _extract_spot_price(payload)
+        changed, reason, manual_positions = position_tracker.check_close_by_levels(
             asset,
             manual_positions,
             spot_price,
@@ -16423,6 +16423,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
