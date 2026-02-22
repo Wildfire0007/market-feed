@@ -5809,7 +5809,16 @@ def evaluate_hard_exit(
         return None
 
     reasons: List[str] = []
-    adx_drop_min = float(hard_cfg.get("adx_drop_min", 6.0) or 6.0)
+    adx_drop_min_cfg = hard_cfg.get("adx_drop_min", 6.0)
+    if isinstance(adx_drop_min_cfg, dict):
+        drop_threshold_raw = adx_drop_min_cfg.get(asset, adx_drop_min_cfg.get("default", 4.0))
+    else:
+        drop_threshold_raw = adx_drop_min_cfg
+    try:
+        drop_threshold = float(drop_threshold_raw or 4.0)
+    except (TypeError, ValueError):
+        drop_threshold = 4.0
+
     adx_now = (payload.get("entry_thresholds") or {}).get("adx_value")
     adx_prev = (payload.get("entry_thresholds") or {}).get("adx_prev")
     try:
@@ -5823,7 +5832,7 @@ def evaluate_hard_exit(
     if (
         adx_now_f is not None
         and adx_prev_f is not None
-        and (adx_prev_f - adx_now_f) >= adx_drop_min
+        and (adx_prev_f - adx_now_f) >= drop_threshold
     ):
         reasons.append(f"ADX esés: {adx_prev_f:.1f} → {adx_now_f:.1f}")
 
@@ -16423,6 +16432,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
