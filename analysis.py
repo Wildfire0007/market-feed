@@ -5789,6 +5789,66 @@ def _resolve_post_exit_cooldown_minutes(
     return _resolve_asset_value(cooldown_map, asset, default)
 
 
+def evaluate_hard_exit(
+    *,
+    asset: str,
+    payload: Dict[str, Any],
+    manual_state: Dict[str, Any],
+    config: Dict[str, Any],
+    now_dt: datetime,
+) -> Optional[Dict[str, Any]]:
+    if not manual_state.get("has_position"):
+        return None
+
+    side = str((manual_state.get("position") or {}).get("side") or "").lower()
+    if side not in {"long", "short"}:
+        return None
+
+    hard_cfg = (config.get("hard_exit") or {}) if isinstance(config, dict) else {}
+    if hard_cfg.get("enabled", True) is False:
+        return None
+
+    reasons: List[str] = []
+    adx_drop_min = float(hard_cfg.get("adx_drop_min", 6.0) or 6.0)
+    adx_now = (payload.get("entry_thresholds") or {}).get("adx_value")
+    adx_prev = (payload.get("entry_thresholds") or {}).get("adx_prev")
+    try:
+        adx_now_f = float(adx_now) if adx_now is not None else None
+        adx_prev_f = float(adx_prev) if adx_prev is not None else None
+    except (TypeError, ValueError):
+        adx_now_f = None
+        adx_prev_f = None
+    if adx_now_f is None or adx_prev_f is None:
+        return None
+    if (
+        adx_now_f is not None
+        and adx_prev_f is not None
+        and (adx_prev_f - adx_now_f) >= adx_drop_min
+    ):
+        reasons.append(f"ADX esés: {adx_prev_f:.1f} → {adx_now_f:.1f}")
+
+    strong_signal = str(payload.get("signal") or "").lower()
+    if (side == "long" and strong_signal == "strong sell") or (
+        side == "short" and strong_signal == "strong buy"
+    ):
+        reasons.append("Erős ellenirányú momentum jelzés")
+
+    if not reasons:
+        return None
+
+    return {
+        "state": "hard_exit",
+        "direction": side,
+        "reasons": [
+            "Piac dinamikája megváltozott (Hard Exit)",
+            "Azonnali pozíciózárás javasolt a védelem érdekében!",
+            *reasons,
+        ],
+        "triggered_at": to_utc_iso(now_dt),
+        "category": "hard_exit_guard",
+    }
+
+
 def _resolve_setup_grade(signal_data: Dict[str, Any], decision: str) -> Optional[str]:
     if not isinstance(signal_data, dict):
         return None
@@ -5980,27 +6040,61 @@ def apply_signal_stability_layer(
     cooldown_minutes = _resolve_post_exit_cooldown_minutes(
         tracking_cfg, asset, default=20
     )
-
+    tp1_close_fraction = float((config.get("manual_trade_model") or {}).get("tp1_close_fraction", 0.5) or 0.5)
+    state_path = outdir / "signal_state.json"
+    entry_thresholds_payload = (
+        payload.get("entry_thresholds") if isinstance(payload.get("entry_thresholds"), dict) else None
+    )
+    adx_now_value = safe_float(entry_thresholds_payload.get("adx_value")) if entry_thresholds_payload else None
+    adx_prev_value = safe_float(entry_thresholds_payload.get("adx_prev")) if entry_thresholds_payload else None
+    adx_state = _load_signal_state(state_path, 1)
+    if adx_prev_value is None:
+        adx_prev_value = safe_float(adx_state.get("last_adx_value"))
+        if adx_prev_value is not None and entry_thresholds_payload is not None:
+            entry_thresholds_payload["adx_prev"] = adx_prev_value
+          
     if analysis_can_write and manual_state.get("tracking_enabled") and manual_state.get("has_position"):
-        spot_price = _extract_spot_price(payload)
-        changed, reason, manual_positions = position_tracker.check_close_by_levels(
+       spot_price = _extract_spot_price(payload)
+       changed, reason, manual_positions = position_tracker.check_close_by_levels(
             asset,
             manual_positions,
             spot_price,
             now_dt,
             cooldown_minutes,
+            tp1_close_fraction=tp1_close_fraction,
         )
         if changed:
             position_tracker.save_positions_atomic(positions_path, manual_positions)
             manual_state = position_tracker.compute_state(
                 asset, tracking_cfg, manual_positions, now_dt
             )
+            latest_entry = manual_positions.get(asset) if isinstance(manual_positions, dict) else None
+            if (
+                reason == "tp1_hit"
+                and isinstance(latest_entry, dict)
+                and isinstance(latest_entry.get("last_management_signal"), dict)
+            ):
+                payload["position_exit_signal"] = latest_entry.get("last_management_signal")
             LOGGER.debug(
                 "CLOSE state transition %s reason=%s cooldown_until=%s",
                 asset,
                 reason,
                 manual_state.get("cooldown_until_utc"),
             )
+
+    if manual_state.get("tracking_enabled") and manual_state.get("has_position"):
+        hard_exit_signal = evaluate_hard_exit(
+            asset=asset,
+            payload=payload,
+            manual_state=manual_state,
+            config=config,
+            now_dt=now_dt,
+       )
+        if hard_exit_signal and (
+            not exit_signal or exit_signal.get("state") != "hard_exit"
+        ):
+            exit_signal = hard_exit_signal
+            payload["position_exit_signal"] = hard_exit_signal
 
     tracked_levels = _extract_tracked_levels(asset, manual_state, manual_positions)
     direction_map = {"buy": "buy", "sell": "sell"}
@@ -6056,9 +6150,10 @@ def apply_signal_stability_layer(
                 or [1]
             ),
         )
-        state_path = outdir / "signal_state.json"
         state = _load_signal_state(state_path, history_window)
         _update_entry_history(state, entry_side, history_window)
+        if adx_now_value is not None:
+            state["last_adx_value"] = adx_now_value
 
         if not actionable and state.get("last_notified_at_utc"):
             state["last_invalidated_at_utc"] = to_utc_iso(now_dt)
@@ -6129,6 +6224,9 @@ def apply_signal_stability_layer(
                 )
         _save_signal_state(state_path, state)
 
+    if not stability_enabled and adx_now_value is not None:
+        adx_state["last_adx_value"] = adx_now_value
+        _save_signal_state(state_path, adx_state)
     positions_changed = False
     entry_opened = False
     if analysis_can_write and (
@@ -15013,8 +15111,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             entry = sl = tp1 = tp2 = rr = None
             execution_playbook = []
             momentum_trailing_plan = None
-        }
-
+        
     ml_confidence_block = False
     if (
         decision in ("buy", "sell")      
@@ -16326,6 +16423,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
