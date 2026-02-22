@@ -654,24 +654,44 @@ def clear_pending_exits(path: str, applied: Optional[Dict[str, Any]] = None) -> 
         connection.close()
 
 
-def _levels_hit(side: Optional[str], spot_price: Optional[float], sl: Any, tp2: Any) -> Tuple[bool, Optional[str]]:
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _levels_hit(
+    side: Optional[str],
+    spot_price: Optional[float],
+    sl: Any,
+    tp1: Any,
+    tp2: Any,
+) -> Tuple[bool, Optional[str]]:
     try:
         price = float(spot_price)
     except (TypeError, ValueError):
         return False, None
 
     side_norm = str(side or "").lower()
-    sl_val = None if sl is None else float(sl)
-    tp2_val = None if tp2 is None else float(tp2)
-
+    sl_val = _safe_float(sl)
+    tp1_val = _safe_float(tp1)
+    tp2_val = _safe_float(tp2)
+    
     if side_norm == "long":
         if sl_val is not None and price <= sl_val:
             return True, "sl_hit"
+        if tp1_val is not None and price >= tp1_val:
+            return True, "tp1_hit"
         if tp2_val is not None and price >= tp2_val:
             return True, "tp2_hit"
     elif side_norm == "short":
         if sl_val is not None and price >= sl_val:
             return True, "sl_hit"
+        if tp1_val is not None and price <= tp1_val:
+            return True, "tp1_hit"
         if tp2_val is not None and price <= tp2_val:
             return True, "tp2_hit"
     return False, None
@@ -683,6 +703,7 @@ def check_close_by_levels(
     spot_price: Optional[float],
     now_dt: datetime,
     cooldown_minutes: int,
+    tp1_close_fraction: float = 0.5,
 ) -> Tuple[bool, Optional[str], Dict[str, Any]]:
     entry = positions.get(asset) if isinstance(positions, dict) else None
     if not isinstance(entry, dict):
@@ -692,8 +713,50 @@ def check_close_by_levels(
     if side not in {"long", "short"}:
         return False, None, positions if isinstance(positions, dict) else {}
 
-    hit, reason = _levels_hit(side, spot_price, entry.get("sl"), entry.get("tp2"))
+    hit, reason = _levels_hit(
+        side,
+        spot_price,
+        entry.get("sl"),
+        entry.get("tp1"),
+        entry.get("tp2"),
+    )
     if not hit or not reason:
+        return False, None, positions if isinstance(positions, dict) else {}
+
+    if reason == "tp1_hit" and not bool(entry.get("tp1_scaled")):
+        updated = deepcopy(positions)
+        current_entry = updated.get(asset) if isinstance(updated.get(asset), dict) else {}
+        size_val = _safe_float(current_entry.get("size"))
+        close_fraction = min(1.0, max(0.0, _safe_float(tp1_close_fraction) or 0.5))
+        if size_val is not None and size_val > 0:
+            size_val = max(0.0, size_val * (1.0 - close_fraction))
+            current_entry["size"] = size_val
+        entry_price = _safe_float(current_entry.get("entry"))
+        if entry_price is not None:
+            current_entry["sl"] = entry_price
+        current_entry["tp1_scaled"] = True
+        current_entry["last_management_signal"] = {
+            "state": "scale_out",
+            "direction": side,
+            "reasons": [
+                "TP1 (1. célár) elérve",
+                "50% profit eltéve",
+                "Stop-Loss nullába húzva (Breakeven)",
+            ],
+        }
+        updated[asset] = current_entry
+        _audit_log(
+            "tp1 scale-out applied",
+            event="AUTO_SCALE_OUT",
+            asset=asset,
+            reason=reason,
+            spot_price=spot_price,
+            size=current_entry.get("size"),
+            sl=current_entry.get("sl"),
+        )
+        return True, reason, updated
+
+    if reason == "tp1_hit":
         return False, None, positions if isinstance(positions, dict) else {}
 
     updated = close_position(
