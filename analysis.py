@@ -4205,7 +4205,21 @@ def get_precision_flow_rules(asset: str) -> Dict[str, float]:
         "strength_floor": float(strength_floor),
         "block_ratio": float(ratio),
     }
-    overrides = (settings.load_config().get("precision_flow_overrides") or {}).get(asset_key)
+    cfg = settings.load_config()
+    hard_rules = (cfg.get("precision_flow_rules") or {}).get(asset_key)
+    if isinstance(hard_rules, dict):
+        for key in (
+            "imbalance_threshold",
+            "pressure_threshold",
+            "counter_trend_imbalance_min",
+        ):
+            if key in hard_rules:
+                try:
+                    rules[key] = float(hard_rules[key])
+                except (TypeError, ValueError):
+                    pass
+
+    overrides = (cfg.get("precision_flow_overrides") or {}).get(asset_key)  
     if isinstance(overrides, dict):
         for key in (
             "imbalance_threshold",
@@ -7580,7 +7594,7 @@ def compute_precision_entry(
     score = 40.0
     factors: List[str] = []
 
-    imb = order_flow_metrics.get("imbalance")
+    imb = safe_float(order_flow_metrics.get("imbalance"))
     flow_signal_count = 0
     flow_strength = 0.0
     flow_reasons: List[str] = []
@@ -7609,7 +7623,7 @@ def compute_precision_entry(
             elif direction == "sell" and imb >= strong_threshold:
                 flow_blockers.append(f"imbalance {imb:.2f}")
 
-    pressure = order_flow_metrics.get("pressure")
+    pressure = safe_float(order_flow_metrics.get("pressure"))
     if pressure is not None:
         pressure_strong = pressure_threshold * pressure_margin
         pressure_base = max(pressure_threshold, 1e-9)
@@ -14947,6 +14961,38 @@ def analyze(asset: str) -> Dict[str, Any]:
             "action": "soft",
         }
 
+    if asset == "GOLD_CFD" and decision in {"buy", "sell"} and alignment_state == "COUNTER":
+        flow_rules = get_precision_flow_rules(asset)
+        counter_trend_imbalance_min = safe_float(
+            flow_rules.get("counter_trend_imbalance_min")
+        )
+        if counter_trend_imbalance_min is None:
+            counter_trend_imbalance_min = 0.85
+        order_flow_imbalance_val = safe_float(order_flow_metrics.get("imbalance"))
+        counter_flow_ok = (
+            order_flow_imbalance_val is not None
+            and not np.isnan(order_flow_imbalance_val)
+            and abs(order_flow_imbalance_val) >= counter_trend_imbalance_min
+        )
+        if not counter_flow_ok:
+            if "order_flow_counter_trend_weak" not in momentum_soft_flags:
+                momentum_soft_flags.append("order_flow_counter_trend_weak")
+            if "order_flow_counter_trend_weak" not in missing:
+                missing.append("order_flow_counter_trend_weak")
+            if isinstance(locals().get("missing_core"), list) and "order_flow_counter_trend_weak" not in missing_core:
+                missing_core.append("order_flow_counter_trend_weak")
+            counter_reason = (
+                "GOLD_CFD: Trenddel ellentétes belépőhöz extrém Order Flow "
+                "Imbalance (>=0.85) szükséges, jelenlegi érték nem elegendő."
+            )
+            if counter_reason not in reasons:
+                reasons.append(counter_reason)
+            decision = "no entry"
+            entry = sl = tp1 = tp2 = rr = None
+            execution_playbook = []
+            momentum_trailing_plan = None
+        }
+
     ml_confidence_block = False
     if (
         decision in ("buy", "sell")      
@@ -16258,6 +16304,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
