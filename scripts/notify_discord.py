@@ -277,7 +277,26 @@ def check_and_notify() -> None:
                 "color": COLOR_ORANGE if exit_state != "hard_exit" else COLOR_RED,
                 "fields": [
                     {"name": "Irány", "value": str(exit_signal.get("direction") or "n/a").upper(), "inline": True},
+                    {
+                        "name": "Árfolyam / Szintek",
+                        "value": (
+                            f"Spot: `{format_price(spot_price)}`\n"
+                            f"Entry: `{format_price(entry)}`"
+                        ),
+                        "inline": True,
+                    },        
                     {"name": "Okok", "value": "\n".join(f"• {r}" for r in reasons) or "N/A", "inline": False},
+                    {
+                        "name": "💡 Javasolt Akció",
+                        "value": (
+                            "Zárd le a pozíció 50%-át (TP1 elérve), és módosítsd a Stop-Losst a belépési árra (Breakeven)!"
+                            if exit_state == "scale_out"
+                            else "Azonnal zárd be a teljes pozíciót a jelenlegi piaci áron (Hard Exit)!"
+                            if exit_state == "hard_exit"
+                            else "Vizsgáld felül a pozíciót a megadott okok alapján."
+                        ),
+                        "inline": False,
+                    },    
                 ],
                 "footer": {"text": f"Exit • {asset_name}"},
             }
@@ -411,6 +430,11 @@ def check_and_notify() -> None:
                     else f"Prob: `{probability}` | P-score: `{p_score}`"
                 ),
                 "inline": True,
+            },
+            {
+                "name": "🛠️ Menedzsment Terv",
+                "value": "TP1 elérésekor automatikus jelzés érkezik: 50% részleges zárás és SL nullába (Breakeven) húzása javasolt. A maradék futtatása TP2-ig vagy 'Hard Exit' vészjelzésig.",
+                "inline": False,
             },
         ]
 
