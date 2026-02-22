@@ -219,6 +219,40 @@ def test_check_close_by_levels_hits_sl_and_tp2():
     assert updated["EURUSD"]["close_reason"] == "tp2_hit"
 
 
+def test_check_close_by_levels_tp1_scales_out_and_moves_sl_to_breakeven():
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    positions = {
+        "BTCUSD": {"side": "long", "entry": 100.0, "sl": 95.0, "tp1": 105.0, "tp2": 110.0, "size": 2.0}
+    }
+
+    changed, reason, updated = position_tracker.check_close_by_levels(
+        "BTCUSD", positions, 105.0, now_dt, 15, tp1_close_fraction=0.5
+    )
+
+    assert changed is True
+    assert reason == "tp1_hit"
+    assert updated["BTCUSD"]["side"] == "long"
+    assert updated["BTCUSD"]["size"] == 1.0
+    assert updated["BTCUSD"]["sl"] == 100.0
+    assert updated["BTCUSD"]["tp1_scaled"] is True
+    assert updated["BTCUSD"]["last_management_signal"]["state"] == "scale_out"
+
+
+def test_check_close_by_levels_tp1_not_repeated_after_scaled_flag():
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    positions = {
+        "BTCUSD": {"side": "long", "entry": 100.0, "sl": 100.0, "tp1": 105.0, "tp2": 110.0, "size": 1.0, "tp1_scaled": True}
+    }
+
+    changed, reason, updated = position_tracker.check_close_by_levels(
+        "BTCUSD", positions, 105.0, now_dt, 15, tp1_close_fraction=0.5
+    )
+
+    assert changed is False
+    assert reason is None
+    assert updated["BTCUSD"]["tp1_scaled"] is True
+
+
 def test_pending_exit_record_and_clear(tmp_path: Path) -> None:
     pending_path = tmp_path / "pending.json"
 
