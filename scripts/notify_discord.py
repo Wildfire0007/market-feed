@@ -35,6 +35,7 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
 ENTRY_COOLDOWN_MINUTES = 5
 EXIT_NOTIFY_COOLDOWN_MINUTES = 10
+DISCORD_NOTIFY_ASSETS = {"GOLD_CFD", "XAGUSD"}
 
 BASE_DIR = Path(__file__).resolve().parent
 PUBLIC_DIR = Path(os.getenv("NOTIFY_PUBLIC_DIR", "")) if os.getenv("NOTIFY_PUBLIC_DIR") else None
@@ -201,7 +202,13 @@ def check_and_notify() -> None:
         notify_state = {}
     notify_state_changed = False
 
-    assets = [d for d in PUBLIC_DIR.iterdir() if d.is_dir() and not d.name.startswith("_")]
+    # assets = [d for d in PUBLIC_DIR.iterdir() if d.is_dir() and not d.name.startswith("_")]
+    assets = [
+        d
+        for d in PUBLIC_DIR.iterdir()
+        if d.is_dir() and not d.name.startswith("_") and d.name in DISCORD_NOTIFY_ASSETS
+    ]
+    
     
     for asset_dir in assets:
         asset_name = asset_dir.name
