@@ -370,6 +370,7 @@ def check_and_notify() -> None:
         if alignment_state == "COUNTER":
             color = COLOR_YELLOW
 
+        budapest_time = datetime.now(ZoneInfo("Europe/Budapest")).strftime("%H:%M")
         valid_until = datetime.now(BUDAPEST_TZ) + timedelta(minutes=30)
         mode_label = "🟡 ÁTMENETI" if alignment_state == "MIXED" else ("🔵 RANGE" if alignment_state == "COUNTER" else "🟢 TREND")
         if alignment_state == "MIXED":
@@ -399,31 +400,40 @@ def check_and_notify() -> None:
 
         fields = [
             {
-                "name": "⚙️ Paraméterek a brókerhez",
-                "value": (
-                    f"ESZKÖZ: `{asset_name}`\n"
-                    f"MODE: `{mode_label}`\n"
-                    f"ENTRY: `{entry_text}`\n"
-                    f"STOP (SL): `{sl_text}`\n"
-                    f"CÉL (TP): `{tp_text}`"        
-                ),
+                "name": "📊 Aktuális Piaci Állapot",
+                "value": f"Spot ár: {format_price(spot_price)} | Időpont: {budapest_time}",
                 "inline": False,
-            },
-            {
-                "name": "⏳ Érvényesség & Törlés",
-                "value": (
-                    f"LEJÁRAT (Valid Until): `{valid_until.strftime('%H:%M')}` – Ha addig nem aktiválódik, töröld a megbízást!\n"
-                    "TÖRLÉS FELTÉTEL: Ha az árfolyam eléri a Stop-Loss szintet az aktiválódás előtt, töröld!"
-                ),
-                "inline": False,
-            },
-            {
-                "name": "🛠️ Menedzsment",
-                "value": "TP1 elérésekor automatikus jelzés érkezik a részleges zárásra és a Stop nullába (Breakeven) húzására.",                
-                "inline": False,
-            },
+            }
         ]
-        
+        if alignment_state != "MIXED":
+            fields.extend(
+                [
+                    {
+                        "name": "⚙️ Paraméterek a brókerhez",
+                        "value": (
+                            f"ESZKÖZ: `{asset_name}`\n"
+                            f"MODE: `{mode_label}`\n"
+                            f"ENTRY: `{entry_text}`\n"
+                            f"STOP (SL): `{sl_text}`\n"
+                            f"CÉL (TP): `{tp_text}`"
+                        ),
+                        "inline": False,
+                    },
+                    {
+                        "name": "⏳ Érvényesség & Törlés",
+                        "value": (
+                            f"LEJÁRAT (Valid Until): `{valid_until.strftime('%H:%M')}` – Ha addig nem aktiválódik, töröld a megbízást!\n"
+                            "TÖRLÉS FELTÉTEL: Ha az árfolyam eléri a Stop-Loss szintet az aktiválódás előtt, töröld!"
+                        ),
+                        "inline": False,
+                    },
+                    {
+                        "name": "🛠️ Menedzsment",
+                        "value": "TP1 elérésekor automatikus jelzés érkezik a részleges zárásra és a Stop nullába (Breakeven) húzására.",
+                        "inline": False,
+                    },
+                ]
+            )
         embed = {
             "title": title,
             "description": f"Eszköz: `{asset_name}`",
