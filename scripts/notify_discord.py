@@ -184,6 +184,18 @@ def _spread_gate_status(gates: Dict[str, Any]) -> str:
     return "BLOCK" if "spread_guard" in missing else "OK"
 
 
+def _hu_reason(reason: str) -> str:
+    reason_map = {
+        "tp1_hit": "TP1 szint elérve.",
+        "regime_shift": "Piaci rezsimváltás érzékelve.",
+        "momentum_loss": "A lendület gyengül.",
+        "structure_break": "Szerkezeti törés történt.",
+        "volatility_spike": "Megugrott a volatilitás.",
+    }
+    key = str(reason or "").strip().lower()
+    return reason_map.get(key, str(reason or "N/A"))
+
+
 def check_and_notify() -> None:
     if not PUBLIC_DIR.exists():
         return
@@ -258,6 +270,9 @@ def check_and_notify() -> None:
         if direction not in {"buy", "sell"}:
             direction = "buy"
 
+        spot = data.get("spot") if isinstance(data.get("spot"), dict) else {}
+        spot_price = spot.get("price")
+        
         if exit_signal:
             exit_state = str(exit_signal.get("state") or exit_signal.get("action") or "").lower()            
             exit_signature = _exit_signature(exit_signal)            
@@ -274,36 +289,28 @@ def check_and_notify() -> None:
                     print(f" -> EXIT DEDUP: {asset_name} ({EXIT_NOTIFY_COOLDOWN_MINUTES}m)")
                     continue
             state_label = {
-                "hard_exit": "HARD EXIT",
-                "scale_out": "RÉSZLEGES ZÁRÁS",
-                "tighten_stop": "SL SZŰKÍTÉS",
-            }.get(exit_state, "POZÍCIÓ MENEDZSMENT")
+                "scale_out": "🟠 TEENDŐ MOST: RÉSZZÁRÁS 50% ÉS STOP NULLÁBA",
+                "hard_exit": "🔴 TEENDŐ MOST: AZONNAL ZÁRD A TELJES POZÍCIÓT!",
+                "tighten_stop": "🟠 TEENDŐ MOST: SZŰKÍTSD A STOP-LOSST!",
+            }.get(exit_state, "🟠 TEENDŐ MOST: POZÍCIÓ MENEDZSMENT")
             embed = {
-                "title": f"⚠️ {state_label}: {asset_name}",
-                "description": "**Pozíció menedzsment jelzés**",
+                "title": state_label,
+                "description": f"Eszköz: `{asset_name}`",
                 "color": COLOR_ORANGE if exit_state != "hard_exit" else COLOR_RED,
-                "fields": [
-                    {"name": "Irány", "value": str(exit_signal.get("direction") or "n/a").upper(), "inline": True},
+                "fields": [                    
                     {
-                        "name": "Árfolyam / Szintek",
+                        "name": "📊 Árfolyam & Szintek",    
                         "value": (
                             f"Spot: `{format_price(spot_price)}`\n"
-                            f"Entry: `{format_price(entry)}`"
-                        ),
-                        "inline": True,
-                    },        
-                    {"name": "Okok", "value": "\n".join(f"• {r}" for r in reasons) or "N/A", "inline": False},
-                    {
-                        "name": "💡 Javasolt Akció",
-                        "value": (
-                            "Zárd le a pozíció 50%-át (TP1 elérve), és módosítsd a Stop-Losst a belépési árra (Breakeven)!"
-                            if exit_state == "scale_out"
-                            else "Azonnal zárd be a teljes pozíciót a jelenlegi piaci áron (Hard Exit)!"
-                            if exit_state == "hard_exit"
-                            else "Vizsgáld felül a pozíciót a megadott okok alapján."
+                            f"Eredeti Entry: `{format_price(entry)}`"
                         ),
                         "inline": False,
-                    },    
+                    },       
+                    {
+                        "name": "💡 Javaslat oka",
+                        "value": "\n".join(f"• {_hu_reason(r)}" for r in reasons) or "• N/A",
+                        "inline": False,
+                    },
                 ],
                 "footer": {"text": f"Exit • {asset_name}"},
             }
@@ -314,31 +321,26 @@ def check_and_notify() -> None:
             notify_state_changed = True
             continue
 
-        if entry is None or sl is None or tp1 is None:
-            print(f"{asset_name}: hiányzó entry/SL/TP1 — jelzés eldobva.")
-            continue
+        mixed_no_trade = alignment_state == "MIXED"
+        tp1_net_usd = 0.0
+        if not mixed_no_trade:
+            if entry is None or sl is None or tp1 is None:
+                print(f"{asset_name}: hiányzó entry/SL/TP1 — jelzés eldobva.")
+                continue
 
-        notional = equity_usd * leverage
-        rt_pct = round_trip_pct(asset_name)
-        tp1_gross_pct = calc_gross_pct(entry, tp1, direction) or 0.0
-        tp2_gross_pct = calc_gross_pct(entry, tp2, direction) if tp2 is not None else None
-        tp1_net_pct = tp1_gross_pct - rt_pct
-        tp2_net_pct = (tp2_gross_pct - rt_pct) if tp2_gross_pct is not None else None
+            notional = equity_usd * leverage
+            rt_pct = round_trip_pct(asset_name)
+            tp1_gross_pct = calc_gross_pct(entry, tp1, direction) or 0.0
+            tp2_gross_pct = calc_gross_pct(entry, tp2, direction) if tp2 is not None else None
+            tp1_net_pct = tp1_gross_pct - rt_pct
+            tp1_net_usd = tp1_net_pct * notional * tp1_close_fraction
 
-        tp1_net_usd = tp1_net_pct * notional * tp1_close_fraction
-        tp2_net_usd = (tp2_net_pct * notional) if tp2_net_pct is not None else None
-        sl_gross_pct = calc_gross_pct(entry, sl, "sell" if direction == "buy" else "buy") or 0.0
-        sl_usd = sl_gross_pct * notional
-
-        rr_tp1 = calc_rr(entry, sl, tp1)
-        rr_tp2 = calc_rr(entry, sl, tp2) if tp2 is not None else None
-        rr_tp1_display = f"{rr_tp1:.2f}" if rr_tp1 is not None else "n/a"
-        rr_tp2_display = f"{rr_tp2:.2f}" if rr_tp2 is not None else "n/a"
-
-        counter_min_net = max(tp2_min_net_usd, tp1_min_net_usd * 1.5)
-        allow_entry = tp1_net_usd >= tp1_min_net_usd
-        if alignment_state == "COUNTER":
-            allow_entry = tp1_net_usd >= counter_min_net
+            counter_min_net = max(tp2_min_net_usd, tp1_min_net_usd * 1.5)
+            allow_entry = tp1_net_usd >= tp1_min_net_usd
+            if alignment_state == "COUNTER":
+                allow_entry = tp1_net_usd >= counter_min_net
+        else:
+            allow_entry = True
 
         asset_state = notify_state.get(asset_name) if isinstance(notify_state.get(asset_name), dict) else {}
         now_dt = datetime.now(timezone.utc)
@@ -368,95 +370,63 @@ def check_and_notify() -> None:
         if alignment_state == "COUNTER":
             color = COLOR_YELLOW
 
-        spot = data.get("spot") if isinstance(data.get("spot"), dict) else {}
-        spot_price = spot.get("price")
-        time_label = get_budapest_time(spot.get("utc"))
-        spread_status = _spread_gate_status(gates)
+        valid_until = datetime.now(BUDAPEST_TZ) + timedelta(minutes=30)
+        mode_label = "🟡 ÁTMENETI" if alignment_state == "MIXED" else ("🔵 RANGE" if alignment_state == "COUNTER" else "🟢 TREND")
+        if alignment_state == "MIXED":
+            title = "🟡 TEENDŐ MOST: NINCS KÖTÉS – VÁRJ (Átmeneti piac)"
+            entry_text = "N/A (nincs kötés)"
+            sl_text = "N/A"
+            tp_text = "N/A"
+            color = COLOR_YELLOW
+        elif alignment_state == "COUNTER":
+            title = (
+                f"🟦 TEENDŐ MOST: NYISS LONG – BUY LIMIT @ {format_price(entry)}"
+                if direction == "buy"
+                else f"🟧 TEENDŐ MOST: NYISS SHORT – SELL LIMIT @ {format_price(entry)}"
+            )
+            entry_text = format_price(entry)
+            sl_text = format_price(sl)
+            tp_text = f"TP1: {format_price(tp1)}" + (f" | TP2: {format_price(tp2)}" if tp2 is not None else "")
+        else:
+            title = (
+                f"🟩 TEENDŐ MOST: NYISS LONG – BUY STOP @ {format_price(entry)}"
+                if direction == "buy"
+                else f"🟥 TEENDŐ MOST: NYISS SHORT – SELL STOP @ {format_price(entry)}"
+            )
+            entry_text = format_price(entry)
+            sl_text = format_price(sl)
+            tp_text = f"TP1: {format_price(tp1)}" + (f" | TP2: {format_price(tp2)}" if tp2 is not None else "")
 
         fields = [
             {
-                "name": "Setup",
+                "name": "⚙️ Paraméterek a brókerhez",
                 "value": (
-                    f"Entry: `{format_price(entry)}`\n"
-                    f"SL: `{format_price(sl)}`\n"
-                    f"TP1: `{format_price(tp1)}`\n"
-                    f"TP2: `{format_price(tp2)}`"
-                ),
-                "inline": True,
-            },
-            {
-                "name": "Δ ár (points)",
-                "value": (
-                    f"TP1: `{calc_points(entry, tp1):.4f}`\n"
-                    f"TP2: `{calc_points(entry, tp2):.4f}`" if tp2 is not None else "TP2: `n/a`"
-                ),
-                "inline": True,
-            },
-            {
-                "name": "TP1/TP2 % (gross/net)",
-                "value": (
-                    f"TP1: `{tp1_gross_pct*100:.2f}% / {tp1_net_pct*100:.2f}%`\n"
-                    f"TP2: `{(tp2_gross_pct or 0)*100:.2f}% / {(tp2_net_pct or 0)*100:.2f}%`"
-                    if tp2 is not None
-                    else f"TP1: `{tp1_gross_pct*100:.2f}% / {tp1_net_pct*100:.2f}%`"
-                ),
-                "inline": True,
-            },
-            {
-                "name": "PnL (USD) & R",
-                "value": (
-                    f"TP1: `${tp1_net_usd:.2f}` | R: `{rr_tp1_display}`\n"
-                    f"TP2: `${tp2_net_usd:.2f}` | R: `{rr_tp2_display}`\n"
-                    f"SL: `-${sl_usd:.2f}` | Risk cap: `${sl_risk_usd:.2f}`"
-                    if tp2_net_usd is not None
-                    else f"TP1: `${tp1_net_usd:.2f}` | R: `{rr_tp1_display}`\nSL: `-${sl_usd:.2f}` | Risk cap: `${sl_risk_usd:.2f}`"
+                    f"ESZKÖZ: `{asset_name}`\n"
+                    f"MODE: `{mode_label}`\n"
+                    f"ENTRY: `{entry_text}`\n"
+                    f"STOP (SL): `{sl_text}`\n"
+                    f"CÉL (TP): `{tp_text}`"        
                 ),
                 "inline": False,
             },
             {
-                "name": "Bias / ATR / Spread",
+                "name": "⏳ Érvényesség & Törlés",
                 "value": (
-                    f"{_format_biases(biases)}\n"
-                    f"ATR(1H): `{atr1h:.4f}`\n"
-                    f"Spread gate: `{spread_status}`"
-                    if atr1h is not None
-                    else f"{_format_biases(biases)}\nATR(1H): `n/a`\nSpread gate: `{spread_status}`"
+                    f"LEJÁRAT (Valid Until): `{valid_until.strftime('%H:%M')}` – Ha addig nem aktiválódik, töröld a megbízást!\n"
+                    "TÖRLÉS FELTÉTEL: Ha az árfolyam eléri a Stop-Loss szintet az aktiválódás előtt, töröld!"
                 ),
                 "inline": False,
             },
             {
-                "name": "Alignment",
-                "value": f"State: `{alignment_state}` | Gate: `{alignment_gate_note}`",
-                "inline": True,
-            },
-            {
-                "name": "Probability / P-score",
-                "value": (
-                    f"Prob: `{probability:.0f}%`\nP-score: `{p_score:.0f}`"
-                    if probability is not None and p_score is not None
-                    else f"Prob: `{probability}` | P-score: `{p_score}`"
-                ),
-                "inline": True,
-            },
-            {
-                "name": "🛠️ Menedzsment Terv",
-                "value": "TP1 elérésekor automatikus jelzés érkezik: 50% részleges zárás és SL nullába (Breakeven) húzása javasolt. A maradék futtatása TP2-ig vagy 'Hard Exit' vészjelzésig.",
+                "name": "🛠️ Menedzsment",
+                "value": "TP1 elérésekor automatikus jelzés érkezik a részleges zárásra és a Stop nullába (Breakeven) húzására.",                
                 "inline": False,
             },
         ]
-
-        if reasons:
-            fields.append(
-                {
-                    "name": "Miért",
-                    "value": "\n".join(f"• {reason}" for reason in reasons),
-                    "inline": False,
-                }
-            )
-
+        
         embed = {
-            "title": f"{icon} {order_type} {direction.upper()} — {asset_name}",
-            "description": f"Spot: `{format_price(spot_price)}` • 🕒 {time_label}",
+            "title": title,
+            "description": f"Eszköz: `{asset_name}`",
             "color": color,
             "fields": fields,
             "footer": {"text": f"{asset_name} • Manual trade model"},
