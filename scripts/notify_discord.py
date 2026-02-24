@@ -321,26 +321,22 @@ def check_and_notify() -> None:
             notify_state_changed = True
             continue
 
-        mixed_no_trade = alignment_state == "MIXED"
         tp1_net_usd = 0.0
-        if not mixed_no_trade:
-            if entry is None or sl is None or tp1 is None:
-                print(f"{asset_name}: hiányzó entry/SL/TP1 — jelzés eldobva.")
-                continue
+        if entry is None or sl is None or tp1 is None:
+            print(f"{asset_name}: hiányzó entry/SL/TP1 — jelzés eldobva.")
+            continue
 
-            notional = equity_usd * leverage
-            rt_pct = round_trip_pct(asset_name)
-            tp1_gross_pct = calc_gross_pct(entry, tp1, direction) or 0.0
-            tp2_gross_pct = calc_gross_pct(entry, tp2, direction) if tp2 is not None else None
-            tp1_net_pct = tp1_gross_pct - rt_pct
-            tp1_net_usd = tp1_net_pct * notional * tp1_close_fraction
+        notional = equity_usd * leverage
+        rt_pct = round_trip_pct(asset_name)
+        tp1_gross_pct = calc_gross_pct(entry, tp1, direction) or 0.0
+        tp2_gross_pct = calc_gross_pct(entry, tp2, direction) if tp2 is not None else None
+        tp1_net_pct = tp1_gross_pct - rt_pct
+        tp1_net_usd = tp1_net_pct * notional * tp1_close_fraction
 
-            counter_min_net = max(tp2_min_net_usd, tp1_min_net_usd * 1.5)
-            allow_entry = tp1_net_usd >= tp1_min_net_usd
-            if alignment_state == "COUNTER":
-                allow_entry = tp1_net_usd >= counter_min_net
-        else:
-            allow_entry = True
+        counter_min_net = max(tp2_min_net_usd, tp1_min_net_usd * 1.5)
+        allow_entry = tp1_net_usd >= tp1_min_net_usd
+        if alignment_state == "COUNTER":
+            allow_entry = tp1_net_usd >= counter_min_net
 
         asset_state = notify_state.get(asset_name) if isinstance(notify_state.get(asset_name), dict) else {}
         now_dt = datetime.now(timezone.utc)
@@ -362,41 +358,37 @@ def check_and_notify() -> None:
             )
             continue
 
-        icon = ICON_BUY_MARKET if direction == "buy" else ICON_SELL_MARKET
-        color = COLOR_GREEN if direction == "buy" else COLOR_RED
-        if order_type == "LIMIT":
-            icon = ICON_BUY_LIMIT if direction == "buy" else ICON_SELL_LIMIT
-            color = COLOR_BLUE if direction == "buy" else COLOR_ORANGE
-        if alignment_state == "COUNTER":
-            color = COLOR_YELLOW
-
         budapest_time = datetime.now(ZoneInfo("Europe/Budapest")).strftime("%H:%M")
         valid_until = datetime.now(BUDAPEST_TZ) + timedelta(minutes=30)
         mode_label = "🟡 ÁTMENETI" if alignment_state == "MIXED" else ("🔵 RANGE" if alignment_state == "COUNTER" else "🟢 TREND")
+
+        if order_type == "LIMIT":
+            instruction = (
+                f"NYISS LONG – BUY LIMIT @ {format_price(entry)}"
+                if direction == "buy"
+                else f"NYISS SHORT – SELL LIMIT @ {format_price(entry)}"
+            )
+        else:
+            instruction = (
+                f"NYISS LONG – BUY STOP @ {format_price(entry)}"
+                if direction == "buy"
+                else f"NYISS SHORT – SELL STOP @ {format_price(entry)}"
+            )
+
         if alignment_state == "MIXED":
-            title = "🟡 TEENDŐ MOST: NINCS KÖTÉS – VÁRJ (Átmeneti piac)"
-            entry_text = "N/A (nincs kötés)"
-            sl_text = "N/A"
-            tp_text = "N/A"
+            prefix = "🟡"
             color = COLOR_YELLOW
         elif alignment_state == "COUNTER":
-            title = (
-                f"🟦 TEENDŐ MOST: NYISS LONG – BUY LIMIT @ {format_price(entry)}"
-                if direction == "buy"
-                else f"🟧 TEENDŐ MOST: NYISS SHORT – SELL LIMIT @ {format_price(entry)}"
-            )
-            entry_text = format_price(entry)
-            sl_text = format_price(sl)
-            tp_text = f"TP1: {format_price(tp1)}" + (f" | TP2: {format_price(tp2)}" if tp2 is not None else "")
+            prefix = "🟦" if direction == "buy" else "🟧"
+            color = COLOR_BLUE if direction == "buy" else COLOR_ORANGE
         else:
-            title = (
-                f"🟩 TEENDŐ MOST: NYISS LONG – BUY STOP @ {format_price(entry)}"
-                if direction == "buy"
-                else f"🟥 TEENDŐ MOST: NYISS SHORT – SELL STOP @ {format_price(entry)}"
-            )
-            entry_text = format_price(entry)
-            sl_text = format_price(sl)
-            tp_text = f"TP1: {format_price(tp1)}" + (f" | TP2: {format_price(tp2)}" if tp2 is not None else "")
+            prefix = "🟩" if direction == "buy" else "🟥"
+            color = COLOR_GREEN if direction == "buy" else COLOR_RED
+
+        title = f"{prefix} TEENDŐ MOST: {instruction}"
+        entry_text = format_price(entry)
+        sl_text = format_price(sl)
+        tp_text = f"TP1: {format_price(tp1)}" + (f" | TP2: {format_price(tp2)}" if tp2 is not None else "")
 
         fields = [
             {
@@ -405,35 +397,34 @@ def check_and_notify() -> None:
                 "inline": False,
             }
         ]
-        if alignment_state != "MIXED":
-            fields.extend(
-                [
-                    {
-                        "name": "⚙️ Paraméterek a brókerhez",
-                        "value": (
-                            f"ESZKÖZ: `{asset_name}`\n"
-                            f"MODE: `{mode_label}`\n"
-                            f"ENTRY: `{entry_text}`\n"
-                            f"STOP (SL): `{sl_text}`\n"
-                            f"CÉL (TP): `{tp_text}`"
-                        ),
-                        "inline": False,
-                    },
-                    {
-                        "name": "⏳ Érvényesség & Törlés",
-                        "value": (
-                            f"LEJÁRAT (Valid Until): `{valid_until.strftime('%H:%M')}` – Ha addig nem aktiválódik, töröld a megbízást!\n"
-                            "TÖRLÉS FELTÉTEL: Ha az árfolyam eléri a Stop-Loss szintet az aktiválódás előtt, töröld!"
-                        ),
-                        "inline": False,
-                    },
-                    {
-                        "name": "🛠️ Menedzsment",
-                        "value": "TP1 elérésekor automatikus jelzés érkezik a részleges zárásra és a Stop nullába (Breakeven) húzására.",
-                        "inline": False,
-                    },
-                ]
-            )
+        fields.extend(
+            [
+                {
+                    "name": "⚙️ Paraméterek a brókerhez",
+                    "value": (
+                        f"ESZKÖZ: `{asset_name}`\n"
+                        f"MODE: `{mode_label}`\n"
+                        f"ENTRY: `{entry_text}`\n"
+                        f"STOP (SL): `{sl_text}`\n"
+                        f"CÉL (TP): `{tp_text}`"
+                    ),
+                    "inline": False,
+                },
+                {
+                    "name": "⏳ Érvényesség & Törlés",
+                    "value": (
+                        f"LEJÁRAT (Valid Until): `{valid_until.strftime('%H:%M')}` – Ha addig nem aktiválódik, töröld a megbízást!\n"
+                        "TÖRLÉS FELTÉTEL: Ha az árfolyam eléri a Stop-Loss szintet az aktiválódás előtt, töröld!"
+                    ),
+                    "inline": False,
+                },
+                {
+                    "name": "🛠️ Menedzsment",
+                    "value": "TP1 elérésekor automatikus jelzés érkezik a részleges zárásra és a Stop nullába (Breakeven) húzására.",
+                    "inline": False,
+                },
+            ]
+        )
         embed = {
             "title": title,
             "description": f"Eszköz: `{asset_name}`",
