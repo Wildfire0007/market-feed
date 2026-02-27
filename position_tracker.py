@@ -21,6 +21,8 @@ from typing import Any, Dict, Optional, Tuple
 from logging_utils import ensure_json_file_handler, ensure_json_stream_handler
 import state_db
 
+PENDING_EXPIRY_MINUTES = 30
+
 
 LOGGER = logging.getLogger("manual_positions")
 ensure_json_stream_handler(LOGGER, static_fields={"component": "manual_positions"})
@@ -170,7 +172,7 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
         connection.row_factory = sqlite3.Row
         try:
             rows = connection.execute(
-                "SELECT * FROM positions WHERE status='OPEN'"
+                "SELECT * FROM positions WHERE status IN ('OPEN', 'PENDING')"
             ).fetchall()
         finally:
             connection.close()
@@ -190,6 +192,7 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
                     metadata = parsed
             positions[asset] = {
                 "side": metadata.get("side"),
+                "status": str(row["status"] or "open").lower(),
                 "entry": row["entry_price"],
                 "size": row["size"],
                 "sl": row["sl"],
@@ -272,7 +275,13 @@ def _sync_positions_to_db(db_path: Path, data: Dict[str, Any]) -> bool:
                 if not isinstance(payload, dict):
                     continue
                 side = payload.get("side")
-                status = "OPEN" if side in {"long", "short"} else "CLOSED"
+                payload_status = str(payload.get("status") or "").lower()
+                if payload_status == "pending":
+                    status = "PENDING"
+                elif side in {"long", "short"}:
+                    status = "OPEN"
+                else:
+                    status = "CLOSED"
                 entry_price = payload.get("entry")
                 size = payload.get("size")
                 sl = payload.get("sl")
@@ -369,18 +378,21 @@ def compute_state(
     asset_entry = positions.get(asset) if isinstance(positions, dict) else None
     side_raw = None
     cooldown_raw = None
+    status_raw = ""
     if isinstance(asset_entry, dict):
         side_raw = str(asset_entry.get("side") or "").strip().lower()
         cooldown_raw = asset_entry.get("cooldown_until_utc")
-
+        status_raw = str(asset_entry.get("status") or "").strip().lower()
+        
     cooldown_until = _parse_utc_timestamp(cooldown_raw)
     cooldown_active = bool(cooldown_until and now_dt < cooldown_until)
 
     side_map = {"long": "buy", "short": "sell"}
     side = side_map.get(side_raw)
 
+    pending_active = status_raw == "pending"
     has_position = bool(side) and not cooldown_active
-    is_flat = not side and not cooldown_active
+    is_flat = not side and not cooldown_active and not pending_active
     opened_at = asset_entry.get("opened_at_utc") if isinstance(asset_entry, dict) else None
     entry_level = asset_entry.get("entry") if isinstance(asset_entry, dict) else None
     sl_level = asset_entry.get("sl") if isinstance(asset_entry, dict) else None
@@ -400,6 +412,8 @@ def compute_state(
         "sl": sl_level,
         "tp1": tp1_level,
         "tp2": tp2_level,
+        "pending_active": pending_active,
+        "status": status_raw or ("open" if side else None),
         "position": deepcopy(asset_entry) if isinstance(asset_entry, dict) else None,
     }
 
@@ -419,6 +433,7 @@ def open_position(
     updated = deepcopy(positions) if isinstance(positions, dict) else {}
     previous_entry = deepcopy(updated.get(asset)) if isinstance(updated.get(asset), dict) else None
     updated[asset] = {
+        "status": "open",
         "side": norm_side,
         "opened_at_utc": opened_at_utc,
         "entry": entry,
@@ -464,6 +479,7 @@ def close_position(
 
     entry.update(
         {
+            "status": "closed",
             "side": None,
             "closed_at_utc": closed_at_utc,
             "close_reason": reason,
@@ -663,6 +679,135 @@ def _safe_float(value: Any) -> Optional[float]:
         return None
 
 
+def register_precision_pending_position(
+    asset: str,
+    signal_payload: Dict[str, Any],
+    now_dt: datetime,
+    positions: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    updated = deepcopy(positions) if isinstance(positions, dict) else {}
+    signal = str((signal_payload or {}).get("signal") or "").lower()
+    if signal != "precision_arming":
+        return updated
+
+    plan = (signal_payload or {}).get("precision_plan")
+    if not isinstance(plan, dict):
+        return updated
+
+    direction = str(plan.get("direction") or "").lower()
+    if direction not in {"buy", "sell"}:
+        return updated
+
+    order_type = str(plan.get("order_type") or "LIMIT").upper()
+    if order_type not in {"LIMIT", "MARKET"}:
+        order_type = "LIMIT"
+
+    entry = _safe_float(plan.get("entry"))
+    sl = _safe_float(plan.get("stop_loss"))
+    tp1 = _safe_float(plan.get("take_profit_1"))
+    tp2 = _safe_float(plan.get("take_profit_2"))
+    if entry is None:
+        return updated
+
+    existing = updated.get(asset) if isinstance(updated.get(asset), dict) else None
+    existing_status = ""
+    if isinstance(existing, dict):
+        existing_status = str(
+            existing.get("status")
+            or ("open" if existing.get("side") in {"long", "short"} else "")
+        ).lower()
+    if existing_status == "open":
+        return updated
+
+    pending_since_utc = _to_utc_iso(now_dt)
+    if (
+        existing_status == "pending"
+        and str(existing.get("direction") or "").lower() == direction
+        and str(existing.get("order_type") or "LIMIT").upper() == order_type
+        and _safe_float(existing.get("entry")) == entry
+        and _safe_float(existing.get("sl")) == sl
+        and _safe_float(existing.get("tp1")) == tp1
+        and _safe_float(existing.get("tp2")) == tp2
+    ):
+        pending_since_utc = str(existing.get("pending_since_utc") or pending_since_utc)
+
+    updated[asset] = {
+        "status": "pending",
+        "direction": direction,
+        "order_type": order_type,
+        "entry": entry,
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "side": None,
+        "opened_at_utc": None,
+        "pending_since_utc": pending_since_utc,
+        "closed_at_utc": None,
+        "close_reason": None,
+        "cooldown_until_utc": None,
+    }
+    return updated
+
+
+def _pending_fill_hit(entry: Dict[str, Any], spot_price: Optional[float]) -> bool:
+    price = _safe_float(spot_price)
+    entry_price = _safe_float(entry.get("entry"))
+    if price is None or entry_price is None:
+        return False
+
+    direction = str(entry.get("direction") or "").lower()
+    order_type = str(entry.get("order_type") or "LIMIT").upper()
+    if direction not in {"buy", "sell"}:
+        return False
+
+    if order_type == "LIMIT":
+        return price <= entry_price if direction == "buy" else price >= entry_price
+    return price >= entry_price if direction == "buy" else price <= entry_price
+
+
+def _activate_or_expire_pending(
+    asset: str,
+    entry: Dict[str, Any],
+    positions: Dict[str, Any],
+    spot_price: Optional[float],
+    now_dt: datetime,
+    pending_expiry_minutes: int,
+) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+    pending_since = _parse_utc_timestamp(entry.get("pending_since_utc"))
+    expiry_minutes = max(0, int(pending_expiry_minutes))
+    if pending_since and now_dt - pending_since >= timedelta(minutes=expiry_minutes):
+        updated = deepcopy(positions)
+        updated.pop(asset, None)
+        _audit_log(
+            "pending manual position expired",
+            event="PENDING_EXPIRED",
+            asset=asset,
+            pending_since_utc=entry.get("pending_since_utc"),
+            expiry_minutes=expiry_minutes,
+        )
+        return True, "pending_expired", updated
+
+    if not _pending_fill_hit(entry, spot_price):
+        return False, None, positions
+
+    updated = deepcopy(positions)
+    current = deepcopy(entry)
+    current["status"] = "open"
+    current["side"] = "long" if str(current.get("direction") or "").lower() == "buy" else "short"
+    current["opened_at_utc"] = _to_utc_iso(now_dt)
+    updated[asset] = current
+    _audit_log(
+        "pending manual position activated",
+        event="PENDING_FILLED",
+        asset=asset,
+        direction=current.get("direction"),
+        order_type=current.get("order_type"),
+        entry=current.get("entry"),
+        spot_price=spot_price,
+    )
+    return True, "pending_filled", updated
+
+    
 def _levels_hit(
     side: Optional[str],
     spot_price: Optional[float],
@@ -704,11 +849,26 @@ def check_close_by_levels(
     now_dt: datetime,
     cooldown_minutes: int,
     tp1_close_fraction: float = 0.5,
+    pending_expiry_minutes: int = PENDING_EXPIRY_MINUTES,
 ) -> Tuple[bool, Optional[str], Dict[str, Any]]:
     entry = positions.get(asset) if isinstance(positions, dict) else None
     if not isinstance(entry, dict):
         return False, None, positions if isinstance(positions, dict) else {}
 
+    status = str(entry.get("status") or ("open" if entry.get("side") in {"long", "short"} else "")).lower()
+    if status == "pending":
+        return _activate_or_expire_pending(
+            asset,
+            entry,
+            positions if isinstance(positions, dict) else {},
+            spot_price,
+            now_dt,
+            pending_expiry_minutes,
+        )
+
+    if status != "open":
+        return False, None, positions if isinstance(positions, dict) else {}
+    
     side = entry.get("side")
     if side not in {"long", "short"}:
         return False, None, positions if isinstance(positions, dict) else {}
