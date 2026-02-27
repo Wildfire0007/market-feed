@@ -100,10 +100,23 @@ def main() -> None:
     now_dt = datetime.now(timezone.utc)
     manual_positions = position_tracker.load_positions(positions_path, treat_missing)
     changed_assets = []
-
+    positions_dirty = False
+    
     for asset in settings.ASSETS:
+        signal_path = Path("public") / asset / "signal.json"
+        signal_payload = _load_json(signal_path) if signal_path.exists() else {}
+        pending_positions = position_tracker.register_precision_pending_position(
+            asset,
+            signal_payload,
+            now_dt,
+            manual_positions,
+        )
+        if pending_positions != manual_positions:
+            manual_positions = pending_positions
+            positions_dirty = True
+
         manual_state = position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt)
-        if not manual_state.get("has_position"):
+        if not manual_state.get("has_position") and not manual_state.get("pending_active"):
             continue
 
         spot_price, _ = _resolve_spot(asset)
@@ -115,6 +128,10 @@ def main() -> None:
             _cooldown_minutes(tracking_cfg, asset, cooldown_default),
         )
         if not changed:
+            continue
+
+        positions_dirty = True
+        if reason in {"pending_filled", "pending_expired"}:
             continue
 
         if can_write:
@@ -129,18 +146,19 @@ def main() -> None:
                 source="watchdog",
             )
 
-    if can_write and changed_assets:
+    if can_write and positions_dirty:
         position_tracker.save_positions_atomic(positions_path, manual_positions)
-        position_tracker.clear_pending_exits(
-            pending_exit_path, [asset for asset, _ in changed_assets]
-        )
-        for asset, reason in changed_assets:
-            position_tracker.log_audit_event(
-                "watchdog auto-close committed",
-                event="WATCHDOG_CLOSE_COMMIT",
-                asset=asset,
-                reason=reason,
+        if changed_assets:
+            position_tracker.clear_pending_exits(
+                pending_exit_path, [asset for asset, _ in changed_assets]
             )
+            for asset, reason in changed_assets:
+                position_tracker.log_audit_event(
+                    "watchdog auto-close committed",
+                    event="WATCHDOG_CLOSE_COMMIT",
+                    asset=asset,
+                    reason=reason,
+                )
 
 
 if __name__ == "__main__":
