@@ -33,7 +33,7 @@ from config import analysis_settings as settings
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
-ENTRY_COOLDOWN_MINUTES = 5
+ENTRY_COOLDOWN_MINUTES = 30
 EXIT_NOTIFY_COOLDOWN_MINUTES = 10
 DISCORD_NOTIFY_ASSETS = {"GOLD_CFD", "XAGUSD"}
 
@@ -153,10 +153,9 @@ def calc_rr(entry: float, sl: float, target: float) -> Optional[float]:
     return reward / risk
 
 
-def _entry_signature(signal: str, entry: Optional[float], order_type: str) -> Dict[str, Any]:
+def _entry_signature(direction: str, order_type: str) -> Dict[str, Any]:
     return {
-        "signal": signal,
-        "entry": round(entry, 2) if entry is not None else None,
+        "direction": direction,
         "order_type": order_type,
     }
 
@@ -340,7 +339,7 @@ def check_and_notify() -> None:
 
         asset_state = notify_state.get(asset_name) if isinstance(notify_state.get(asset_name), dict) else {}
         now_dt = datetime.now(timezone.utc)
-        entry_signature = _entry_signature(signal, entry, order_type)
+        entry_signature = _entry_signature(direction, order_type)
         last_entry_signature = asset_state.get("last_entry_signature")
         last_entry_sent_utc = asset_state.get("last_entry_sent_utc")
         if allow_entry and last_entry_signature == entry_signature and last_entry_sent_utc:
