@@ -270,3 +270,122 @@ def test_pending_exit_record_and_clear(tmp_path: Path) -> None:
 
     position_tracker.clear_pending_exits(str(pending_path), ["BTCUSD"])
     assert not pending_path.exists()
+
+
+def test_register_precision_pending_position_and_fill_limit_buy():
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    payload = {
+        "signal": "precision_arming",
+        "precision_plan": {
+            "direction": "buy",
+            "order_type": "LIMIT",
+            "entry": 100.0,
+            "stop_loss": 95.0,
+            "take_profit_1": 105.0,
+            "take_profit_2": 110.0,
+        },
+    }
+
+    positions = position_tracker.register_precision_pending_position(
+        "XAGUSD", payload, now_dt, {}
+    )
+    assert positions["XAGUSD"]["status"] == "pending"
+
+    changed, reason, updated = position_tracker.check_close_by_levels(
+        "XAGUSD", positions, 99.9, now_dt, cooldown_minutes=20
+    )
+    assert changed is True
+    assert reason == "pending_filled"
+    assert updated["XAGUSD"]["status"] == "open"
+    assert updated["XAGUSD"]["side"] == "long"
+
+
+def test_pending_position_expires_after_30_minutes():
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    positions = {
+        "XAGUSD": {
+            "status": "pending",
+            "direction": "sell",
+            "order_type": "LIMIT",
+            "entry": 31.0,
+            "sl": 32.0,
+            "tp1": 30.0,
+            "tp2": 29.0,
+            "pending_since_utc": "2025-01-01T11:29:00Z",
+            "side": None,
+        }
+    }
+
+    changed, reason, updated = position_tracker.check_close_by_levels(
+        "XAGUSD", positions, 30.5, now_dt, cooldown_minutes=20
+    )
+    assert changed is True
+    assert reason == "pending_expired"
+    assert "XAGUSD" not in updated
+
+
+def test_register_precision_pending_does_not_reset_timestamp_for_same_pending():
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    payload = {
+        "signal": "precision_arming",
+        "precision_plan": {
+            "direction": "buy",
+            "order_type": "LIMIT",
+            "entry": 100.0,
+            "stop_loss": 95.0,
+            "take_profit_1": 105.0,
+            "take_profit_2": 110.0,
+        },
+    }
+    positions = {
+        "XAGUSD": {
+            "status": "pending",
+            "direction": "buy",
+            "order_type": "LIMIT",
+            "entry": 100.0,
+            "sl": 95.0,
+            "tp1": 105.0,
+            "tp2": 110.0,
+            "pending_since_utc": "2025-01-01T11:20:00Z",
+        }
+    }
+
+    updated = position_tracker.register_precision_pending_position(
+        "XAGUSD", payload, now_dt, positions
+    )
+
+    assert updated["XAGUSD"]["pending_since_utc"] == "2025-01-01T11:20:00Z"
+
+
+def test_register_precision_pending_does_not_override_open_position():
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    payload = {
+        "signal": "precision_arming",
+        "precision_plan": {
+            "direction": "sell",
+            "order_type": "LIMIT",
+            "entry": 31.0,
+            "stop_loss": 32.0,
+            "take_profit_1": 30.0,
+            "take_profit_2": 29.0,
+        },
+    }
+    positions = {
+        "XAGUSD": {
+            "status": "open",
+            "side": "long",
+            "entry": 30.5,
+            "sl": 29.8,
+            "tp1": 31.2,
+            "tp2": 31.8,
+            "opened_at_utc": "2025-01-01T11:50:00Z",
+        }
+    }
+
+    updated = position_tracker.register_precision_pending_position(
+        "XAGUSD", payload, now_dt, positions
+    )
+
+    assert updated["XAGUSD"]["status"] == "open"
+    assert updated["XAGUSD"]["side"] == "long"
+    assert updated["XAGUSD"]["entry"] == 30.5
