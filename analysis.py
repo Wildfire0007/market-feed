@@ -10852,17 +10852,26 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     micro_bias_confidence = 0
     strong_momentum = False
+    micro_structure_momentum = bool(
+        (micro_bias == "long" and (micro_bos_long or struct_retest_long))
+        or (micro_bias == "short" and (micro_bos_short or struct_retest_short))
+    )
     micro_guard_state = intraday_profile.get("micro_range_guard") if isinstance(intraday_profile, dict) else None  
     if micro_bias:
         micro_bias_confidence += 1
-        if strong_momentum:
+        if micro_structure_momentum:
             micro_bias_confidence += 1
         if isinstance(micro_guard_state, dict):
             if micro_bias == "long" and not micro_guard_state.get("long"):
                 micro_bias_confidence += 1
             elif micro_bias == "short" and not micro_guard_state.get("short"):
                 micro_bias_confidence += 1
-    if micro_bias and effective_bias in {"long", "short"} and effective_bias != micro_bias:
+    if (
+        micro_bias
+        and asset != "XAGUSD"
+        and effective_bias in {"long", "short"}
+        and effective_bias != micro_bias
+    ):              
         if micro_bias_confidence >= 2:
             effective_bias = micro_bias
             bias_override_used = True
@@ -16432,6 +16441,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
