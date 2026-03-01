@@ -10866,9 +10866,10 @@ def analyze(asset: str) -> Dict[str, Any]:
                 micro_bias_confidence += 1
             elif micro_bias == "short" and not micro_guard_state.get("short"):
                 micro_bias_confidence += 1
+    allow_micro_override = (asset not in {"XAGUSD", "USOIL"})
     if (
         micro_bias
-        and asset != "XAGUSD"
+        and allow_micro_override
         and effective_bias in {"long", "short"}
         and effective_bias != micro_bias
     ):              
@@ -10877,7 +10878,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             bias_override_used = True
             bias_override_reason = "Micro bias override: gyors struktúra dominál"
             reasons.append("Intraday micro-bias előnyben részesítve a belépésnél")
-    elif micro_bias and asset != "XAGUSD" and effective_bias == "neutral":
+    elif micro_bias and allow_micro_override and effective_bias == "neutral":
         effective_bias = micro_bias
         bias_override_used = True
         bias_override_reason = "Micro bias override: neutral -> micro irány"
@@ -11709,29 +11710,31 @@ def analyze(asset: str) -> Dict[str, Any]:
             if note not in structure_notes:
                 structure_notes.append(note)
         if effective_bias == "long":
-            higher_break = bool(bos1h_long)
+            higher_break = bool(bos1h_long or (bos5m_long and micro_bos_long))
             if usoil_gap_break_long:
                 structure_components["bos"] = True
                 gap_note = "USOIL: Gap + VWAP törés — long setup prioritás"
                 if gap_note not in structure_notes:
                     structure_notes.append(gap_note)
-            elif not higher_break:
-                structure_components["bos"] = False
-                tighten_note = "USOIL: oldalazó szerkezet — 1h BOS nélkül nincs belépő"
-                if tighten_note not in structure_notes:
-                    structure_notes.append(tighten_note)
+            else:
+                structure_components["bos"] = higher_break and not recent_break_short
+                if not higher_break:
+                    tighten_note = "USOIL: oldalazó szerkezet — H1/M5 BOS nélkül nincs belépő"
+                    if tighten_note not in structure_notes:
+                        structure_notes.append(tighten_note)
         elif effective_bias == "short":
-            higher_break = bool(bos1h_short)
+            higher_break = bool(bos1h_short or (bos5m_short and micro_bos_short))
             if usoil_gap_break_short:
                 structure_components["bos"] = True
                 gap_note = "USOIL: Gap + VWAP törés — short setup prioritás"
                 if gap_note not in structure_notes:
                     structure_notes.append(gap_note)
-            elif not higher_break:
-                structure_components["bos"] = False
-                tighten_note = "USOIL: oldalazó szerkezet — 1h BOS nélkül nincs belépő"
-                if tighten_note not in structure_notes:
-                    structure_notes.append(tighten_note)
+            else:
+                structure_components["bos"] = higher_break and not recent_break_long
+                if not higher_break:
+                    tighten_note = "USOIL: oldalazó szerkezet — H1/M5 BOS nélkül nincs belépő"
+                    if tighten_note not in structure_notes:
+                        structure_notes.append(tighten_note)
 
     elif asset == "GOLD_CFD" and effective_bias in {"long", "short"}:
         vwap_distance = safe_float(vwap_confluence.get("distance")) if isinstance(vwap_confluence, dict) else None
@@ -16413,6 +16416,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
