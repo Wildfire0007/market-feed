@@ -56,6 +56,30 @@ def _default_asset_state() -> Dict[str, Any]:
     }
 
 
+def _parse_utc(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _has_recent_notify_activity(
+    asset_state: Dict[str, Any],
+    now: datetime,
+    max_activity_age_minutes: Optional[float],
+) -> bool:
+    if max_activity_age_minutes is None or max_activity_age_minutes <= 0:
+        return False
+    cutoff = now - timedelta(minutes=float(max_activity_age_minutes))
+    for key in ("last_entry_sent_utc", "last_exit_sent_utc"):
+        ts = _parse_utc(asset_state.get(key))
+        if ts and ts >= cutoff:
+            return True
+    return False
+
+
 def build_default_state(*, now: Optional[datetime] = None, reason: str = "initialise") -> Dict[str, Any]:
     now = now or _now()
     payload: Dict[str, Any] = {
@@ -84,6 +108,7 @@ def normalise_notify_state(
     now: Optional[datetime] = None,
     reset_counts: bool = True,
     max_cooldown_age_minutes: Optional[float] = 1440.0,
+    max_activity_age_minutes: Optional[float] = 1440.0,    
     reason: str = "scheduled_normalise",
 ) -> Dict[str, Any]:
     """Return a normalised state dictionary without mutating the input."""
@@ -111,7 +136,14 @@ def normalise_notify_state(
         asset_state = dict(payload)
         original_count = asset_state.get("count")
         if reset_counts:
-            if isinstance(original_count, (int, float)) and original_count != 0:
+            has_recent_activity = _has_recent_notify_activity(
+                asset_state,
+                now,
+                max_activity_age_minutes,
+            )
+            if has_recent_activity:
+                asset_state["count"] = int(original_count) if isinstance(original_count, (int, float)) else 0
+            elif isinstance(original_count, (int, float)) and original_count != 0:
                 asset_state["count"] = 0
                 cleared.append(asset)
                 cleared_total += 1
@@ -147,6 +179,7 @@ def normalise_notify_state_file(
     now: Optional[datetime] = None,
     reset_counts: bool = True,
     max_cooldown_age_minutes: Optional[float] = 1440.0,
+    max_activity_age_minutes: Optional[float] = 1440.0,
     reason: str = "scheduled_normalise",
 ) -> NotifyStateUpdate:
     now = now or _now()
@@ -169,6 +202,7 @@ def normalise_notify_state_file(
         now=now,
         reset_counts=reset_counts,
         max_cooldown_age_minutes=max_cooldown_age_minutes,
+        max_activity_age_minutes=max_activity_age_minutes,
         reason=reason,
     )
     if normalised != current:
@@ -197,6 +231,15 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Keep existing counts (only refresh metadata).",
     )
     parser.add_argument(
+        "--max-activity-age-minutes",
+        type=float,
+        default=1440.0,
+        help=(
+            "Entry/exit dedup state younger than this is considered fresh and keeps its count "
+            "(based on last_entry_sent_utc/last_exit_sent_utc)."
+        ),
+    )
+    parser.add_argument(
         "--max-cooldown-age-minutes",
         type=float,
         default=1440.0,
@@ -212,6 +255,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         path=args.state_path,
         reset_counts=not args.no_reset_counts,
         max_cooldown_age_minutes=args.max_cooldown_age_minutes,
+        max_activity_age_minutes=args.max_activity_age_minutes,
         reason=args.reason,
     )
     print(result.message)
