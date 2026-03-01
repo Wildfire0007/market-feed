@@ -98,6 +98,11 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         help="Skip Discord notification dispatch",
     )
     parser.add_argument(
+        "--skip-position-watchdog",
+        action="store_true",
+        help="Skip precision pending + TP1/SL position watchdog",
+    )
+    parser.add_argument(
         "--auto-train-models",
         action="store_true",
         help="Run the Feature→Label→Train automation after analysis",
@@ -246,6 +251,9 @@ def main(argv: List[str] | None = None) -> int:
         notify_cmd.extend(args.notify_arg)
         _run_step("Discord notify", notify_cmd, optional=True)
 
+    if not args.skip_position_watchdog:
+        _run_step("Position watchdog", [python, "scripts/position_watchdog.py"], optional=True)
+    
     if not args.skip_spot_watchdog:
         spot_cooldown_seconds = max(float(args.spot_watchdog_cooldown_minutes), 0.0) * 60.0
         spot_assets = [asset.upper() for asset in args.spot_watchdog_assets or []]
