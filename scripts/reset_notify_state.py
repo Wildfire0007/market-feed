@@ -53,6 +53,10 @@ def _default_asset_state() -> Dict[str, Any]:
         "last_sent_mode": None,
         "last_sent_known": False,
         "cooldown_until": None,
+        "last_entry_sent_utc": None,
+        "last_entry_signature": None,
+        "last_exit_sent_utc": None,
+        "last_exit_signature": None,
     }
 
 
@@ -99,6 +103,14 @@ def _reset_asset_state(asset: str, payload: Optional[Dict[str, Any]]) -> Dict[st
         last_value = payload.get("last")
         if isinstance(last_value, str) and last_value.strip():
             state["last"] = last_value.strip()
+        for key in (
+            "last_entry_sent_utc",
+            "last_entry_signature",
+            "last_exit_sent_utc",
+            "last_exit_signature",
+        ):
+            if key in payload:
+                state[key] = payload.get(key)
     return state
 
 
