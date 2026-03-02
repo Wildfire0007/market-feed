@@ -389,3 +389,61 @@ def test_register_precision_pending_does_not_override_open_position():
     assert updated["XAGUSD"]["status"] == "open"
     assert updated["XAGUSD"]["side"] == "long"
     assert updated["XAGUSD"]["entry"] == 30.5
+
+
+def test_update_pending_positions_activates_limit_buy_and_expires_old_pending():
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    positions = {
+        "XAGUSD": {
+            "status": "pending",
+            "direction": "buy",
+            "order_type": "LIMIT",
+            "entry": 30.5,
+            "pending_since_utc": "2025-01-01T11:55:00Z",
+        },
+        "EURUSD": {
+            "status": "pending",
+            "direction": "sell",
+            "order_type": "LIMIT",
+            "entry": 1.1,
+            "pending_since_utc": "2025-01-01T11:00:00Z",
+        },
+    }
+
+    updated, changes = position_tracker.update_pending_positions(
+        positions,
+        {"XAGUSD": 30.4, "EURUSD": 1.2},
+        now_dt,
+        pending_expiry_minutes=30,
+    )
+
+    assert changes["XAGUSD"] == "pending_filled"
+    assert updated["XAGUSD"]["status"] == "open"
+    assert updated["XAGUSD"]["side"] == "long"
+    assert changes["EURUSD"] == "pending_expired"
+    assert "EURUSD" not in updated
+
+
+def test_update_pending_positions_respects_asset_expiry_config():
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    positions = {
+        "XAGUSD": {
+            "status": "pending",
+            "direction": "buy",
+            "order_type": "LIMIT",
+            "entry": 30.5,
+            "pending_since_utc": "2025-01-01T11:40:00Z",
+        }
+    }
+
+    updated, changes = position_tracker.update_pending_positions(
+        positions,
+        {"XAGUSD": 30.8},
+        now_dt,
+        pending_expiry_minutes=30,
+        pending_expiry_by_asset={"XAGUSD": 15},
+    )
+
+    assert changes["XAGUSD"] == "pending_expired"
+    assert "XAGUSD" not in updated
+
