@@ -101,11 +101,13 @@ def main() -> None:
     pending_exit_path = tracking_cfg.get("pending_exit_file") or str(state_db.DEFAULT_DB_PATH)
     treat_missing = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
     cooldown_default = _cooldown_minutes(tracking_cfg, "default", 20)
+    pending_expiry_cfg = tracking_cfg.get("pending_expiry_minutes")    
 
     now_dt = datetime.now(timezone.utc)
     manual_positions = position_tracker.load_positions(positions_path, treat_missing)
     changed_assets = []
     positions_dirty = False
+    spot_prices: Dict[str, Any] = {}
     
     for asset in settings.ASSETS:
         signal_path = Path("public") / asset / "signal.json"
@@ -119,16 +121,27 @@ def main() -> None:
         if pending_positions != manual_positions:
             manual_positions = pending_positions
             positions_dirty = True
+        spot_price, _ = _resolve_spot(asset)
+        spot_prices[asset] = spot_price
 
+    manual_positions, pending_changes = position_tracker.update_pending_positions(
+        manual_positions,
+        spot_prices,
+        now_dt,
+        pending_expiry_by_asset=pending_expiry_cfg,
+    )
+    if pending_changes:
+        positions_dirty = True
+ 
+    for asset in settings.ASSETS:
         manual_state = position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt)
-        if not manual_state.get("has_position") and not manual_state.get("pending_active"):
+        if not manual_state.get("has_position"):
             continue
 
-        spot_price, _ = _resolve_spot(asset)
         changed, reason, manual_positions = position_tracker.check_close_by_levels(
             asset,
             manual_positions,
-            spot_price,
+            spot_prices.get(asset),
             now_dt,
             _cooldown_minutes(tracking_cfg, asset, cooldown_default),
         )
