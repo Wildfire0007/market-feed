@@ -245,14 +245,14 @@ def main(argv: List[str] | None = None) -> int:
         auto_cmd = [python, "scripts/auto_train_models.py", "--public-dir", args.public_dir]
         auto_cmd.extend(args.auto_train_arg)
         _run_step("Auto-train models", auto_cmd)
-        
+
+    if not args.skip_position_watchdog:
+        _run_step("Position watchdog", [python, "scripts/position_watchdog.py"], optional=True)
+    
     if not args.skip_discord:
         notify_cmd = [python, "scripts/notify_discord.py"]
         notify_cmd.extend(args.notify_arg)
         _run_step("Discord notify", notify_cmd, optional=True)
-
-    if not args.skip_position_watchdog:
-        _run_step("Position watchdog", [python, "scripts/position_watchdog.py"], optional=True)
     
     if not args.skip_spot_watchdog:
         spot_cooldown_seconds = max(float(args.spot_watchdog_cooldown_minutes), 0.0) * 60.0
