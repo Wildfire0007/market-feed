@@ -54,3 +54,35 @@ def test_normalise_notify_state_file_rebuilds_missing_assets(tmp_path):
     assert data["_meta"]["last_reset_reason"] == "unit_test"
     # At least one configured asset should be present after rebuild
     assert any(asset != "_meta" for asset in data.keys())
+
+
+def test_normalise_notify_state_file_preserves_discord_dedup_fields(tmp_path):
+    state_path = tmp_path / "_notify_state.json"
+    payload = {
+        "_meta": {"last_reset_utc": "2025-11-10T00:00:00Z"},
+        "XAGUSD": {
+            "last": "buy",
+            "count": 3,
+            "last_entry_sent_utc": "2025-11-12T05:40:00Z",
+            "last_entry_signature": {"direction": "buy", "order_type": "LIMIT"},
+            "last_exit_sent_utc": "2025-11-12T05:45:00Z",
+            "last_exit_signature": {"state": "scale_out", "direction": "long"},
+        },
+    }
+    state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    now = datetime(2025, 11, 12, 6, 0, tzinfo=timezone.utc)
+    normalise_notify_state_file(
+        path=state_path,
+        now=now,
+        reset_counts=True,
+        max_cooldown_age_minutes=0.0,
+        reason="unit_test",
+    )
+
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    xag = data["XAGUSD"]
+    assert xag["last_entry_sent_utc"] == "2025-11-12T05:40:00Z"
+    assert xag["last_entry_signature"] == {"direction": "buy", "order_type": "LIMIT"}
+    assert xag["last_exit_sent_utc"] == "2025-11-12T05:45:00Z"
+    assert xag["last_exit_signature"] == {"state": "scale_out", "direction": "long"}
