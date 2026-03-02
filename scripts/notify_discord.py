@@ -34,7 +34,7 @@ from config import analysis_settings as settings
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
 ENTRY_COOLDOWN_MINUTES = 30
-EXIT_NOTIFY_COOLDOWN_MINUTES = 10
+EXIT_NOTIFY_COOLDOWN_MINUTES = 30
 DISCORD_NOTIFY_ASSETS = {"GOLD_CFD", "XAGUSD", "USOIL"}
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -163,11 +163,14 @@ def _entry_signature(direction: str, order_type: str) -> Dict[str, Any]:
 def _exit_signature(exit_signal: Dict[str, Any]) -> Dict[str, Any]:
     state = str(exit_signal.get("state") or exit_signal.get("action") or "").lower()
     direction = str(exit_signal.get("direction") or "").lower()
-    reasons = [str(r) for r in (exit_signal.get("reasons") or []) if r]
+    category = str(exit_signal.get("category") or "").lower()
+    trigger_price = safe_float(exit_signal.get("trigger_price"))
+    trigger_bucket = round(trigger_price, 3) if trigger_price is not None else None
     return {
         "state": state,
         "direction": direction,
-        "reasons": reasons[:4],
+        "category": category,
+        "trigger_bucket": trigger_bucket,
     }
 
 
@@ -274,7 +277,8 @@ def check_and_notify() -> None:
         
         if exit_signal:
             exit_state = str(exit_signal.get("state") or exit_signal.get("action") or "").lower()            
-            exit_signature = _exit_signature(exit_signal)            
+            exit_signature = _exit_signature(exit_signal)
+            exit_reasons = [str(r) for r in (exit_signal.get("reasons") or []) if r][:4]
             now_dt = datetime.now(timezone.utc)
             asset_state = notify_state.get(asset_name) if isinstance(notify_state.get(asset_name), dict) else {}
             last_exit_signature = asset_state.get("last_exit_signature")
@@ -307,7 +311,7 @@ def check_and_notify() -> None:
                     },       
                     {
                         "name": "💡 Javaslat oka",
-                        "value": "\n".join(f"• {_hu_reason(r)}" for r in reasons) or "• N/A",
+                        "value": "\n".join(f"• {_hu_reason(r)}" for r in exit_reasons) or "• N/A",
                         "inline": False,
                     },
                 ],
