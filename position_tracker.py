@@ -807,7 +807,51 @@ def _activate_or_expire_pending(
     )
     return True, "pending_filled", updated
 
-    
+
+def update_pending_positions(
+    positions: Dict[str, Any],
+    spot_prices: Dict[str, Any],
+    now_dt: datetime,
+    pending_expiry_minutes: int = PENDING_EXPIRY_MINUTES,
+    pending_expiry_by_asset: Optional[Dict[str, Any]] = None,
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """Activate or expire pending entries deterministically from current spot prices."""
+
+    current_positions = positions if isinstance(positions, dict) else {}
+    current_spots = spot_prices if isinstance(spot_prices, dict) else {}
+    expiry_cfg = pending_expiry_by_asset if isinstance(pending_expiry_by_asset, dict) else {}
+    updated = current_positions
+    changes: Dict[str, str] = {}
+
+    for asset in sorted(current_positions.keys()):
+        payload = current_positions.get(asset)
+        if not isinstance(payload, dict):
+            continue
+        status = str(payload.get("status") or "").lower()
+        if status != "pending":
+            continue
+        expiry_minutes = pending_expiry_minutes
+        if asset in expiry_cfg or "default" in expiry_cfg:
+            try:
+                expiry_minutes = int(expiry_cfg.get(asset, expiry_cfg.get("default", expiry_minutes)))
+            except Exception:
+                expiry_minutes = pending_expiry_minutes
+        changed, reason, next_positions = _activate_or_expire_pending(
+            asset,
+            payload,
+            updated,
+            current_spots.get(asset),
+            now_dt,
+            expiry_minutes,
+        )
+        if not changed:
+            continue
+        updated = next_positions
+        if reason:
+            changes[asset] = reason
+    return updated, changes
+
+
 def _levels_hit(
     side: Optional[str],
     spot_price: Optional[float],
