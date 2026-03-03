@@ -247,7 +247,7 @@ def main(argv: List[str] | None = None) -> int:
         _run_step("Auto-train models", auto_cmd)
 
     if not args.skip_position_watchdog:
-        _run_step("Position watchdog", [python, "scripts/position_watchdog.py"], optional=True)
+        _run_step("Position watchdog", [python, "scripts/position_watchdog.py"])
     
     if not args.skip_discord:
         notify_cmd = [python, "scripts/notify_discord.py"]
