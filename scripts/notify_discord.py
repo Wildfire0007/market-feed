@@ -184,6 +184,23 @@ def _entry_signature(direction: str, order_type: str) -> Dict[str, Any]:
     }
 
 
+def _entry_levels_signature(
+    entry: Optional[float],
+    sl: Optional[float],
+    tp1: Optional[float],
+    tp2: Optional[float],
+) -> Dict[str, Any]:
+    def _bucket(value: Optional[float]) -> Optional[float]:
+        return round(value, 5) if value is not None else None
+
+    return {
+        "entry": _bucket(entry),
+        "sl": _bucket(sl),
+        "tp1": _bucket(tp1),
+        "tp2": _bucket(tp2),
+    }
+
+
 def _exit_signature(exit_signal: Dict[str, Any]) -> Dict[str, Any]:
     state = str(exit_signal.get("state") or exit_signal.get("action") or "").lower()
     direction = str(exit_signal.get("direction") or "").lower()
@@ -388,9 +405,16 @@ def check_and_notify() -> None:
         asset_state = notify_state.get(asset_name) if isinstance(notify_state.get(asset_name), dict) else {}
         now_dt = datetime.now(timezone.utc)
         entry_signature = _entry_signature(direction, order_type)
+        entry_levels_signature = _entry_levels_signature(entry, sl, tp1, tp2)
         last_entry_signature = asset_state.get("last_entry_signature")
+        last_entry_levels_signature = asset_state.get("last_entry_levels_signature")
         last_entry_sent_utc = asset_state.get("last_entry_sent_utc")
-        if allow_entry and last_entry_signature == entry_signature and last_entry_sent_utc:
+        if (
+            allow_entry
+            and last_entry_signature == entry_signature
+            and last_entry_levels_signature == entry_levels_signature
+            and last_entry_sent_utc
+        ):    
             try:
                 last_entry_dt = datetime.fromisoformat(str(last_entry_sent_utc).replace("Z", "+00:00"))
             except Exception:
@@ -501,6 +525,7 @@ def check_and_notify() -> None:
 
         send_discord_embed(embed)
         asset_state["last_entry_signature"] = entry_signature
+        asset_state["last_entry_levels_signature"] = entry_levels_signature
         asset_state["last_entry_sent_utc"] = to_utc_iso(now_dt)
         notify_state[asset_name] = asset_state
         notify_state_changed = True
