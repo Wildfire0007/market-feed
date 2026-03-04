@@ -872,17 +872,17 @@ def _levels_hit(
     if side_norm == "long":
         if sl_val is not None and price <= sl_val:
             return True, "sl_hit"
-        if tp1_val is not None and price >= tp1_val:
-            return True, "tp1_hit"
         if tp2_val is not None and price >= tp2_val:
             return True, "tp2_hit"
+        if tp1_val is not None and price >= tp1_val:
+            return True, "tp1_hit"
     elif side_norm == "short":
         if sl_val is not None and price >= sl_val:
             return True, "sl_hit"
-        if tp1_val is not None and price <= tp1_val:
-            return True, "tp1_hit"
         if tp2_val is not None and price <= tp2_val:
             return True, "tp2_hit"
+        if tp1_val is not None and price <= tp1_val:
+            return True, "tp1_hit"    
     return False, None
 
 
