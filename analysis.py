@@ -11777,17 +11777,21 @@ def analyze(asset: str) -> Dict[str, Any]:
         }
         xag_overrides.setdefault("structure", {}).update(xag_structure_meta)
         if effective_bias == "long":
-            long_break = bool(higher_break_long and price_above_vwap and not recent_break_short)
+            if not higher_break_long:
+                structure_components["bos"] = False
+            else:
+                structure_components["bos"] = bool(price_above_vwap and not recent_break_short)
             if not price_above_vwap:
                 structure_notes.append("XAG: VWAP alatt — long setup türelmet igényel")
-            structure_components["bos"] = long_break
             if price_above_vwap:
                 structure_components["liquidity"] = True
         elif effective_bias == "short":
-            short_break = bool(higher_break_short and price_below_vwap and not recent_break_long)
+            if not higher_break_short:
+                structure_components["bos"] = False
+            else:
+                structure_components["bos"] = bool(price_below_vwap and not recent_break_long)
             if not price_below_vwap:
                 structure_notes.append("XAG: VWAP felett — short setup türelmet igényel")
-            structure_components["bos"] = short_break
             if price_below_vwap:      
                 structure_components["liquidity"] = True
         if xag_momentum_override and structure_components.get("bos"):
@@ -16416,6 +16420,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
