@@ -109,8 +109,8 @@ def _reset_asset_state(asset: str, payload: Optional[Dict[str, Any]]) -> Dict[st
             "last_exit_sent_utc",
             "last_exit_signature",
         ):
-            if key in payload:
-                state[key] = payload.get(key)
+            if key in ["last_entry_sent_utc", "last_entry_signature"] and key in payload:
+                state[key] = payload[key]
     return state
 
 
