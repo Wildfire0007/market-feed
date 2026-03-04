@@ -253,6 +253,33 @@ def test_check_close_by_levels_tp1_not_repeated_after_scaled_flag():
     assert updated["BTCUSD"]["tp1_scaled"] is True
 
 
+def test_check_close_by_levels_tp2_has_priority_over_tp1_when_both_hit():
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    long_positions = {
+        "BTCUSD": {"side": "long", "entry": 100.0, "sl": 95.0, "tp1": 105.0, "tp2": 110.0, "size": 1.0}
+    }
+
+    changed, reason, updated = position_tracker.check_close_by_levels(
+        "BTCUSD", long_positions, 111.0, now_dt, 15, tp1_close_fraction=0.5
+    )
+
+    assert changed is True
+    assert reason == "tp2_hit"
+    assert updated["BTCUSD"]["close_reason"] == "tp2_hit"
+
+    short_positions = {
+        "EURUSD": {"side": "short", "entry": 1.2, "sl": 1.25, "tp1": 1.1, "tp2": 1.05, "size": 1.0}
+    }
+
+    changed, reason, updated = position_tracker.check_close_by_levels(
+        "EURUSD", short_positions, 1.04, now_dt, 15, tp1_close_fraction=0.5
+    )
+
+    assert changed is True
+    assert reason == "tp2_hit"
+    assert updated["EURUSD"]["close_reason"] == "tp2_hit"
+
+
 def test_pending_exit_record_and_clear(tmp_path: Path) -> None:
     pending_path = tmp_path / "pending.json"
 
@@ -446,4 +473,3 @@ def test_update_pending_positions_respects_asset_expiry_config():
 
     assert changes["XAGUSD"] == "pending_expired"
     assert "XAGUSD" not in updated
-
