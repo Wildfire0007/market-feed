@@ -59,6 +59,25 @@ COLOR_BLUE = 0x3498DB
 COLOR_ORANGE = 0xE67E22
 COLOR_YELLOW = 0xF1C40F
 
+HARD_GATE_KEYWORDS = (
+    "spread",
+    "volatility",
+    "vola",
+    "atr",
+    "order_flow",
+    "structure",
+    "breakout",
+    "session",
+    "liquidity",
+    "metal_bias",
+    "trend",
+)
+
+
+def _is_hard_gate_blocker(gate_name: str) -> bool:
+    key = str(gate_name or "").strip().lower()
+    return any(token in key for token in HARD_GATE_KEYWORDS)
+
 
 def load_json(path: Path) -> Dict[str, Any]:
     try:
@@ -248,6 +267,23 @@ def check_and_notify() -> None:
         if alignment_state == "COUNTER":
             alignment_gate_note = "BLOCK"
 
+        if alignment_state == "MIXED" and not exit_signal:
+            print(f"{asset_name}: MIXED piac — jelzés némítva.")
+            continue
+
+        missing_gates = [str(item) for item in (gates.get("missing") or []) if item]
+        hard_missing_gates = [gate for gate in missing_gates if _is_hard_gate_blocker(gate)]
+        soft_missing_gates = [gate for gate in missing_gates if gate not in hard_missing_gates]
+        if hard_missing_gates and not exit_signal:
+            print(
+                f"{asset_name}: belépő blokkolva hard védelmi kapun ({', '.join(hard_missing_gates)})."
+            )
+            continue
+        if soft_missing_gates and not exit_signal:
+            print(
+                f"{asset_name}: soft gate figyelmeztetés ({', '.join(soft_missing_gates)}), jelzés továbbengedve."
+            )
+        
         atr1h = safe_float(data.get("atr1h"))
         probability = safe_float(data.get("probability"))
         p_score = safe_float(data.get("probability_raw"))
@@ -258,17 +294,20 @@ def check_and_notify() -> None:
         tp1 = safe_float(data.get("tp1"))
         tp2 = safe_float(data.get("tp2"))
 
-        order_type = "MARKET"
+        order_type = str(data.get("entry_order_type") or data.get("order_type") or "MARKET").upper()
         direction = signal
         if signal == "precision_arming":
             plan = data.get("precision_plan") if isinstance(data.get("precision_plan"), dict) else {}
             direction = str(plan.get("direction") or data.get("signal") or "buy").lower()
-            order_type = "LIMIT"
+            order_type = str(plan.get("order_type") or order_type or "LIMIT").upper()
             entry = safe_float(plan.get("entry") or entry)
             sl = safe_float(plan.get("stop_loss") or sl)
             tp1 = safe_float(plan.get("take_profit_1") or tp1)
             tp2 = safe_float(plan.get("take_profit_2") or tp2)
 
+        if order_type not in {"LIMIT", "MARKET", "STOP"}:
+            order_type = "MARKET"
+        
         if direction not in {"buy", "sell"}:
             direction = "buy"
 
@@ -363,7 +402,7 @@ def check_and_notify() -> None:
 
         budapest_time = datetime.now(ZoneInfo("Europe/Budapest")).strftime("%H:%M")
         valid_until = datetime.now(BUDAPEST_TZ) + timedelta(minutes=30)
-        mode_label = "🟡 ÁTMENETI" if alignment_state == "MIXED" else ("🔵 RANGE" if alignment_state == "COUNTER" else "🟢 TREND")
+        mode_label = "🔵 RANGE" if alignment_state == "COUNTER" else "🟢 TREND"
 
         if order_type == "LIMIT":
             instruction = (
@@ -371,23 +410,28 @@ def check_and_notify() -> None:
                 if direction == "buy"
                 else f"NYISS SHORT – SELL LIMIT @ {format_price(entry)}"
             )
-        else:
+            prefix = "🟡"
+            color = COLOR_YELLOW
+            order_card_hint = "Limit (függő): csak a megadott vagy jobb áron teljesül."
+        elif order_type == "STOP":
             instruction = (
                 f"NYISS LONG – BUY STOP @ {format_price(entry)}"
                 if direction == "buy"
                 else f"NYISS SHORT – SELL STOP @ {format_price(entry)}"
             )
-
-        if alignment_state == "MIXED":
-            prefix = "🟡"
-            color = COLOR_YELLOW
-        elif alignment_state == "COUNTER":
-            prefix = "🟦" if direction == "buy" else "🟧"
-            color = COLOR_BLUE if direction == "buy" else COLOR_ORANGE
+            prefix = "🔵"
+            color = COLOR_BLUE
+            order_card_hint = "Stop (függő): kitörésre aktiválódik a trigger árnál."
         else:
-            prefix = "🟩" if direction == "buy" else "🟥"
-            color = COLOR_GREEN if direction == "buy" else COLOR_RED
-
+            instruction = (
+                f"NYISS LONG – BUY MARKET @ {format_price(entry)}"
+                if direction == "buy"
+                else f"NYISS SHORT – SELL MARKET @ {format_price(entry)}"
+            )
+            prefix = "🟢"
+            color = COLOR_GREEN
+            order_card_hint = "Market (azonnali): azonnali végrehajtás piaci áron."
+            
         title = f"{prefix} TEENDŐ MOST: {instruction}"
         entry_text = format_price(entry)
         sl_text = format_price(sl)
@@ -414,6 +458,15 @@ def check_and_notify() -> None:
                     "inline": False,
                 },
                 {
+                    "name": "🧭 Megbízás típus (kártya jelölés)",
+                    "value": (
+                        f"TÍPUS: `{order_type}`\n"
+                        f"JELÖLÉS: `{prefix}`\n"
+                        f"LEÍRÁS: {order_card_hint}"
+                    ),
+                    "inline": False,
+                },
+                {
                     "name": "⏳ Érvényesség & Törlés",
                     "value": (
                         f"LEJÁRAT (Valid Until): `{valid_until.strftime('%H:%M')}` – Ha addig nem aktiválódik, töröld a megbízást!\n"
@@ -424,6 +477,11 @@ def check_and_notify() -> None:
                 {
                     "name": "🛠️ Menedzsment",
                     "value": "TP1 elérésekor automatikus jelzés érkezik a részleges zárásra és a Stop nullába (Breakeven) húzására.",
+                    "inline": False,
+                },
+                {
+                    "name": "🧠 Rövid indoklás",
+                    "value": f"• {reasons[0]}" if reasons else "• N/A",
                     "inline": False,
                 },
             ]
