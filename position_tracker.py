@@ -755,6 +755,11 @@ def _pending_fill_hit(entry: Dict[str, Any], spot_price: Optional[float]) -> boo
     if price is None or entry_price is None:
         return False
 
+    status = str(entry.get("status") or "").lower()
+    side = str(entry.get("side") or "").lower()
+    if status == "pending" and side in {"long", "short"}:
+        return price <= entry_price if side == "long" else price >= entry_price
+    
     direction = str(entry.get("direction") or "").lower()
     order_type = str(entry.get("order_type") or "LIMIT").upper()
     if direction not in {"buy", "sell"}:
