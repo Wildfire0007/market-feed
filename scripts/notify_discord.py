@@ -59,24 +59,29 @@ COLOR_BLUE = 0x3498DB
 COLOR_ORANGE = 0xE67E22
 COLOR_YELLOW = 0xF1C40F
 
-HARD_GATE_KEYWORDS = (
-    "spread",
-    "volatility",
-    "vola",
-    "atr",
-    "order_flow",
-    "structure",
-    "breakout",
-    "session",
-    "liquidity",
-    "metal_bias",
-    "trend",
-)
+HARD_GATE_NAMES = {
+    "spread_guard",
+    "volatility_guard",
+    "atr_guard",
+    "order_flow_guard",
+    "structure_guard",
+    "breakout_guard",
+    "false_breakout_guard",
+    "metal_bias_5m_alignment",
+}
 
 
 def _is_hard_gate_blocker(gate_name: str) -> bool:
-    key = str(gate_name or "").strip().lower()
-    return any(token in key for token in HARD_GATE_KEYWORDS)
+    key = str(gate_name or "").strip().lower().replace(" ", "_").replace("-", "_")
+    return key in HARD_GATE_NAMES or key.startswith((
+        "spread_",
+        "volatility_",
+        "atr_",
+        "order_flow_",
+        "structure_",
+        "breakout_",
+        "false_breakout_",
+    ))
 
 
 def load_json(path: Path) -> Dict[str, Any]:
@@ -267,8 +272,8 @@ def check_and_notify() -> None:
         if alignment_state == "COUNTER":
             alignment_gate_note = "BLOCK"
 
-        if alignment_state == "MIXED" and not exit_signal:
-            print(f"{asset_name}: MIXED piac — jelzés némítva.")
+        if alignment_state == "MIXED" and signal != "precision_arming" and not exit_signal:
+            print(f"{asset_name}: MIXED piac — jelzés némítva (csak precision_arming mehet át).")
             continue
 
         missing_gates = [str(item) for item in (gates.get("missing") or []) if item]
