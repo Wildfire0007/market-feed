@@ -302,6 +302,9 @@ def main(argv: List[str] | None = None) -> int:
 
         _run_step("Spot quote watchdog", spot_cmd, optional=True)
 
+    if not args.skip_position_watchdog:
+        _run_step("Watchdog", [python, "scripts/position_watchdog.py"])
+    
     if not args.skip_watchdog:
         public_dir = Path(args.public_dir)
         public_dir.mkdir(parents=True, exist_ok=True)
