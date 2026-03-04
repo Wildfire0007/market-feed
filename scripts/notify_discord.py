@@ -289,8 +289,10 @@ def check_and_notify() -> None:
         if alignment_state == "COUNTER":
             alignment_gate_note = "BLOCK"
 
-        if alignment_state == "MIXED" and signal != "precision_arming" and not exit_signal:
-            print(f"{asset_name}: MIXED piac — jelzés némítva (csak precision_arming mehet át).")
+        if alignment_state in {"MIXED", "COUNTER"} and signal != "precision_arming" and not exit_signal:
+            print(
+                f"{asset_name}: {alignment_state} piac — jelzés némítva (csak precision_arming mehet át)."
+            )
             continue
 
         missing_gates = [str(item) for item in (gates.get("missing") or []) if item]
@@ -331,7 +333,8 @@ def check_and_notify() -> None:
             order_type = "MARKET"
         
         if direction not in {"buy", "sell"}:
-            direction = "buy"
+            print(f"{asset_name}: bizonytalan irány ({direction}) — jelzés némítva.")
+            continue
 
         spot = data.get("spot") if isinstance(data.get("spot"), dict) else {}
         spot_price = spot.get("price")
