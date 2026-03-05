@@ -6118,6 +6118,9 @@ def apply_signal_stability_layer(
         ):
             exit_signal = hard_exit_signal
             payload["position_exit_signal"] = hard_exit_signal
+    if not exit_signal and isinstance(payload.get("position_exit_signal"), dict):
+        exit_signal = payload.get("position_exit_signal")
+
 
     tracked_levels = _extract_tracked_levels(asset, manual_state, manual_positions)
     direction_map = {"buy": "buy", "sell": "sell"}
@@ -16467,6 +16470,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
