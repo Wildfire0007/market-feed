@@ -6133,6 +6133,9 @@ def apply_signal_stability_layer(
     if exit_signal and exit_signal.get("state") == "hard_exit":
         intent = "hard_exit"
         actionable = manual_state["has_position"] or not manual_state["tracking_enabled"]
+    elif exit_signal:
+        intent = "manage_position"
+        actionable = manual_state["has_position"] or not manual_state["tracking_enabled"]
     elif action_plan and action_plan.get("status") == "manage_position":
         intent = "manage_position"
         actionable = manual_state["has_position"] or not manual_state["tracking_enabled"]
@@ -16464,6 +16467,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
