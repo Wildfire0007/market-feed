@@ -387,7 +387,12 @@ def compute_state(
     cooldown_until = _parse_utc_timestamp(cooldown_raw)
     cooldown_active = bool(cooldown_until and now_dt < cooldown_until)
 
-    side_map = {"long": "buy", "short": "sell"}
+    side_map = {
+        "long": "buy",
+        "short": "sell",
+        "buy": "buy",
+        "sell": "sell",
+    }
     side = side_map.get(side_raw)
 
     pending_active = status_raw == "pending"
