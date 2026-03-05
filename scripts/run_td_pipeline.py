@@ -301,9 +301,6 @@ def main(argv: List[str] | None = None) -> int:
             spot_cmd.extend(args.spot_watchdog_fallback_cmd)
 
         _run_step("Spot quote watchdog", spot_cmd, optional=True)
-
-    if not args.skip_position_watchdog:
-        _run_step("Watchdog", [python, "scripts/position_watchdog.py"])
     
     if not args.skip_watchdog:
         public_dir = Path(args.public_dir)
