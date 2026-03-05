@@ -66,5 +66,34 @@ class PositionManagementSentimentTests(unittest.TestCase):
         self.assertEqual(exit_signal.get("direction"), "long")
 
 
+class HardExitTests(unittest.TestCase):
+    def test_hard_exit_triggers_when_long_position_hits_tracked_sl(self) -> None:
+        payload = {
+            "spot": {"price": 75.31},
+            "entry_thresholds": {"adx_value": None, "adx_prev": None},
+            "signal": "buy",
+        }
+        manual_state = {
+            "has_position": True,
+            "position": {"side": "long", "sl": 75.31},
+        }
+
+        exit_signal = analysis.evaluate_hard_exit(
+            asset="USOIL",
+            payload=payload,
+            manual_state=manual_state,
+            config={"hard_exit": {"enabled": True}},
+            now_dt=analysis.datetime.now(analysis.timezone.utc),
+        )
+
+        self.assertIsNotNone(exit_signal)
+        assert exit_signal is not None
+        self.assertEqual(exit_signal.get("state"), "hard_exit")
+        self.assertEqual(exit_signal.get("category"), "hard_exit_guard")
+        self.assertTrue(
+            any("SL szint sérült" in str(reason) for reason in (exit_signal.get("reasons") or []))
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
