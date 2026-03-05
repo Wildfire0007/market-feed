@@ -29,6 +29,8 @@ if importlib.util.find_spec("requests") is not None:
 BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
 
 from config import analysis_settings as settings
+import position_tracker
+import state_db
 
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
@@ -240,6 +242,14 @@ def _hu_reason(reason: str) -> str:
     return reason_map.get(key, str(reason or "N/A"))
 
 
+def _resolve_tracking_context() -> Tuple[Dict[str, Any], str, bool]:
+    stability_cfg = settings.load_config().get("signal_stability") or {}
+    tracking_cfg = stability_cfg.get("manual_position_tracking") or {}
+    positions_path = str(tracking_cfg.get("positions_file") or state_db.DEFAULT_DB_PATH)
+    treat_missing = bool(tracking_cfg.get("treat_missing_file_as_flat", True))
+    return tracking_cfg, positions_path, treat_missing
+
+
 def check_and_notify() -> None:
     if not PUBLIC_DIR.exists():
         return
@@ -257,7 +267,10 @@ def check_and_notify() -> None:
     if not isinstance(notify_state, dict):
         notify_state = {}
     notify_state_changed = False
-
+    tracking_cfg, positions_path, treat_missing = _resolve_tracking_context()
+    tracking_enabled = bool(tracking_cfg.get("enabled"))
+    manual_positions = position_tracker.load_positions(positions_path, treat_missing)
+    
     # assets = [d for d in PUBLIC_DIR.iterdir() if d.is_dir() and not d.name.startswith("_")]
     assets = [
         d
@@ -336,6 +349,23 @@ def check_and_notify() -> None:
         if direction not in {"buy", "sell"}:
             print(f"{asset_name}: bizonytalan irány ({direction}) — jelzés némítva.")
             continue
+
+        if tracking_enabled:
+            tracked_state = position_tracker.compute_state(
+                asset_name,
+                tracking_cfg,
+                manual_positions,
+                datetime.now(timezone.utc),
+            )
+            if tracked_state.get("has_position") or tracked_state.get("pending_active"):
+                tracked_status = "OPEN" if tracked_state.get("has_position") else "PENDING"
+                print(f"{asset_name}: belépő blokkolva (pozíció státusz: {tracked_status}).")
+                continue
+            if tracked_state.get("cooldown_active"):
+                print(
+                    f"{asset_name}: belépő blokkolva (cooldown aktív: {tracked_state.get('cooldown_until_utc')})."
+                )
+                continue
 
         spot = data.get("spot") if isinstance(data.get("spot"), dict) else {}
         spot_price = spot.get("price")
@@ -537,6 +567,20 @@ def check_and_notify() -> None:
         asset_state["last_entry_sent_utc"] = to_utc_iso(now_dt)
         notify_state[asset_name] = asset_state
         notify_state_changed = True
+
+        if (
+            tracking_enabled
+            and signal == "precision_arming"
+            and order_type in {"LIMIT", "STOP"}
+        ):
+            manual_positions = position_tracker.register_precision_pending_position(
+                asset_name,
+                data,
+                now_dt,
+                manual_positions,
+            )
+            if not DRY_RUN:
+                position_tracker.save_positions_atomic(positions_path, manual_positions)
 
     if notify_state_changed and not DRY_RUN:  
         save_json(notify_state_path, notify_state)
