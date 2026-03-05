@@ -5809,6 +5809,22 @@ def evaluate_hard_exit(
         return None
 
     reasons: List[str] = []
+    spot_price = _extract_spot_price(payload)
+    position_obj = manual_state.get("position") if isinstance(manual_state, dict) else {}
+    try:
+        tracked_sl = float((position_obj or {}).get("sl"))
+    except (TypeError, ValueError):
+        tracked_sl = None
+    if spot_price is not None and tracked_sl is not None:
+        if side == "long" and spot_price <= tracked_sl:
+            reasons.append(
+                f"SL szint sérült: spot {spot_price:.5f} ≤ SL {tracked_sl:.5f}"
+            )
+        elif side == "short" and spot_price >= tracked_sl:
+            reasons.append(
+                f"SL szint sérült: spot {spot_price:.5f} ≥ SL {tracked_sl:.5f}"
+            )
+
     adx_drop_min_cfg = hard_cfg.get("adx_drop_min", 6.0)
     if isinstance(adx_drop_min_cfg, dict):
         drop_threshold_raw = adx_drop_min_cfg.get(asset, adx_drop_min_cfg.get("default", 4.0))
@@ -5827,8 +5843,6 @@ def evaluate_hard_exit(
     except (TypeError, ValueError):
         adx_now_f = None
         adx_prev_f = None
-    if adx_now_f is None or adx_prev_f is None:
-        return None
     if (
         adx_now_f is not None
         and adx_prev_f is not None
@@ -12973,6 +12987,8 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     # --- Momentum feltételek (override) — kriptókra (zárt 5m-ből) ---
     precision_direction: Optional[str] = None
+    precision_plan: Optional[Dict[str, Any]] = None
+    counter_plan: Optional[Dict[str, Any]] = None
     momentum_used = False
     mom_dir: Optional[str] = None
     mom_atr_ok: Optional[bool] = None
@@ -14136,6 +14152,34 @@ def analyze(asset: str) -> Dict[str, Any]:
                 "trigger_levels": counter_plan.get("trigger_levels"),
                 "order_flow_ready": counter_plan.get("order_flow_ready"),
             }
+
+    if asset in {"USOIL", "GOLD_CFD", "XAGUSD"} and decision in {"buy", "sell"}:
+        own_plan = precision_plan if isinstance(precision_plan, dict) else None
+        own_score = safe_float((own_plan or {}).get("score"))
+        counter_score = safe_float((counter_plan or {}).get("score"))
+        min_edge = 4.0
+        if own_score is not None and counter_score is not None:
+            directional_edge = own_score - counter_score
+            entry_thresholds_meta["directional_edge_guard"] = {
+                "asset": asset,
+                "decision": decision,
+                "score": own_score,
+                "counter_score": counter_score,
+                "edge": directional_edge,
+                "min_edge": min_edge,
+            }
+            if directional_edge < min_edge:
+                if "directional_edge" not in missing:
+                    missing.append("directional_edge")
+                reason_edge = (
+                    f"{asset}: gyenge irányél (score {own_score:.1f} vs ellenirány {counter_score:.1f}) — belépés tiltva"
+                )
+                if reason_edge not in reasons:
+                    reasons.append(reason_edge)
+                decision = "no entry"
+                entry = sl = tp1 = tp2 = rr = None
+                execution_playbook = []
+                momentum_trailing_plan = None
 
     if precision_disabled_due_to_data_gap:
         precision_trigger_state = "disabled"
@@ -16420,6 +16464,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
