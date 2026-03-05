@@ -24,6 +24,15 @@ import state_db
 PENDING_EXPIRY_MINUTES = 30
 
 
+def _normalize_position_side(value: Any) -> Optional[str]:
+    side = str(value or "").strip().lower()
+    if side in {"long", "buy"}:
+        return "long"
+    if side in {"short", "sell"}:
+        return "short"
+    return None
+
+
 LOGGER = logging.getLogger("manual_positions")
 ensure_json_stream_handler(LOGGER, static_fields={"component": "manual_positions"})
 
@@ -190,8 +199,12 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
                     parsed = None
                 if isinstance(parsed, dict):
                     metadata = parsed
+            normalized_side = _normalize_position_side(metadata.get("side"))
+            if normalized_side is None and str(row["status"] or "").upper() == "OPEN":
+                normalized_side = _normalize_position_side(metadata.get("direction"))
+
             positions[asset] = {
-                "side": metadata.get("side"),
+                "side": normalized_side,
                 "status": str(row["status"] or "open").lower(),
                 "entry": row["entry_price"],
                 "size": row["size"],
@@ -278,7 +291,7 @@ def _sync_positions_to_db(db_path: Path, data: Dict[str, Any]) -> bool:
                 payload_status = str(payload.get("status") or "").lower()
                 if payload_status == "pending":
                     status = "PENDING"
-                elif side in {"long", "short"}:
+                elif _normalize_position_side(side) in {"long", "short"}:
                     status = "OPEN"
                 else:
                     status = "CLOSED"
@@ -433,8 +446,7 @@ def open_position(
     opened_at_utc: str,
     positions: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    side_map = {"buy": "long", "sell": "short", "long": "long", "short": "short"}
-    norm_side = side_map.get(str(side or "").lower())
+    norm_side = _normalize_position_side(side)
     updated = deepcopy(positions) if isinstance(positions, dict) else {}
     previous_entry = deepcopy(updated.get(asset)) if isinstance(updated.get(asset), dict) else None
     updated[asset] = {
@@ -505,6 +517,38 @@ def close_position(
     return updated
 
 
+
+
+def _is_json_pending_exit_path(path: str) -> bool:
+    return str(path or "").strip().lower().endswith(".json")
+
+
+def _load_pending_exits_from_json(path: Path) -> Dict[str, Dict[str, Any]]:
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+
+    pending: Dict[str, Dict[str, Any]] = {}
+    for asset, payload in raw.items():
+        if not isinstance(payload, dict):
+            continue
+        key = str(asset or "").upper()
+        if not key:
+            continue
+        pending[key] = {
+            "reason": payload.get("reason"),
+            "closed_at_utc": payload.get("closed_at_utc"),
+            "cooldown_minutes": int(max(0, _safe_float(payload.get("cooldown_minutes")) or 0)),
+            "source": payload.get("source"),
+            "run_id": payload.get("run_id"),
+        }
+    return pending
+
 def _load_pending_exits_from_db(db_path: Path) -> Dict[str, Dict[str, Any]]:
     _ensure_db_initialized(db_path)
     connection = state_db.connect(db_path)
@@ -539,10 +583,14 @@ def load_pending_exits(path: str) -> Dict[str, Dict[str, Any]]:
 
     db_path = Path(path) if path else state_db.DEFAULT_DB_PATH
     try:
-        pending = _load_pending_exits_from_db(db_path)
+        pending = (
+            _load_pending_exits_from_json(db_path)
+            if _is_json_pending_exit_path(path)
+            else _load_pending_exits_from_db(db_path)
+        )
         _audit_log(
-            "pending exits loaded from db",
-            event="PENDING_EXIT_LOAD_DB",
+            "pending exits loaded",
+            event="PENDING_EXIT_LOAD",
             pending_count=len(pending),
         )
         return pending
@@ -576,6 +624,22 @@ def record_pending_exit(
     }
 
     db_path = Path(path) if path else state_db.DEFAULT_DB_PATH
+    if _is_json_pending_exit_path(path):
+        pending = _load_pending_exits_from_json(db_path)
+        pending[asset.upper()] = payload
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path.write_text(json.dumps(pending, ensure_ascii=False, indent=2), encoding="utf-8")
+        _audit_log(
+            "pending exit recorded",
+            event="PENDING_EXIT_RECORDED",
+            asset=asset,
+            reason=reason,
+            cooldown_minutes=payload["cooldown_minutes"],
+            closed_at_utc=closed_at_utc,
+            pending_file=str(resolve_repo_path(path)),
+        )
+        return
+
     try:
         _ensure_db_initialized(db_path)
         connection = state_db.connect(db_path)
@@ -644,6 +708,20 @@ def record_pending_exit(
 
 def clear_pending_exits(path: str, applied: Optional[Dict[str, Any]] = None) -> None:
     db_path = Path(path) if path else state_db.DEFAULT_DB_PATH
+    if _is_json_pending_exit_path(path):
+        pending = _load_pending_exits_from_json(db_path)
+        if applied:
+            for item in applied:
+                pending.pop(str(item).upper(), None)
+        else:
+            pending = {}
+        if pending:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            db_path.write_text(json.dumps(pending, ensure_ascii=False, indent=2), encoding="utf-8")
+        elif db_path.exists():
+            db_path.unlink()
+        return
+
     try:
         _ensure_db_initialized(db_path)
         connection = state_db.connect(db_path)
@@ -761,7 +839,7 @@ def _pending_fill_hit(entry: Dict[str, Any], spot_price: Optional[float]) -> boo
         return False
 
     status = str(entry.get("status") or "").lower()
-    side = str(entry.get("side") or "").lower()
+    side = _normalize_position_side(entry.get("side")) or ""
     if status == "pending" and side in {"long", "short"}:
         return price <= entry_price if side == "long" else price >= entry_price
     
@@ -909,7 +987,8 @@ def check_close_by_levels(
     if not isinstance(entry, dict):
         return False, None, positions if isinstance(positions, dict) else {}
 
-    status = str(entry.get("status") or ("open" if entry.get("side") in {"long", "short"} else "")).lower()
+    normalized_side = _normalize_position_side(entry.get("side"))
+    status = str(entry.get("status") or ("open" if normalized_side in {"long", "short"} else "")).lower()
     if status == "pending":
         return _activate_or_expire_pending(
             asset,
@@ -923,7 +1002,7 @@ def check_close_by_levels(
     if status != "open":
         return False, None, positions if isinstance(positions, dict) else {}
     
-    side = entry.get("side")
+    side = _normalize_position_side(entry.get("side"))
     if side not in {"long", "short"}:
         return False, None, positions if isinstance(positions, dict) else {}
 
