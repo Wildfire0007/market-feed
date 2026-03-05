@@ -23,6 +23,10 @@ import state_db
 LOGGER = logging.getLogger(__name__)
 
 
+def _can_write_positions(manual_writer: str, redundant_guard: bool) -> bool:
+    return manual_writer in {"analysis", "watchdog", "dual"} or redundant_guard
+
+
 def _load_json(path: Path) -> Dict[str, Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -96,7 +100,7 @@ def main() -> None:
 
     manual_writer = str(tracking_cfg.get("writer") or "dual").lower()
     redundant_guard = bool(tracking_cfg.get("redundant_write_guard", False))
-    can_write = manual_writer in {"analysis", "dual"} or redundant_guard
+    can_write = _can_write_positions(manual_writer, redundant_guard)
     positions_path = tracking_cfg.get("positions_file") or str(state_db.DEFAULT_DB_PATH)
     pending_exit_path = tracking_cfg.get("pending_exit_file") or str(state_db.DEFAULT_DB_PATH)
     treat_missing = bool(tracking_cfg.get("treat_missing_file_as_flat", False))
