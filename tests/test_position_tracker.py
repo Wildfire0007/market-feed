@@ -473,3 +473,92 @@ def test_update_pending_positions_respects_asset_expiry_config():
 
     assert changes["XAGUSD"] == "pending_expired"
     assert "XAGUSD" not in updated
+
+
+def test_load_positions_normalizes_buy_sell_side_from_db(tmp_path: Path) -> None:
+    db_path = tmp_path / "trading.db"
+    position_tracker.state_db.initialize(db_path)
+    connection = position_tracker.state_db.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO positions (asset, entry_price, size, sl, tp, status, strategy_metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "EURUSD",
+                1.1,
+                1.0,
+                1.09,
+                1.12,
+                "OPEN",
+                '{"side":"buy","opened_at_utc":"2025-01-01T11:00:00Z"}',
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    loaded = position_tracker.load_positions(str(db_path), treat_missing_as_flat=False)
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    state = position_tracker.compute_state("EURUSD", {"enabled": True}, loaded, now_dt)
+
+    assert loaded["EURUSD"]["side"] == "long"
+    assert state["has_position"] is True
+    assert state["side"] == "buy"
+
+
+def test_check_close_by_levels_handles_legacy_buy_side_without_status():
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    positions = {
+        "BTCUSD": {"side": "buy", "entry": 100.0, "sl": 95.0, "tp1": 105.0, "tp2": 110.0}
+    }
+
+    changed, reason, updated = position_tracker.check_close_by_levels(
+        "BTCUSD", positions, 110.0, now_dt, 15
+    )
+
+    assert changed is True
+    assert reason == "tp2_hit"
+    assert updated["BTCUSD"]["close_reason"] == "tp2_hit"
+
+
+def test_save_positions_atomic_treats_buy_sell_side_as_open(tmp_path: Path) -> None:
+    db_path = tmp_path / "trading.db"
+    position_tracker.state_db.initialize(db_path)
+
+    payload = {
+        "EURUSD": {
+            "status": "open",
+            "side": "buy",
+            "entry": 1.1,
+            "size": 1.0,
+            "sl": 1.09,
+            "tp1": 1.12,
+            "tp2": 1.12,
+        }
+    }
+    position_tracker.save_positions_atomic(str(db_path), payload)
+
+    loaded = position_tracker.load_positions(str(db_path), treat_missing_as_flat=False)
+    assert loaded["EURUSD"]["status"] == "open"
+    assert loaded["EURUSD"]["side"] == "long"
+
+
+def test_pending_exit_db_path_still_works(tmp_path: Path) -> None:
+    db_path = tmp_path / "trading.db"
+
+    position_tracker.record_pending_exit(
+        str(db_path),
+        "BTCUSD",
+        reason="hard_exit",
+        closed_at_utc="2025-01-01T00:00:00Z",
+        cooldown_minutes=15,
+        source="test",
+    )
+
+    pending = position_tracker.load_pending_exits(str(db_path))
+    assert pending["BTCUSD"]["cooldown_minutes"] == 15
+
+    position_tracker.clear_pending_exits(str(db_path), ["BTCUSD"])
+    assert position_tracker.load_pending_exits(str(db_path)) == {}    
