@@ -31,6 +31,7 @@ def test_pipeline_runs_position_watchdog_before_discord(monkeypatch):
 
     assert exit_code == 0
     command_texts = [" ".join(cmd) for cmd in calls]
+    assert sum("scripts/position_watchdog.py" in cmd for cmd in command_texts) == 1
     watchdog_idx = next(i for i, cmd in enumerate(command_texts) if "scripts/position_watchdog.py" in cmd)
     notify_idx = next(i for i, cmd in enumerate(command_texts) if "scripts/notify_discord.py" in cmd)
     assert watchdog_idx < notify_idx
