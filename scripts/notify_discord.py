@@ -55,6 +55,7 @@ ICON_SELL_LIMIT = "🟠"
 
 COLOR_GREEN = 0x2ECC71
 COLOR_RED = 0xE74C3C
+COLOR_HARD_EXIT = 0xB71C1C
 COLOR_BLUE = 0x3498DB
 COLOR_ORANGE = 0xE67E22
 COLOR_YELLOW = 0xF1C40F
@@ -363,7 +364,7 @@ def check_and_notify() -> None:
             embed = {
                 "title": state_label,
                 "description": f"Eszköz: `{asset_name}`",
-                "color": COLOR_ORANGE if exit_state != "hard_exit" else COLOR_RED,
+                "color": COLOR_ORANGE if exit_state != "hard_exit" else COLOR_HARD_EXIT,
                 "fields": [                    
                     {
                         "name": "📊 Árfolyam & Szintek",    
@@ -460,8 +461,12 @@ def check_and_notify() -> None:
                 if direction == "buy"
                 else f"NYISS SHORT – SELL MARKET @ {format_price(entry)}"
             )
-            prefix = "🟢"
-            color = COLOR_GREEN
+            if direction == "buy":
+                prefix = "🟢"
+                color = COLOR_GREEN
+            else:
+                prefix = "🔴"
+                color = COLOR_RED
             order_card_hint = "Market (azonnali): azonnali végrehajtás piaci áron."
             
         title = f"{prefix} TEENDŐ MOST: {instruction}"
