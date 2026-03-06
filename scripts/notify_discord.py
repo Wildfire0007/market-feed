@@ -218,6 +218,17 @@ def _exit_signature(exit_signal: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _position_event_key(position: Dict[str, Any], event_state: str) -> Optional[str]:
+    if not isinstance(position, dict):
+        return None
+    opened_at = str(position.get("opened_at_utc") or "").strip()
+    side = str(position.get("side") or "").strip().lower()
+    entry = safe_float(position.get("entry"))
+    if not opened_at or side not in {"long", "short"} or entry is None:
+        return None
+    return f"{opened_at}|{side}|{round(entry, 5)}|{event_state}"
+
+
 def _format_biases(biases: Dict[str, Any]) -> str:
     bias_4h = str(biases.get("adjusted_4h") or "n/a")
     bias_1h = str(biases.get("adjusted_1h") or "n/a")
@@ -288,7 +299,10 @@ def check_and_notify() -> None:
 
         signal = str(data.get("signal") or "no entry").lower()
         exit_signal = data.get("position_exit_signal") or data.get("active_position_meta", {}).get("exit_signal")
-        if signal not in {"buy", "sell", "precision_arming"} and not exit_signal:
+        tracked_entry = manual_positions.get(asset_name) if isinstance(manual_positions, dict) else None
+        tracked_status = str(tracked_entry.get("status") or "").lower() if isinstance(tracked_entry, dict) else ""
+        has_lifecycle_event = tracking_enabled and tracked_status in {"open", "closed"}
+        if signal not in {"buy", "sell", "precision_arming"} and not exit_signal and not has_lifecycle_event:
             continue
 
         biases = data.get("biases") if isinstance(data.get("biases"), dict) else {}
@@ -303,7 +317,7 @@ def check_and_notify() -> None:
         if alignment_state == "COUNTER":
             alignment_gate_note = "BLOCK"
 
-        if alignment_state in {"MIXED", "COUNTER"} and signal != "precision_arming" and not exit_signal:
+        if alignment_state in {"MIXED", "COUNTER"} and signal != "precision_arming" and not exit_signal and not has_lifecycle_event:
             print(
                 f"{asset_name}: {alignment_state} piac — jelzés némítva (csak precision_arming mehet át)."
             )
@@ -312,12 +326,12 @@ def check_and_notify() -> None:
         missing_gates = [str(item) for item in (gates.get("missing") or []) if item]
         hard_missing_gates = [gate for gate in missing_gates if _is_hard_gate_blocker(gate)]
         soft_missing_gates = [gate for gate in missing_gates if gate not in hard_missing_gates]
-        if hard_missing_gates and not exit_signal:
+        if hard_missing_gates and not exit_signal and not has_lifecycle_event:
             print(
                 f"{asset_name}: belépő blokkolva hard védelmi kapun ({', '.join(hard_missing_gates)})."
             )
             continue
-        if soft_missing_gates and not exit_signal:
+        if soft_missing_gates and not exit_signal and not has_lifecycle_event:
             print(
                 f"{asset_name}: soft gate figyelmeztetés ({', '.join(soft_missing_gates)}), jelzés továbbengedve."
             )
@@ -346,11 +360,11 @@ def check_and_notify() -> None:
         if order_type not in {"LIMIT", "MARKET", "STOP"}:
             order_type = "MARKET"
         
-        if direction not in {"buy", "sell"}:
+        if direction not in {"buy", "sell"} and not exit_signal and not has_lifecycle_event:
             print(f"{asset_name}: bizonytalan irány ({direction}) — jelzés némítva.")
             continue
 
-        if tracking_enabled:
+        if tracking_enabled and not exit_signal and not has_lifecycle_event:
             tracked_state = position_tracker.compute_state(
                 asset_name,
                 tracking_cfg,
@@ -369,13 +383,69 @@ def check_and_notify() -> None:
 
         spot = data.get("spot") if isinstance(data.get("spot"), dict) else {}
         spot_price = spot.get("price")
-        
+
+        asset_state = notify_state.get(asset_name) if isinstance(notify_state.get(asset_name), dict) else {}
+        if tracking_enabled and isinstance(tracked_entry, dict):
+            if tracked_status == "open":
+                activation_key = _position_event_key(tracked_entry, "activated")
+                if activation_key and asset_state.get("last_position_event_key") != activation_key:
+                    activation_side = str(tracked_entry.get("side") or "").lower()
+                    activation_icon = "🟢" if activation_side == "long" else "🔴"
+                    send_discord_embed({
+                        "title": f"{activation_icon} POZÍCIÓ AKTÍV (FILL)",
+                        "description": f"Eszköz: `{asset_name}`",
+                        "color": COLOR_GREEN if activation_side == "long" else COLOR_RED,
+                        "fields": [
+                            {
+                                "name": "📊 Aktiválódott szintek",
+                                "value": (
+                                    f"Entry: `{format_price(tracked_entry.get('entry'))}`\n"
+                                    f"SL: `{format_price(tracked_entry.get('sl'))}`\n"
+                                    f"TP1: `{format_price(tracked_entry.get('tp1'))}` | TP2: `{format_price(tracked_entry.get('tp2'))}`"
+                                ),
+                                "inline": False,
+                            }
+                        ],
+                        "footer": {"text": f"Activation • {asset_name}"},
+                    })
+                    asset_state["last_position_event_key"] = activation_key
+                    notify_state[asset_name] = asset_state
+                    notify_state_changed = True
+            elif tracked_status == "closed":
+                close_reason = str(tracked_entry.get("close_reason") or "").lower()
+                closed_at = str(tracked_entry.get("closed_at_utc") or "")
+                close_key = f"{closed_at}|{close_reason}|closed" if closed_at and close_reason else None
+                if close_key and asset_state.get("last_position_event_key") != close_key:
+                    close_title = "🟢 POZÍCIÓ LEZÁRVA (TP2)" if close_reason == "tp2_hit" else "🔴 POZÍCIÓ LEZÁRVA (SL)"
+                    close_color = COLOR_GREEN if close_reason == "tp2_hit" else COLOR_RED
+                    send_discord_embed({
+                        "title": close_title,
+                        "description": f"Eszköz: `{asset_name}`",
+                        "color": close_color,
+                        "fields": [
+                            {
+                                "name": "📊 Zárás részlete",
+                                "value": f"Ok: `{close_reason}`\nZárás UTC: `{closed_at}`",
+                                "inline": False,
+                            }
+                        ],
+                        "footer": {"text": f"Close • {asset_name}"},
+                    })
+                    asset_state["last_position_event_key"] = close_key
+                    notify_state[asset_name] = asset_state
+                    notify_state_changed = True
+    
         if exit_signal:
             exit_state = str(exit_signal.get("state") or exit_signal.get("action") or "").lower()            
             exit_signature = _exit_signature(exit_signal)
             exit_reasons = [str(r) for r in (exit_signal.get("reasons") or []) if r][:4]
             now_dt = datetime.now(timezone.utc)
             asset_state = notify_state.get(asset_name) if isinstance(notify_state.get(asset_name), dict) else {}
+            tracked_entry = manual_positions.get(asset_name) if isinstance(manual_positions, dict) else None
+            event_key = _position_event_key(tracked_entry, exit_state)
+            if event_key and asset_state.get("last_position_event_key") == event_key:
+                print(f" -> EXIT POSITION DEDUP: {asset_name} ({exit_state})")
+                continue
             last_exit_signature = asset_state.get("last_exit_signature")
             last_exit_sent_utc = asset_state.get("last_exit_sent_utc")
             if last_exit_signature == exit_signature and last_exit_sent_utc:
@@ -387,7 +457,7 @@ def check_and_notify() -> None:
                     print(f" -> EXIT DEDUP: {asset_name} ({EXIT_NOTIFY_COOLDOWN_MINUTES}m)")
                     continue
             state_label = {
-                "scale_out": "🟠 TEENDŐ MOST: RÉSZZÁRÁS 50% ÉS STOP NULLÁBA",
+                "scale_out": "🟠 RÉSZZÁRÁS (TP1) - HÚZD A STOP-OT NULLÁBA!",
                 "hard_exit": "🔴 TEENDŐ MOST: AZONNAL ZÁRD A TELJES POZÍCIÓT!",
                 "tighten_stop": "🟠 TEENDŐ MOST: SZŰKÍTSD A STOP-LOSST!",
             }.get(exit_state, "🟠 TEENDŐ MOST: POZÍCIÓ MENEDZSMENT")
@@ -415,6 +485,8 @@ def check_and_notify() -> None:
             send_discord_embed(embed)
             asset_state["last_exit_signature"] = exit_signature
             asset_state["last_exit_sent_utc"] = to_utc_iso(now_dt)
+            if event_key:
+                asset_state["last_position_event_key"] = event_key
             notify_state[asset_name] = asset_state
             notify_state_changed = True
             continue
