@@ -173,7 +173,7 @@ def _maybe_attach_file_handler() -> None:
 
 
 def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
-    db_path = Path(path) if path else state_db.DEFAULT_DB_PATH
+    db_path = resolve_repo_path(str(path)) if path else resolve_repo_path(str(state_db.DEFAULT_DB_PATH))
 
     def _load_positions_from_db() -> Dict[str, Any]:
         _ensure_db_initialized(db_path)
@@ -241,7 +241,7 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
         
 
 def save_positions_atomic(path: str, data: Dict[str, Any]) -> Dict[str, Any]:
-    db_path = Path(path) if path else state_db.DEFAULT_DB_PATH
+    db_path = resolve_repo_path(str(path)) if path else resolve_repo_path(str(state_db.DEFAULT_DB_PATH))
     _audit_log(
         "persisting positions to db",
         event="SAVE_BEGIN",
@@ -348,7 +348,7 @@ def _sync_positions_to_db(db_path: Path, data: Dict[str, Any]) -> bool:
 def positions_file_snapshot(path: str) -> Dict[str, Any]:
     """Return size/mtime/sha256 for diagnostics; never raises."""
 
-    resolved = Path(path) if path else state_db.DEFAULT_DB_PATH
+    resolved = resolve_repo_path(str(path)) if path else resolve_repo_path(str(state_db.DEFAULT_DB_PATH))
     payload: Dict[str, Any] = {"positions_file": str(resolved)}
     try:
         stat = resolved.stat()
@@ -581,7 +581,7 @@ def _load_pending_exits_from_db(db_path: Path) -> Dict[str, Dict[str, Any]]:
 def load_pending_exits(path: str) -> Dict[str, Dict[str, Any]]:
     """Load pending exit requests for deferred application."""
 
-    db_path = Path(path) if path else state_db.DEFAULT_DB_PATH
+    db_path = resolve_repo_path(str(path)) if path else resolve_repo_path(str(state_db.DEFAULT_DB_PATH))
     try:
         pending = (
             _load_pending_exits_from_json(db_path)
@@ -623,7 +623,7 @@ def record_pending_exit(
         "run_id": _AUDIT_CONTEXT.get("run_id"),
     }
 
-    db_path = Path(path) if path else state_db.DEFAULT_DB_PATH
+    db_path = resolve_repo_path(str(path)) if path else resolve_repo_path(str(state_db.DEFAULT_DB_PATH))
     if _is_json_pending_exit_path(path):
         pending = _load_pending_exits_from_json(db_path)
         pending[asset.upper()] = payload
