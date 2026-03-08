@@ -145,14 +145,15 @@ jobs:
           PUBLIC_BASE_URL: ${{ env.PUBLIC_BASE_URL }}
         run: |
           set -euo pipefail
-          mkdir -p public
-          if curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions.json?ts=${GITHUB_RUN_ID}" -o public/_manual_positions.json; then
-            echo "manual positions restored from public"
+          mkdir -p public config
+          if [ -f public/trading.db ]; then
+            echo "sqlite position state available from repository checkout"
           else
-            echo '{}' > public/_manual_positions.json
-            echo "manual positions fallback created"
+            echo "sqlite position state missing (fresh bootstrap)"
           fi
-          curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true
+          curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_notify_state.json?ts=${GITHUB_RUN_ID}" -o public/_notify_state.json || echo '{}' > public/_notify_state.json
+          cp public/_notify_state.json config/_notify_state.json
+          curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true       
   
       - name: Upload pipeline artifact bundle
         uses: actions/upload-artifact@v4
@@ -271,13 +272,14 @@ jobs:
           PUBLIC_BASE_URL: ${{ env.PUBLIC_BASE_URL }}
         run: |
           set -euo pipefail
-          mkdir -p public
-          if curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions.json?ts=${GITHUB_RUN_ID}" -o public/_manual_positions.json; then  
+          mkdir -p public config
+          if [ -f public/trading.db ]; then            
               echo "STATE_LOADED=1" >> $GITHUB_ENV
           else
-              echo '{}' > public/_manual_positions.json
               echo "STATE_LOADED=0" >> $GITHUB_ENV
           fi
+          curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_notify_state.json?ts=${GITHUB_RUN_ID}" -o public/_notify_state.json || echo '{}' > public/_notify_state.json
+          cp public/_notify_state.json config/_notify_state.json
           curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true  
 
       - name: Setup Python
@@ -362,8 +364,8 @@ jobs:
       - name: Show manual positions size
         if: always()
         run: |
-          ls -la public/_manual_positions.json || true
-          wc -c public/_manual_positions.json || true
+          ls -la public/trading.db || true
+          wc -c public/trading.db || true
 
       - name: Verify manual position state and audit integrity
         if: always()
@@ -375,7 +377,7 @@ jobs:
           import os
           from pathlib import Path
 
-          positions_path = Path("public/_manual_positions.json")
+          positions_path = Path("public/trading.db")
           audit_path = Path("public/_manual_positions_audit.jsonl")
 
           if not positions_path.exists():
@@ -410,18 +412,19 @@ jobs:
                       dispatch_success = True
 
           if dispatch_success:
+              import sqlite3
+              has_entries = False
               try:
-                  positions = json.loads(positions_path.read_text())
+                  con = sqlite3.connect(positions_path)
+                  row = con.execute("SELECT COUNT(1) FROM positions WHERE status IN ('OPEN','PENDING')").fetchone()
+                  has_entries = bool((row or [0])[0])
+                  con.close()
               except Exception:
-                  positions = None
-
-              has_entries = isinstance(positions, dict) and any(
-                  isinstance(v, dict) and v for v in positions.values()
-              )
-
+                  has_entries = False
+                  
               if not has_entries:
                   raise SystemExit(
-                      "ENTRY dispatch succeeded but manual_positions.json is empty"
+                      "ENTRY dispatch succeeded but trading.db has no OPEN/PENDING positions"
                   )
 
           if not had_dispatch:
@@ -433,7 +436,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p config
-          cp public/_manual_positions.json config/manual_positions.json
+          if [ -f public/trading.db ]; then
+            cp public/trading.db config/trading.db
+          fi
+          if [ -f public/_notify_state.json ]; then
+            cp public/_notify_state.json config/_notify_state.json
+          fi
 
       - name: Publish manual position artifacts
         uses: actions/upload-pages-artifact@v3
