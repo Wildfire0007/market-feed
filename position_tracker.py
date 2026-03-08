@@ -707,7 +707,7 @@ def record_pending_exit(
 
 
 def clear_pending_exits(path: str, applied: Optional[Dict[str, Any]] = None) -> None:
-    db_path = Path(path) if path else state_db.DEFAULT_DB_PATH
+    db_path = resolve_repo_path(str(path)) if path else resolve_repo_path(str(state_db.DEFAULT_DB_PATH))
     if _is_json_pending_exit_path(path):
         pending = _load_pending_exits_from_json(db_path)
         if applied:
