@@ -146,7 +146,9 @@ def _format_ts(timestamp: Any, fallback: str = "nincs adat") -> str:
         return fallback
     try:
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(BUDAPEST_TZ).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return fallback
 
@@ -165,7 +167,7 @@ def _asset_emoji(asset: str) -> str:
 def _close_reason_hu(reason: str) -> str:
     return {
         "tp2_hit": "TP2 elérve",
-        "sl_hit": "SL elérve",
+       "sl_hit": "SL elérve",
         "hard_exit": "Hard exit",
     }.get(str(reason or "").strip().lower(), "nincs adat")
 
