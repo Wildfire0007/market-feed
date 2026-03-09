@@ -526,30 +526,41 @@ def check_and_notify() -> None:
                     print(f" -> EXIT DEDUP: {asset_name} ({EXIT_NOTIFY_COOLDOWN_MINUTES}m)")
                     continue
             state_label = {
-                "scale_out": "🟠 RÉSZZÁRÁS (TP1) - HÚZD A STOP-OT NULLÁBA!",
-                "hard_exit": "🔴 TEENDŐ MOST: AZONNAL ZÁRD A TELJES POZÍCIÓT!",
-                "tighten_stop": "🟠 TEENDŐ MOST: SZŰKÍTSD A STOP-LOSST!",
-            }.get(exit_state, "🟠 TEENDŐ MOST: POZÍCIÓ MENEDZSMENT")
+                "scale_out": "🟠 RÉSZZÁRÁS (TP1) - Húzd a Stop-ot Nullába!",
+                "hard_exit": "🔴 AZONNAL ZÁRD A POZÍCIÓT! (Hard Exit)",
+                "tighten_stop": "🟠 SZŰKÍTSD A STOP-LOSST!",
+                "stop_loss_hit": "🔴 STOP LOSS ELÉRVE - Pozíció Lezárva",
+                "take_profit_hit": "🟢 CÉLÁR ELÉRVE - Pozíció Lezárva",
+                "take_profit_2_hit": "🟢 CÉLÁR (TP2) ELÉRVE - Pozíció Lezárva",
+                "closed": "⚪ POZÍCIÓ LEZÁRVA",
+            }.get(exit_state, f"🟠 POZÍCIÓ MENEDZSMENT ({exit_state})")
+
+            if exit_state in ["hard_exit", "stop_loss_hit"]:
+                color = COLOR_RED
+            elif exit_state in ["take_profit_hit", "take_profit_2_hit"]:
+                color = COLOR_GREEN
+            elif exit_state == "closed":
+                color = 0x95A5A6
+            else:
+                color = COLOR_ORANGE
+                
             embed = {
                 "title": state_label,
-                "description": f"Eszköz: `{asset_name}`",
-                "color": COLOR_ORANGE if exit_state != "hard_exit" else COLOR_HARD_EXIT,
-                "fields": [                    
+                "description": f"{_asset_emoji(asset_name)} Eszköz: `{asset_name}`",
+                "color": color,
+                "fields": [
                     {
-                        "name": "📊 Árfolyam & Szintek",    
-                        "value": (
-                            f"Spot: `{format_price(spot_price)}`\n"
-                            f"Eredeti Entry: `{format_price(entry)}`"
-                        ),
+                        "name": "📊 Árfolyam & Szintek",
+                        "value": f"Spot: `{format_price(spot_price)}`\nEredeti Entry: `{format_price(entry)}`",
                         "inline": False,
-                    },       
+                    },
                     {
                         "name": "💡 Javaslat oka",
                         "value": "\n".join(f"• {_hu_reason(r)}" for r in exit_reasons) or "• N/A",
                         "inline": False,
-                    },
+                    }
                 ],
-                "footer": {"text": f"Exit • {asset_name}"},
+                "footer": {"text": f"Menedzsment • {asset_name}"},
             }
             send_discord_embed(embed)
             asset_state["last_exit_signature"] = exit_signature
@@ -604,102 +615,45 @@ def check_and_notify() -> None:
             )
             continue
 
-        budapest_time = datetime.now(ZoneInfo("Europe/Budapest")).strftime("%H:%M")
-        valid_until = datetime.now(BUDAPEST_TZ) + timedelta(minutes=30)
-        mode_label = "🔵 RANGE" if alignment_state == "COUNTER" else "🟢 TREND"
-
-        if order_type == "LIMIT":
-            instruction = (
-                f"NYISS LONG – BUY LIMIT @ {format_price(entry)}"
-                if direction == "buy"
-                else f"NYISS SHORT – SELL LIMIT @ {format_price(entry)}"
-            )
+        if order_type in ["LIMIT", "STOP"]:
             prefix = "🟡"
             color = COLOR_YELLOW
-            order_card_hint = "Limit (függő): csak a megadott vagy jobb áron teljesül."
-        elif order_type == "STOP":
-            instruction = (
-                f"NYISS LONG – BUY STOP @ {format_price(entry)}"
-                if direction == "buy"
-                else f"NYISS SHORT – SELL STOP @ {format_price(entry)}"
-            )
-            prefix = "🔵"
-            color = COLOR_BLUE
-            order_card_hint = "Stop (függő): kitörésre aktiválódik a trigger árnál."
         else:
-            instruction = (
-                f"NYISS LONG – BUY MARKET @ {format_price(entry)}"
-                if direction == "buy"
-                else f"NYISS SHORT – SELL MARKET @ {format_price(entry)}"
-            )
-            if direction == "buy":
-                prefix = "🟢"
-                color = COLOR_GREEN
-            else:
-                prefix = "🔴"
-                color = COLOR_RED
-            order_card_hint = "Market (azonnali): azonnali végrehajtás piaci áron."
-            
-        title = f"{prefix} TEENDŐ MOST: {instruction}"
-        entry_text = format_price(entry)
-        sl_text = format_price(sl)
-        tp_text = f"TP1: {format_price(tp1)}" + (f" | TP2: {format_price(tp2)}" if tp2 is not None else "")
+            prefix = "🟢"
+            color = COLOR_GREEN
 
+        direction_hu = "LONG" if direction == "buy" else "SHORT"
+        direction_en = "BUY" if direction == "buy" else "SELL"
+        instruction = f"NYISS {direction_hu} – {direction_en} {order_type} @ {format_price(entry)}"
+            
+        title = f"{prefix} {instruction}"
+
+        reasons_text = "\n".join([f"• {_hu_reason(r)}" for r in reasons[:2]]) if reasons else "• Rendszer jelzés"
+        
         fields = [
             {
-                "name": "📊 Aktuális Piaci Állapot",
-                "value": f"Spot ár: {format_price(spot_price)} | Időpont: {budapest_time}",
+                "name": "📊 Árfolyam",
+                "value": f"Spot ár: `{format_price(spot_price)}`\nBelépő (Entry): `{format_price(entry)}`",
                 "inline": False,
-            }
+            },
+            {
+                "name": "⚙️ Paraméterek",
+                "value": f"Stop Loss (SL): `{format_price(sl)}`\nTake Profit 1 (TP1): `{format_price(tp1)}`"
+                + (f"\nTake Profit 2 (TP2): `{format_price(tp2)}`" if tp2 else ""),
+                "inline": False,
+            },
+            {
+                "name": "💡 Indoklás",
+                "value": reasons_text,
+                "inline": False,
+            },
         ]
-        fields.extend(
-            [
-                {
-                    "name": "⚙️ Paraméterek a brókerhez",
-                    "value": (
-                        f"ESZKÖZ: `{asset_name}`\n"
-                        f"MODE: `{mode_label}`\n"
-                        f"ENTRY: `{entry_text}`\n"
-                        f"STOP (SL): `{sl_text}`\n"
-                        f"CÉL (TP): `{tp_text}`"
-                    ),
-                    "inline": False,
-                },
-                {
-                    "name": "🧭 Megbízás típus (kártya jelölés)",
-                    "value": (
-                        f"TÍPUS: `{order_type}`\n"
-                        f"JELÖLÉS: `{prefix}`\n"
-                        f"LEÍRÁS: {order_card_hint}"
-                    ),
-                    "inline": False,
-                },
-                {
-                    "name": "⏳ Érvényesség & Törlés",
-                    "value": (
-                        f"LEJÁRAT (Valid Until): `{valid_until.strftime('%H:%M')}` – Ha addig nem aktiválódik, töröld a megbízást!\n"
-                        "TÖRLÉS FELTÉTEL: Ha az árfolyam eléri a Stop-Loss szintet az aktiválódás előtt, töröld!"
-                    ),
-                    "inline": False,
-                },
-                {
-                    "name": "🛠️ Menedzsment",
-                    "value": "TP1 elérésekor automatikus jelzés érkezik a részleges zárásra és a Stop nullába (Breakeven) húzására.",
-                    "inline": False,
-                },
-                {
-                    "name": "🧠 Rövid indoklás",
-                    "value": f"• {reasons[0]}" if reasons else "• N/A",
-                    "inline": False,
-                },
-            ]
-        )
         embed = {
             "title": title,
-            "description": f"Eszköz: `{asset_name}`",
+            "description": f"{_asset_emoji(asset_name)} Eszköz: `{asset_name}`",
             "color": color,
             "fields": fields,
-            "footer": {"text": f"{asset_name} • Manual trade model"},
+            "footer": {"text": "Signal • Várakozás (30 perc csend indítva)"},
         }
 
         send_discord_embed(embed)
