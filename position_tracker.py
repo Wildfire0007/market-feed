@@ -1019,6 +1019,7 @@ def check_close_by_levels(
     if reason == "tp1_hit" and not bool(entry.get("tp1_scaled")):
         updated = deepcopy(positions)
         current_entry = updated.get(asset) if isinstance(updated.get(asset), dict) else {}
+        tp1_hit_at_utc = _to_utc_iso(now_dt)
         size_val = _safe_float(current_entry.get("size"))
         close_fraction = min(1.0, max(0.0, _safe_float(tp1_close_fraction) or 0.5))
         if size_val is not None and size_val > 0:
@@ -1028,9 +1029,11 @@ def check_close_by_levels(
         if entry_price is not None:
             current_entry["sl"] = entry_price
         current_entry["tp1_scaled"] = True
+        current_entry["tp1_hit_at_utc"] = tp1_hit_at_utc
         current_entry["last_management_signal"] = {
             "state": "scale_out",
             "direction": side,
+            "triggered_at": tp1_hit_at_utc,
             "reasons": [
                 "TP1 (1. célár) elérve",
                 "50% profit eltéve",
