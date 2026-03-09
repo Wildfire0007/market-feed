@@ -478,8 +478,13 @@ def check_and_notify() -> None:
                         "color": close_color,
                         "fields": [
                             {
-                                "name": "📊 Zárás részlete",
-                                "value": f"Ok: `{close_reason}`\nZárás UTC: `{closed_at}`",
+                                "name": "❗ Lezárás oka",
+                                "value": f"`{_close_reason_hu(close_reason)}`",
+                                "inline": False,
+                            },
+                            {
+                                "name": "🕒 Lezárás ideje",
+                                "value": f"`{_format_ts(closed_at)}`",
                                 "inline": False,
                             }
                         ],
