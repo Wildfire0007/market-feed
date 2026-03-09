@@ -140,6 +140,45 @@ def get_budapest_time(utc_iso_string: Optional[str]) -> str:
         return "Idő?"
 
 
+def _format_ts(timestamp: Any, fallback: str = "nincs adat") -> str:
+    raw = str(timestamp or "").strip()
+    if not raw or raw == "-":
+        return fallback
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return fallback
+
+
+def _asset_emoji(asset: str) -> str:
+    key = str(asset or "").upper()
+    if key in {"XAU", "XAUUSD", "GOLD_CFD", "GOLDCFD"}:
+        return "🟡"
+    if key in {"XAG", "XAGUSD", "SILVER", "SILVER_CFD"}:
+        return "⚪"
+    if key in {"USOIL", "OIL", "BRENT"}:
+        return "🛢️"
+    return "📌"
+
+
+def _close_reason_hu(reason: str) -> str:
+    return {
+        "tp2_hit": "TP2 elérve",
+        "sl_hit": "SL elérve",
+        "hard_exit": "Hard exit",
+    }.get(str(reason or "").strip().lower(), "nincs adat")
+
+
+def _position_status_hu(status: str, tp1_hit_ts: str) -> str:
+    state = str(status or "").strip().lower()
+    if state == "closed":
+        return "Lezárt"
+    if tp1_hit_ts != "még nem":
+        return "Részben zárt"
+    return "Nyitott"
+
+
 def send_discord_embed(embed_data: Dict[str, Any]) -> None:
     if DRY_RUN or not DISCORD_WEBHOOK_URL:
         print(f"[DRY RUN] Embed title: {embed_data.get('title')}")
@@ -390,22 +429,24 @@ def check_and_notify() -> None:
                 activation_key = _position_event_key(tracked_entry, "activated")
                 if activation_key and asset_state.get("last_position_event_key") != activation_key:
                     activation_side = str(tracked_entry.get("side") or "").lower()
-                    activation_icon = "🟢" if activation_side == "long" else "🔴"
+                    irany = "Vétel" if activation_side == "long" else "Eladás"
+                    tp1_hit_ts = _format_ts(
+                        tracked_entry.get("tp1_hit_at_utc")
+                        or (tracked_entry.get("last_management_signal") or {}).get("triggered_at"),
+                        fallback="még nem",
+                    )
                     send_discord_embed({
-                        "title": f"{activation_icon} POZÍCIÓ AKTÍV (FILL)",
-                        "description": f"Eszköz: `{asset_name}`",
+                        "title": f"{_asset_emoji(asset_name)} {asset_name}",
+                        "description": (
+                            f"Irány: `{irany}`\n"
+                            f"Belépő: `{format_price(tracked_entry.get('entry'))}`\n"
+                            f"Aktiválva: `{_format_ts(tracked_entry.get('opened_at_utc'))}`\n"
+                            f"TP1: `{format_price(tracked_entry.get('tp1'))}`\n"
+                            f"TP1 elérve: `{tp1_hit_ts}`\n"
+                            f"Állapot: `{_position_status_hu(tracked_status, tp1_hit_ts)}`"
+                        ),
                         "color": COLOR_GREEN if activation_side == "long" else COLOR_RED,
-                        "fields": [
-                            {
-                                "name": "📊 Aktiválódott szintek",
-                                "value": (
-                                    f"Entry: `{format_price(tracked_entry.get('entry'))}`\n"
-                                    f"SL: `{format_price(tracked_entry.get('sl'))}`\n"
-                                    f"TP1: `{format_price(tracked_entry.get('tp1'))}` | TP2: `{format_price(tracked_entry.get('tp2'))}`"
-                                ),
-                                "inline": False,
-                            }
-                        ],
+                        "fields": [],
                         "footer": {"text": f"Activation • {asset_name}"},
                     })
                     asset_state["last_position_event_key"] = activation_key
@@ -416,11 +457,24 @@ def check_and_notify() -> None:
                 closed_at = str(tracked_entry.get("closed_at_utc") or "")
                 close_key = f"{closed_at}|{close_reason}|closed" if closed_at and close_reason else None
                 if close_key and asset_state.get("last_position_event_key") != close_key:
-                    close_title = "🟢 POZÍCIÓ LEZÁRVA (TP2)" if close_reason == "tp2_hit" else "🔴 POZÍCIÓ LEZÁRVA (SL)"
-                    close_color = COLOR_GREEN if close_reason == "tp2_hit" else COLOR_RED
+                    activation_side = str(tracked_entry.get("side") or "").lower()
+                    irany = "Vétel" if activation_side == "long" else "Eladás"
+                    tp1_hit_ts = _format_ts(
+                        tracked_entry.get("tp1_hit_at_utc")
+                        or (tracked_entry.get("last_management_signal") or {}).get("triggered_at"),
+                        fallback="még nem",
+                    )
+                    close_color = COLOR_GREEN if close_reason == "tp2_hit" else COLOR_HARD_EXIT if close_reason == "hard_exit" else COLOR_RED
                     send_discord_embed({
-                        "title": close_title,
-                        "description": f"Eszköz: `{asset_name}`",
+                        "title": f"{_asset_emoji(asset_name)} {asset_name}",
+                        "description": (
+                            f"Irány: `{irany}`\n"
+                            f"Belépő: `{format_price(tracked_entry.get('entry'))}`\n"
+                            f"Aktiválva: `{_format_ts(tracked_entry.get('opened_at_utc'))}`\n"
+                            f"TP1: `{format_price(tracked_entry.get('tp1'))}`\n"
+                            f"TP1 elérve: `{tp1_hit_ts}`\n"
+                            "Állapot: `Lezárt`"
+                        ),
                         "color": close_color,
                         "fields": [
                             {
