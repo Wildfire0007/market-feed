@@ -543,6 +543,11 @@ def check_and_notify() -> None:
                 color = 0x95A5A6
             else:
                 color = COLOR_ORANGE
+
+            p_score_text = f"P Score: **{p_score:.1f}** (Erősség)" if p_score is not None else ""
+            reason_lines = [f"• {_hu_reason(r)}" for r in exit_reasons] or ["• N/A"]
+            if p_score_text:
+                reason_lines.insert(0, p_score_text)
                 
             embed = {
                 "title": state_label,
@@ -556,7 +561,7 @@ def check_and_notify() -> None:
                     },
                     {
                         "name": "💡 Javaslat oka",
-                        "value": "\n".join(f"• {_hu_reason(r)}" for r in exit_reasons) or "• N/A",
+                        "value": "\n".join(reason_lines),
                         "inline": False,
                     }
                 ],
@@ -628,7 +633,11 @@ def check_and_notify() -> None:
             
         title = f"{prefix} {instruction}"
 
-        reasons_text = "\n".join([f"• {_hu_reason(r)}" for r in reasons[:2]]) if reasons else "• Rendszer jelzés"
+        p_score_text = f"P Score: **{p_score:.1f}** (Erősség)" if p_score is not None else ""
+        reason_lines = [f"• {_hu_reason(r)}" for r in reasons[:2]] if reasons else ["• Rendszer jelzés"]
+        if p_score_text:
+            reason_lines.insert(0, p_score_text)
+        reasons_text = "\n".join(reason_lines)
         
         fields = [
             {
