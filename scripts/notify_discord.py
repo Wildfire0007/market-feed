@@ -507,6 +507,10 @@ def check_and_notify() -> None:
             now_dt = datetime.now(timezone.utc)
             asset_state = notify_state.get(asset_name) if isinstance(notify_state.get(asset_name), dict) else {}
             tracked_entry = manual_positions.get(asset_name) if isinstance(manual_positions, dict) else None
+            tracked_status_for_exit = str(tracked_entry.get("status") or "").lower() if isinstance(tracked_entry, dict) else ""
+            if tracking_enabled and tracked_status_for_exit not in {"open", "closed"}:
+                print(f"{asset_name}: exit jelzés figyelmen kívül hagyva (nincs követett nyitott/zárt pozíció).")
+                continue
             event_key = _position_event_key(tracked_entry, exit_state)
             if event_key and asset_state.get("last_position_event_key") == event_key:
                 print(f" -> EXIT POSITION DEDUP: {asset_name} ({exit_state})")
