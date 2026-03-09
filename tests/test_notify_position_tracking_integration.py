@@ -160,8 +160,9 @@ def test_notify_sends_single_activation_card_for_open_position(tmp_path, monkeyp
         for item in sent
         if "XAGUSD" in item.get("title", "")
         and "Állapot: `Nyitott`" in (item.get("description") or "")
-    ]    
+    ]
     assert len(activation) == 1
+    assert "Aktiválva: `2026-01-01 01:00:00`" in (activation[0].get("description") or "")
 
 
 def test_notify_sends_close_card_once_for_tp2_close(tmp_path, monkeypatch):
@@ -260,5 +261,5 @@ def test_notify_lifecycle_not_blocked_by_alignment_or_gates(tmp_path, monkeypatc
 
     assert any(
         "XAGUSD" in item.get("title", "") and "Állapot: `Nyitott`" in (item.get("description") or "")
-        for item in sent
+        for item in sent        
     )
