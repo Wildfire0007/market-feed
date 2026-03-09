@@ -167,7 +167,7 @@ def _asset_emoji(asset: str) -> str:
 def _close_reason_hu(reason: str) -> str:
     return {
         "tp2_hit": "TP2 elérve",
-       "sl_hit": "SL elérve",
+        "sl_hit": "SL elérve",
         "hard_exit": "Hard exit",
     }.get(str(reason or "").strip().lower(), "nincs adat")
 
@@ -181,17 +181,29 @@ def _position_status_hu(status: str, tp1_hit_ts: str) -> str:
     return "Nyitott"
 
 
+def _resolve_tp1_hit_ts(position: Dict[str, Any]) -> str:
+    if not isinstance(position, dict):
+        return "még nem"
+    explicit_hit = _format_ts(position.get("tp1_hit_at_utc"), fallback="")
+    if explicit_hit:
+        return explicit_hit
+    last_signal = position.get("last_management_signal")
+    if isinstance(last_signal, dict) and str(last_signal.get("state") or "").lower() == "scale_out":
+        return _format_ts(last_signal.get("triggered_at"), fallback="még nem")
+    return "még nem"
+
+
 def send_discord_embed(embed_data: Dict[str, Any]) -> None:
-    if DRY_RUN or not DISCORD_WEBHOOK_URL:
-        print(f"[DRY RUN] Embed title: {embed_data.get('title')}")
-        return
-    if requests is None:
-        print("Hiba: a 'requests' modul hiányzik; webhook küldés kihagyva.")
-        return
-    try:
-        requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed_data]}, timeout=5)
-    except Exception as exc:
-        print(f"Hiba: {exc}")
+     if DRY_RUN or not DISCORD_WEBHOOK_URL:
+         print(f"[DRY RUN] Embed title: {embed_data.get('title')}")
+         return
+     if requests is None:
+         print("Hiba: a 'requests' modul hiányzik; webhook küldés kihagyva.")
+         return
+     try:
+         requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed_data]}, timeout=5)
+     except Exception as exc:
+         print(f"Hiba: {exc}")
 
 
 def round_trip_pct(asset: str) -> float:
@@ -432,11 +444,7 @@ def check_and_notify() -> None:
                 if activation_key and asset_state.get("last_position_event_key") != activation_key:
                     activation_side = str(tracked_entry.get("side") or "").lower()
                     irany = "Vétel" if activation_side == "long" else "Eladás"
-                    tp1_hit_ts = _format_ts(
-                        tracked_entry.get("tp1_hit_at_utc")
-                        or (tracked_entry.get("last_management_signal") or {}).get("triggered_at"),
-                        fallback="még nem",
-                    )
+                    tp1_hit_ts = _resolve_tp1_hit_ts(tracked_entry)                     
                     send_discord_embed({
                         "title": f"{_asset_emoji(asset_name)} {asset_name}",
                         "description": (
@@ -461,11 +469,7 @@ def check_and_notify() -> None:
                 if close_key and asset_state.get("last_position_event_key") != close_key:
                     activation_side = str(tracked_entry.get("side") or "").lower()
                     irany = "Vétel" if activation_side == "long" else "Eladás"
-                    tp1_hit_ts = _format_ts(
-                        tracked_entry.get("tp1_hit_at_utc")
-                        or (tracked_entry.get("last_management_signal") or {}).get("triggered_at"),
-                        fallback="még nem",
-                    )
+                    tp1_hit_ts = _resolve_tp1_hit_ts(tracked_entry)
                     close_color = COLOR_GREEN if close_reason == "tp2_hit" else COLOR_HARD_EXIT if close_reason == "hard_exit" else COLOR_RED
                     send_discord_embed({
                         "title": f"{_asset_emoji(asset_name)} {asset_name}",
