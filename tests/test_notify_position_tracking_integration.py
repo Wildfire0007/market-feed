@@ -155,7 +155,12 @@ def test_notify_sends_single_activation_card_for_open_position(tmp_path, monkeyp
     notify.check_and_notify()
     notify.check_and_notify()
 
-    activation = [item for item in sent if "AKTÍV (FILL)" in item.get("title", "")]
+    activation = [
+        item
+        for item in sent
+        if "XAGUSD" in item.get("title", "")
+        and "Állapot: `Nyitott`" in (item.get("description") or "")
+    ]    
     assert len(activation) == 1
 
 
@@ -200,7 +205,12 @@ def test_notify_sends_close_card_once_for_tp2_close(tmp_path, monkeypatch):
     notify.check_and_notify()
     notify.check_and_notify()
 
-    closed = [item for item in sent if "LEZÁRVA (TP2)" in item.get("title", "")]
+    closed = [
+        item
+        for item in sent
+        if "XAGUSD" in item.get("title", "")
+        and "Állapot: `Lezárt`" in (item.get("description") or "")
+    ]
     assert len(closed) == 1
 
 
@@ -248,4 +258,7 @@ def test_notify_lifecycle_not_blocked_by_alignment_or_gates(tmp_path, monkeypatc
 
     notify.check_and_notify()
 
-    assert any("AKTÍV (FILL)" in item.get("title", "") for item in sent)
+    assert any(
+        "XAGUSD" in item.get("title", "") and "Állapot: `Nyitott`" in (item.get("description") or "")
+        for item in sent
+    )
