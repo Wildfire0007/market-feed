@@ -80,3 +80,38 @@ def test_manual_tracking_blocks_entry_when_open(tmp_path):
     assert result["actionable"] is False
     assert result["notify"]["should_notify"] is False
     assert result["notify"]["reason"] == "position_already_open"
+
+
+def test_opposite_entry_becomes_hard_exit_when_position_open(tmp_path):
+    asset = "XAGUSD"
+    outdir = tmp_path / "public" / asset
+    outdir.mkdir(parents=True)
+
+    now = datetime.now(timezone.utc)
+    payload = {
+        "asset": asset,
+        "signal": "sell",
+        "gates": {"missing": []},
+        "retrieved_at_utc": to_utc_iso(now),
+    }
+
+    manual_positions = {asset: {"side": "long", "opened_at_utc": to_utc_iso(now - timedelta(minutes=20))}}
+
+    result = apply_signal_stability_layer(
+        asset,
+        payload,
+        decision="sell",
+        action_plan={},
+        exit_signal=None,
+        gates_missing=[],
+        analysis_timestamp=payload["retrieved_at_utc"],
+        outdir=outdir,
+        stability_config=_default_config(),
+        manual_positions=manual_positions,
+    )
+
+    assert result["intent"] == "hard_exit"
+    assert result["notify"]["should_notify"] is True
+    assert result["notify"]["reason"] == "actionable"
+    assert result["position_exit_signal"]["state"] == "hard_exit"
+    assert result["position_exit_signal"]["category"] == "reverse_signal_guard"
