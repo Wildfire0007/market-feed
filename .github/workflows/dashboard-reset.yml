@@ -3,8 +3,9 @@ name: Monitoring Dashboard Reset (daily)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 1 * * *"  # daily at 01:30 UTC
-
+    - cron: "30 20 * * *"  # 22:30 Europe/Budapest during DST
+    - cron: "30 21 * * *"  # 22:30 Europe/Budapest during standard time
+    
 permissions:
   contents: write
 
@@ -28,7 +29,24 @@ jobs:
       - name: Ensure branch is up to date
         run: git pull --ff-only origin "$TARGET_BRANCH"
 
+      - name: Guard 22:30 Europe/Budapest
+        id: bp_guard
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          is_dispatch = os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch"
+          now_bp = datetime.now(ZoneInfo("Europe/Budapest"))
+          should_run = is_dispatch or (now_bp.hour == 22 and now_bp.minute == 30)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"run_reset={'true' if should_run else 'false'}\n")
+          PY
+
       - name: Setup Python
+        if: steps.bp_guard.outputs.run_reset == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -36,11 +54,13 @@ jobs:
           cache-dependency-path: requirements.lock
 
       - name: Install dependencies
+        if: steps.bp_guard.outputs.run_reset == 'true'
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.lock
 
       - name: Run dashboard reset script
+        if: steps.bp_guard.outputs.run_reset == 'true'
         env:
           PUBLIC_DIR: public
         run: |
@@ -49,10 +69,11 @@ jobs:
             --status-message "scheduled monitoring reset"
 
       - name: Commit & push reset artefacts
+        if: steps.bp_guard.outputs.run_reset == 'true'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add public/_active_anchor.json public/_notify_state.json public/status.json public/monitoring || true
+          git add public/_active_anchor.json public/_notify_state.json public/status.json public/trading.db public/trading.db-wal public/trading.db-shm public/monitoring || true
           if ! git diff --cached --quiet; then
             git commit -m "reset: refresh monitoring state [skip ci]"
             git pull --rebase origin "$TARGET_BRANCH"
