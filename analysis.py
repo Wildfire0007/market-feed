@@ -6129,6 +6129,25 @@ def apply_signal_stability_layer(
     exit_side = exit_direction_map.get(
         str((exit_signal or {}).get("direction") or "").lower()
     )
+    tracked_side = str(manual_state.get("side") or "").lower()
+    if (
+        manual_state.get("tracking_enabled")
+        and manual_state.get("has_position")
+        and entry_side in {"buy", "sell"}
+        and tracked_side in {"buy", "sell"}
+        and tracked_side != entry_side
+        and not exit_signal
+    ):
+        exit_signal = {
+            "state": "hard_exit",
+            "category": "reverse_signal_guard",
+            "direction": "long" if tracked_side == "buy" else "short",
+            "reasons": [
+                f"Ellenirányú új belépő jel érkezett ({entry_side.upper()}) nyitott {tracked_side.upper()} pozícióra."
+            ],
+        }
+        payload["position_exit_signal"] = exit_signal
+        exit_side = tracked_side
     setup_grade = _resolve_setup_grade(payload, decision)
 
     intent = "standby"
@@ -16470,6 +16489,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
