@@ -314,6 +314,15 @@ def _resolve_tracking_context() -> Tuple[Dict[str, Any], str, bool]:
     return tracking_cfg, positions_path, treat_missing
 
 
+def _normalize_position_side(side: Any) -> str:
+    raw = str(side or "").strip().lower()
+    if raw in {"long", "buy"}:
+        return "buy"
+    if raw in {"short", "sell"}:
+        return "sell"
+    return ""
+
+
 def check_and_notify() -> None:
     if not PUBLIC_DIR.exists():
         return
@@ -417,6 +426,23 @@ def check_and_notify() -> None:
             print(f"{asset_name}: bizonytalan irány ({direction}) — jelzés némítva.")
             continue
 
+        if (
+            tracking_enabled
+            and tracked_status in {"open", "pending"}
+            and not exit_signal
+            and direction in {"buy", "sell"}
+        ):
+            tracked_side = _normalize_position_side(tracked_entry.get("side") if isinstance(tracked_entry, dict) else "")
+            if tracked_side == direction:
+                print("Azonos irányú pozíció már fut, új belépő blokkolva.")
+                continue
+            if tracked_side and tracked_side != direction:
+                exit_signal = {
+                    "state": "hard_exit",
+                    "reasons": ["Ellenirányú erős belépési jel (Trendforduló)"],
+                    "synthetic_reverse": True,
+                }
+
         if tracking_enabled and not exit_signal and not has_lifecycle_event:
             tracked_state = position_tracker.compute_state(
                 asset_name,
@@ -504,25 +530,22 @@ def check_and_notify() -> None:
             exit_state = str(exit_signal.get("state") or exit_signal.get("action") or "").lower()            
             exit_signature = _exit_signature(exit_signal)
             exit_reasons = [str(r) for r in (exit_signal.get("reasons") or []) if r][:4]
+            is_synthetic_reverse = bool(exit_signal.get("synthetic_reverse"))
             now_dt = datetime.now(timezone.utc)
             asset_state = notify_state.get(asset_name) if isinstance(notify_state.get(asset_name), dict) else {}
             tracked_entry = manual_positions.get(asset_name) if isinstance(manual_positions, dict) else None
             tracked_status_for_exit = str(tracked_entry.get("status") or "").lower() if isinstance(tracked_entry, dict) else ""
-            if tracking_enabled and tracked_status_for_exit not in {"open", "closed"}:
+            if tracking_enabled and tracked_status_for_exit not in {"open", "closed"} and not is_synthetic_reverse:
                 print(f"{asset_name}: exit jelzés figyelmen kívül hagyva (nincs követett nyitott/zárt pozíció).")
                 continue
             event_key = _position_event_key(tracked_entry, exit_state)
-            if event_key and asset_state.get("last_position_event_key") == event_key:
-                print(f" -> EXIT POSITION DEDUP: {asset_name} ({exit_state})")
-                continue
-            last_exit_signature = asset_state.get("last_exit_signature")
             last_exit_sent_utc = asset_state.get("last_exit_sent_utc")
-            if last_exit_signature == exit_signature and last_exit_sent_utc:
+            if last_exit_sent_utc:
                 try:
                     last_exit_dt = datetime.fromisoformat(str(last_exit_sent_utc).replace("Z", "+00:00"))
                 except Exception:
                     last_exit_dt = None
-                if last_exit_dt and now_dt - last_exit_dt < timedelta(minutes=EXIT_NOTIFY_COOLDOWN_MINUTES):                    
+                if last_exit_dt and now_dt - last_exit_dt < timedelta(minutes=EXIT_NOTIFY_COOLDOWN_MINUTES):
                     print(f" -> EXIT DEDUP: {asset_name} ({EXIT_NOTIFY_COOLDOWN_MINUTES}m)")
                     continue
             state_label = {
@@ -544,14 +567,9 @@ def check_and_notify() -> None:
             else:
                 color = COLOR_ORANGE
 
-            p_score_text = f"P Score: **{p_score:.1f}** (Erősség)" if p_score is not None else ""
-            reason_lines = [f"• {_hu_reason(r)}" for r in exit_reasons] or ["• N/A"]
-            if p_score_text:
-                reason_lines.insert(0, p_score_text)
-                
             embed = {
                 "title": state_label,
-                "description": f"{_asset_emoji(asset_name)} Eszköz: `{asset_name}`",
+                "description": f"Eszköz: `{asset_name}`",
                 "color": color,
                 "fields": [
                     {
@@ -561,7 +579,7 @@ def check_and_notify() -> None:
                     },
                     {
                         "name": "💡 Javaslat oka",
-                        "value": "\n".join(reason_lines),
+                        "value": "\n".join(f"• {_hu_reason(r)}" for r in exit_reasons) or "• N/A",
                         "inline": False,
                     }
                 ],
@@ -574,7 +592,8 @@ def check_and_notify() -> None:
                 asset_state["last_position_event_key"] = event_key
             notify_state[asset_name] = asset_state
             notify_state_changed = True
-            continue
+            if not is_synthetic_reverse:
+                continue
 
         tp1_net_usd = 0.0
         if entry is None or sl is None or tp1 is None:
@@ -633,11 +652,15 @@ def check_and_notify() -> None:
             
         title = f"{prefix} {instruction}"
 
+        risk_usd = sl_risk_usd if sl_risk_usd and sl_risk_usd > 0 else 50.0
+        units_text = "N/A"
+        if entry and sl and abs(entry - sl) > 0:
+            units = risk_usd / abs(entry - sl)
+            units_text = f"{units:.2f} Egység (Units)"
+        
         p_score_text = f"P Score: **{p_score:.1f}** (Erősség)" if p_score is not None else ""
-        reason_lines = [f"• {_hu_reason(r)}" for r in reasons[:2]] if reasons else ["• Rendszer jelzés"]
-        if p_score_text:
-            reason_lines.insert(0, p_score_text)
-        reasons_text = "\n".join(reason_lines)
+        reasons_text = "\n".join([f"• {_hu_reason(r)}" for r in reasons[:2]]) if reasons else "• Rendszer jelzés"
+        final_reasons = f"{p_score_text}\n{reasons_text}" if p_score_text else reasons_text
         
         fields = [
             {
@@ -646,23 +669,23 @@ def check_and_notify() -> None:
                 "inline": False,
             },
             {
-                "name": "⚙️ Paraméterek",
-                "value": f"Stop Loss (SL): `{format_price(sl)}`\nTake Profit 1 (TP1): `{format_price(tp1)}`"
+                "name": "⚙️ Paraméterek az eToro-hoz",
+                "value": f"MÉRET: `{units_text}` ({risk_usd} USD kockázat)\nStop Loss (SL): `{format_price(sl)}`\nTake Profit 1 (TP1): `{format_price(tp1)}`"
                 + (f"\nTake Profit 2 (TP2): `{format_price(tp2)}`" if tp2 else ""),
                 "inline": False,
             },
             {
                 "name": "💡 Indoklás",
-                "value": reasons_text,
+                "value": final_reasons,
                 "inline": False,
             },
         ]
         embed = {
             "title": title,
-            "description": f"{_asset_emoji(asset_name)} Eszköz: `{asset_name}`",
+            "description": f"Eszköz: `{asset_name}`",
             "color": color,
             "fields": fields,
-            "footer": {"text": "Signal • Várakozás (30 perc csend indítva)"},
+            "footer": {"text": f"Signal • Várakozás (30 perc csend indítva)"},
         }
 
         send_discord_embed(embed)
