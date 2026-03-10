@@ -539,8 +539,9 @@ def check_and_notify() -> None:
                 print(f"{asset_name}: exit jelzés figyelmen kívül hagyva (nincs követett nyitott/zárt pozíció).")
                 continue
             event_key = _position_event_key(tracked_entry, exit_state)
+            last_exit_signature = asset_state.get("last_exit_signature")
             last_exit_sent_utc = asset_state.get("last_exit_sent_utc")
-            if last_exit_sent_utc:
+            if last_exit_signature == exit_signature and last_exit_sent_utc:
                 try:
                     last_exit_dt = datetime.fromisoformat(str(last_exit_sent_utc).replace("Z", "+00:00"))
                 except Exception:
