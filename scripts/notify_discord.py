@@ -37,9 +37,10 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
 ENTRY_COOLDOWN_MINUTES = 30
 EXIT_NOTIFY_COOLDOWN_MINUTES = 30
+_default_notify_assets = "GOLDCFD,XAGUSD,USOIL"
 DISCORD_NOTIFY_ASSETS = {
     asset.strip().upper()
-    for asset in os.getenv("DISCORD_NOTIFY_ASSETS", "").split(",")
+    for asset in os.getenv("DISCORD_NOTIFY_ASSETS", _default_notify_assets).split(",")
     if asset.strip()
 }
 
@@ -599,8 +600,7 @@ def check_and_notify() -> None:
                 asset_state["last_position_event_key"] = event_key
             notify_state[asset_name] = asset_state
             notify_state_changed = True
-            if not is_synthetic_reverse:
-                continue
+            continue
 
         tp1_net_usd = 0.0
         if entry is None or sl is None or tp1 is None:
@@ -689,9 +689,15 @@ def check_and_notify() -> None:
         ]
         embed = {
             "title": title,
-            "description": f"Eszköz: `{asset_name}`",
+            "description": f"Eszköz: `{_asset_emoji(asset_name)} {asset_name}`",
             "color": color,
-            "fields": fields,
+            "fields": fields + [
+                {
+                    "name": "🕒 Időbélyeg (Budapest)",
+                    "value": f"`{now_dt.astimezone(BUDAPEST_TZ).strftime('%Y-%m-%d %H:%M:%S')}`",
+                    "inline": False,
+                }
+            ],
             "footer": {"text": f"Signal • Várakozás (30 perc csend indítva)"},
         }
 
