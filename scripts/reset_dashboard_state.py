@@ -25,13 +25,13 @@ if str(_REPO_ROOT) not in sys.path:
 
 from active_anchor import load_anchor_state, reset_anchor_state
 import state_db
-from scripts.notify_discord import (
-    STATE_PATH as NOTIFY_STATE_PATH,
-    build_default_state as build_notify_default_state,
-    to_utc_iso,
-)
+from scripts.notify_discord import to_utc_iso
+from scripts.reset_notify_state import build_default_state as build_notify_default_state
+import position_tracker
+from config import analysis_settings as settings
 
 PUBLIC_DIR = Path(os.getenv("PUBLIC_DIR", "public"))
+NOTIFY_STATE_PATH = PUBLIC_DIR / "_notify_state.json"
 STATUS_PATH = PUBLIC_DIR / "status.json"
 DEFAULT_STATUS_MESSAGE = "monitoring cron reset (non-production)"
 DEFAULT_BACKUP_DIR = PUBLIC_DIR / "monitoring" / "reset_backups"
@@ -75,6 +75,45 @@ def _make_backup(path: Path, backup_dir: Optional[Path]) -> Optional[Path]:
     backup_path.write_bytes(path.read_bytes())
     return backup_path
 
+
+
+
+def _resolve_tracking_paths() -> tuple[str, str]:
+    stability_cfg = settings.load_config().get("signal_stability") or {}
+    tracking_cfg = stability_cfg.get("manual_position_tracking") or {}
+    positions_path = str(tracking_cfg.get("positions_file") or state_db.DEFAULT_DB_PATH)
+    pending_exit_path = str(tracking_cfg.get("pending_exit_file") or positions_path)
+    return positions_path, pending_exit_path
+
+
+def reset_manual_positions_state(
+    *,
+    now: Optional[datetime] = None,
+    dry_run: bool = False,
+) -> ResetResult:
+    """Clear tracked manual positions + pending exits (flat baseline)."""
+
+    positions_path, pending_exit_path = _resolve_tracking_paths()
+    positions_before = len(position_tracker.load_positions(positions_path, treat_missing_as_flat=True))
+    pending_before = len(position_tracker.load_pending_exits(pending_exit_path))
+    total_before = positions_before + pending_before
+
+    if not dry_run and total_before > 0:
+        position_tracker.save_positions_atomic(positions_path, {})
+        position_tracker.clear_pending_exits(pending_exit_path)
+
+    return ResetResult(
+        path=Path(positions_path),
+        before=total_before,
+        after=0,
+        removed=total_before,
+        changed=(total_before > 0) and not dry_run,
+        message=(
+            f"manual positions reset ({positions_before} positions, {pending_before} pending exits)"
+            if total_before
+            else "manual positions already flat"
+        ),
+    )
 
 def reset_anchor_state_file(
     *,
@@ -266,12 +305,28 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Directory for JSON backups (defaults to public/monitoring/reset_backups).",
     )
     parser.add_argument("--dry-run", action="store_true", help="Report actions without writing files.")
+    parser.add_argument(
+        "--skip-position-reset",
+        action="store_true",
+        help="Do not clear manual tracked positions/pending exits.",
+    )
 
     args = parser.parse_args(argv)
 
     now = datetime.now(timezone.utc)
     backup_dir = Path(args.backup_dir) if args.backup_dir else None
 
+    if args.skip_position_reset:
+        position_result = ResetResult(
+            path=Path("manual_positions"),
+            message="manual position reset skipped",
+        )
+    else:
+        position_result = reset_manual_positions_state(
+            now=now,
+            dry_run=args.dry_run,
+        )
+    
     anchor_result = reset_anchor_state_file(
         max_age_hours=args.anchor_max_age_hours,
         db_path=Path(args.anchor_db) if args.anchor_db else None,
@@ -294,6 +349,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         reason=args.status_message,
     )
 
+    print(_result_to_str("positions", position_result))    
     print(_result_to_str("anchor", anchor_result))
     print(_result_to_str("notify", notify_result))
     print(_result_to_str("status", status_result))
