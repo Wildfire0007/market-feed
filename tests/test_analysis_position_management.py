@@ -95,5 +95,16 @@ class HardExitTests(unittest.TestCase):
         )
 
 
+class DirectionLevelConsistencyTests(unittest.TestCase):
+    def test_levels_match_direction_buy(self) -> None:
+        self.assertTrue(analysis.levels_match_direction("buy", 100.0, 99.0, 101.0, 102.0))
+
+    def test_levels_match_direction_sell(self) -> None:
+        self.assertTrue(analysis.levels_match_direction("sell", 100.0, 101.0, 99.0, 98.0))
+
+    def test_levels_match_direction_rejects_mismatch(self) -> None:
+        self.assertFalse(analysis.levels_match_direction("sell", 100.0, 99.0, 101.0, 102.0))
+
+
 if __name__ == "__main__":
     unittest.main()
