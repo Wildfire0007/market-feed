@@ -17,6 +17,7 @@ jobs:
   reset:
     name: Reset monitoring state
     runs-on: ubuntu-24.04
+    timeout-minutes: 8
     env:
       TARGET_BRANCH: ${{ github.event.repository.default_branch || github.ref_name }}
     steps:
@@ -48,9 +49,9 @@ jobs:
       - name: Run dashboard reset script
         if: steps.bp_guard.outputs.run_reset == 'true'
         env:
-           PUBLIC_DIR: public
+          PUBLIC_DIR: public
         run: |
-          python3 scripts/reset_dashboard_state.py \        
+          timeout 180s python3 scripts/reset_dashboard_state.py \
             --anchor-max-age-hours 0 \
             --status-message "scheduled monitoring reset"
 
@@ -60,9 +61,10 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add public/_active_anchor.json public/_notify_state.json public/status.json public/trading.db public/trading.db-wal public/trading.db-shm public/monitoring || true
-            git commit -m "reset: refresh monitoring state [skip ci]"
-            git pull --rebase origin "$TARGET_BRANCH"
-            git push origin "HEAD:$TARGET_BRANCH"
-          else
+          if git diff --cached --quiet; then
             echo "No monitoring state changes to commit."
+            exit 0
           fi
+          git commit -m "reset: refresh monitoring state [skip ci]"
+          git pull --rebase origin "$TARGET_BRANCH"
+          git push origin "HEAD:$TARGET_BRANCH"
