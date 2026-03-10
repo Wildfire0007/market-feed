@@ -110,6 +110,73 @@ def test_notify_persists_pending_after_precision_entry_card(tmp_path, monkeypatc
     assert persisted[0][1]["XAGUSD"]["status"] == "pending"
 
 
+def test_notify_persists_open_after_market_precision_entry_card(tmp_path, monkeypatch):
+    public_dir = tmp_path / "public"
+    signal_path = public_dir / "XAGUSD" / "signal.json"
+    _write_signal(
+        signal_path,
+        {
+            "signal": "precision_arming",
+            "precision_plan": {
+                "direction": "sell",
+                "order_type": "MARKET",
+                "entry": 25.0,
+                "stop_loss": 25.2,
+                "take_profit_1": 24.8,
+                "take_profit_2": 24.6,
+            },
+            "spot": {"price": 25.0},
+            "gates": {"missing": []},
+            "biases": {},
+            "reasons": ["teszt"],
+            "alignment_state": "TREND",
+        },
+    )
+
+    monkeypatch.setattr(notify, "PUBLIC_DIR", public_dir)
+    monkeypatch.setattr(notify, "DISCORD_NOTIFY_ASSETS", {"XAGUSD"})
+    monkeypatch.setattr(notify, "DRY_RUN", False)
+    monkeypatch.setattr(notify, "DISCORD_WEBHOOK_URL", "")
+    monkeypatch.setattr(notify.position_tracker, "load_positions", lambda *_: {})
+    monkeypatch.setattr(
+        notify.position_tracker,
+        "compute_state",
+        lambda *_args, **_kwargs: {"has_position": False, "pending_active": False, "cooldown_active": False},
+    )
+
+    sent = []
+    monkeypatch.setattr(notify, "send_discord_embed", lambda embed: sent.append(embed))
+
+    persisted = []
+
+    def _open_position(asset, side, entry, sl, tp1, tp2, opened_at_utc, positions):
+        next_positions = dict(positions)
+        next_positions[asset] = {
+            "status": "open",
+            "side": side,
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "opened_at_utc": opened_at_utc,
+        }
+        return next_positions
+
+    monkeypatch.setattr(notify.position_tracker, "open_position", _open_position)
+    monkeypatch.setattr(
+       notify.position_tracker,
+        "save_positions_atomic",
+        lambda path, data: persisted.append((path, data.copy())),
+    )
+
+    notify.check_and_notify()
+
+    assert len(sent) == 1
+    assert len(persisted) == 1
+    assert persisted[0][1]["XAGUSD"]["status"] == "open"
+    assert persisted[0][1]["XAGUSD"]["side"] == "short"
+
+
 def test_notify_sends_single_activation_card_for_open_position(tmp_path, monkeypatch):
     public_dir = tmp_path / "public"
     signal_path = public_dir / "XAGUSD" / "signal.json"
