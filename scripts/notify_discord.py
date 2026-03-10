@@ -363,6 +363,8 @@ def check_and_notify() -> None:
 
         signal = str(data.get("signal") or "no entry").lower()
         exit_signal = data.get("position_exit_signal") or data.get("active_position_meta", {}).get("exit_signal")
+        notify_meta = data.get("notify") if isinstance(data.get("notify"), dict) else {}
+        position_state = data.get("position_state") if isinstance(data.get("position_state"), dict) else {}        
         tracked_entry = manual_positions.get(asset_name) if isinstance(manual_positions, dict) else None
         tracked_status = str(tracked_entry.get("status") or "").lower() if isinstance(tracked_entry, dict) else ""
         has_lifecycle_event = tracking_enabled and tracked_status in {"open", "closed"}
@@ -426,6 +428,22 @@ def check_and_notify() -> None:
         
         if direction not in {"buy", "sell"} and not exit_signal and not has_lifecycle_event:
             print(f"{asset_name}: bizonytalan irány ({direction}) — jelzés némítva.")
+            continue
+
+        payload_has_position = bool(position_state.get("has_position"))
+        if payload_has_position and not exit_signal and not has_lifecycle_event and direction in {"buy", "sell"}:
+            print(f"{asset_name}: belépő jelzés némítva (payload position_state.has_position=true).")
+            continue
+
+        should_notify_entry = notify_meta.get("should_notify")
+        if (
+            should_notify_entry is False
+            and not exit_signal
+            and not has_lifecycle_event
+            and direction in {"buy", "sell"}
+        ):
+            reason = str(notify_meta.get("reason") or "unspecified")
+            print(f"{asset_name}: belépő jelzés némítva (notify.should_notify=false, reason={reason}).")
             continue
 
         if (
