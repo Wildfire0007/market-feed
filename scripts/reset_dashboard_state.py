@@ -90,24 +90,34 @@ def reset_manual_positions_state(
     *,
     now: Optional[datetime] = None,
     dry_run: bool = False,
+    backup_dir: Optional[Path] = None,
 ) -> ResetResult:
     """Clear tracked manual positions + pending exits (flat baseline)."""
 
     positions_path, pending_exit_path = _resolve_tracking_paths()
+    db_path = Path(positions_path)
     positions_before = len(position_tracker.load_positions(positions_path, treat_missing_as_flat=True))
     pending_before = len(position_tracker.load_pending_exits(pending_exit_path))
     total_before = positions_before + pending_before
+    backup_path = None
 
     if not dry_run and total_before > 0:
-        position_tracker.save_positions_atomic(positions_path, {})
-        position_tracker.clear_pending_exits(pending_exit_path)
+        backup_path = _make_backup(db_path, backup_dir)
+        connection = state_db.connect(db_path)
+        try:
+            with connection:
+                connection.execute("DELETE FROM positions")
+                connection.execute("DELETE FROM pending_exits")
+        finally:
+            connection.close()
 
     return ResetResult(
-        path=Path(positions_path),
+        path=db_path,
         before=total_before,
         after=0,
         removed=total_before,
         changed=(total_before > 0) and not dry_run,
+        backup_path=backup_path,
         message=(
             f"manual positions reset ({positions_before} positions, {pending_before} pending exits)"
             if total_before
@@ -325,6 +335,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         position_result = reset_manual_positions_state(
             now=now,
             dry_run=args.dry_run,
+            backup_dir=backup_dir,
         )
     
     anchor_result = reset_anchor_state_file(
