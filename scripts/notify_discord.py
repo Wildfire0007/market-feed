@@ -703,17 +703,25 @@ def check_and_notify() -> None:
         notify_state[asset_name] = asset_state
         notify_state_changed = True
 
-        if (
-            tracking_enabled
-            and signal == "precision_arming"
-            and order_type in {"LIMIT", "STOP"}
-        ):
-            manual_positions = position_tracker.register_precision_pending_position(
-                asset_name,
-                data,
-                now_dt,
-                manual_positions,
-            )
+        if tracking_enabled and signal == "precision_arming":
+            if order_type in {"LIMIT", "STOP"}:
+                manual_positions = position_tracker.register_precision_pending_position(
+                    asset_name,
+                    data,
+                    now_dt,
+                    manual_positions,
+                )
+            elif order_type == "MARKET" and direction in {"buy", "sell"}:
+                manual_positions = position_tracker.open_position(
+                    asset_name,
+                    side="long" if direction == "buy" else "short",
+                    entry=entry,
+                    sl=sl,
+                    tp1=tp1,
+                    tp2=tp2,
+                    opened_at_utc=to_utc_iso(now_dt),
+                    positions=manual_positions,
+                )
             if not DRY_RUN:
                 position_tracker.save_positions_atomic(positions_path, manual_positions)
 
