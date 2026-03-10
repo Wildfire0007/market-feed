@@ -5987,6 +5987,23 @@ def extract_trade_levels(signal_data: Dict[str, Any]) -> Dict[str, Optional[floa
     return {"entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": rr}
 
 
+def levels_match_direction(
+    direction: str,
+    entry: Optional[float],
+    sl: Optional[float],
+    tp1: Optional[float],
+    tp2: Optional[float],
+) -> bool:
+    side = str(direction or "").strip().lower()
+    if side not in {"buy", "sell"}:
+        return False
+    if entry is None or sl is None or tp1 is None:
+        return False
+    if side == "buy":
+        return sl < entry < tp1 and (tp2 is None or tp1 <= tp2)
+    return tp1 < entry < sl and (tp2 is None or tp2 <= tp1)
+
+
 def _load_signal_state(path: Path, history_window: int) -> Dict[str, Any]:
     state = load_json(str(path)) or {}
     if not isinstance(state, dict):
@@ -15180,7 +15197,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         
     ml_confidence_block = False
     if (
-        decision in ("buy", "sell")      
+        decision in ("buy", "sell")
         and ml_probability is not None
         and ml_threshold is not None
         and ml_probability < ml_threshold
@@ -15193,6 +15210,19 @@ def analyze(asset: str) -> Dict[str, Any]:
         )
         if reason_ml not in reasons:
             reasons.append(reason_ml)
+        decision = "no entry"
+        entry = sl = tp1 = tp2 = rr = None
+        execution_playbook = []
+        momentum_trailing_plan = None
+
+    if decision in {"buy", "sell"} and not levels_match_direction(decision, entry, sl, tp1, tp2):
+        if "direction_level_mismatch" not in missing:
+            missing.append("direction_level_mismatch")
+        mismatch_reason = (
+            "Irány/szintek inkonzisztensek (signal vs entry/SL/TP) — jelzés semlegesítve"
+        )
+        if mismatch_reason not in reasons:
+            reasons.append(mismatch_reason)
         decision = "no entry"
         entry = sl = tp1 = tp2 = rr = None
         execution_playbook = []
@@ -16489,6 +16519,7 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
+
 
 
 
