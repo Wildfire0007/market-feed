@@ -37,12 +37,7 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
 ENTRY_COOLDOWN_MINUTES = 30
 EXIT_NOTIFY_COOLDOWN_MINUTES = 30
-_default_notify_assets = "GOLDCFD,XAGUSD,USOIL"
-DISCORD_NOTIFY_ASSETS = {
-    asset.strip().upper()
-    for asset in os.getenv("DISCORD_NOTIFY_ASSETS", _default_notify_assets).split(",")
-    if asset.strip()
-}
+DISCORD_NOTIFY_ASSETS = {"GOLD_CFD", "XAGUSD", "USOIL"}
 
 BASE_DIR = Path(__file__).resolve().parent
 PUBLIC_DIR = Path(os.getenv("NOTIFY_PUBLIC_DIR", "")) if os.getenv("NOTIFY_PUBLIC_DIR") else None
