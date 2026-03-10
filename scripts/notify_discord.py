@@ -233,6 +233,22 @@ def calc_rr(entry: float, sl: float, target: float) -> Optional[float]:
     return reward / risk
 
 
+def levels_match_direction(
+    direction: str,
+    entry: Optional[float],
+    sl: Optional[float],
+    tp1: Optional[float],
+    tp2: Optional[float],
+) -> bool:
+    if direction not in {"buy", "sell"}:
+        return False
+    if entry is None or sl is None or tp1 is None:
+        return False
+    if direction == "buy":
+        return sl < entry < tp1 and (tp2 is None or tp1 <= tp2)
+    return tp1 < entry < sl and (tp2 is None or tp2 <= tp1)
+
+
 def _entry_signature(direction: str, order_type: str) -> Dict[str, Any]:
     return {
         "direction": direction,
@@ -618,6 +634,13 @@ def check_and_notify() -> None:
         tp1_net_usd = 0.0
         if entry is None or sl is None or tp1 is None:
             print(f"{asset_name}: hiányzó entry/SL/TP1 — jelzés eldobva.")
+            continue
+
+        if not levels_match_direction(direction, entry, sl, tp1, tp2):
+            print(
+                f"{asset_name}: inkonzisztens irány/szintek ({direction}) — jelzés eldobva. "
+                f"entry={format_price(entry)} sl={format_price(sl)} tp1={format_price(tp1)} tp2={format_price(tp2)}"
+            )
             continue
 
         notional = equity_usd * leverage
