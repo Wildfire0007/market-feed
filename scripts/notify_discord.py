@@ -441,7 +441,22 @@ def check_and_notify() -> None:
 
         if order_type not in {"LIMIT", "MARKET", "STOP"}:
             order_type = "MARKET"
-        
+
+        if (
+            signal == "precision_arming"
+            and direction in {"buy", "sell"}
+            and entry is not None
+            and sl is not None
+            and tp1 is not None
+            and not levels_match_direction(direction, entry, sl, tp1, tp2)
+        ):
+            corrected_direction = "sell" if direction == "buy" else "buy"
+            if levels_match_direction(corrected_direction, entry, sl, tp1, tp2):
+                print(
+                    f"{asset_name}: precision_arming irány auto-correct ({direction} -> {corrected_direction})"
+                )
+                direction = corrected_direction
+
         if direction not in {"buy", "sell"} and not exit_signal and not has_lifecycle_event:
             print(f"{asset_name}: bizonytalan irány ({direction}) — jelzés némítva.")
             continue
@@ -454,6 +469,7 @@ def check_and_notify() -> None:
         should_notify_entry = notify_meta.get("should_notify")
         if (
             should_notify_entry is False
+            and signal in {"buy", "sell"}
             and not exit_signal
             and not has_lifecycle_event
             and direction in {"buy", "sell"}
@@ -744,8 +760,8 @@ def check_and_notify() -> None:
         notify_state[asset_name] = asset_state
         notify_state_changed = True
 
-        if tracking_enabled and signal == "precision_arming":
-            if order_type in {"LIMIT", "STOP"}:
+        if tracking_enabled and signal in {"precision_arming", "buy", "sell"}:
+            if signal == "precision_arming" and order_type in {"LIMIT", "STOP"}:
                 manual_positions = position_tracker.register_precision_pending_position(
                     asset_name,
                     data,
