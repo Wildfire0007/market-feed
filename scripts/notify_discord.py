@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 import sys
+import fcntl
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -61,6 +62,7 @@ COLOR_HARD_EXIT = 0xB71C1C
 COLOR_BLUE = 0x3498DB
 COLOR_ORANGE = 0xE67E22
 COLOR_YELLOW = 0xF1C40F
+NOTIFY_LOCK_PATH = PUBLIC_DIR / ".notify_discord.lock"
 
 HARD_GATE_NAMES = {
     "spread_guard",
@@ -861,4 +863,10 @@ def check_and_notify() -> None:
 
 
 if __name__ == "__main__":
-    check_and_notify()
+    with NOTIFY_LOCK_PATH.open("w", encoding="utf-8") as lock_handle:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("Másik notify_discord folyamat már fut; duplikált küldés elkerülve.")
+            sys.exit(0)
+        check_and_notify()
