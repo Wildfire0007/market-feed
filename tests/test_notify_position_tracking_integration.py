@@ -510,13 +510,13 @@ def test_notify_activation_defaults_to_auto_activation_when_entry_type_missing(t
             "XAGUSD": {
                 "status": "open",
                 "side": "long",
-               "opened_at_utc": "2026-01-01T00:00:00Z",
+                "opened_at_utc": "2026-01-01T00:00:00Z",
                 "entry": 25.0,
                 "sl": 24.8,
                 "tp1": 25.2,
                 "tp2": 25.4,
             }
-       },
+        },
     )
     monkeypatch.setattr(
         notify.position_tracker,
@@ -524,7 +524,7 @@ def test_notify_activation_defaults_to_auto_activation_when_entry_type_missing(t
         lambda *_args, **_kwargs: {"has_position": True, "pending_active": False, "cooldown_active": False},
     )
 
-   sent = []
+    sent = []
     monkeypatch.setattr(notify, "send_discord_embed", lambda embed: sent.append(embed))
 
     notify.check_and_notify()
@@ -632,3 +632,58 @@ def test_notify_lifecycle_not_blocked_by_alignment_or_gates(tmp_path, monkeypatc
         "XAGUSD" in item.get("title", "") and "Állapot: `Nyitott`" in (item.get("description") or "")
         for item in sent        
     )
+
+def test_notify_precision_arming_opposite_open_position_emits_hard_exit(tmp_path, monkeypatch):
+    public_dir = tmp_path / "public"
+    signal_path = public_dir / "XAGUSD" / "signal.json"
+    _write_signal(
+        signal_path,
+        {
+            "signal": "precision_arming",
+            "precision_plan": {
+                "direction": "sell",
+                "order_type": "LIMIT",
+                "entry": 25.1,
+                "stop_loss": 25.3,
+                "take_profit_1": 24.9,
+                "take_profit_2": 24.7,
+            },
+            "spot": {"price": 25.1},
+            "gates": {"missing": []},
+            "biases": {},
+            "reasons": ["teszt"],
+            "alignment_state": "TREND",
+        },
+    )
+
+    monkeypatch.setattr(notify, "PUBLIC_DIR", public_dir)
+    monkeypatch.setattr(notify, "DISCORD_NOTIFY_ASSETS", {"XAGUSD"})
+    monkeypatch.setattr(notify, "DRY_RUN", True)
+    monkeypatch.setattr(
+        notify.position_tracker,
+        "load_positions",
+        lambda *_: {
+            "XAGUSD": {
+                "status": "open",
+                "side": "long",
+                "entry": 25.0,
+                "sl": 24.8,
+                "tp1": 25.2,
+                "tp2": 25.4,
+                "opened_at_utc": "2026-01-01T00:00:00Z",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        notify.position_tracker,
+        "compute_state",
+        lambda *_args, **_kwargs: {"has_position": True, "pending_active": False, "cooldown_active": False},
+    )
+
+    sent = []
+    monkeypatch.setattr(notify, "send_discord_embed", lambda embed: sent.append(embed))
+
+    notify.check_and_notify()
+
+    assert any("AZONNAL ZÁRD A POZÍCIÓT" in (item.get("title") or "") for item in sent)
+    assert any("NYISS SHORT" in (item.get("title") or "") for item in sent)
