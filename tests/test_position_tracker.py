@@ -507,6 +507,104 @@ def test_load_positions_normalizes_buy_sell_side_from_db(tmp_path: Path) -> None
     assert state["has_position"] is True
     assert state["side"] == "buy"
 
+def test_load_positions_infers_side_from_levels_when_metadata_missing(tmp_path: Path) -> None:
+    db_path = tmp_path / "trading.db"
+    position_tracker.state_db.initialize(db_path)
+    connection = position_tracker.state_db.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO positions (asset, entry_price, size, sl, tp, status, strategy_metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "GOLD_CFD",
+                2600.0,
+                1.0,
+                2580.0,
+                2640.0,
+                "OPEN",
+                "{}",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    loaded = position_tracker.load_positions(str(db_path), treat_missing_as_flat=False)
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    state = position_tracker.compute_state("GOLD_CFD", {"enabled": True}, loaded, now_dt)
+
+    assert loaded["GOLD_CFD"]["side"] == "long"
+    assert state["has_position"] is True
+    assert state["side"] == "buy"
+
+
+
+
+def test_load_positions_infers_side_from_sl_when_tp_missing(tmp_path: Path) -> None:
+    db_path = tmp_path / "trading.db"
+    position_tracker.state_db.initialize(db_path)
+    connection = position_tracker.state_db.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO positions (asset, entry_price, size, sl, tp, status, strategy_metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "XAGUSD",
+                30.0,
+                1.0,
+                31.0,
+                None,
+                "OPEN",
+                "{}",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    loaded = position_tracker.load_positions(str(db_path), treat_missing_as_flat=False)
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    state = position_tracker.compute_state("XAGUSD", {"enabled": True}, loaded, now_dt)
+
+    assert loaded["XAGUSD"]["side"] == "short"
+    assert state["has_position"] is True
+    assert state["side"] == "sell"
+
+
+def test_load_positions_does_not_infer_side_from_inconsistent_levels(tmp_path: Path) -> None:
+    db_path = tmp_path / "trading.db"
+    position_tracker.state_db.initialize(db_path)
+    connection = position_tracker.state_db.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO positions (asset, entry_price, size, sl, tp, status, strategy_metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "BTCUSD",
+                100.0,
+                1.0,
+                99.0,
+                98.0,
+                "OPEN",
+                "{}",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    loaded = position_tracker.load_positions(str(db_path), treat_missing_as_flat=False)
+    now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    state = position_tracker.compute_state("BTCUSD", {"enabled": True}, loaded, now_dt)
+
+    assert loaded["BTCUSD"]["side"] is None
+    assert state["has_position"] is False
 
 def test_check_close_by_levels_handles_legacy_buy_side_without_status():
     now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
