@@ -711,7 +711,12 @@ def test_notify_precision_arming_opposite_open_position_emits_hard_exit(tmp_path
 
     assert closed_calls and closed_calls[0]["reason"] == "hard_exit"
     assert any("AZONNAL ZÁRD A POZÍCIÓT" in (item.get("title") or "") for item in sent)
-    assert any("NYISS SHORT" in (item.get("title") or "") for item in sent)
+    hard_exit_embed = next(item for item in sent if "AZONNAL ZÁRD A POZÍCIÓT" in (item.get("title") or ""))
+    assert any(
+        field.get("name") == "🎯 Zárandó irány" and "LONG" in str(field.get("value") or "")
+        for field in (hard_exit_embed.get("fields") or [])
+    )
+    assert not any("NYISS SHORT" in (item.get("title") or "") for item in sent)
 
 
 def test_notify_treats_no_entry_with_precision_trigger_as_precision_arming(tmp_path, monkeypatch):
