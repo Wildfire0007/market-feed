@@ -426,6 +426,10 @@ def check_and_notify() -> None:
             continue
 
         signal = str(data.get("signal") or "no entry").lower()
+        plan_for_signal = data.get("precision_plan") if isinstance(data.get("precision_plan"), dict) else {}
+        trigger_state = str(plan_for_signal.get("trigger_state") or "").lower()
+        if signal == "no entry" and trigger_state in {"arming", "fire"}:
+            signal = "precision_arming"
         exit_signal = data.get("position_exit_signal") or data.get("active_position_meta", {}).get("exit_signal")
         notify_meta = data.get("notify") if isinstance(data.get("notify"), dict) else {}
         position_state = data.get("position_state") if isinstance(data.get("position_state"), dict) else {}        
@@ -488,7 +492,7 @@ def check_and_notify() -> None:
         ).upper()
         direction = signal
         if signal == "precision_arming":
-            plan = data.get("precision_plan") if isinstance(data.get("precision_plan"), dict) else {}
+            plan = plan_for_signal
             direction = str(plan.get("direction") or data.get("signal") or "buy").lower()
             order_type = str(plan.get("order_type") or order_type or "LIMIT").upper()
             entry = safe_float(plan.get("entry") or entry)
