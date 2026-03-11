@@ -712,3 +712,45 @@ def test_notify_precision_arming_opposite_open_position_emits_hard_exit(tmp_path
     assert closed_calls and closed_calls[0]["reason"] == "hard_exit"
     assert any("AZONNAL ZÁRD A POZÍCIÓT" in (item.get("title") or "") for item in sent)
     assert any("NYISS SHORT" in (item.get("title") or "") for item in sent)
+
+
+def test_notify_treats_no_entry_with_precision_trigger_as_precision_arming(tmp_path, monkeypatch):
+    public_dir = tmp_path / "public"
+    signal_path = public_dir / "XAGUSD" / "signal.json"
+    _write_signal(
+        signal_path,
+        {
+            "signal": "no entry",
+            "precision_plan": {
+                "direction": "sell",
+                "order_type": "LIMIT",
+                "entry": 25.1,
+                "stop_loss": 25.3,
+                "take_profit_1": 24.9,
+                "take_profit_2": 24.7,
+                "trigger_state": "fire",
+            },
+            "spot": {"price": 25.1},
+            "gates": {"missing": []},
+            "biases": {},
+            "reasons": ["teszt"],
+            "alignment_state": "MIXED",
+        },
+    )
+
+    monkeypatch.setattr(notify, "PUBLIC_DIR", public_dir)
+    monkeypatch.setattr(notify, "DISCORD_NOTIFY_ASSETS", {"XAGUSD"})
+    monkeypatch.setattr(notify, "DRY_RUN", True)
+    monkeypatch.setattr(notify.position_tracker, "load_positions", lambda *_: {})
+    monkeypatch.setattr(
+        notify.position_tracker,
+        "compute_state",
+        lambda *_args, **_kwargs: {"has_position": False, "pending_active": False, "cooldown_active": False},
+    )
+
+    sent = []
+    monkeypatch.setattr(notify, "send_discord_embed", lambda embed: sent.append(embed))
+
+    notify.check_and_notify()
+
+    assert any("NYISS SHORT" in (item.get("title") or "") for item in sent)
