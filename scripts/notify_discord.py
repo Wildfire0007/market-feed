@@ -193,6 +193,52 @@ def _resolve_tp1_hit_ts(position: Dict[str, Any]) -> str:
     return "még nem"
 
 
+def _pick_first_nonempty(payload: Dict[str, Any], *keys: str) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _resolve_entry_type_label(event_type: str, signal_data: Dict[str, Any], tracked_entry: Dict[str, Any]) -> str:
+    tracked = tracked_entry if isinstance(tracked_entry, dict) else {}
+    signal = signal_data if isinstance(signal_data, dict) else {}
+    resolved = _pick_first_nonempty(
+        tracked,
+        "entry_type",
+        "entryType",
+        "order_type",
+        "orderType",
+        "signal_type",
+        "signalType",
+        "trigger_type",
+        "triggerType",
+        "entry_order_type",
+    )
+    if not resolved:
+        resolved = _pick_first_nonempty(
+            signal,
+            "entry_type",
+            "entryType",
+            "order_type",
+            "orderType",
+            "signal_type",
+            "signalType",
+            "trigger_type",
+            "triggerType",
+            "entry_order_type",
+        )
+    if not resolved:
+        return "Automatikus aktiválás" if event_type == "activation" else "N/A"
+    return resolved.upper()
+
+
 def send_discord_embed(embed_data: Dict[str, Any]) -> None:
      if DRY_RUN or not DISCORD_WEBHOOK_URL:
          print(f"[DRY RUN] Embed title: {embed_data.get('title')}")
@@ -428,7 +474,16 @@ def check_and_notify() -> None:
         tp1 = safe_float(data.get("tp1"))
         tp2 = safe_float(data.get("tp2"))
 
-        order_type = str(data.get("entry_order_type") or data.get("order_type") or "MARKET").upper()
+        order_type = str(
+            data.get("entry_order_type")
+            or data.get("entry_type")
+            or data.get("entryType")
+            or data.get("order_type")
+            or data.get("orderType")
+            or data.get("signal_type")
+            or data.get("signalType")
+            or "MARKET"
+        ).upper()
         direction = signal
         if signal == "precision_arming":
             plan = data.get("precision_plan") if isinstance(data.get("precision_plan"), dict) else {}
@@ -522,8 +577,20 @@ def check_and_notify() -> None:
                 if activation_key and asset_state.get("last_position_event_key") != activation_key:
                     activation_side = str(tracked_entry.get("side") or "").lower()
                     irany = "Vétel" if activation_side == "long" else "Eladás"
-                    order_type = str(tracked_entry.get("order_type") or "N/A").upper()
-                    tp1_hit_ts = _resolve_tp1_hit_ts(tracked_entry)                     
+                    order_type = _resolve_entry_type_label("activation", data, tracked_entry)
+                    tp1_hit_ts = _resolve_tp1_hit_ts(tracked_entry)
+                    print(
+                        f"{asset_name}: activation entry type resolved "
+                        f"event_type=activation tracked_entry_type={tracked_entry.get('entry_type')!r} "
+                        f"tracked_order_type={tracked_entry.get('order_type')!r} "
+                        f"tracked_signal_type={tracked_entry.get('signal_type')!r} "
+                        f"tracked_trigger_type={tracked_entry.get('trigger_type')!r} "
+                        f"signal_entry_type={data.get('entry_type')!r} "
+                        f"signal_order_type={data.get('order_type')!r} "
+                        f"signal_signal_type={data.get('signal_type')!r} "
+                        f"signal_trigger_type={data.get('trigger_type')!r} "
+                        f"displayed={order_type!r}"
+                    )
                     send_discord_embed({
                         "title": f"{_asset_emoji(asset_name)} {asset_name}",
                         "description": (
@@ -531,7 +598,9 @@ def check_and_notify() -> None:
                             f"Belépő típus: `{order_type}`\n"
                             f"Belépő: `{format_price(tracked_entry.get('entry'))}`\n"
                             f"Aktiválva: `{_format_ts(tracked_entry.get('opened_at_utc'))}`\n"
+                            f"SL: `{format_price(tracked_entry.get('sl'))}`\n"
                             f"TP1: `{format_price(tracked_entry.get('tp1'))}`\n"
+                            f"Spot: `{format_price(spot_price)}`\n"
                             f"TP1 elérve: `{tp1_hit_ts}`\n"
                             f"Állapot: `{_position_status_hu(tracked_status, tp1_hit_ts)}`"
                         ),
@@ -557,7 +626,9 @@ def check_and_notify() -> None:
                             f"Irány: `{irany}`\n"
                             f"Belépő: `{format_price(tracked_entry.get('entry'))}`\n"
                             f"Aktiválva: `{_format_ts(tracked_entry.get('opened_at_utc'))}`\n"
+                            f"SL: `{format_price(tracked_entry.get('sl'))}`\n"
                             f"TP1: `{format_price(tracked_entry.get('tp1'))}`\n"
+                            f"Spot: `{format_price(spot_price)}`\n"
                             f"TP1 elérve: `{tp1_hit_ts}`\n"
                             "Állapot: `Lezárt`"
                         ),
