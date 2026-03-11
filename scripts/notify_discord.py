@@ -518,10 +518,17 @@ def check_and_notify() -> None:
             print(f"{asset_name}: bizonytalan irány ({direction}) — jelzés némítva.")
             continue
 
+        loop_now_dt = datetime.now(timezone.utc)        
         payload_has_position = bool(position_state.get("has_position"))
         if payload_has_position and not exit_signal and not has_lifecycle_event and direction in {"buy", "sell"}:
-            print(f"{asset_name}: belépő jelzés némítva (payload position_state.has_position=true).")
-            continue
+            allow_market_with_tracking = order_type == "MARKET" and tracking_enabled
+            if allow_market_with_tracking:
+                print(
+                    f"{asset_name}: payload has_position=true, de MARKET jelzés tracking mellett továbbengedve (dedup/tracking gate dönt)."
+                )
+            else:
+                print(f"{asset_name}: belépő jelzés némítva (payload position_state.has_position=true).")
+                continue
 
         should_notify_entry = notify_meta.get("should_notify")
         if (
@@ -539,6 +546,7 @@ def check_and_notify() -> None:
             tracking_enabled
             and tracked_status in {"open", "pending"}
             and not exit_signal
+            and signal in {"buy", "sell"}
             and direction in {"buy", "sell"}
         ):
             tracked_side = _normalize_position_side(tracked_entry.get("side") if isinstance(tracked_entry, dict) else "")
@@ -557,10 +565,12 @@ def check_and_notify() -> None:
                 asset_name,
                 tracking_cfg,
                 manual_positions,
-                datetime.now(timezone.utc),
+                loop_now_dt,
             )
-            if tracked_state.get("has_position") or tracked_state.get("pending_active"):
-                tracked_status = "OPEN" if tracked_state.get("has_position") else "PENDING"
+            has_position = bool(tracked_state.get("has_position"))
+            pending_active = bool(tracked_state.get("pending_active"))
+            if has_position or (pending_active and signal != "precision_arming"):
+                tracked_status = "OPEN" if has_position else "PENDING"
                 print(f"{asset_name}: belépő blokkolva (pozíció státusz: {tracked_status}).")
                 continue
             if tracked_state.get("cooldown_active"):
@@ -604,7 +614,8 @@ def check_and_notify() -> None:
                             f"TP1: `{format_price(tracked_entry.get('tp1'))}`\n"
                             f"Spot: `{format_price(spot_price)}`\n"
                             f"TP1 elérve: `{tp1_hit_ts}`\n"
-                            f"Állapot: `{_position_status_hu(tracked_status, tp1_hit_ts)}`"
+                            f"Állapot: `{_position_status_hu(tracked_status, tp1_hit_ts)}`\n"
+                            f"Kártya időbélyeg: `{_format_ts(to_utc_iso(loop_now_dt))}`"
                         ),
                         "color": COLOR_GREEN if activation_side == "long" else COLOR_RED,
                         "fields": [],
@@ -658,7 +669,7 @@ def check_and_notify() -> None:
             exit_signature = _exit_signature(exit_signal)
             exit_reasons = [str(r) for r in (exit_signal.get("reasons") or []) if r][:4]
             is_synthetic_reverse = bool(exit_signal.get("synthetic_reverse"))
-            now_dt = datetime.now(timezone.utc)
+            now_dt = loop_now_dt
             asset_state = notify_state.get(asset_name) if isinstance(notify_state.get(asset_name), dict) else {}
             tracked_entry = manual_positions.get(asset_name) if isinstance(manual_positions, dict) else None
             tracked_status_for_exit = str(tracked_entry.get("status") or "").lower() if isinstance(tracked_entry, dict) else ""
@@ -700,6 +711,11 @@ def check_and_notify() -> None:
                 "description": f"Eszköz: `{asset_name}`",
                 "color": color,
                 "fields": [
+                    {
+                        "name": "🕒 Kártya időbélyeg",
+                        "value": f"`{_format_ts(to_utc_iso(now_dt))}`",
+                        "inline": False,
+                    },
                     {
                         "name": "📊 Árfolyam & Szintek",
                         "value": f"Spot: `{format_price(spot_price)}`\nEredeti Entry: `{format_price(entry)}`",
@@ -747,7 +763,7 @@ def check_and_notify() -> None:
             allow_entry = tp1_net_usd >= counter_min_net
 
         asset_state = notify_state.get(asset_name) if isinstance(notify_state.get(asset_name), dict) else {}
-        now_dt = datetime.now(timezone.utc)
+        now_dt = loop_now_dt
         entry_signature = _entry_signature(direction, order_type)
         entry_levels_signature = _entry_levels_signature(entry, sl, tp1, tp2)
         last_entry_signature = asset_state.get("last_entry_signature")
