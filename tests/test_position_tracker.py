@@ -545,6 +545,48 @@ def test_save_positions_atomic_treats_buy_sell_side_as_open(tmp_path: Path) -> N
     assert loaded["EURUSD"]["side"] == "long"
 
 
+def test_save_positions_atomic_preserves_order_type_when_payload_missing_it(tmp_path: Path) -> None:
+    db_path = tmp_path / "trading.db"
+    position_tracker.state_db.initialize(db_path)
+
+    connection = position_tracker.state_db.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO positions (asset, entry_price, size, sl, tp, status, strategy_metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "USOIL",
+                82.39,
+                1.0,
+                80.0,
+                90.0,
+                "OPEN",
+                '{"side":"long","order_type":"LIMIT","opened_at_utc":"2026-03-10T18:31:44Z"}',
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    payload = {
+        "USOIL": {
+            "status": "open",
+            "side": "long",
+            "entry": 82.39,
+            "size": 1.0,
+            "sl": 80.0,
+            "tp1": 90.0,
+            "tp2": 90.0,
+        }
+    }
+    position_tracker.save_positions_atomic(str(db_path), payload)
+
+    loaded = position_tracker.load_positions(str(db_path), treat_missing_as_flat=False)
+    assert loaded["USOIL"]["order_type"] == "LIMIT"
+
+
 def test_pending_exit_db_path_still_works(tmp_path: Path) -> None:
     db_path = tmp_path / "trading.db"
 
