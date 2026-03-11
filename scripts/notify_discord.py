@@ -546,7 +546,7 @@ def check_and_notify() -> None:
             tracking_enabled
             and tracked_status in {"open", "pending"}
             and not exit_signal
-            and signal in {"buy", "sell"}
+            and signal in {"buy", "sell", "precision_arming"}
             and direction in {"buy", "sell"}
         ):
             tracked_side = _normalize_position_side(tracked_entry.get("side") if isinstance(tracked_entry, dict) else "")
@@ -736,7 +736,12 @@ def check_and_notify() -> None:
                 asset_state["last_position_event_key"] = event_key
             notify_state[asset_name] = asset_state
             notify_state_changed = True
-            continue
+            if not (
+                is_synthetic_reverse
+                and signal in {"buy", "sell", "precision_arming"}
+                and direction in {"buy", "sell"}
+            ):
+                continue
 
         tp1_net_usd = 0.0
         if entry is None or sl is None or tp1 is None:
