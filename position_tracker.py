@@ -211,6 +211,7 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
                 "sl": row["sl"],
                 "tp1": tp_value,
                 "tp2": tp_value,
+                "order_type": metadata.get("order_type"),
                 "opened_at_utc": metadata.get("opened_at_utc"),
                 "closed_at_utc": metadata.get("closed_at_utc"),
                 "cooldown_until_utc": metadata.get("cooldown_until_utc"),
@@ -444,6 +445,7 @@ def open_position(
     tp1: Optional[float],
     tp2: Optional[float],
     opened_at_utc: str,
+    order_type: Optional[str] = None,
     positions: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     norm_side = _normalize_position_side(side)
@@ -452,6 +454,7 @@ def open_position(
     updated[asset] = {
         "status": "open",
         "side": norm_side,
+        "order_type": str(order_type or "MARKET").upper(),
         "opened_at_utc": opened_at_utc,
         "entry": entry,
         "sl": sl,
