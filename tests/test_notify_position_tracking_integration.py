@@ -682,8 +682,33 @@ def test_notify_precision_arming_opposite_open_position_emits_hard_exit(tmp_path
 
     sent = []
     monkeypatch.setattr(notify, "send_discord_embed", lambda embed: sent.append(embed))
+    closed_calls = []
 
+    def _close_position(asset, reason, closed_at_utc, cooldown_minutes, positions):
+        closed_calls.append(
+            {
+                "asset": asset,
+                "reason": reason,
+                "cooldown_minutes": cooldown_minutes,
+            }
+        )
+        next_positions = dict(positions)
+        current = dict(next_positions.get(asset) or {})
+        current.update(
+            {
+                "status": "closed",
+                "side": None,
+                "closed_at_utc": closed_at_utc,
+                "close_reason": reason,
+            }
+        )
+        next_positions[asset] = current
+        return next_positions
+
+    monkeypatch.setattr(notify.position_tracker, "close_position", _close_position)
+    
     notify.check_and_notify()
 
+    assert closed_calls and closed_calls[0]["reason"] == "hard_exit"
     assert any("AZONNAL ZÁRD A POZÍCIÓT" in (item.get("title") or "") for item in sent)
     assert any("NYISS SHORT" in (item.get("title") or "") for item in sent)
