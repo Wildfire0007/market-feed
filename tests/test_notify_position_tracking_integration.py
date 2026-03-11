@@ -149,7 +149,7 @@ def test_notify_persists_open_after_market_precision_entry_card(tmp_path, monkey
 
     persisted = []
 
-    def _open_position(asset, side, entry, sl, tp1, tp2, opened_at_utc, positions):
+    def _open_position(asset, side, entry, sl, tp1, tp2, opened_at_utc, order_type=None, positions=None):
         next_positions = dict(positions)
         next_positions[asset] = {
             "status": "open",
@@ -358,7 +358,7 @@ def test_notify_persists_open_for_plain_market_buy_signal(tmp_path, monkeypatch)
 
     persisted = []
 
-    def _open_position(asset, side, entry, sl, tp1, tp2, opened_at_utc, positions):
+    def _open_position(asset, side, entry, sl, tp1, tp2, opened_at_utc, order_type=None, positions=None):
         next_positions = dict(positions)
         next_positions[asset] = {"status": "open", "side": side, "entry": entry}
         return next_positions
@@ -406,6 +406,7 @@ def test_notify_sends_single_activation_card_for_open_position(tmp_path, monkeyp
                 "side": "long",
                 "opened_at_utc": "2026-01-01T00:00:00Z",
                 "entry": 25.0,
+                "order_type": "LIMIT",
                 "sl": 24.8,
                 "tp1": 25.2,
                 "tp2": 25.4,
@@ -431,6 +432,7 @@ def test_notify_sends_single_activation_card_for_open_position(tmp_path, monkeyp
         and "Állapot: `Nyitott`" in (item.get("description") or "")
     ]
     assert len(activation) == 1
+    assert "Belépő típus: `LIMIT`" in (activation[0].get("description") or "")
     assert "Aktiválva: `2026-01-01 01:00:00`" in (activation[0].get("description") or "")
 
 
