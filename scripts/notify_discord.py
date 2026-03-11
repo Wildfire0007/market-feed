@@ -559,7 +559,17 @@ def check_and_notify() -> None:
                     "reasons": ["Ellenirányú erős belépési jel (Trendforduló)"],
                     "synthetic_reverse": True,
                 }
-
+                closed_at_utc = to_utc_iso(loop_now_dt)
+                manual_positions = position_tracker.close_position(
+                    asset_name,
+                    reason="hard_exit",
+                    closed_at_utc=closed_at_utc,
+                    cooldown_minutes=0,
+                    positions=manual_positions,
+                )
+                tracked_entry = manual_positions.get(asset_name) if isinstance(manual_positions, dict) else None
+                tracked_status = str(tracked_entry.get("status") or "").lower() if isinstance(tracked_entry, dict) else ""
+                
         if tracking_enabled and not exit_signal and not has_lifecycle_event:
             tracked_state = position_tracker.compute_state(
                 asset_name,
