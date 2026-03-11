@@ -33,6 +33,44 @@ def _normalize_position_side(value: Any) -> Optional[str]:
     return None
 
 
+def _infer_side_from_levels(entry: Any, sl: Any, tp: Any) -> Optional[str]:
+    try:
+        entry_f = float(entry)
+    except (TypeError, ValueError):
+        return None
+
+    def _sign(value: Any) -> int:
+        try:
+            diff = float(value) - entry_f
+        except (TypeError, ValueError):
+            return 0
+        if diff > 0:
+            return 1
+        if diff < 0:
+            return -1
+        return 0
+
+    sl_sign = _sign(sl)
+    tp_sign = _sign(tp)
+
+    if sl_sign and tp_sign:
+        if sl_sign == -1 and tp_sign == 1:
+            return "long"
+        if sl_sign == 1 and tp_sign == -1:
+            return "short"
+        return None
+
+    if sl_sign == -1:
+        return "long"
+    if sl_sign == 1:
+        return "short"
+    if tp_sign == 1:
+        return "long"
+    if tp_sign == -1:
+        return "short"
+    return None
+
+
 LOGGER = logging.getLogger("manual_positions")
 ensure_json_stream_handler(LOGGER, static_fields={"component": "manual_positions"})
 
@@ -202,7 +240,12 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
             normalized_side = _normalize_position_side(metadata.get("side"))
             if normalized_side is None and str(row["status"] or "").upper() == "OPEN":
                 normalized_side = _normalize_position_side(metadata.get("direction"))
-
+            if normalized_side is None and str(row["status"] or "").upper() == "OPEN":
+                normalized_side = _infer_side_from_levels(
+                    row["entry_price"],
+                    row["sl"],
+                    tp_value,
+                )
             positions[asset] = {
                 "side": normalized_side,
                 "status": str(row["status"] or "open").lower(),
