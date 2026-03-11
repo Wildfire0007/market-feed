@@ -522,11 +522,13 @@ def check_and_notify() -> None:
                 if activation_key and asset_state.get("last_position_event_key") != activation_key:
                     activation_side = str(tracked_entry.get("side") or "").lower()
                     irany = "Vétel" if activation_side == "long" else "Eladás"
+                    order_type = str(tracked_entry.get("order_type") or "N/A").upper()
                     tp1_hit_ts = _resolve_tp1_hit_ts(tracked_entry)                     
                     send_discord_embed({
                         "title": f"{_asset_emoji(asset_name)} {asset_name}",
                         "description": (
                             f"Irány: `{irany}`\n"
+                            f"Belépő típus: `{order_type}`\n"
                             f"Belépő: `{format_price(tracked_entry.get('entry'))}`\n"
                             f"Aktiválva: `{_format_ts(tracked_entry.get('opened_at_utc'))}`\n"
                             f"TP1: `{format_price(tracked_entry.get('tp1'))}`\n"
@@ -777,6 +779,7 @@ def check_and_notify() -> None:
                     tp1=tp1,
                     tp2=tp2,
                     opened_at_utc=to_utc_iso(now_dt),
+                    order_type=order_type,
                     positions=manual_positions,
                 )
             if not DRY_RUN:
