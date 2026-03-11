@@ -560,6 +560,7 @@ def check_and_notify() -> None:
             if tracked_side and tracked_side != direction:
                 exit_signal = {
                     "state": "hard_exit",
+                    "direction": "long" if tracked_side == "buy" else "short",
                     "reasons": ["Ellenirányú erős belépési jel (Trendforduló)"],
                     "synthetic_reverse": True,
                 }
@@ -720,27 +721,44 @@ def check_and_notify() -> None:
             else:
                 color = COLOR_ORANGE
 
+            close_direction = _normalize_position_side(exit_signal.get("direction"))
+            if not close_direction and isinstance(tracked_entry, dict):
+                close_direction = _normalize_position_side(tracked_entry.get("side"))
+            close_direction_text = "LONG" if close_direction == "buy" else "SHORT" if close_direction == "sell" else "N/A"
+
+            fields = [
+                {
+                    "name": "🕒 Kártya időbélyeg",
+                    "value": f"`{_format_ts(to_utc_iso(now_dt))}`",
+                    "inline": False,
+                },
+            ]
+            if exit_state == "hard_exit":
+                fields.append(
+                    {
+                        "name": "🎯 Zárandó irány",
+                        "value": f"`{close_direction_text}`",
+                        "inline": False,
+                    }
+                )
+            fields.extend([
+                {
+                    "name": "📊 Árfolyam & Szintek",
+                    "value": f"Spot: `{format_price(spot_price)}`\nEredeti Entry: `{format_price(entry)}`",
+                    "inline": False,
+                },
+                {
+                    "name": "💡 Javaslat oka",
+                    "value": "\n".join(f"• {_hu_reason(r)}" for r in exit_reasons) or "• N/A",
+                    "inline": False,
+                }
+            ])
+
             embed = {
                 "title": state_label,
                 "description": f"Eszköz: `{asset_name}`",
                 "color": color,
-                "fields": [
-                    {
-                        "name": "🕒 Kártya időbélyeg",
-                        "value": f"`{_format_ts(to_utc_iso(now_dt))}`",
-                        "inline": False,
-                    },
-                    {
-                        "name": "📊 Árfolyam & Szintek",
-                        "value": f"Spot: `{format_price(spot_price)}`\nEredeti Entry: `{format_price(entry)}`",
-                        "inline": False,
-                    },
-                    {
-                        "name": "💡 Javaslat oka",
-                        "value": "\n".join(f"• {_hu_reason(r)}" for r in exit_reasons) or "• N/A",
-                        "inline": False,
-                    }
-                ],
+                "fields": fields,
                 "footer": {"text": f"Menedzsment • {asset_name}"},
             }
             send_discord_embed(embed)
@@ -750,12 +768,9 @@ def check_and_notify() -> None:
                 asset_state["last_position_event_key"] = event_key
             notify_state[asset_name] = asset_state
             notify_state_changed = True
-            if not (
-                is_synthetic_reverse
-                and signal in {"buy", "sell", "precision_arming"}
-                and direction in {"buy", "sell"}
-            ):
-                continue
+            # Hard-exit után ugyanabban a ciklusban ne küldjünk azonnali új entry kártyát,
+            # mert ez élőben ellentmondásos "zárd + nyisd" párost eredményez.
+            continue
 
         tp1_net_usd = 0.0
         if entry is None or sl is None or tp1 is None:
