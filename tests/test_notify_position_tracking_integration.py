@@ -433,7 +433,104 @@ def test_notify_sends_single_activation_card_for_open_position(tmp_path, monkeyp
     ]
     assert len(activation) == 1
     assert "Belépő típus: `LIMIT`" in (activation[0].get("description") or "")
+    assert "SL: `24.80`" in (activation[0].get("description") or "")
+    assert "Spot: `25.00`" in (activation[0].get("description") or "")
     assert "Aktiválva: `2026-01-01 01:00:00`" in (activation[0].get("description") or "")
+
+def test_notify_activation_uses_camel_case_order_type_fallback(tmp_path, monkeypatch):
+    public_dir = tmp_path / "public"
+    signal_path = public_dir / "XAGUSD" / "signal.json"
+    _write_signal(
+        signal_path,
+        {
+            "signal": "no entry",
+            "spot": {"price": 25.0},
+            "gates": {"missing": []},
+            "biases": {},
+            "alignment_state": "TREND",
+        },
+    )
+
+    monkeypatch.setattr(notify, "PUBLIC_DIR", public_dir)
+    monkeypatch.setattr(notify, "DISCORD_NOTIFY_ASSETS", {"XAGUSD"})
+    monkeypatch.setattr(notify, "DRY_RUN", False)
+    monkeypatch.setattr(notify, "DISCORD_WEBHOOK_URL", "")
+    monkeypatch.setattr(
+        notify.position_tracker,
+        "load_positions",
+        lambda *_: {
+            "XAGUSD": {
+                "status": "open",
+                "side": "long",
+                "opened_at_utc": "2026-01-01T00:00:00Z",
+                "entry": 25.0,
+                "orderType": "limit",
+                "sl": 24.8,
+                "tp1": 25.2,
+                "tp2": 25.4,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        notify.position_tracker,
+        "compute_state",
+        lambda *_args, **_kwargs: {"has_position": True, "pending_active": False, "cooldown_active": False},
+    )
+
+    sent = []
+    monkeypatch.setattr(notify, "send_discord_embed", lambda embed: sent.append(embed))
+
+    notify.check_and_notify()
+
+    assert "Belépő típus: `LIMIT`" in (sent[0].get("description") or "")
+
+
+def test_notify_activation_defaults_to_auto_activation_when_entry_type_missing(tmp_path, monkeypatch):
+    public_dir = tmp_path / "public"
+    signal_path = public_dir / "XAGUSD" / "signal.json"
+    _write_signal(
+        signal_path,
+        {
+            "signal": "no entry",
+            "spot": {"price": 25.0},
+            "gates": {"missing": []},
+            "biases": {},
+            "alignment_state": "TREND",
+        },
+    )
+
+    monkeypatch.setattr(notify, "PUBLIC_DIR", public_dir)
+    monkeypatch.setattr(notify, "DISCORD_NOTIFY_ASSETS", {"XAGUSD"})
+    monkeypatch.setattr(notify, "DRY_RUN", False)
+    monkeypatch.setattr(notify, "DISCORD_WEBHOOK_URL", "")
+    monkeypatch.setattr(
+        notify.position_tracker,
+        "load_positions",
+        lambda *_: {
+            "XAGUSD": {
+                "status": "open",
+                "side": "long",
+               "opened_at_utc": "2026-01-01T00:00:00Z",
+                "entry": 25.0,
+                "sl": 24.8,
+                "tp1": 25.2,
+                "tp2": 25.4,
+            }
+       },
+    )
+    monkeypatch.setattr(
+        notify.position_tracker,
+        "compute_state",
+        lambda *_args, **_kwargs: {"has_position": True, "pending_active": False, "cooldown_active": False},
+    )
+
+   sent = []
+    monkeypatch.setattr(notify, "send_discord_embed", lambda embed: sent.append(embed))
+
+    notify.check_and_notify()
+
+    assert "Belépő típus: `Automatikus aktiválás`" in (sent[0].get("description") or "")
+
 
 
 def test_notify_sends_close_card_once_for_tp2_close(tmp_path, monkeypatch):
@@ -484,7 +581,8 @@ def test_notify_sends_close_card_once_for_tp2_close(tmp_path, monkeypatch):
         and "Állapot: `Lezárt`" in (item.get("description") or "")
     ]
     assert len(closed) == 1
-
+    assert "SL: `N/A`" in (closed[0].get("description") or "")
+    assert "Spot: `25.40`" in (closed[0].get("description") or "")
 
 def test_notify_lifecycle_not_blocked_by_alignment_or_gates(tmp_path, monkeypatch):
     public_dir = tmp_path / "public"
