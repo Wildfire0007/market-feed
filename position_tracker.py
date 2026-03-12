@@ -252,8 +252,8 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
                 "entry": row["entry_price"],
                 "size": row["size"],
                 "sl": row["sl"],
-                "tp1": tp_value,
-                "tp2": tp_value,
+                "tp1": metadata.get("tp1") if metadata.get("tp1") is not None else tp_value,
+                "tp2": metadata.get("tp2") if metadata.get("tp2") is not None else tp_value,
                 "order_type": metadata.get("order_type") or metadata.get("orderType"),
                 "entry_type": metadata.get("entry_type") or metadata.get("entryType"),
                 "trigger_type": metadata.get("trigger_type") or metadata.get("triggerType"),
@@ -262,6 +262,9 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
                 "closed_at_utc": metadata.get("closed_at_utc"),
                 "cooldown_until_utc": metadata.get("cooldown_until_utc"),
                 "close_reason": metadata.get("close_reason"),
+                "tp1_scaled": bool(metadata.get("tp1_scaled")),
+                "tp1_hit_at_utc": metadata.get("tp1_hit_at_utc"),
+                "last_management_signal": metadata.get("last_management_signal"),
             }
         return positions
     try:
