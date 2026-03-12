@@ -245,6 +245,12 @@ jobs:
       DISABLE_PIPELINE_MONITOR: ${{ vars.DISABLE_PIPELINE_MONITOR || '0' }}
       WARNINGS_RATIO_TARGET: "0.2"
     steps:
+      - name: Validate Discord webhook secret
+        run: |
+          if [ -z "${DISCORD_WEBHOOK_URL}" ]; then
+            echo "ERROR: DISCORD_WEBHOOK_URL secret is missing or empty." >&2
+            exit 1
+          fi
       - name: Checkout latest signals
         uses: actions/checkout@v5
         with:
