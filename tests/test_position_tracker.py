@@ -53,6 +53,39 @@ def test_load_positions_reads_from_db(tmp_path: Path) -> None:
     assert loaded["BTCUSD"]["side"] == "long"
 
 
+def test_load_positions_preserves_tp1_and_tp1_scaleout_metadata(tmp_path: Path) -> None:
+    db_path = tmp_path / "trading.db"
+    position_tracker.state_db.initialize(db_path)
+    connection = position_tracker.state_db.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO positions (asset, entry_price, size, sl, tp, status, strategy_metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "USOIL",
+                89.03,
+                0.5,
+                89.03,
+                95.0,
+                "OPEN",
+                '{"side":"long","tp1":93.17,"tp2":95.0,"tp1_scaled":true,"tp1_hit_at_utc":"2026-03-12T13:15:00Z","last_management_signal":{"state":"scale_out","triggered_at":"2026-03-12T13:15:00Z"}}',
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    loaded = position_tracker.load_positions(str(db_path), treat_missing_as_flat=False)
+
+    assert loaded["USOIL"]["tp1"] == 93.17
+    assert loaded["USOIL"]["tp2"] == 95.0
+    assert loaded["USOIL"]["tp1_scaled"] is True
+    assert loaded["USOIL"]["tp1_hit_at_utc"] == "2026-03-12T13:15:00Z"
+    assert loaded["USOIL"]["last_management_signal"]["state"] == "scale_out"
+
+
 def test_close_position_sets_cooldown_state():
     now_dt = datetime.datetime(2025, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
     opened_at = "2025-01-01T11:00:00Z"
