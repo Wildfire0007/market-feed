@@ -278,7 +278,7 @@ def test_notify_precision_arming_not_blocked_by_notify_should_notify_false(tmp_p
     assert len(sent) == 1
 
 
-def test_notify_precision_arming_autocorrects_direction_before_entry_gate(tmp_path, monkeypatch):
+def test_notify_precision_arming_invalid_direction_levels_are_dropped(tmp_path, monkeypatch):
     public_dir = tmp_path / "public"
     signal_path = public_dir / "XAGUSD" / "signal.json"
     _write_signal(
@@ -318,7 +318,7 @@ def test_notify_precision_arming_autocorrects_direction_before_entry_gate(tmp_pa
     monkeypatch.setattr(notify.position_tracker, "save_positions_atomic", lambda *_: None)
 
     notify.check_and_notify()
-    assert len(sent) == 1
+    assert sent == []
 
 
 def test_notify_persists_open_for_plain_market_buy_signal(tmp_path, monkeypatch):
@@ -716,7 +716,11 @@ def test_notify_precision_arming_opposite_open_position_emits_hard_exit(tmp_path
         field.get("name") == "🎯 Zárandó irány" and "LONG" in str(field.get("value") or "")
         for field in (hard_exit_embed.get("fields") or [])
     )
-    assert not any("NYISS SHORT" in (item.get("title") or "") for item in sent)
+    titles = [str(item.get("title") or "") for item in sent]
+    assert any("NYISS SHORT" in title for title in titles)
+    assert next(i for i, title in enumerate(titles) if "AZONNAL ZÁRD A POZÍCIÓT" in title) < next(
+        i for i, title in enumerate(titles) if "NYISS SHORT" in title
+    )
 
 
 def test_notify_treats_no_entry_with_precision_trigger_as_precision_arming(tmp_path, monkeypatch):
