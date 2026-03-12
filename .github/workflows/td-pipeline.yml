@@ -66,9 +66,15 @@ jobs:
           restore-keys: |
             venv-${{ runner.os }}-
 
-      - name: Create virtualenv (cache miss)
-        if: steps.cache-venv.outputs.cache-hit != 'true'
+      - name: Ensure virtualenv is available
         run: |
+          if [ -x .venv/bin/python ]; then
+            echo "Reusing cached virtualenv"
+            exit 0
+          fi
+
+          echo "Cached virtualenv missing or invalid, rebuilding .venv"
+          rm -rf .venv
           python -m venv .venv
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/pip install -r requirements.lock
