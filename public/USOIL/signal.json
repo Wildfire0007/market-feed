@@ -1,34 +1,34 @@
 {
   "asset": "USOIL",
   "ok": true,
-  "retrieved_at_utc": "2026-03-12T02:26:35Z",
+  "retrieved_at_utc": "2026-03-12T02:31:37Z",
   "source": "Twelve Data (lokális JSON)",
   "spot": {
-    "price": 93.43901,
-    "utc": "2026-03-12T02:26:08Z",
-    "retrieved_at_utc": "2026-03-12T02:26:08Z",
+    "price": 93.41742,
+    "utc": "2026-03-12T02:31:15Z",
+    "retrieved_at_utc": "2026-03-12T02:31:15Z",
     "source": "twelvedata:quote",
     "realtime_override": false,
     "fallback_used": false,
     "confidence": 1.0,
-    "avg_latency_profile": 27.0,
+    "avg_latency_profile": 22.0,
     "realtime_stats": null
   },
-  "signal": "no entry",
-  "probability": 88,
-  "probability_raw": 88,
+  "signal": "precision_arming",
+  "probability": 85,
+  "probability_raw": 85,
   "entry": 92.088932,
   "sl": 90.49378125714286,
   "tp1": 96.87438422857142,
   "tp2": 96.87438422857142,
-  "rr": 3.0,
+  "rr": 2.999999999999991,
   "leverage": 20.0,
   "position_size_scale": 0.7,
   "range_time_stop": null,
   "funding_filter": null,
   "funding_rate": null,
   "stale_timeframes": {
-    "k1m": true,
+    "k1m": false,
     "k5m": false,
     "k1h": false,
     "k4h": false
@@ -50,7 +50,7 @@
     "effective_bias": "long"
   },
   "gates": {
-    "mode": "core_only",
+    "mode": "core",
     "required": [
       "session",
       "spread_guard",
@@ -62,7 +62,10 @@
       "rr_math>=2.0",
       "tp_min_profit",
       "min_stoploss",
-      "tp1_net>=+0.35%"
+      "tp1_net>=+0.35%",
+      "precision_score>=55",
+      "precision_flow_alignment",
+      "precision_trigger_sync"
     ],
     "missing": [],
     "session_window_status": {
@@ -74,7 +77,8 @@
     }
   },
   "gate_skips": [
-    "liquidity_profile_no_levels"
+    "liquidity_profile_no_levels",
+    "liquidity_no_data"
   ],
   "session_info": {
     "open": true,
@@ -83,8 +87,8 @@
     "within_entry_window": true,
     "within_monitor_window": true,
     "weekday_ok": true,
-    "now_utc": "2026-03-12T02:26:35.228606+00:00",
-    "now_budapest": "2026-03-12T03:26:35.228606+01:00",
+    "now_utc": "2026-03-12T02:31:37.269296+00:00",
+    "now_budapest": "2026-03-12T03:31:37.269296+01:00",
     "windows_utc": [
       [
         0,
@@ -118,7 +122,7 @@
     "status_profile": "default",
     "sunday_open_utc": "23:00",
     "sunday_open_budapest": "00:00",
-    "minutes_to_session_close": 1174,
+    "minutes_to_session_close": 1169,
     "session_close_reason": "entry_window",
     "next_session_open_utc": "2026-03-13T00:00:00+00:00",
     "next_session_open_budapest": "2026-03-13T01:00:00+01:00",
@@ -132,7 +136,7 @@
   "momentum_diagnostics": {
     "evaluated": true,
     "used_for_decision": false,
-    "direction_result": null,
+    "direction_result": "buy",
     "required": [
       "session",
       "regime",
@@ -147,90 +151,95 @@
       "intraday_range_guard"
     ],
     "missing": [],
-    "soft_flags": [],
+    "soft_flags": [
+      "liquidity",
+      "order_flow",
+      "order_flow_pressure",
+      "ofi"
+    ],
     "liquidity_data_available": false,
-    "flow_data_available": false,
-    "ofi_available": false,
-    "momentum_trigger_ok": false,
-    "momentum_atr_ok": null,
-    "trigger_desc": "k1m stale — precision/momentum/flow modulok letiltva, core (spot+k5m) fut tovább",
-    "precision_data_gap_mode": true
+    "flow_data_available": true,
+    "ofi_available": true,
+    "momentum_trigger_ok": true,
+    "momentum_atr_ok": true,
+    "trigger_desc": "EMA9×21 momentum cross",
+    "precision_data_gap_mode": false
   },
   "diagnostics": {
     "timeframes": {
       "k1m": {
-        "last_raw_utc": "2026-03-12T02:16:00Z",
-        "last_closed_utc": "2026-03-12T02:16:00Z",
-        "latency_seconds": 635,
+        "last_raw_utc": "2026-03-12T02:30:00Z",
+        "last_closed_utc": "2026-03-12T02:30:00Z",
+        "latency_seconds": 97,
         "expected_max_delay_seconds": 180,
-        "source_mtime_utc": "2026-03-12T02:26:31Z",
-        "stale_for_signals": true,
+        "source_mtime_utc": "2026-03-12T02:31:31Z",
+        "stale_for_signals": false,
         "freshness_limit_seconds": 240.0,
-        "freshness_violation": true,
-        "freshness_retries": 1,
-        "used_symbol": "WTI/USD:ICE",
+        "freshness_violation": false,
+        "freshness_retries": 0,
+        "used_symbol": "WTI/USD:COMMODITY",
         "used_exchange": null,
-        "retrieved_at_utc": "2026-03-12T02:26:30Z",
-        "latency_guard_seconds": 630,
-        "latency_guard_adjustment_seconds": 5,
-        "critical_stale": true
+        "retrieved_at_utc": "2026-03-12T02:31:31Z",
+        "latency_guard_seconds": 91,
+        "latency_guard_adjustment_seconds": 6,
+        "critical_stale": false
       },
       "k5m": {
-        "last_raw_utc": "2026-03-12T02:15:00Z",
-        "last_closed_utc": "2026-03-12T02:15:00Z",
-        "latency_seconds": 695,
+        "last_raw_utc": "2026-03-12T02:20:00Z",
+        "last_closed_utc": "2026-03-12T02:20:00Z",
+        "latency_seconds": 697,
         "expected_max_delay_seconds": 300,
-        "source_mtime_utc": "2026-03-12T02:26:11Z",
+        "source_mtime_utc": "2026-03-12T02:31:28Z",
         "stale_for_signals": false,
         "freshness_limit_seconds": 900.0,
         "freshness_violation": false,
         "freshness_retries": 0,
         "used_symbol": "WTI/USD",
         "used_exchange": "COMMODITY",
-        "retrieved_at_utc": "2026-03-12T02:26:11Z",
-        "latency_guard_seconds": 671,
-        "latency_guard_adjustment_seconds": 24,
+        "retrieved_at_utc": "2026-03-12T02:31:28Z",
+        "latency_guard_seconds": 688,
+        "latency_guard_adjustment_seconds": 9,
         "critical_stale": false
       },
       "k1h": {
         "last_raw_utc": "2026-03-12T02:00:00Z",
         "last_closed_utc": "2026-03-12T02:00:00Z",
-        "latency_seconds": 1595,
+        "latency_seconds": 1897,
         "expected_max_delay_seconds": 3600,
-        "source_mtime_utc": "2026-03-12T02:26:20Z",
+        "source_mtime_utc": "2026-03-12T02:31:30Z",
         "stale_for_signals": false,
         "freshness_limit_seconds": 5400.0,
         "freshness_violation": false,
         "freshness_retries": 0,
         "used_symbol": "WTI/USD",
         "used_exchange": "COMMODITY",
-        "retrieved_at_utc": "2026-03-12T02:26:20Z",
-        "latency_guard_seconds": 1580,
-        "latency_guard_adjustment_seconds": 15,
+        "retrieved_at_utc": "2026-03-12T02:31:30Z",
+        "latency_guard_seconds": 1890,
+        "latency_guard_adjustment_seconds": 7,
         "critical_stale": false
       },
       "k4h": {
         "last_raw_utc": "2026-03-12T00:00:00Z",
         "last_closed_utc": "2026-03-12T00:00:00Z",
-        "latency_seconds": 8795,
+        "latency_seconds": 9097,
         "expected_max_delay_seconds": 14400,
-        "source_mtime_utc": "2026-03-12T02:26:17Z",
+        "source_mtime_utc": "2026-03-12T02:31:22Z",
         "stale_for_signals": false,
         "freshness_limit_seconds": 21600.0,
         "freshness_violation": false,
         "freshness_retries": 0,
         "used_symbol": "WTI/USD",
         "used_exchange": "COMMODITY",
-        "retrieved_at_utc": "2026-03-12T02:26:17Z",
-        "latency_guard_seconds": 8777,
-        "latency_guard_adjustment_seconds": 18,
+        "retrieved_at_utc": "2026-03-12T02:31:22Z",
+        "latency_guard_seconds": 9082,
+        "latency_guard_adjustment_seconds": 15,
         "critical_stale": false
       },
       "spot": {
-        "last_raw_utc": "2026-03-12T02:26:08Z",
-        "latency_seconds": 27,
+        "last_raw_utc": "2026-03-12T02:31:15Z",
+        "latency_seconds": 22,
         "expected_max_delay_seconds": 900,
-        "source_mtime_utc": "2026-03-12T02:26:31Z",
+        "source_mtime_utc": "2026-03-12T02:31:31Z",
         "source": "twelvedata:quote",
         "fallback_used": false,
         "realtime_override": false,
@@ -243,15 +252,13 @@
       }
     },
     "source_files": {
-      "spot.json": "2026-03-12T02:26:31Z",
-      "klines_1m.json": "2026-03-12T02:26:31Z",
-      "klines_5m.json": "2026-03-12T02:26:11Z",
-      "klines_1h.json": "2026-03-12T02:26:20Z",
-      "klines_4h.json": "2026-03-12T02:26:17Z"
+      "spot.json": "2026-03-12T02:31:31Z",
+      "klines_1m.json": "2026-03-12T02:31:31Z",
+      "klines_5m.json": "2026-03-12T02:31:28Z",
+      "klines_1h.json": "2026-03-12T02:31:30Z",
+      "klines_4h.json": "2026-03-12T02:31:22Z"
     },
     "latency_flags": [
-      "k1m: utolsó zárt gyertya 10 perc késésben van",
-      "k1m: jelzés korlátozva 10 perc késés miatt",
       "k5m: utolsó zárt gyertya 11 perc késésben van"
     ],
     "refresh_tips": [
@@ -264,27 +271,28 @@
   },
   "reasons": [
     "Bias(4H→1H)=long (+15.0)",
-    "EMA21 slope 1.92× küszöb (+17.5)",
+    "EMA21 slope 1.91× küszöb (+17.5)",
     "5M BOS trendirányba (+16.0)",
-    "ATR erősség 0.95× küszöb (+10.7)",
+    "ATR erősség 0.89× küszöb (+10.3)",
     "Range expanzió támogatja a momentumot (+3.0)",
     "USOIL: erős momentum — invalid zóna 2.5×ATR(1h)-re tágítva",
     "Fib zóna konfluencia (0.618–0.886) (+18.0)",
-    "Order flow neutrális (−4.6)",
-    "P-Score reduced by 2.1 due to ATR Soft Gate tolerance",
+    "Order flow neutrális (−4.8)",
+    "P-Score reduced by 4.6 due to ATR Soft Gate tolerance",
     "USOIL: parabolikus lendület — RR cél 1:1.4 környékére szűkítve",
     "USOIL: ázsiai sáv — pozícióméret ×0.70",
+    "Liquidity gate skipped (no volume proxy available)",
     "USOIL stop lazítás: ATR1h alapú kockázat ×0.97",
-    "Diagnosztika: k1m: utolsó zárt gyertya 10 perc késésben van",
-    "Diagnosztika: k1m: jelzés korlátozva 10 perc késés miatt",
+    "Precision trigger kész → limit figyelés",
+    "Precision limit belépő parkolva 12 percig",
     "Diagnosztika: k5m: utolsó zárt gyertya 11 perc késésben van",
     "Pozíciómenedzsment: aktív long pozíció (opened_at: 2026-03-12T00:01:41Z, Entry: 92.088932, SL: 90.49378125714286, TP2: 96.87438422857142)"
   ],
   "realtime_transport": "http",
   "data_integrity_diagnostics": {
     "core_data_ok": true,
-    "precision_data_ok": false,
-    "precision_disabled_due_to_data_gap": true,
+    "precision_data_ok": true,
+    "precision_disabled_due_to_data_gap": false,
     "intraday_relax_applied": false,
     "core_required_sources": [
       "spot",
@@ -296,10 +304,10 @@
       "k1m"
     ],
     "spot": {
-      "last_raw_utc": "2026-03-12T02:26:08Z",
-      "latency_seconds": 27,
+      "last_raw_utc": "2026-03-12T02:31:15Z",
+      "latency_seconds": 22,
       "expected_max_delay_seconds": 900,
-      "source_mtime_utc": "2026-03-12T02:26:31Z",
+      "source_mtime_utc": "2026-03-12T02:31:31Z",
       "source": "twelvedata:quote",
       "fallback_used": false,
       "realtime_override": false,
@@ -311,38 +319,38 @@
       "used_exchange": "COMMODITY"
     },
     "k5m": {
-      "last_raw_utc": "2026-03-12T02:15:00Z",
-      "last_closed_utc": "2026-03-12T02:15:00Z",
-      "latency_seconds": 695,
+      "last_raw_utc": "2026-03-12T02:20:00Z",
+      "last_closed_utc": "2026-03-12T02:20:00Z",
+      "latency_seconds": 697,
       "expected_max_delay_seconds": 300,
-      "source_mtime_utc": "2026-03-12T02:26:11Z",
+      "source_mtime_utc": "2026-03-12T02:31:28Z",
       "stale_for_signals": false,
       "freshness_limit_seconds": 900.0,
       "freshness_violation": false,
       "freshness_retries": 0,
       "used_symbol": "WTI/USD",
       "used_exchange": "COMMODITY",
-      "retrieved_at_utc": "2026-03-12T02:26:11Z",
-      "latency_guard_seconds": 671,
-      "latency_guard_adjustment_seconds": 24,
+      "retrieved_at_utc": "2026-03-12T02:31:28Z",
+      "latency_guard_seconds": 688,
+      "latency_guard_adjustment_seconds": 9,
       "critical_stale": false
     },
     "k1m": {
-      "last_raw_utc": "2026-03-12T02:16:00Z",
-      "last_closed_utc": "2026-03-12T02:16:00Z",
-      "latency_seconds": 635,
+      "last_raw_utc": "2026-03-12T02:30:00Z",
+      "last_closed_utc": "2026-03-12T02:30:00Z",
+      "latency_seconds": 97,
       "expected_max_delay_seconds": 180,
-      "source_mtime_utc": "2026-03-12T02:26:31Z",
-      "stale_for_signals": true,
+      "source_mtime_utc": "2026-03-12T02:31:31Z",
+      "stale_for_signals": false,
       "freshness_limit_seconds": 240.0,
-      "freshness_violation": true,
-      "freshness_retries": 1,
-      "used_symbol": "WTI/USD:ICE",
+      "freshness_violation": false,
+      "freshness_retries": 0,
+      "used_symbol": "WTI/USD:COMMODITY",
       "used_exchange": null,
-      "retrieved_at_utc": "2026-03-12T02:26:30Z",
-      "latency_guard_seconds": 630,
-      "latency_guard_adjustment_seconds": 5,
-      "critical_stale": true
+      "retrieved_at_utc": "2026-03-12T02:31:31Z",
+      "latency_guard_seconds": 91,
+      "latency_guard_adjustment_seconds": 6,
+      "critical_stale": false
     }
   },
   "profile_resolution": {
@@ -368,7 +376,7 @@
     "manual_trade_model": null,
     "min_stoploss_pct": 0.01,
     "atr_abs_min_used": 0.16,
-    "atr_low_threshold": 0.016855066885228875,
+    "atr_low_threshold": 0.01685425287476696,
     "atr_overlay_min": null,
     "bos_lookback": 28,
     "fib_tolerance": 0.012,
@@ -403,14 +411,14 @@
     "status": "disabled",
     "unavailable_reason": "ml_scoring_disabled"
   },
-  "ema21_slope_1h": 0.036393197241756194,
+  "ema21_slope_1h": 0.036380597898731326,
   "ema21_slope_threshold": 0.019,
   "ema21_relation_1h": "above",
   "last_swing_high_1h": 88.461201,
   "last_swing_low_1h": 91.714287,
-  "last_close_1h": 93.439012,
+  "last_close_1h": 93.417422,
   "bos_5m_dir": "bos_up",
-  "atr1h": 3.0092947142857147,
+  "atr1h": 3.0112951428571426,
   "momentum_volume_ratio": null,
   "momentum_liquidity_ok": false,
   "dynamic_tp_profile": {
@@ -426,30 +434,30 @@
     },
     "regime": "normal",
     "reference": {
-      "current": 1.4916317142857167,
+      "current": 1.3944871428571457,
       "q20": 1.1025645142857128,
-      "q50": 1.495079857142856,
-      "q80": 2.1613895857142875
+      "q50": 1.4947069999999982,
+      "q80": 2.157903171428573
     }
   },
   "order_flow_metrics": {
-    "imbalance": -0.04201680672268908,
-    "pressure": 0.0003497983193277978,
-    "delta_volume": -5.0,
+    "imbalance": -0.025210084033613446,
+    "pressure": 0.009803563025210195,
+    "delta_volume": -3.0,
     "aggressor_ratio": null,
-    "imbalance_z": 0.365719090821586,
+    "imbalance_z": 0.29719738135920915,
     "status": "synthetic_volume"
   },
   "intraday_profile": {
     "asset": "USOIL",
-    "timestamp": "2026-03-12T02:26:35Z",
+    "timestamp": "2026-03-12T02:31:37Z",
     "day_start_utc": "2026-03-11T23:00:00Z",
     "day_open": 90.144616,
     "day_high": 94.326118,
     "day_low": 89.802688,
     "day_range": 4.5234299999999905,
-    "range_vs_atr": 3.032538096822433,
-    "range_position": 0.8038859891719338,
+    "range_vs_atr": 3.2437946976922256,
+    "range_position": 0.799113062432714,
     "range_bias": "upper",
     "range_state": "expansion",
     "range_compression": false,
@@ -460,10 +468,10 @@
       "long": false,
       "short": false
     },
-    "micro_range_position": 0.9209879684289826,
-    "micro_range_vs_atr": 2.071080260906993,
+    "micro_range_position": 0.6242819515497662,
+    "micro_range_vs_atr": 1.9531926227870648,
     "micro_range_guard": {
-      "long": true,
+      "long": false,
       "short": false
     },
     "opening_range_high": 94.326118,
@@ -475,8 +483,8 @@
     "opening_gap": 0.34115500000000054,
     "opening_gap_pct": 0.37989070376697454,
     "opening_gap_direction": "up",
-    "price_reference": 93.43901,
-    "elapsed_minutes": 206,
+    "price_reference": 93.41742,
+    "elapsed_minutes": 211,
     "notes": [
       "Range expanzió >1.5×ATR — agresszív menedzsment indokolt."
     ]
@@ -486,7 +494,7 @@
     "usoil_overrides": {
       "momentum_stop": {
         "atr_multiplier": 2.5,
-        "buffer": 7.523236785714287
+        "buffer": 7.528237857142857
       },
       "vwap_distance": null,
       "vwap_bias": {
@@ -502,10 +510,10 @@
         "gap_vwap_break_short": false
       },
       "p_score_adjustments": {
-        "atr1h": 3.0092947142857147
+        "atr1h": 3.0112951428571426
       },
       "rr_adjustments": {
-        "atr1h": 3.0092947142857147,
+        "atr1h": 3.0112951428571426,
         "core_rr_min": 2.2,
         "momentum_rr_min": 2.0,
         "regime": "parabolic",
@@ -515,12 +523,12 @@
       "position_scale": {
         "session": "asia",
         "session_scale": 0.7,
-        "atr1h": 3.0092947142857147,
+        "atr1h": 3.0112951428571426,
         "applied": 0.7
       }
     },
     "news_lockout": false,
-    "adx_value": 49.87936531427136,
+    "adx_value": 53.176330379653834,
     "adx_trend_threshold": 20.0,
     "adx_regime_initial": "trend",
     "atr_multiplier": 1.1,
@@ -530,28 +538,28 @@
       "bucket": "mid",
       "samples": 319,
       "percentile": 0.32,
-      "threshold": 0.016855066885228875
+      "threshold": 0.01685425287476696
     },
-    "atr_threshold_percentile": 0.016855066885228875,
+    "atr_threshold_percentile": 0.01685425287476696,
     "spread_ratio": null,
     "atr_soft_gate": {
       "enabled": true,
-      "rel_atr": 0.01596369347540943,
-      "threshold": 0.016855066885228875,
+      "rel_atr": 0.014927485075665176,
+      "threshold": 0.01685425287476696,
       "tolerance_pct": 0.15,
       "penalty_max": 6.0,
-      "diff_ratio": 0.05288459641774594,
+      "diff_ratio": 0.11431938356558122,
       "mode": "soft_pass",
-      "penalty": 2.1153838567098378,
+      "penalty": 4.572775342623249,
       "warning": "ATR Soft Gate"
     },
     "atr_soft_gate_used": true,
     "atr_ratio_ok": true,
-    "atr_threshold_effective": 0.016855066885228875,
+    "atr_threshold_effective": 0.01685425287476696,
     "spread_gate_ok": true,
     "volatility_gate": {
       "ok": true,
-      "current_atr": 1.4916317142857167,
+      "current_atr": 1.3944871428571457,
       "floor": null
     },
     "atr_abs_min_used": 0.16,
@@ -572,18 +580,18 @@
       "fib_ok": true,
       "ema21_dist_ok": false,
       "order_flow_status": "synthetic_volume",
-      "order_flow_imbalance": -0.04201680672268908,
-      "order_flow_pressure": 0.0003497983193277978,
+      "order_flow_imbalance": -0.025210084033613446,
+      "order_flow_pressure": 0.009803563025210195,
       "order_flow_aggressor": null,
-      "ofi_z": 0.365719090821586,
+      "ofi_z": 0.29719738135920915,
       "realtime_confidence": 1.0
     },
     "dynamic_score_engine": {
-      "base_score": 90.52542108017579,
-      "atr_soft_gate_penalty": 2.1153838567098378,
-      "final_score": 88.41003722346595
+      "base_score": 90.01277759497721,
+      "atr_soft_gate_penalty": 4.572775342623249,
+      "final_score": 85.44000225235396
     },
-    "ofi_z": 0.365719090821586,
+    "ofi_z": 0.29719738135920915,
     "vwap_confluence": {
       "trend_pullback": false,
       "mean_revert": false
@@ -607,6 +615,39 @@
       "core_rr_min": 2.0,
       "momentum_rr_min": 2.0
     },
+    "precision_gate_state": {
+      "score_ready": true,
+      "score": 62.0,
+      "threshold": 55.0,
+      "flow_ready": true,
+      "trigger_ready": true,
+      "trigger_state": "arming",
+      "sync_ready": true,
+      "flow_ready_only": false,
+      "trigger_ready_only": false,
+      "flow_blockers": [],
+      "profile": "baseline",
+      "position_sizing_floor": 0.01,
+      "trigger_wait_since": {
+        "timestamp_utc": "2026-03-12 02:31:37",
+        "timestamp_bud": "2026-03-12 03:31:37"
+      },
+      "trigger_wait_minutes": 0.0,
+      "trigger_fallback": false,
+      "precision_state": "precision_arming",
+      "precision_soft_block": false,
+      "precision_profile": "baseline",
+      "btc_precision_threshold": 52.0,
+      "precision_ready_since": null,
+      "precision_arming_since": null,
+      "precision_events": 1,
+      "precision_hits_ready": 0,
+      "precision_hits_arming": 1,
+      "precision_hits_soft_block": 0,
+      "precision_hits_sync_ready": 1,
+      "precision_hits_flow_ready_only": 0,
+      "precision_hits_trigger_ready_only": 0
+    },
     "precision_score_threshold": 55.0,
     "precision_timeouts": {
       "ready": 10,
@@ -616,20 +657,20 @@
   "entry_gate_context_hu": {
     "atr_kapu": {
       "ok": true,
-      "rel_atr": 0.01596369347540943,
-      "threshold": 0.016855066885228875,
+      "rel_atr": 0.014927485075665176,
+      "threshold": 0.01685425287476696,
       "abs_ok": true,
       "overlay_ok": true,
       "btc_atr_gate": true,
-      "timestamp_utc": "2026-03-12 02:26:35",
-      "timestamp_bud": "2026-03-12 03:26:35"
+      "timestamp_utc": "2026-03-12 02:31:37",
+      "timestamp_bud": "2026-03-12 03:31:37"
     },
     "spread_kapu": {
       "ok": true,
       "spread_ratio_atr": null,
       "spread_limit_atr": 0.45,
-      "timestamp_utc": "2026-03-12 02:26:35",
-      "timestamp_bud": "2026-03-12 03:26:35"
+      "timestamp_utc": "2026-03-12 02:31:37",
+      "timestamp_bud": "2026-03-12 03:31:37"
     },
     "kockazat_guard": {
       "max_risk_pct": 1.2,
@@ -639,19 +680,19 @@
         "round_trip_pct": 0.0007,
         "overnight_pct": 0.0002
       },
-      "timestamp_utc": "2026-03-12 02:26:35",
-      "timestamp_bud": "2026-03-12 03:26:35"
+      "timestamp_utc": "2026-03-12 02:31:37",
+      "timestamp_bud": "2026-03-12 03:31:37"
     },
     "profil_kuszobok": {
       "profil": "baseline",
       "p_score_min": 36.0,
       "p_score_min_base": 36.0,
-      "atr_kuszob_rel": 0.016855066885228875,
+      "atr_kuszob_rel": 0.01685425287476696,
       "atr_abs_min": 0.16,
       "fib_tures_frac": 0.012,
-      "fib_tures_atr": 2.256971035714286,
-      "timestamp_utc": "2026-03-12 02:26:35",
-      "timestamp_bud": "2026-03-12 03:26:35"
+      "fib_tures_atr": 2.2584713571428567,
+      "timestamp_utc": "2026-03-12 02:31:37",
+      "timestamp_bud": "2026-03-12 03:31:37"
     },
     "bos_visszatekintes": 28,
     "fib_zona": {
@@ -661,9 +702,9 @@
         0.886
       ],
       "tures_frac": 0.012,
-      "tures_atr": 2.256971035714286,
-      "timestamp_utc": "2026-03-12 02:26:35",
-      "timestamp_bud": "2026-03-12 03:26:35"
+      "tures_atr": 2.2584713571428567,
+      "timestamp_utc": "2026-03-12 02:31:37",
+      "timestamp_bud": "2026-03-12 03:31:37"
     },
     "session_ablak_utc": {
       "entry": [
@@ -692,124 +733,368 @@
         "ofi": false
       },
       "soft_1of3": false,
-      "timestamp_utc": "2026-03-12 02:26:35",
-      "timestamp_bud": "2026-03-12 03:26:35"
+      "timestamp_utc": "2026-03-12 02:31:37",
+      "timestamp_bud": "2026-03-12 03:31:37"
     },
     "rr_kapuk": {
       "core_rr_min": 2.0,
       "momentum_rr_min": 2.0,
       "relaxalt": false,
       "indok": null,
-      "timestamp_utc": "2026-03-12 02:26:35",
-      "timestamp_bud": "2026-03-12 03:26:35"
+      "timestamp_utc": "2026-03-12 02:31:37",
+      "timestamp_bud": "2026-03-12 03:31:37"
     },
     "momentum_kapu": {
-      "momentum_ok": false,
-      "momentum_direction": null,
-      "momentum_reason": "k1m stale — precision/momentum/flow modulok letiltva, core (spot+k5m) fut tovább",
+      "momentum_ok": true,
+      "momentum_direction": "buy",
+      "momentum_reason": "EMA9×21 momentum cross",
       "momentum_missing": [],
-      "momentum_soft_gates": [],
+      "momentum_soft_gates": [
+        "liquidity",
+        "order_flow",
+        "order_flow_pressure",
+        "ofi"
+      ],
       "momentum_regime_ok": true,
       "momentum_structure_ok": true,
-      "momentum_atr_ok": false,
+      "momentum_atr_ok": true,
       "momentum_liquidity_ok": false,
-      "momentum_trigger_ok": false,
-      "momentum_ofi_z": 0.365719090821586,
-      "timestamp_utc": "2026-03-12 02:26:35",
-      "timestamp_bud": "2026-03-12 03:26:35",
+      "momentum_trigger_ok": true,
+      "momentum_ofi_z": 0.29719738135920915,
+      "timestamp_utc": "2026-03-12 02:31:37",
+      "timestamp_bud": "2026-03-12 03:31:37",
       "momentum_asset_class": "energy_equity"
+    },
+    "precision_kapu": {
+      "score_ready": true,
+      "score": 62.0,
+      "threshold": 55.0,
+      "flow_ready": true,
+      "trigger_ready": true,
+      "trigger_state": "arming",
+      "sync_ready": true,
+      "flow_ready_only": false,
+      "trigger_ready_only": false,
+      "flow_blockers": [],
+      "profile": "baseline",
+      "position_sizing_floor": 0.01,
+      "trigger_wait_since": {
+        "timestamp_utc": "2026-03-12 02:31:37",
+        "timestamp_bud": "2026-03-12 03:31:37"
+      },
+      "trigger_wait_minutes": 0.0,
+      "trigger_fallback": false,
+      "precision_state": "precision_arming",
+      "precision_soft_block": false,
+      "precision_profile": "baseline",
+      "btc_precision_threshold": 52.0,
+      "precision_ready_since": null,
+      "precision_arming_since": null,
+      "precision_events": 1,
+      "precision_hits_ready": 0,
+      "precision_hits_arming": 1,
+      "precision_hits_soft_block": 0,
+      "precision_hits_sync_ready": 1,
+      "precision_hits_flow_ready_only": 0,
+      "precision_hits_trigger_ready_only": 0,
+      "timestamp_utc": "2026-03-12 02:31:37",
+      "timestamp_bud": "2026-03-12 03:31:37"
     }
   },
   "volatility_overlay": {
     "implied_vol": null,
-    "realised_vol": 0.005717619309640514,
+    "realised_vol": 0.006212324521916443,
     "realised_window_minutes": 120,
     "regime": "elevated",
     "premium": null,
     "source_path": null,
     "implied_realised_ratio": null
   },
-  "invalid_levels": {
-    "buy": 90.20963964285714,
-    "sell": 89.96584835714286
+  "precision_plan": {
+    "asset": "USOIL",
+    "direction": "buy",
+    "score": 62.0,
+    "confidence": "medium",
+    "entry": 92.590231,
+    "entry_window": [
+      91.92087717142857,
+      92.92490791428571
+    ],
+    "stop_loss": 90.91684642857143,
+    "take_profit_1": 95.93700014285716,
+    "take_profit_2": 97.61038471428573,
+    "risk": 1.6733845714285749,
+    "liquidity_levels": [
+      92.063951,
+      92.091039,
+      92.134662,
+      92.46022,
+      92.590231
+    ],
+    "factors": [
+      "ATR1m 0.7704",
+      "ATR5m 1.3945",
+      "price near liquidity pocket"
+    ],
+    "score_threshold": 55.0,
+    "score_ready": true,
+    "trigger_state": "arming",
+    "trigger_ready": true,
+    "trigger_levels": {
+      "window_low": 91.92087717142857,
+      "window_high": 92.92490791428571,
+      "fire": 92.590231,
+      "arm": 92.92490791428571,
+      "disarm": 91.92087717142857
+    },
+    "ready_ts": "2026-03-12T02:29:00Z",
+    "order_flow_ready": true,
+    "order_flow_strength": null,
+    "microstructure_score": 62.0,
+    "trigger_progress": 0.7,
+    "trigger_confidence": 0.44,
+    "trigger_reasons": [
+      "order flow optional (volume unavailable)",
+      "price near window"
+    ],
+    "order_flow_status": "synthetic_volume",
+    "order_flow_optional": true,
+    "order_flow_settings": {
+      "imbalance_threshold": 0.6,
+      "pressure_threshold": 0.7,
+      "imbalance_margin": 1.1,
+      "pressure_margin": 1.1,
+      "min_signals": 1,
+      "strength_floor": 0.74,
+      "block_ratio": 0.0
+    },
+    "order_flow_snapshot": {
+      "imbalance": -0.025210084033613446,
+      "pressure": 0.009803563025210195,
+      "delta_volume": -3.0,
+      "aggressor_ratio": null,
+      "status": "synthetic_volume"
+    },
+    "order_flow_signals": 0,
+    "order_flow_blockers": [],
+    "order_flow_stalled": false,
+    "alternates": {
+      "sell": {
+        "direction": "sell",
+        "entry": 93.666197,
+        "entry_window": [
+          93.33152008571429,
+          94.33555082857143
+        ],
+        "stop_loss": 95.33958157142857,
+        "take_profit_1": 90.31942785714284,
+        "take_profit_2": 88.64604328571427,
+        "risk": 1.6733845714285749,
+        "score": 62.0,
+        "confidence": "medium",
+        "trigger_levels": {
+          "window_low": 93.33152008571429,
+          "window_high": 94.33555082857143,
+          "fire": 93.666197,
+          "arm": 93.33152008571429,
+          "disarm": 94.33555082857143
+        },
+        "order_flow_ready": true
+      }
+    },
+    "ready_timeout_minutes": 10,
+    "arming_timeout_minutes": 12,
+    "context": {
+      "intraday_profile": {
+        "range_state": "expansion",
+        "range_position": 0.799113062432714,
+        "range_vs_atr": 3.2437946976922256
+      }
+    }
   },
-  "invalid_buffer_abs": 7.523236785714287,
+  "order_type": "LIMIT",
+  "entry_order_type": "LIMIT",
+  "execution_playbook": [
+    {
+      "step": "precision_limit",
+      "description": "Precision parkolt limit belépő 91.92088–92.92491 — 12 perc timeout",
+      "direction": "buy",
+      "confidence": "medium",
+      "entry_window": [
+        91.92087717142857,
+        92.92490791428571
+      ],
+      "timeout_minutes": 12
+    },
+    {
+      "step": "precision_trigger",
+      "state": "arming",
+      "description": "Precision trigger: arming",
+      "entry_window": [
+        91.92087717142857,
+        92.92490791428571
+      ],
+      "trigger_levels": {
+        "window_low": 91.92087717142857,
+        "window_high": 92.92490791428571,
+        "fire": 92.590231,
+        "arm": 92.92490791428571,
+        "disarm": 91.92087717142857
+      },
+      "ready_ts": "2026-03-12T02:29:00Z",
+      "score": 62.0,
+      "score_threshold": 55.0,
+      "score_ready": true,
+      "trigger_ready": true,
+      "order_flow_ready": true,
+      "order_flow_strength": null,
+      "trigger_progress": 0.7,
+      "trigger_confidence": 0.44,
+      "reasons": [
+        "order flow optional (volume unavailable)",
+        "price near window"
+      ]
+    }
+  ],
+  "invalid_levels": {
+    "buy": 90.20863942857143,
+    "sell": 89.96684857142857
+  },
+  "invalid_buffer_abs": 7.528237857142857,
   "short_term_diagnostics": {
     "k1m": {
       "status": "ok",
-      "last_close": 93.517266,
-      "start_close": 93.496453,
+      "last_close": 92.766019,
+      "start_close": 92.182707,
       "bars": 5,
       "direction": "up",
-      "delta": 0.020813000000003967,
-      "ema_fast": 93.36166446591209,
-      "ema_slow": 92.93672424492782,
+      "delta": 0.5833120000000065,
+      "ema_fast": 92.5242091871671,
+      "ema_slow": 92.51631595437988,
       "ema_relation": "fast_above",
-      "ema_slow_slope": 0.05805417550722325,
+      "ema_slow_slope": 0.024970304562003776,
       "ema_slow_slope_direction": "up"
     },
     "k5m": {
       "status": "ok",
-      "last_close": 93.439012,
-      "start_close": 92.016567,
+      "last_close": 93.417422,
+      "start_close": 93.347649,
       "bars": 3,
       "direction": "up",
-      "delta": 1.4224450000000104,
-      "ema_fast": 92.74056389217938,
-      "ema_slow": 92.36915299066797,
+      "delta": 0.06977299999999786,
+      "ema_fast": 92.90329871374351,
+      "ema_slow": 92.47858405763205,
       "ema_relation": "fast_above",
-      "ema_slow_slope": 0.10698590093319638,
+      "ema_slow_slope": 0.09388379423680249,
       "ema_slow_slope_direction": "up"
     },
-    "k1m_last_closed_utc": "2026-03-12T02:16:00Z",
-    "k5m_last_closed_utc": "2026-03-12T02:15:00Z",
-    "trend_alignment": "aligned",
-    "tp1_distance_abs": 5.813957388000006,
-    "tp1_distance_pct": 6.222194978307247,
-    "sl_distance_abs": 2.906978694000003,
-    "sl_distance_pct": 3.1110974891536234,
-    "tp1_distance_atr5": 3.8977163949508,
-    "sl_distance_atr5": 1.9488581974754
+    "k1m_last_closed_utc": "2026-03-12T02:30:00Z",
+    "k5m_last_closed_utc": "2026-03-12T02:20:00Z",
+    "trend_alignment": "aligned"
   },
   "short_term_diagnostics_note_hu": "A rövid távú diagnosztika kizárólag zárt 1m/5m gyertyákat használ; nincs look-ahead vagy jövőbeli adat. Ez irány- és kockázat-ellenőrzés, nem garantált árfolyam-előrejelzés.",
   "short_term_diagnostics_summary_hu": "Hozzáadott 1m/5m mikrotrend snapshotok, trend- és döntés-illeszkedés, TP/SL távolságok és ATR-normalizált viszonyok a döntési payloadban.",
   "action_plan": {
-    "status": "standby",
-    "priority": "low",
-    "summary": "Nincs belépő – figyeld a következő megerősítést.",
-    "steps": [],
+    "status": "monitor_trigger",
+    "priority": "high",
+    "summary": "Precision trigger aktív",
+    "steps": [
+      {
+        "order": 1,
+        "category": "precision_limit",
+        "instruction": "Precision parkolt limit belépő 91.92088–92.92491 — 12 perc timeout",
+        "source": "execution_playbook",
+        "confidence": "medium",
+        "entry_window": [
+          91.92087717142857,
+          92.92490791428571
+        ]
+      },
+      {
+        "order": 2,
+        "category": "precision_trigger",
+        "instruction": "Precision trigger: arming",
+        "source": "execution_playbook",
+        "entry_window": [
+          91.92087717142857,
+          92.92490791428571
+        ],
+        "trigger_levels": {
+          "window_low": 91.92087717142857,
+          "window_high": 92.92490791428571,
+          "fire": 92.590231,
+          "arm": 92.92490791428571,
+          "disarm": 91.92087717142857
+        }
+      },
+      {
+        "order": 3,
+        "category": "precision_window",
+        "instruction": "Figyeld a long belépő zónát 91.921–92.925.",
+        "source": "precision",
+        "entry_window": [
+          91.92087717142857,
+          92.92490791428571
+        ]
+      },
+      {
+        "order": 4,
+        "category": "precision_stop",
+        "instruction": "Precision SL előkészítése: 90.917.",
+        "source": "precision",
+        "stop_loss": 90.91684642857143
+      },
+      {
+        "order": 5,
+        "category": "precision_trigger",
+        "instruction": "Aktiváld az árriasztást a precision trigger szintekre.",
+        "source": "precision",
+        "trigger_levels": {
+          "window_low": 91.92087717142857,
+          "window_high": 92.92490791428571,
+          "fire": 92.590231,
+          "arm": 92.92490791428571,
+          "disarm": 91.92087717142857
+        }
+      }
+    ],
     "blockers": [],
     "blockers_raw": [],
     "notes": [
       "Range expanzió >1.5×ATR — agresszív menedzsment indokolt.",
-      "Összesített valószínűség: 88%.",
+      "Összesített valószínűség: 85%.",
       "Ajánlott tőkeáttétel: ×20.0.",
-      "Célzott RR: 3.00R.",
+      "Precision score: 62.00 / küszöb 55.",
+      "Precision confidence: medium.",
+      "Precision trigger állapot: arming.",
       "Bias(4H→1H)=long (+15.0)",
-      "EMA21 slope 1.92× küszöb (+17.5)",
+      "EMA21 slope 1.91× küszöb (+17.5)",
       "5M BOS trendirányba (+16.0)",
-      "ATR erősség 0.95× küszöb (+10.7)",
+      "ATR erősség 0.89× küszöb (+10.3)",
       "Range expanzió támogatja a momentumot (+3.0)",
       "USOIL: erős momentum — invalid zóna 2.5×ATR(1h)-re tágítva"
     ],
     "context": {
       "asset": "USOIL",
-      "decision": "no entry",
-      "probability": 88,
+      "decision": "precision_arming",
+      "probability": 85,
       "session_open": true,
       "session_entry_open": true,
       "session_status": "open",
       "intraday_profile": {
         "range_state": "expansion",
-        "range_position": 0.8038859891719338,
-        "range_vs_atr": 3.032538096822433,
+        "range_position": 0.799113062432714,
+        "range_vs_atr": 3.2437946976922256,
         "range_guard": {
           "long": false,
           "short": false
         },
         "opening_break": "none"
       },
-      "next_session_open_utc": "2026-03-13T00:00:00+00:00"
+      "next_session_open_utc": "2026-03-13T00:00:00+00:00",
+      "precision_state": "precision_arming",
+      "precision_trigger_state": "arming",
+      "precision_direction": "buy"
     }
   },
   "entry_diagnostics": {
@@ -824,46 +1109,49 @@
       "rr_math>=2.0",
       "tp_min_profit",
       "min_stoploss",
-      "tp1_net>=+0.35%"
+      "tp1_net>=+0.35%",
+      "precision_score>=55",
+      "precision_flow_alignment",
+      "precision_trigger_sync"
     ],
     "missing": [],
     "blockers": [],
-    "p_score_used": 88
+    "p_score_used": 85
   },
   "position_diagnostics": {
     "state": null,
     "severity": null,
     "reasons": [],
-    "p_score_used": 88
+    "p_score_used": 85
   },
   "active_position_meta": {
-    "ema21_slope_abs": 0.036393197241756194,
-    "ema21_slope_signed": 0.036393197241756194,
+    "ema21_slope_abs": 0.036380597898731326,
+    "ema21_slope_signed": 0.036380597898731326,
     "ema21_slope_threshold": 0.019,
     "ema21_relation": "above",
     "structure_5m": "bos_up",
     "stale_timeframes": {
-      "k1m": true,
+      "k1m": false,
       "k5m": false,
       "k1h": false,
       "k4h": false
     },
-    "atr1h": 3.0092947142857147,
-    "atr1h_trail_floor": 7.523236785714287,
-    "atr5": 1.4916317142857167,
-    "atr5_rel": 0.01596369347540943,
-    "atr5_threshold": 0.016855066885228875,
+    "atr1h": 3.0112951428571426,
+    "atr1h_trail_floor": 7.528237857142857,
+    "atr5": 1.3944871428571457,
+    "atr5_rel": 0.014927485075665176,
+    "atr5_threshold": 0.01685425287476696,
     "bos1h_long": true,
     "bos1h_short": false,
     "regime_ok": true,
     "effective_bias": "long",
-    "last_close_1h": 93.439012,
+    "last_close_1h": 93.417422,
     "last_swing_high_1h": 88.461201,
     "last_swing_low_1h": 91.714287,
-    "invalid_level_sell": 89.96584835714286,
-    "invalid_level_buy": 90.20963964285714,
-    "invalid_buffer_abs": 7.523236785714287,
-    "p_score": 88,
+    "invalid_level_sell": 89.96684857142857,
+    "invalid_level_buy": 90.20863942857143,
+    "invalid_buffer_abs": 7.528237857142857,
+    "p_score": 85,
     "probability_calibrated": null,
     "probability_threshold": null,
     "probability_model_raw": null,
@@ -873,46 +1161,281 @@
       "tp2_r": 3.0
     },
     "realtime_confidence": 1.0,
-    "avg_latency_profile": 27.0,
+    "avg_latency_profile": 22.0,
+    "precision_plan": {
+      "asset": "USOIL",
+      "direction": "buy",
+      "score": 62.0,
+      "confidence": "medium",
+      "entry": 92.590231,
+      "entry_window": [
+        91.92087717142857,
+        92.92490791428571
+      ],
+      "stop_loss": 90.91684642857143,
+      "take_profit_1": 95.93700014285716,
+      "take_profit_2": 97.61038471428573,
+      "risk": 1.6733845714285749,
+      "liquidity_levels": [
+        92.063951,
+        92.091039,
+        92.134662,
+        92.46022,
+        92.590231
+      ],
+      "factors": [
+        "ATR1m 0.7704",
+        "ATR5m 1.3945",
+        "price near liquidity pocket"
+      ],
+      "score_threshold": 55.0,
+      "score_ready": true,
+      "trigger_state": "arming",
+      "trigger_ready": true,
+      "trigger_levels": {
+        "window_low": 91.92087717142857,
+        "window_high": 92.92490791428571,
+        "fire": 92.590231,
+        "arm": 92.92490791428571,
+        "disarm": 91.92087717142857
+      },
+      "ready_ts": "2026-03-12T02:29:00Z",
+      "order_flow_ready": true,
+      "order_flow_strength": null,
+      "microstructure_score": 62.0,
+      "trigger_progress": 0.7,
+      "trigger_confidence": 0.44,
+      "trigger_reasons": [
+        "order flow optional (volume unavailable)",
+        "price near window"
+      ],
+      "order_flow_status": "synthetic_volume",
+      "order_flow_optional": true,
+      "order_flow_settings": {
+        "imbalance_threshold": 0.6,
+        "pressure_threshold": 0.7,
+        "imbalance_margin": 1.1,
+        "pressure_margin": 1.1,
+        "min_signals": 1,
+        "strength_floor": 0.74,
+        "block_ratio": 0.0
+      },
+      "order_flow_snapshot": {
+        "imbalance": -0.025210084033613446,
+        "pressure": 0.009803563025210195,
+        "delta_volume": -3.0,
+        "aggressor_ratio": null,
+        "status": "synthetic_volume"
+      },
+      "order_flow_signals": 0,
+      "order_flow_blockers": [],
+      "order_flow_stalled": false,
+      "alternates": {
+        "sell": {
+          "direction": "sell",
+          "entry": 93.666197,
+          "entry_window": [
+            93.33152008571429,
+            94.33555082857143
+          ],
+          "stop_loss": 95.33958157142857,
+          "take_profit_1": 90.31942785714284,
+          "take_profit_2": 88.64604328571427,
+          "risk": 1.6733845714285749,
+          "score": 62.0,
+          "confidence": "medium",
+          "trigger_levels": {
+            "window_low": 93.33152008571429,
+            "window_high": 94.33555082857143,
+            "fire": 93.666197,
+            "arm": 93.33152008571429,
+            "disarm": 94.33555082857143
+          },
+          "order_flow_ready": true
+        }
+      },
+      "ready_timeout_minutes": 10,
+      "arming_timeout_minutes": 12,
+      "context": {
+        "intraday_profile": {
+          "range_state": "expansion",
+          "range_position": 0.799113062432714,
+          "range_vs_atr": 3.2437946976922256
+        }
+      }
+    },
+    "precision_trigger": {
+      "state": "arming",
+      "ready_ts": "2026-03-12T02:29:00Z",
+      "entry_window": [
+        91.92087717142857,
+        92.92490791428571
+      ],
+      "trigger_levels": {
+        "window_low": 91.92087717142857,
+        "window_high": 92.92490791428571,
+        "fire": 92.590231,
+        "arm": 92.92490791428571,
+        "disarm": 91.92087717142857
+      },
+      "score": 62.0,
+      "score_threshold": 55.0,
+      "score_ready": true,
+      "trigger_ready": true,
+      "order_flow_ready": true,
+      "order_flow_strength": null,
+      "trigger_progress": 0.7,
+      "trigger_confidence": 0.44,
+      "reasons": [
+        "order flow optional (volume unavailable)",
+        "price near window"
+      ]
+    },
     "action_plan": {
-      "status": "standby",
-      "priority": "low",
-      "summary": "Nincs belépő – figyeld a következő megerősítést.",
-      "steps": [],
+      "status": "monitor_trigger",
+      "priority": "high",
+      "summary": "Precision trigger aktív",
+      "steps": [
+        {
+          "order": 1,
+          "category": "precision_limit",
+          "instruction": "Precision parkolt limit belépő 91.92088–92.92491 — 12 perc timeout",
+          "source": "execution_playbook",
+          "confidence": "medium",
+          "entry_window": [
+            91.92087717142857,
+            92.92490791428571
+          ]
+        },
+        {
+          "order": 2,
+          "category": "precision_trigger",
+          "instruction": "Precision trigger: arming",
+          "source": "execution_playbook",
+          "entry_window": [
+            91.92087717142857,
+            92.92490791428571
+          ],
+          "trigger_levels": {
+            "window_low": 91.92087717142857,
+            "window_high": 92.92490791428571,
+            "fire": 92.590231,
+            "arm": 92.92490791428571,
+            "disarm": 91.92087717142857
+          }
+        },
+        {
+          "order": 3,
+          "category": "precision_window",
+          "instruction": "Figyeld a long belépő zónát 91.921–92.925.",
+          "source": "precision",
+          "entry_window": [
+            91.92087717142857,
+            92.92490791428571
+          ]
+        },
+        {
+          "order": 4,
+          "category": "precision_stop",
+          "instruction": "Precision SL előkészítése: 90.917.",
+          "source": "precision",
+          "stop_loss": 90.91684642857143
+        },
+        {
+          "order": 5,
+          "category": "precision_trigger",
+          "instruction": "Aktiváld az árriasztást a precision trigger szintekre.",
+          "source": "precision",
+          "trigger_levels": {
+            "window_low": 91.92087717142857,
+            "window_high": 92.92490791428571,
+            "fire": 92.590231,
+            "arm": 92.92490791428571,
+            "disarm": 91.92087717142857
+          }
+        }
+      ],
       "blockers": [],
       "blockers_raw": [],
       "notes": [
         "Range expanzió >1.5×ATR — agresszív menedzsment indokolt.",
-        "Összesített valószínűség: 88%.",
+        "Összesített valószínűség: 85%.",
         "Ajánlott tőkeáttétel: ×20.0.",
-        "Célzott RR: 3.00R.",
+        "Precision score: 62.00 / küszöb 55.",
+        "Precision confidence: medium.",
+        "Precision trigger állapot: arming.",
         "Bias(4H→1H)=long (+15.0)",
-        "EMA21 slope 1.92× küszöb (+17.5)",
+        "EMA21 slope 1.91× küszöb (+17.5)",
         "5M BOS trendirányba (+16.0)",
-        "ATR erősség 0.95× küszöb (+10.7)",
+        "ATR erősség 0.89× küszöb (+10.3)",
         "Range expanzió támogatja a momentumot (+3.0)",
         "USOIL: erős momentum — invalid zóna 2.5×ATR(1h)-re tágítva"
       ],
       "context": {
         "asset": "USOIL",
-        "decision": "no entry",
-        "probability": 88,
+        "decision": "precision_arming",
+        "probability": 85,
         "session_open": true,
         "session_entry_open": true,
         "session_status": "open",
         "intraday_profile": {
           "range_state": "expansion",
-          "range_position": 0.8038859891719338,
-          "range_vs_atr": 3.032538096822433,
+          "range_position": 0.799113062432714,
+          "range_vs_atr": 3.2437946976922256,
           "range_guard": {
             "long": false,
             "short": false
           },
           "opening_break": "none"
         },
-        "next_session_open_utc": "2026-03-13T00:00:00+00:00"
+        "next_session_open_utc": "2026-03-13T00:00:00+00:00",
+        "precision_state": "precision_arming",
+        "precision_trigger_state": "arming",
+        "precision_direction": "buy"
       }
-    }
+    },
+    "execution_playbook": [
+      {
+        "step": "precision_limit",
+        "description": "Precision parkolt limit belépő 91.92088–92.92491 — 12 perc timeout",
+        "direction": "buy",
+        "confidence": "medium",
+        "entry_window": [
+          91.92087717142857,
+          92.92490791428571
+        ],
+        "timeout_minutes": 12
+      },
+      {
+        "step": "precision_trigger",
+        "state": "arming",
+        "description": "Precision trigger: arming",
+        "entry_window": [
+          91.92087717142857,
+          92.92490791428571
+        ],
+        "trigger_levels": {
+          "window_low": 91.92087717142857,
+          "window_high": 92.92490791428571,
+          "fire": 92.590231,
+          "arm": 92.92490791428571,
+          "disarm": 91.92087717142857
+        },
+        "ready_ts": "2026-03-12T02:29:00Z",
+        "score": 62.0,
+        "score_threshold": 55.0,
+        "score_ready": true,
+        "trigger_ready": true,
+        "order_flow_ready": true,
+        "order_flow_strength": null,
+        "trigger_progress": 0.7,
+        "trigger_confidence": 0.44,
+        "reasons": [
+          "order flow optional (volume unavailable)",
+          "price near window"
+        ]
+      }
+    ]
   },
   "side": "long",
   "opened_at_utc": "2026-03-12T00:01:41Z",
@@ -921,7 +1444,7 @@
     "sl": 90.49378125714286,
     "tp1": 96.87438422857142,
     "tp2": 96.87438422857142,
-    "rr": 3.0
+    "rr": 2.999999999999991
   },
   "position_state": {
     "tracking_enabled": true,
