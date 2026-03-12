@@ -581,6 +581,7 @@ def check_and_notify() -> None:
                     "direction": "long" if tracked_side == "buy" else "short",
                     "reasons": ["Ellenirányú erős belépési jel (Trendforduló)"],
                     "synthetic_reverse": True,
+                    "timestamp": to_utc_iso(loop_now_dt),
                 }
                 closed_at_utc = to_utc_iso(loop_now_dt)
                 manual_positions = position_tracker.close_position(
@@ -932,15 +933,15 @@ def check_and_notify() -> None:
         notify_state[asset_name] = asset_state
         notify_state_changed = True
 
-        if tracking_enabled and signal in {"precision_arming", "buy", "sell"}:
-            if signal == "precision_arming" and order_type in {"LIMIT", "STOP"}:
+        if tracking_enabled and direction in {"buy", "sell"}:
+            if order_type in {"LIMIT", "STOP"}:
                 manual_positions = position_tracker.register_precision_pending_position(
                     asset_name,
                     data,
                     now_dt,
                     manual_positions,
                 )
-            elif order_type == "MARKET" and direction in {"buy", "sell"}:
+            elif order_type == "MARKET":    
                 manual_positions = position_tracker.open_position(
                     asset_name,
                     side="long" if direction == "buy" else "short",
@@ -952,6 +953,9 @@ def check_and_notify() -> None:
                     order_type=order_type,
                     positions=manual_positions,
                 )
+                if asset_name in manual_positions:
+                    manual_positions[asset_name]["status"] = "open"
+
             if not DRY_RUN:
                 position_tracker.save_positions_atomic(positions_path, manual_positions)
 
