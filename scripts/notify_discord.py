@@ -37,7 +37,6 @@ import state_db
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
 ENTRY_COOLDOWN_MINUTES = 30
-EXIT_NOTIFY_COOLDOWN_MINUTES = 30
 DISCORD_NOTIFY_ASSETS = {"GOLD_CFD", "XAGUSD", "USOIL"}
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -327,11 +326,18 @@ def _exit_signature(exit_signal: Dict[str, Any]) -> Dict[str, Any]:
     category = str(exit_signal.get("category") or "").lower()
     trigger_price = safe_float(exit_signal.get("trigger_price"))
     trigger_bucket = round(trigger_price, 3) if trigger_price is not None else None
+    triggered_at = str(
+        exit_signal.get("triggered_at")
+        or exit_signal.get("closed_at_utc")
+        or exit_signal.get("timestamp")
+        or ""
+    ).strip()
     return {
         "state": state,
         "direction": direction,
         "category": category,
         "trigger_bucket": trigger_bucket,
+        "triggered_at": triggered_at,
     }
 
 
@@ -503,20 +509,6 @@ def check_and_notify() -> None:
         if order_type not in {"LIMIT", "MARKET", "STOP"}:
             order_type = "MARKET"
 
-        if (
-            signal == "precision_arming"
-            and direction in {"buy", "sell"}
-            and entry is not None
-            and sl is not None
-            and tp1 is not None
-            and not levels_match_direction(direction, entry, sl, tp1, tp2)
-        ):
-            corrected_direction = "sell" if direction == "buy" else "buy"
-            if levels_match_direction(corrected_direction, entry, sl, tp1, tp2):
-                print(
-                    f"{asset_name}: precision_arming irány auto-correct ({direction} -> {corrected_direction})"
-                )
-                direction = corrected_direction
 
         if direction not in {"buy", "sell"} and not exit_signal and not has_lifecycle_event:
             print(f"{asset_name}: bizonytalan irány ({direction}) — jelzés némítva.")
@@ -584,7 +576,7 @@ def check_and_notify() -> None:
             )
             has_position = bool(tracked_state.get("has_position"))
             pending_active = bool(tracked_state.get("pending_active"))
-            if has_position or (pending_active and signal != "precision_arming"):
+            if has_position or pending_active:
                 tracked_status = "OPEN" if has_position else "PENDING"
                 print(f"{asset_name}: belépő blokkolva (pozíció státusz: {tracked_status}).")
                 continue
@@ -639,6 +631,42 @@ def check_and_notify() -> None:
                     asset_state["last_position_event_key"] = activation_key
                     notify_state[asset_name] = asset_state
                     notify_state_changed = True
+                management_signal = tracked_entry.get("last_management_signal")
+                management_state = (
+                    str(management_signal.get("state") or "").lower()
+                    if isinstance(management_signal, dict)
+                    else ""
+                )
+                if bool(tracked_entry.get("tp1_scaled")) and management_state == "scale_out":
+                    scale_out_key = _position_event_key(tracked_entry, "scale_out")
+                    if scale_out_key and asset_state.get("last_position_event_key") != scale_out_key:
+                        send_discord_embed(
+                            {
+                                "title": "🟠 RÉSZZÁRÁS (TP1) - Húzd a Stop-ot Nullába!",
+                                "description": f"Eszköz: `{asset_name}`",
+                                "color": COLOR_ORANGE,
+                                "fields": [
+                                    {
+                                        "name": "🕒 Kártya időbélyeg",
+                                        "value": f"`{_format_ts(management_signal.get('triggered_at'))}`",
+                                        "inline": False,
+                                    },
+                                    {
+                                        "name": "📊 Árfolyam & Szintek",
+                                        "value": (
+                                            f"Spot: `{format_price(spot_price)}`\n"
+                                            f"Eredeti Entry: `{format_price(tracked_entry.get('entry'))}`\n"
+                                            f"Új SL (breakeven): `{format_price(tracked_entry.get('sl'))}`"
+                                        ),
+                                        "inline": False,
+                                    },
+                                ],
+                                "footer": {"text": f"Menedzsment • {asset_name}"},
+                            }
+                        )
+                        asset_state["last_position_event_key"] = scale_out_key
+                        notify_state[asset_name] = asset_state
+                        notify_state_changed = True
             elif tracked_status == "closed":
                 close_reason = str(tracked_entry.get("close_reason") or "").lower()
                 closed_at = str(tracked_entry.get("closed_at_utc") or "")
@@ -688,20 +716,14 @@ def check_and_notify() -> None:
             asset_state = notify_state.get(asset_name) if isinstance(notify_state.get(asset_name), dict) else {}
             tracked_entry = manual_positions.get(asset_name) if isinstance(manual_positions, dict) else None
             tracked_status_for_exit = str(tracked_entry.get("status") or "").lower() if isinstance(tracked_entry, dict) else ""
-            if tracking_enabled and tracked_status_for_exit not in {"open", "closed"} and not is_synthetic_reverse:
-                print(f"{asset_name}: exit jelzés figyelmen kívül hagyva (nincs követett nyitott/zárt pozíció).")
+            if tracking_enabled and tracked_status_for_exit != "open" and not is_synthetic_reverse:
+                print(f"{asset_name}: exit jelzés figyelmen kívül hagyva (nincs követett nyitott pozíció).")
                 continue
             event_key = _position_event_key(tracked_entry, exit_state)
             last_exit_signature = asset_state.get("last_exit_signature")
-            last_exit_sent_utc = asset_state.get("last_exit_sent_utc")
-            if last_exit_signature == exit_signature and last_exit_sent_utc:
-                try:
-                    last_exit_dt = datetime.fromisoformat(str(last_exit_sent_utc).replace("Z", "+00:00"))
-                except Exception:
-                    last_exit_dt = None
-                if last_exit_dt and now_dt - last_exit_dt < timedelta(minutes=EXIT_NOTIFY_COOLDOWN_MINUTES):
-                    print(f" -> EXIT DEDUP: {asset_name} ({EXIT_NOTIFY_COOLDOWN_MINUTES}m)")
-                    continue
+            if last_exit_signature == exit_signature:
+                print(f" -> EXIT DEDUP: {asset_name} (event signature)")
+                continue
             state_label = {
                 "scale_out": "🟠 RÉSZZÁRÁS (TP1) - Húzd a Stop-ot Nullába!",
                 "hard_exit": "🔴 AZONNAL ZÁRD A POZÍCIÓT! (Hard Exit)",
@@ -768,9 +790,8 @@ def check_and_notify() -> None:
                 asset_state["last_position_event_key"] = event_key
             notify_state[asset_name] = asset_state
             notify_state_changed = True
-            # Hard-exit után ugyanabban a ciklusban ne küldjünk azonnali új entry kártyát,
-            # mert ez élőben ellentmondásos "zárd + nyisd" párost eredményez.
-            continue
+            if not is_synthetic_reverse:
+                continue
 
         tp1_net_usd = 0.0
         if entry is None or sl is None or tp1 is None:
