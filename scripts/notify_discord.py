@@ -37,6 +37,7 @@ import state_db
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
 ENTRY_COOLDOWN_MINUTES = 30
+ACTIVATION_REMINDER_MINUTES = max(1, int(os.getenv("NOTIFY_ACTIVATION_REMINDER_MINUTES", "240") or "240"))
 DISCORD_NOTIFY_ASSETS = {
     str(asset).upper()
     for asset in getattr(settings, "ASSETS", [])
@@ -272,9 +273,13 @@ def send_discord_embed(embed_data: Dict[str, Any]) -> bool:
          "timestamp_utc": to_utc_iso(datetime.now(timezone.utc)),
          "title": str(embed_data.get("title") or ""),
      }
-     if DRY_RUN or not DISCORD_WEBHOOK_URL:
+     if DRY_RUN:
          print(f"[DRY RUN] Embed title: {embed_data.get('title')}")
-         _append_notify_event({**event_base, "success": False, "skipped": True, "reason": "dry_run_or_missing_webhook"})
+         _append_notify_event({**event_base, "success": False, "skipped": True, "reason": "dry_run"})
+         return False
+     if not DISCORD_WEBHOOK_URL:
+         print("Hiba: DISCORD_WEBHOOK_URL nincs beállítva; webhook küldés kihagyva.")
+         _append_notify_event({**event_base, "success": False, "skipped": True, "reason": "missing_webhook"})        
          return False
      if requests is None:
          print("Hiba: a 'requests' modul hiányzik; webhook küldés kihagyva.")
@@ -563,9 +568,14 @@ def check_and_notify() -> None:
         payload_has_position = bool(position_state.get("has_position"))
         if payload_has_position and not exit_signal and not has_lifecycle_event and direction in {"buy", "sell"}:
             allow_market_with_tracking = order_type == "MARKET" and tracking_enabled
+            allow_precision_limit_info_card = signal == "precision_arming" and order_type == "LIMIT"
             if allow_market_with_tracking:
                 print(
                     f"{asset_name}: payload has_position=true, de MARKET jelzés tracking mellett továbbengedve (dedup/tracking gate dönt)."
+                )
+            elif allow_precision_limit_info_card:
+                print(
+                    f"{asset_name}: payload has_position=true, precision_arming LIMIT kártya információs módban továbbengedve."
                 )
             else:
                 print(f"{asset_name}: belépő jelzés némítva (payload position_state.has_position=true).")
@@ -644,7 +654,19 @@ def check_and_notify() -> None:
         if tracking_enabled and isinstance(tracked_entry, dict):
             if tracked_status == "open":
                 activation_key = _position_event_key(tracked_entry, "activated")
-                if activation_key and asset_state.get("last_position_event_key") != activation_key:
+                activation_due = False
+                if activation_key:
+                    last_activation_sent_utc = str(asset_state.get("last_activation_sent_utc") or "").strip()
+                    last_activation_dt = None
+                    if last_activation_sent_utc:
+                        try:
+                            last_activation_dt = datetime.fromisoformat(last_activation_sent_utc.replace("Z", "+00:00"))
+                        except Exception:
+                            last_activation_dt = None
+                    activation_due = asset_state.get("last_position_event_key") != activation_key
+                    if not activation_due and last_activation_dt is not None:
+                        activation_due = (loop_now_dt - last_activation_dt) >= timedelta(minutes=ACTIVATION_REMINDER_MINUTES)
+                if activation_key and activation_due:
                     activation_side = str(tracked_entry.get("side") or "").lower()
                     irany = "Vétel" if activation_side == "long" else "Eladás"
                     order_type = _resolve_entry_type_label("activation", data, tracked_entry)
@@ -681,8 +703,12 @@ def check_and_notify() -> None:
                     })
                     if sent_ok:
                         asset_state["last_position_event_key"] = activation_key
+                        asset_state["last_activation_sent_utc"] = to_utc_iso(loop_now_dt)
                         notify_state[asset_name] = asset_state
                         notify_state_changed = True
+                elif activation_key:
+                    print(f" -> ACTIVATION DEDUP: {asset_name} (position event key)")
+                    _log_notify_skip(asset_name, "activation", "dedup_position_event_key")
                 management_signal = tracked_entry.get("last_management_signal")
                 management_state = (
                     str(management_signal.get("state") or "").lower()
