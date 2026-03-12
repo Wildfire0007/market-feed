@@ -62,6 +62,7 @@ COLOR_BLUE = 0x3498DB
 COLOR_ORANGE = 0xE67E22
 COLOR_YELLOW = 0xF1C40F
 NOTIFY_LOCK_PATH = PUBLIC_DIR / ".notify_discord.lock"
+NOTIFY_EVENT_LOG_PATH = PUBLIC_DIR / "monitoring" / "discord_notify_events.jsonl"
 
 HARD_GATE_NAMES = {
     "spread_guard",
@@ -129,6 +130,15 @@ def format_price(price: Any) -> str:
 def to_utc_iso(dt: datetime) -> str:
     return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
     
+def _append_notify_event(event: Dict[str, Any]) -> None:
+    try:
+        NOTIFY_EVENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with NOTIFY_EVENT_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        print(f"Hiba: notify event log írás sikertelen: {exc}")
+
+
 
 def get_budapest_time(utc_iso_string: Optional[str]) -> str:
     if not utc_iso_string or utc_iso_string == "-":
@@ -241,15 +251,31 @@ def _resolve_entry_type_label(event_type: str, signal_data: Dict[str, Any], trac
 
 
 def send_discord_embed(embed_data: Dict[str, Any]) -> None:
+     event_base = {
+         "timestamp_utc": to_utc_iso(datetime.now(timezone.utc)),
+         "title": str(embed_data.get("title") or ""),
+     }
      if DRY_RUN or not DISCORD_WEBHOOK_URL:
          print(f"[DRY RUN] Embed title: {embed_data.get('title')}")
+         _append_notify_event({**event_base, "success": False, "skipped": True, "reason": "dry_run_or_missing_webhook"})
          return
      if requests is None:
          print("Hiba: a 'requests' modul hiányzik; webhook küldés kihagyva.")
+         _append_notify_event({**event_base, "success": False, "skipped": True, "reason": "requests_missing"})    
          return
      try:
-         requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed_data]}, timeout=5)
+         response = requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed_data]}, timeout=5)
+         ok = 200 <= int(response.status_code) < 300
+         _append_notify_event({
+             **event_base,
+             "success": ok,
+             "status_code": int(response.status_code),
+             "reason": "ok" if ok else "http_error",
+         })
+         if not ok:
+             print(f"Hiba: Discord webhook HTTP {response.status_code}")
      except Exception as exc:
+         _append_notify_event({**event_base, "success": False, "reason": "request_exception", "error": str(exc)[:300]})
          print(f"Hiba: {exc}")
 
 
@@ -500,7 +526,7 @@ def check_and_notify() -> None:
         if signal == "precision_arming":
             plan = plan_for_signal
             direction = str(plan.get("direction") or data.get("signal") or "buy").lower()
-            order_type = str(plan.get("order_type") or order_type or "LIMIT").upper()
+            order_type = str(plan.get("order_type") or "LIMIT").upper()
             entry = safe_float(plan.get("entry") or entry)
             sl = safe_float(plan.get("stop_loss") or sl)
             tp1 = safe_float(plan.get("take_profit_1") or tp1)
