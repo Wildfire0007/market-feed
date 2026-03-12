@@ -40,7 +40,7 @@ jobs:
           echo "run_id=${GITHUB_RUN_ID}"
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: main
           fetch-depth: 1
@@ -51,7 +51,7 @@ jobs:
           git reset --hard origin/main
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: "pip"
@@ -59,7 +59,7 @@ jobs:
 
       - name: Restore Python virtualenv cache
         id: cache-venv
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ hashFiles('requirements.lock') }}
@@ -162,7 +162,7 @@ jobs:
           curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true       
   
       - name: Upload pipeline artifact bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: pipeline-artifacts
           path: |
@@ -185,7 +185,7 @@ jobs:
           .venv/bin/python scripts/check_latency_sources.py --output public/monitoring/data_latency.json --pretty
 
       - name: Upload pipeline log artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: pipeline-log
           path: public/monitoring/pipeline.log
@@ -209,7 +209,7 @@ jobs:
           git push origin main
 
       - name: Upload analysis outputs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: analysis-public
           path: public
@@ -229,7 +229,7 @@ jobs:
     steps:
       - name: Deploy public folder to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
   notify:
     name: 3) Discord értesítő
@@ -246,7 +246,7 @@ jobs:
       WARNINGS_RATIO_TARGET: "0.2"
     steps:
       - name: Checkout latest signals
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: main
           fetch-depth: 1
@@ -262,13 +262,13 @@ jobs:
           mkdir -p public
 
       - name: Download analysis outputs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: analysis-public
           path: public
 
       - name: Download pipeline log
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: pipeline-log
           path: public/monitoring
@@ -289,7 +289,7 @@ jobs:
           curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true  
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: "pip"
@@ -297,7 +297,7 @@ jobs:
 
       - name: Restore Python virtualenv cache
         id: cache-venv
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ hashFiles('requirements.lock') }}
@@ -450,6 +450,6 @@ jobs:
           fi
 
       - name: Publish manual position artifacts
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
           path: public
