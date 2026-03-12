@@ -284,10 +284,16 @@ jobs:
           else
               echo "STATE_LOADED=0" >> $GITHUB_ENV
           fi
-          curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_notify_state.json?ts=${GITHUB_RUN_ID}" -o public/_notify_state.json || echo '{}' > public/_notify_state.json
+          if [ -n "${PUBLIC_BASE_URL:-}" ]; then
+            curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_notify_state.json?ts=${GITHUB_RUN_ID}" -o public/_notify_state.json || echo '{}' > public/_notify_state.json
+          else
+            echo '{}' > public/_notify_state.json
+          fi
           cp public/_notify_state.json config/_notify_state.json
-          curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true  
-
+          if [ -n "${PUBLIC_BASE_URL:-}" ]; then
+            curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true
+          fi
+          
       - name: Setup Python
         uses: actions/setup-python@v6
         with:
@@ -304,9 +310,15 @@ jobs:
           restore-keys: |
             venv-${{ runner.os }}-
 
-      - name: Create virtualenv (cache miss)
-        if: steps.cache-venv.outputs.cache-hit != 'true'
+      - name: Ensure virtualenv is available
         run: |
+          if [ -x .venv/bin/python ]; then
+            echo "Reusing cached virtualenv"
+            exit 0
+          fi
+
+          echo "Cached virtualenv missing or invalid, rebuilding .venv"
+          rm -rf .venv
           python -m venv .venv
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/pip install -r requirements.lock
@@ -362,9 +374,9 @@ jobs:
           MANUAL_POS_AUDIT_FILE: public/_manual_positions_audit.jsonl
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            .venv/bin/python scripts/notify_discord.py --manual
+            python scripts/notify_discord.py --manual
           else
-            .venv/bin/python scripts/notify_discord.py
+            python scripts/notify_discord.py
           fi
 
       - name: Show manual positions size
