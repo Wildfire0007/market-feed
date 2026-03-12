@@ -68,7 +68,7 @@ jobs:
 
       - name: Ensure virtualenv is available
         run: |
-          if [ -x .venv/bin/python ]; then
+          if [ -x .venv/bin/python ] && .venv/bin/python -c "import requests" >/dev/null 2>&1; then
             echo "Reusing cached virtualenv"
             exit 0
           fi
@@ -254,7 +254,7 @@ jobs:
       - name: Checkout latest signals
         uses: actions/checkout@v5
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 1
 
       - name: Sync with latest main
