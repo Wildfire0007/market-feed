@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import time
+import fcntl
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -88,6 +89,8 @@ COLOR_HARD_EXIT = 0xB71C1C
 COLOR_BLUE = 0x3498DB
 COLOR_ORANGE = 0xE67E22
 COLOR_YELLOW = 0xF1C40F
+NOTIFY_LOCK_PATH = PUBLIC_DIR / ".notify_discord.lock"
+NOTIFY_EVENT_LOG_PATH = PUBLIC_DIR / "monitoring" / "discord_notify_events.jsonl"
 
 HARD_GATE_NAMES = {
     "spread_guard",
@@ -154,6 +157,15 @@ def format_price(price: Any) -> str:
 
 def to_utc_iso(dt: datetime) -> str:
     return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _append_notify_event(event: Dict[str, Any]) -> None:
+    try:
+        NOTIFY_EVENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with NOTIFY_EVENT_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        print(f"Hiba: notify event log írás sikertelen: {exc}")
     
 
 def get_budapest_time(utc_iso_string: Optional[str]) -> str:
@@ -218,10 +230,6 @@ def _resolve_tp1_hit_ts(position: Dict[str, Any]) -> str:
     if isinstance(last_signal, dict) and str(last_signal.get("state") or "").lower() == "scale_out":
         return _format_ts(last_signal.get("triggered_at"), fallback="még nem")
     return "még nem"
-
-def _append_notify_event(*_args: Any, **_kwargs: Any) -> None:
-    return
-
 
 def post_batches(webhook_url: str, content: str, embeds: list[Dict[str, Any]], batch_size: int = 10) -> Dict[str, Any]:
     if requests is None:
@@ -345,11 +353,18 @@ def _exit_signature(exit_signal: Dict[str, Any]) -> Dict[str, Any]:
     category = str(exit_signal.get("category") or "").lower()
     trigger_price = safe_float(exit_signal.get("trigger_price"))
     trigger_bucket = round(trigger_price, 3) if trigger_price is not None else None
+    triggered_at = str(
+        exit_signal.get("triggered_at")
+        or exit_signal.get("closed_at_utc")
+        or exit_signal.get("timestamp")
+        or ""
+    ).strip()
     return {
         "state": state,
         "direction": direction,
         "category": category,
         "trigger_bucket": trigger_bucket,
+        "triggered_at": triggered_at,
     }
 
 
@@ -791,4 +806,13 @@ def check_and_notify() -> None:
 
 
 if __name__ == "__main__":
-    check_and_notify()
+    if not PUBLIC_DIR.exists():
+        check_and_notify()
+        sys.exit(0)
+    with NOTIFY_LOCK_PATH.open("w", encoding="utf-8") as lock_handle:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("Másik notify_discord folyamat már fut; duplikált küldés elkerülve.")
+            sys.exit(0)
+        check_and_notify()
