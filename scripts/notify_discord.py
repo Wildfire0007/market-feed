@@ -54,7 +54,12 @@ DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
 MANUAL_RUN = "--manual" in sys.argv
 ENTRY_COOLDOWN_MINUTES = 30
 EXIT_NOTIFY_COOLDOWN_MINUTES = 30
-DISCORD_NOTIFY_ASSETS = {"GOLD_CFD", "XAGUSD", "USOIL"}
+_notify_assets_raw = os.getenv("DISCORD_NOTIFY_ASSETS", "").strip()
+DISCORD_NOTIFY_ASSETS = {
+    part.strip().upper()
+    for part in _notify_assets_raw.replace("\n", ",").split(",")
+    if part.strip()
+}
 NOTIFY_ATTEMPTS = 0
 NOTIFY_SUCCESSES = 0
 NOTIFY_FAILURES = 0
@@ -416,7 +421,9 @@ def check_and_notify() -> None:
     assets = [
         d
         for d in PUBLIC_DIR.iterdir()
-        if d.is_dir() and not d.name.startswith("_") and d.name in DISCORD_NOTIFY_ASSETS
+        if d.is_dir()
+        and not d.name.startswith("_")
+        and (not DISCORD_NOTIFY_ASSETS or d.name.upper() in DISCORD_NOTIFY_ASSETS)
     ]
     
     
