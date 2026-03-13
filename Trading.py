@@ -4622,13 +4622,7 @@ def _reset_out_dir_if_requested(out_dir: str, logger: logging.Logger) -> None:
     manual_state_snapshots = []
     out_dir_path = Path(out_dir)
 
-    for state_name in (
-        "_manual_positions_audit.jsonl",
-        "_notify_state.json",
-        "trading.db",
-        "trading.db-shm",
-        "trading.db-wal",
-    ):
+    for state_name in ("_manual_positions_audit.jsonl",):
         state_path = out_dir_path / state_name
         try:
             if state_path.exists():
@@ -4748,6 +4742,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
 
