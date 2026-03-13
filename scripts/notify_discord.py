@@ -61,6 +61,12 @@ DISCORD_NOTIFY_ASSETS = {
     for part in _notify_assets_raw.replace("\n", ",").split(",")
     if part.strip()
 }
+_notify_blocked_assets_raw = os.getenv("DISCORD_NOTIFY_BLOCKED_ASSETS", "BTCUSD,EURUSD").strip()
+DISCORD_NOTIFY_BLOCKED_ASSETS = {
+    part.strip().upper()
+    for part in _notify_blocked_assets_raw.replace("\n", ",").split(",")
+    if part.strip()
+}
 NOTIFY_ATTEMPTS = 0
 NOTIFY_SUCCESSES = 0
 NOTIFY_FAILURES = 0
@@ -431,6 +437,10 @@ def check_and_notify() -> None:
     tracking_cfg, positions_path, treat_missing = _resolve_tracking_context()
     tracking_enabled = bool(tracking_cfg.get("enabled"))
     manual_positions = position_tracker.load_positions(positions_path, treat_missing)
+    skip_reasons: Dict[str, int] = {}
+
+    def _mark_skip(reason: str) -> None:
+        skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
     
     # assets = [d for d in PUBLIC_DIR.iterdir() if d.is_dir() and not d.name.startswith("_")]
     assets = [
@@ -444,9 +454,13 @@ def check_and_notify() -> None:
     
     for asset_dir in assets:
         asset_name = asset_dir.name
+        if asset_name.upper() in DISCORD_NOTIFY_BLOCKED_ASSETS:
+            _mark_skip("asset_opt_out")
+            continue
         signal_path = asset_dir / "signal.json"        
         data = load_json(signal_path)
         if not data:
+            _mark_skip("missing_signal")
             continue
 
         signal = str(data.get("signal") or "no entry").lower()
@@ -455,6 +469,7 @@ def check_and_notify() -> None:
         tracked_status = str(tracked_entry.get("status") or "").lower() if isinstance(tracked_entry, dict) else ""
         has_lifecycle_event = tracking_enabled and tracked_status in {"open", "closed"}
         if signal not in {"buy", "sell", "precision_arming"} and not exit_signal and not has_lifecycle_event:
+            _mark_skip("unsupported_signal")            
             continue
 
         biases = data.get("biases") if isinstance(data.get("biases"), dict) else {}
@@ -473,6 +488,7 @@ def check_and_notify() -> None:
             print(
                 f"{asset_name}: {alignment_state} piac — jelzés némítva (csak precision_arming mehet át)."
             )
+            _mark_skip(f"alignment_{alignment_state.lower()}")
             continue
 
         missing_gates = [str(item) for item in (gates.get("missing") or []) if item]
@@ -482,6 +498,7 @@ def check_and_notify() -> None:
             print(
                 f"{asset_name}: belépő blokkolva hard védelmi kapun ({', '.join(hard_missing_gates)})."
             )
+            _mark_skip("hard_gate_block")    
             continue
         if soft_missing_gates and not exit_signal and not has_lifecycle_event:
             print(
@@ -514,6 +531,7 @@ def check_and_notify() -> None:
         
         if direction not in {"buy", "sell"} and not exit_signal and not has_lifecycle_event:
             print(f"{asset_name}: bizonytalan irány ({direction}) — jelzés némítva.")
+            _mark_skip("invalid_direction")
             continue
 
         if tracking_enabled and not exit_signal and not has_lifecycle_event:
@@ -526,11 +544,13 @@ def check_and_notify() -> None:
             if tracked_state.get("has_position") or tracked_state.get("pending_active"):
                 tracked_status = "OPEN" if tracked_state.get("has_position") else "PENDING"
                 print(f"{asset_name}: belépő blokkolva (pozíció státusz: {tracked_status}).")
+                _mark_skip("position_active")
                 continue
             if tracked_state.get("cooldown_active"):
                 print(
                     f"{asset_name}: belépő blokkolva (cooldown aktív: {tracked_state.get('cooldown_until_utc')})."
                 )
+                _mark_skip("position_cooldown")
                 continue
 
         spot = data.get("spot") if isinstance(data.get("spot"), dict) else {}
@@ -678,6 +698,7 @@ def check_and_notify() -> None:
         tp1_net_usd = 0.0
         if entry is None or sl is None or tp1 is None:
             print(f"{asset_name}: hiányzó entry/SL/TP1 — jelzés eldobva.")
+            _mark_skip("missing_levels")
             continue
 
         notional = equity_usd * leverage
@@ -717,6 +738,7 @@ def check_and_notify() -> None:
             print(
                 f"{asset_name}: belépő blokkolva (TP1 net USD {tp1_net_usd:.2f} / min {tp1_min_net_usd}, alignment {alignment_state})."
             )
+            _mark_skip("tp1_net_too_low")
             continue
 
         if order_type in ["LIMIT", "STOP"]:
@@ -786,11 +808,21 @@ def check_and_notify() -> None:
                 position_tracker.save_positions_atomic(positions_path, manual_positions)
                 
     if MANUAL_RUN and NOTIFY_ATTEMPTS == 0:
+        skip_diag = (
+            "\n\nFő blokkoló okok: "
+            + ", ".join(
+                f"{reason}={count}"
+                for reason, count in sorted(skip_reasons.items(), key=lambda item: (-item[1], item[0]))
+            )
+            if skip_reasons
+            else ""
+        )
         send_discord_embed({
             "title": "ℹ️ Discord notifier kézi futás kész",
             "description": (
                 "Nem volt küldhető új ENTRY/EXIT jelzés ebben a körben.\n"
                 f"STATE_LOADED={os.getenv('STATE_LOADED', 'N/A')}"
+                f"{skip_diag}"
             ),
             "color": COLOR_BLUE,
             "footer": {"text": "Manual run összegzés"},
