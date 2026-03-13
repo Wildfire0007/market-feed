@@ -37,6 +37,7 @@ import state_db
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
+FAIL_ON_DELIVERY_ERROR = os.getenv("NOTIFY_FAIL_ON_DELIVERY_ERROR", "").lower() in {"1", "true", "yes"}
 ENTRY_COOLDOWN_MINUTES = 30
 ACTIVATION_REMINDER_MINUTES = max(1, int(os.getenv("NOTIFY_ACTIVATION_REMINDER_MINUTES", "240") or "240"))
 DISCORD_NOTIFY_ASSETS = {
@@ -69,6 +70,9 @@ COLOR_ORANGE = 0xE67E22
 COLOR_YELLOW = 0xF1C40F
 NOTIFY_LOCK_PATH = PUBLIC_DIR / ".notify_discord.lock"
 NOTIFY_EVENT_LOG_PATH = PUBLIC_DIR / "monitoring" / "discord_notify_events.jsonl"
+NOTIFY_ATTEMPTS = 0
+NOTIFY_SUCCESSES = 0
+NOTIFY_FAILURES = 0
 
 HARD_GATE_NAMES = {
     "spread_guard",
@@ -270,6 +274,8 @@ def _resolve_entry_type_label(event_type: str, signal_data: Dict[str, Any], trac
 
 
 def send_discord_embed(embed_data: Dict[str, Any]) -> bool:
+     global NOTIFY_ATTEMPTS, NOTIFY_SUCCESSES, NOTIFY_FAILURES
+     NOTIFY_ATTEMPTS += 1
      event_base = {
          "timestamp_utc": to_utc_iso(datetime.now(timezone.utc)),
          "title": str(embed_data.get("title") or ""),
@@ -277,10 +283,12 @@ def send_discord_embed(embed_data: Dict[str, Any]) -> bool:
      if DRY_RUN:
          print(f"[DRY RUN] Embed title: {embed_data.get('title')}")
          _append_notify_event({**event_base, "success": False, "skipped": True, "reason": "dry_run"})
+         NOTIFY_FAILURES += 1
          return False
      if not DISCORD_WEBHOOK_URL:
          print("Hiba: DISCORD_WEBHOOK_URL nincs beállítva; webhook küldés kihagyva.")
          _append_notify_event({**event_base, "success": False, "skipped": True, "reason": "missing_webhook"})
+         NOTIFY_FAILURES += 1
          return False
      if requests is None:
          try:
@@ -303,6 +311,9 @@ def send_discord_embed(embed_data: Dict[str, Any]) -> bool:
              }
              if not ok:
                  print(f"Hiba: Discord webhook HTTP {status_code}")
+                 NOTIFY_FAILURES += 1
+            else:
+                 NOTIFY_SUCCESSES += 1
              return ok
          except error.HTTPError as exc:
              _append_notify_event({
@@ -313,6 +324,7 @@ def send_discord_embed(embed_data: Dict[str, Any]) -> bool:
                  "transport": "urllib",
              })
              print(f"Hiba: Discord webhook HTTP {exc.code}")
+             NOTIFY_FAILURES += 1
              return False
          except Exception as exc:
              _append_notify_event({
@@ -323,6 +335,7 @@ def send_discord_embed(embed_data: Dict[str, Any]) -> bool:
                  "error": str(exc)[:300],
              })
              print(f"Hiba: {exc}")
+             NOTIFY_FAILURES += 1
              return False
      try:
          response = requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed_data]}, timeout=5)
@@ -335,10 +348,14 @@ def send_discord_embed(embed_data: Dict[str, Any]) -> bool:
          })
          if not ok:
              print(f"Hiba: Discord webhook HTTP {response.status_code}")
+             NOTIFY_FAILURES += 1
+         else:
+             NOTIFY_SUCCESSES += 1
          return ok
      except Exception as exc:
          _append_notify_event({**event_base, "success": False, "reason": "request_exception", "error": str(exc)[:300]})
          print(f"Hiba: {exc}")
+         NOTIFY_FAILURES += 1
          return False
 
 
@@ -1072,6 +1089,11 @@ def check_and_notify() -> None:
 
     if notify_state_changed and not DRY_RUN:  
         save_json(notify_state_path, notify_state)
+    print(
+        f"Discord notify summary: attempts={NOTIFY_ATTEMPTS}, successes={NOTIFY_SUCCESSES}, failures={NOTIFY_FAILURES}"
+    )
+    if FAIL_ON_DELIVERY_ERROR and NOTIFY_ATTEMPTS > 0 and NOTIFY_SUCCESSES == 0:
+        raise SystemExit("Discord értesítési kézbesítés sikertelen: 0 sikeres küldés")
 
 
 if __name__ == "__main__":
