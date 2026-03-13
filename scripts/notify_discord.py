@@ -12,8 +12,6 @@ import importlib.util
 import json
 import os
 import sys
-import fcntl
-from urllib import request, error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -35,27 +33,11 @@ import position_tracker
 import state_db
 
 
-def _collect_webhook_urls() -> list[str]:
-    raw_values = [os.getenv("DISCORD_WEBHOOK_URL", "")]
-    urls: list[str] = []
-    for raw in raw_values:
-        for token in str(raw or "").replace("\n", ",").split(","):
-            candidate = token.strip()
-            if candidate and candidate not in urls:
-                urls.append(candidate)
-    return urls
-
-
-DISCORD_WEBHOOK_URLS = _collect_webhook_urls()
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
-FAIL_ON_DELIVERY_ERROR = os.getenv("NOTIFY_FAIL_ON_DELIVERY_ERROR", "").lower() in {"1", "true", "yes"}
 ENTRY_COOLDOWN_MINUTES = 30
-ACTIVATION_REMINDER_MINUTES = max(1, int(os.getenv("NOTIFY_ACTIVATION_REMINDER_MINUTES", "240") or "240"))
-DISCORD_NOTIFY_ASSETS = {
-    str(asset).upper()
-    for asset in getattr(settings, "ASSETS", [])
-    if str(asset).strip() and str(asset).upper() != "BTCUSD"
-}
+EXIT_NOTIFY_COOLDOWN_MINUTES = 30
+DISCORD_NOTIFY_ASSETS = {"GOLD_CFD", "XAGUSD", "USOIL"}
 
 BASE_DIR = Path(__file__).resolve().parent
 PUBLIC_DIR = Path(os.getenv("NOTIFY_PUBLIC_DIR", "")) if os.getenv("NOTIFY_PUBLIC_DIR") else None
@@ -79,11 +61,6 @@ COLOR_HARD_EXIT = 0xB71C1C
 COLOR_BLUE = 0x3498DB
 COLOR_ORANGE = 0xE67E22
 COLOR_YELLOW = 0xF1C40F
-NOTIFY_LOCK_PATH = PUBLIC_DIR / ".notify_discord.lock"
-NOTIFY_EVENT_LOG_PATH = PUBLIC_DIR / "monitoring" / "discord_notify_events.jsonl"
-NOTIFY_ATTEMPTS = 0
-NOTIFY_SUCCESSES = 0
-NOTIFY_FAILURES = 0
 
 HARD_GATE_NAMES = {
     "spread_guard",
@@ -151,28 +128,6 @@ def format_price(price: Any) -> str:
 def to_utc_iso(dt: datetime) -> str:
     return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
     
-def _append_notify_event(event: Dict[str, Any]) -> None:
-    try:
-        NOTIFY_EVENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with NOTIFY_EVENT_LOG_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(event, ensure_ascii=False) + "\n")
-    except Exception as exc:
-        print(f"Hiba: notify event log írás sikertelen: {exc}")
-
-
-def _log_notify_skip(asset: str, event: str, reason: str, **extra: Any) -> None:
-    payload = {
-        "timestamp_utc": to_utc_iso(datetime.now(timezone.utc)),
-        "asset": str(asset or "").upper(),
-        "event": str(event or "skip"),
-        "skipped": True,
-        "reason": str(reason or "unspecified"),
-    }
-    if extra:
-        payload.update(extra)
-    _append_notify_event(payload)
-
-
 
 def get_budapest_time(utc_iso_string: Optional[str]) -> str:
     if not utc_iso_string or utc_iso_string == "-":
@@ -238,166 +193,17 @@ def _resolve_tp1_hit_ts(position: Dict[str, Any]) -> str:
     return "még nem"
 
 
-def _pick_first_nonempty(payload: Dict[str, Any], *keys: str) -> str:
-    if not isinstance(payload, dict):
-        return ""
-    for key in keys:
-        value = payload.get(key)
-        if value is None:
-            continue
-        text = str(value).strip()
-        if text:
-            return text
-    return ""
-
-
-def _resolve_entry_type_label(event_type: str, signal_data: Dict[str, Any], tracked_entry: Dict[str, Any]) -> str:
-    tracked = tracked_entry if isinstance(tracked_entry, dict) else {}
-    signal = signal_data if isinstance(signal_data, dict) else {}
-    resolved = _pick_first_nonempty(
-        tracked,
-        "entry_type",
-        "entryType",
-        "order_type",
-        "orderType",
-        "signal_type",
-        "signalType",
-        "trigger_type",
-        "triggerType",
-        "entry_order_type",
-    )
-    if not resolved:
-        resolved = _pick_first_nonempty(
-            signal,
-            "entry_type",
-            "entryType",
-            "order_type",
-            "orderType",
-            "signal_type",
-            "signalType",
-            "trigger_type",
-            "triggerType",
-            "entry_order_type",
-        )
-    if not resolved:
-        return "Automatikus aktiválás" if event_type == "activation" else "N/A"
-    return resolved.upper()
-
-
-def send_discord_embed(embed_data: Dict[str, Any]) -> bool:
-    global NOTIFY_ATTEMPTS, NOTIFY_SUCCESSES, NOTIFY_FAILURES
-    NOTIFY_ATTEMPTS += 1
-    event_base = {
-        "timestamp_utc": to_utc_iso(datetime.now(timezone.utc)),
-        "title": str(embed_data.get("title") or ""),
-    }
-    if DRY_RUN:
-        print(f"[DRY RUN] Embed title: {embed_data.get('title')}")
-        _append_notify_event({**event_base, "success": False, "skipped": True, "reason": "dry_run"})
-        NOTIFY_FAILURES += 1
-        return False
-    if not DISCORD_WEBHOOK_URLS:
-        print("Hiba: DISCORD_WEBHOOK_URL nincs beállítva; webhook küldés kihagyva.")
-        _append_notify_event({**event_base, "success": False, "skipped": True, "reason": "missing_webhook"})
-        NOTIFY_FAILURES += 1
-        return False
-    for idx, webhook_url in enumerate(DISCORD_WEBHOOK_URLS, start=1):
-        if requests is None:
-            try:
-                payload = json.dumps({"embeds": [embed_data]}).encode("utf-8")
-                req = request.Request(
-                    webhook_url,
-                    data=payload,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                with request.urlopen(req, timeout=5) as response:
-                    status_code = int(getattr(response, "status", 0) or 0)
-                ok = 200 <= status_code < 300
-                _append_notify_event({
-                    **event_base,
-                    "success": ok,
-                    "status_code": status_code,
-                    "reason": "ok" if ok else "http_error",
-                    "transport": "urllib",
-                    "webhook_index": idx,
-                })
-                if ok:
-                    NOTIFY_SUCCESSES += 1
-                    return True
-                print(f"Hiba: Discord webhook HTTP {status_code} (index={idx})")
-                continue
-            except error.HTTPError as exc:
-                _append_notify_event({
-                    **event_base,
-                    "success": False,
-                    "status_code": int(exc.code),
-                    "reason": "http_error",
-                    "transport": "urllib",
-                    "webhook_index": idx,
-                })
-                print(f"Hiba: Discord webhook HTTP {exc.code} (index={idx})")
-                continue
-            except Exception as exc:
-                _append_notify_event({
-                    **event_base,
-                    "success": False,
-                    "reason": "request_exception",
-                    "transport": "urllib",
-                    "webhook_index": idx,
-                    "error": str(exc)[:300],
-                })
-                print(f"Hiba: {exc} (index={idx})")
-                continue
-        try:
-            response = requests.post(webhook_url, json={"embeds": [embed_data]}, timeout=5)
-            ok = 200 <= int(response.status_code) < 300
-            _append_notify_event({
-                **event_base,
-                "success": ok,
-                "status_code": int(response.status_code),
-                "reason": "ok" if ok else "http_error",
-                "webhook_index": idx,
-                "payload_type": "embed",
-            })
-            if ok:
-                NOTIFY_SUCCESSES += 1
-                return True
-            body_preview = str(getattr(response, "text", "") or "").strip()[:300]
-            print(f"Hiba: Discord webhook HTTP {response.status_code} (index={idx}) body={body_preview!r}")
-
-            if len(DISCORD_WEBHOOK_URLS) == 1 and int(response.status_code) in {400, 401, 403, 415, 422}:
-                fallback_content = str(embed_data.get("title") or "Trading signal")[:1800]
-                fallback_resp = requests.post(webhook_url, json={"content": fallback_content}, timeout=5)
-                fallback_ok = 200 <= int(fallback_resp.status_code) < 300
-                _append_notify_event({
-                    **event_base,
-                    "success": fallback_ok,
-                    "status_code": int(fallback_resp.status_code),
-                    "reason": "ok" if fallback_ok else "http_error",
-                    "webhook_index": idx,
-                    "payload_type": "content_fallback",
-                })
-                if fallback_ok:
-                    NOTIFY_SUCCESSES += 1
-                    return True
-                fallback_body = str(getattr(fallback_resp, "text", "") or "").strip()[:300]
-                print(
-                    f"Hiba: Discord webhook fallback HTTP {fallback_resp.status_code} "
-                    f"(index={idx}) body={fallback_body!r}"
-                )
-        except Exception as exc:
-            _append_notify_event({
-                **event_base,
-                "success": False,
-                "reason": "request_exception",
-                "webhook_index": idx,
-                "error": str(exc)[:300],
-            })
-            print(f"Hiba: {exc} (index={idx})")
-
-    NOTIFY_FAILURES += 1
-    return False
+def send_discord_embed(embed_data: Dict[str, Any]) -> None:
+     if DRY_RUN or not DISCORD_WEBHOOK_URL:
+         print(f"[DRY RUN] Embed title: {embed_data.get('title')}")
+         return
+     if requests is None:
+         print("Hiba: a 'requests' modul hiányzik; webhook küldés kihagyva.")
+         return
+     try:
+         requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed_data]}, timeout=5)
+     except Exception as exc:
+         print(f"Hiba: {exc}")
 
 
 def round_trip_pct(asset: str) -> float:
@@ -425,22 +231,6 @@ def calc_rr(entry: float, sl: float, target: float) -> Optional[float]:
     if risk <= 0:
         return None
     return reward / risk
-
-
-def levels_match_direction(
-    direction: str,
-    entry: Optional[float],
-    sl: Optional[float],
-    tp1: Optional[float],
-    tp2: Optional[float],
-) -> bool:
-    if direction not in {"buy", "sell"}:
-        return False
-    if entry is None or sl is None or tp1 is None:
-        return False
-    if direction == "buy":
-        return sl < entry < tp1 and (tp2 is None or tp1 <= tp2)
-    return tp1 < entry < sl and (tp2 is None or tp2 <= tp1)
 
 
 def _entry_signature(direction: str, order_type: str) -> Dict[str, Any]:
@@ -473,18 +263,11 @@ def _exit_signature(exit_signal: Dict[str, Any]) -> Dict[str, Any]:
     category = str(exit_signal.get("category") or "").lower()
     trigger_price = safe_float(exit_signal.get("trigger_price"))
     trigger_bucket = round(trigger_price, 3) if trigger_price is not None else None
-    triggered_at = str(
-        exit_signal.get("triggered_at")
-        or exit_signal.get("closed_at_utc")
-        or exit_signal.get("timestamp")
-        or ""
-    ).strip()
     return {
         "state": state,
         "direction": direction,
         "category": category,
         "trigger_bucket": trigger_bucket,
-        "triggered_at": triggered_at,
     }
 
 
@@ -531,15 +314,6 @@ def _resolve_tracking_context() -> Tuple[Dict[str, Any], str, bool]:
     return tracking_cfg, positions_path, treat_missing
 
 
-def _normalize_position_side(side: Any) -> str:
-    raw = str(side or "").strip().lower()
-    if raw in {"long", "buy"}:
-        return "buy"
-    if raw in {"short", "sell"}:
-        return "sell"
-    return ""
-
-
 def check_and_notify() -> None:
     if not PUBLIC_DIR.exists():
         return
@@ -565,9 +339,7 @@ def check_and_notify() -> None:
     assets = [
         d
         for d in PUBLIC_DIR.iterdir()
-        if d.is_dir()
-        and not d.name.startswith("_")
-        and (not DISCORD_NOTIFY_ASSETS or d.name.upper() in DISCORD_NOTIFY_ASSETS)
+        if d.is_dir() and not d.name.startswith("_") and d.name in DISCORD_NOTIFY_ASSETS
     ]
     
     
@@ -579,13 +351,7 @@ def check_and_notify() -> None:
             continue
 
         signal = str(data.get("signal") or "no entry").lower()
-        plan_for_signal = data.get("precision_plan") if isinstance(data.get("precision_plan"), dict) else {}
-        trigger_state = str(plan_for_signal.get("trigger_state") or "").lower()
-        if signal == "no entry" and trigger_state in {"arming", "fire"}:
-            signal = "precision_arming"
         exit_signal = data.get("position_exit_signal") or data.get("active_position_meta", {}).get("exit_signal")
-        notify_meta = data.get("notify") if isinstance(data.get("notify"), dict) else {}
-        position_state = data.get("position_state") if isinstance(data.get("position_state"), dict) else {}        
         tracked_entry = manual_positions.get(asset_name) if isinstance(manual_positions, dict) else None
         tracked_status = str(tracked_entry.get("status") or "").lower() if isinstance(tracked_entry, dict) else ""
         has_lifecycle_event = tracking_enabled and tracked_status in {"open", "closed"}
@@ -633,21 +399,12 @@ def check_and_notify() -> None:
         tp1 = safe_float(data.get("tp1"))
         tp2 = safe_float(data.get("tp2"))
 
-        order_type = str(
-            data.get("entry_order_type")
-            or data.get("entry_type")
-            or data.get("entryType")
-            or data.get("order_type")
-            or data.get("orderType")
-            or data.get("signal_type")
-            or data.get("signalType")
-            or "MARKET"
-        ).upper()
+        order_type = str(data.get("entry_order_type") or data.get("order_type") or "MARKET").upper()
         direction = signal
         if signal == "precision_arming":
-            plan = plan_for_signal
+            plan = data.get("precision_plan") if isinstance(data.get("precision_plan"), dict) else {}
             direction = str(plan.get("direction") or data.get("signal") or "buy").lower()
-            order_type = str(plan.get("order_type") or "LIMIT").upper()
+            order_type = str(plan.get("order_type") or order_type or "LIMIT").upper()
             entry = safe_float(plan.get("entry") or entry)
             sl = safe_float(plan.get("stop_loss") or sl)
             tp1 = safe_float(plan.get("take_profit_1") or tp1)
@@ -655,87 +412,20 @@ def check_and_notify() -> None:
 
         if order_type not in {"LIMIT", "MARKET", "STOP"}:
             order_type = "MARKET"
-
-
+        
         if direction not in {"buy", "sell"} and not exit_signal and not has_lifecycle_event:
             print(f"{asset_name}: bizonytalan irány ({direction}) — jelzés némítva.")
             continue
 
-        loop_now_dt = datetime.now(timezone.utc)        
-        payload_has_position = bool(position_state.get("has_position"))
-        if payload_has_position and not exit_signal and not has_lifecycle_event and direction in {"buy", "sell"}:
-            allow_market_with_tracking = order_type == "MARKET" and tracking_enabled
-            allow_precision_limit_info_card = signal == "precision_arming" and order_type == "LIMIT"
-            if allow_market_with_tracking:
-                print(
-                    f"{asset_name}: payload has_position=true, de MARKET jelzés tracking mellett továbbengedve (dedup/tracking gate dönt)."
-                )
-            elif allow_precision_limit_info_card:
-                print(
-                    f"{asset_name}: payload has_position=true, precision_arming LIMIT kártya információs módban továbbengedve."
-                )
-            else:
-                print(f"{asset_name}: belépő jelzés némítva (payload position_state.has_position=true).")
-                continue
-
-        should_notify_entry = notify_meta.get("should_notify")
-        if (
-            should_notify_entry is False
-            and signal in {"buy", "sell"}
-            and not exit_signal
-            and not has_lifecycle_event
-            and direction in {"buy", "sell"}
-        ):
-            reason = str(notify_meta.get("reason") or "unspecified")
-            print(f"{asset_name}: belépő jelzés némítva (notify.should_notify=false, reason={reason}).")
-            continue
-
-        has_same_direction_tracked_position = False
-        if (
-            tracking_enabled
-            and tracked_status in {"open", "pending"}
-            and not exit_signal
-            and signal in {"buy", "sell", "precision_arming"}
-            and direction in {"buy", "sell"}
-        ):
-            tracked_side = _normalize_position_side(tracked_entry.get("side") if isinstance(tracked_entry, dict) else "")
-            if tracked_side == direction:
-                if signal == "precision_arming":
-                    has_same_direction_tracked_position = True
-                    print("Azonos irányú pozíció már fut, precision_arming LIMIT kártya információs módban küldve.")
-                else:
-                    print("Azonos irányú pozíció már fut, új belépő blokkolva.")
-                    continue
-            if tracked_side and tracked_side != direction:
-                exit_signal = {
-                    "state": "hard_exit",
-                    "direction": "long" if tracked_side == "buy" else "short",
-                    "reasons": ["Ellenirányú erős belépési jel (Trendforduló)"],
-                    "synthetic_reverse": True,
-                    "timestamp": to_utc_iso(loop_now_dt),
-                }
-                closed_at_utc = to_utc_iso(loop_now_dt)
-                manual_positions = position_tracker.close_position(
-                    asset_name,
-                    reason="hard_exit",
-                    closed_at_utc=closed_at_utc,
-                    cooldown_minutes=0,
-                    positions=manual_positions,
-                )
-                tracked_entry = manual_positions.get(asset_name) if isinstance(manual_positions, dict) else None
-                tracked_status = str(tracked_entry.get("status") or "").lower() if isinstance(tracked_entry, dict) else ""
-                
         if tracking_enabled and not exit_signal and not has_lifecycle_event:
             tracked_state = position_tracker.compute_state(
                 asset_name,
                 tracking_cfg,
                 manual_positions,
-                loop_now_dt,
+                datetime.now(timezone.utc),
             )
-            has_position = bool(tracked_state.get("has_position"))
-            pending_active = bool(tracked_state.get("pending_active"))
-            if (has_position or pending_active) and not has_same_direction_tracked_position:
-                tracked_status = "OPEN" if has_position else "PENDING"
+            if tracked_state.get("has_position") or tracked_state.get("pending_active"):
+                tracked_status = "OPEN" if tracked_state.get("has_position") else "PENDING"
                 print(f"{asset_name}: belépő blokkolva (pozíció státusz: {tracked_status}).")
                 continue
             if tracked_state.get("cooldown_active"):
@@ -751,105 +441,27 @@ def check_and_notify() -> None:
         if tracking_enabled and isinstance(tracked_entry, dict):
             if tracked_status == "open":
                 activation_key = _position_event_key(tracked_entry, "activated")
-                activation_due = False
-                if activation_key:
-                    last_activation_sent_utc = str(asset_state.get("last_activation_sent_utc") or "").strip()
-                    last_activation_dt = None
-                    if last_activation_sent_utc:
-                        try:
-                            last_activation_dt = datetime.fromisoformat(last_activation_sent_utc.replace("Z", "+00:00"))
-                        except Exception:
-                            last_activation_dt = None
-                    activation_due = asset_state.get("last_position_event_key") != activation_key
-                    if not activation_due and last_activation_dt is not None:
-                        activation_due = (loop_now_dt - last_activation_dt) >= timedelta(minutes=ACTIVATION_REMINDER_MINUTES)
-                if activation_key and activation_due:
+                if activation_key and asset_state.get("last_position_event_key") != activation_key:
                     activation_side = str(tracked_entry.get("side") or "").lower()
                     irany = "Vétel" if activation_side == "long" else "Eladás"
-                    order_type = _resolve_entry_type_label("activation", data, tracked_entry)
-                    tp1_hit_ts = _resolve_tp1_hit_ts(tracked_entry)
-                    print(
-                        f"{asset_name}: activation entry type resolved "
-                        f"event_type=activation tracked_entry_type={tracked_entry.get('entry_type')!r} "
-                        f"tracked_order_type={tracked_entry.get('order_type')!r} "
-                        f"tracked_signal_type={tracked_entry.get('signal_type')!r} "
-                        f"tracked_trigger_type={tracked_entry.get('trigger_type')!r} "
-                        f"signal_entry_type={data.get('entry_type')!r} "
-                        f"signal_order_type={data.get('order_type')!r} "
-                        f"signal_signal_type={data.get('signal_type')!r} "
-                        f"signal_trigger_type={data.get('trigger_type')!r} "
-                        f"displayed={order_type!r}"
-                    )
-                    sent_ok = send_discord_embed({
+                    tp1_hit_ts = _resolve_tp1_hit_ts(tracked_entry)                     
+                    send_discord_embed({
                         "title": f"{_asset_emoji(asset_name)} {asset_name}",
                         "description": (
                             f"Irány: `{irany}`\n"
-                            f"Belépő típus: `{order_type}`\n"
                             f"Belépő: `{format_price(tracked_entry.get('entry'))}`\n"
                             f"Aktiválva: `{_format_ts(tracked_entry.get('opened_at_utc'))}`\n"
-                            f"SL: `{format_price(tracked_entry.get('sl'))}`\n"
                             f"TP1: `{format_price(tracked_entry.get('tp1'))}`\n"
-                            f"Spot: `{format_price(spot_price)}`\n"
                             f"TP1 elérve: `{tp1_hit_ts}`\n"
-                            f"Állapot: `{_position_status_hu(tracked_status, tp1_hit_ts)}`\n"
-                            f"Kártya időbélyeg: `{_format_ts(to_utc_iso(loop_now_dt))}`"
+                            f"Állapot: `{_position_status_hu(tracked_status, tp1_hit_ts)}`"
                         ),
                         "color": COLOR_GREEN if activation_side == "long" else COLOR_RED,
                         "fields": [],
                         "footer": {"text": f"Activation • {asset_name}"},
                     })
-                    if sent_ok:
-                        asset_state["last_position_event_key"] = activation_key
-                        asset_state["last_activation_sent_utc"] = to_utc_iso(loop_now_dt)
-                        notify_state[asset_name] = asset_state
-                        notify_state_changed = True
-                elif activation_key:
-                    print(f" -> ACTIVATION DEDUP: {asset_name} (position event key)")
-                    _log_notify_skip(asset_name, "activation", "dedup_position_event_key")
-                management_signal = tracked_entry.get("last_management_signal")
-                management_state = (
-                    str(management_signal.get("state") or "").lower()
-                    if isinstance(management_signal, dict)
-                    else ""
-                )
-                if bool(tracked_entry.get("tp1_scaled")) and management_state == "scale_out":
-                    scale_out_key = _position_event_key(tracked_entry, "scale_out")
-                    if scale_out_key and asset_state.get("last_position_event_key") != scale_out_key:
-                        sent_ok = send_discord_embed(
-                            {
-                                "title": "🟠 RÉSZZÁRÁS (TP1) - Húzd a Stop-ot Nullába!",
-                                "description": f"Eszköz: `{asset_name}`",
-                                "color": COLOR_ORANGE,
-                                "fields": [
-                                    {
-                                        "name": "🕒 Kártya időbélyeg",
-                                        "value": f"`{_format_ts(management_signal.get('triggered_at'))}`",
-                                        "inline": False,
-                                    },
-                                    {
-                                        "name": "📊 Árfolyam & Szintek",
-                                        "value": (
-                                            f"Spot: `{format_price(spot_price)}`\n"
-                                            f"Eredeti Entry: `{format_price(tracked_entry.get('entry'))}`\n"
-                                            f"Új SL (breakeven): `{format_price(tracked_entry.get('sl'))}`"
-                                        ),
-                                        "inline": False,
-                                    },
-                                ],
-                                "footer": {"text": f"Menedzsment • {asset_name}"},
-                            }
-                        )
-                        if sent_ok:
-                            asset_state["last_position_event_key"] = scale_out_key
-                            notify_state[asset_name] = asset_state
-                            notify_state_changed = True
-                    elif scale_out_key:
-                        _log_notify_skip(
-                            asset_name,
-                            "scale_out",
-                            "dedup_position_event_key",
-                            key=scale_out_key,
-                        )         
+                    asset_state["last_position_event_key"] = activation_key
+                    notify_state[asset_name] = asset_state
+                    notify_state_changed = True
             elif tracked_status == "closed":
                 close_reason = str(tracked_entry.get("close_reason") or "").lower()
                 closed_at = str(tracked_entry.get("closed_at_utc") or "")
@@ -859,15 +471,13 @@ def check_and_notify() -> None:
                     irany = "Vétel" if activation_side == "long" else "Eladás"
                     tp1_hit_ts = _resolve_tp1_hit_ts(tracked_entry)
                     close_color = COLOR_GREEN if close_reason == "tp2_hit" else COLOR_HARD_EXIT if close_reason == "hard_exit" else COLOR_RED
-                    sent_ok = send_discord_embed({
+                    send_discord_embed({
                         "title": f"{_asset_emoji(asset_name)} {asset_name}",
                         "description": (
                             f"Irány: `{irany}`\n"
                             f"Belépő: `{format_price(tracked_entry.get('entry'))}`\n"
                             f"Aktiválva: `{_format_ts(tracked_entry.get('opened_at_utc'))}`\n"
-                            f"SL: `{format_price(tracked_entry.get('sl'))}`\n"
                             f"TP1: `{format_price(tracked_entry.get('tp1'))}`\n"
-                            f"Spot: `{format_price(spot_price)}`\n"
                             f"TP1 elérve: `{tp1_hit_ts}`\n"
                             "Állapot: `Lezárt`"
                         ),
@@ -886,38 +496,35 @@ def check_and_notify() -> None:
                         ],
                         "footer": {"text": f"Close • {asset_name}"},
                     })
-                    if sent_ok:
-                        asset_state["last_position_event_key"] = close_key
-                        notify_state[asset_name] = asset_state
-                        notify_state_changed = True
-                elif close_key:
-                    _log_notify_skip(
-                        asset_name,
-                        "close",
-                        "dedup_position_event_key",
-                        key=close_key,
-                        close_reason=close_reason,
-                    )
+                    asset_state["last_position_event_key"] = close_key
+                    notify_state[asset_name] = asset_state
+                    notify_state_changed = True
     
         if exit_signal:
             exit_state = str(exit_signal.get("state") or exit_signal.get("action") or "").lower()            
             exit_signature = _exit_signature(exit_signal)
             exit_reasons = [str(r) for r in (exit_signal.get("reasons") or []) if r][:4]
-            is_synthetic_reverse = bool(exit_signal.get("synthetic_reverse"))
-            now_dt = loop_now_dt
+            now_dt = datetime.now(timezone.utc)
             asset_state = notify_state.get(asset_name) if isinstance(notify_state.get(asset_name), dict) else {}
             tracked_entry = manual_positions.get(asset_name) if isinstance(manual_positions, dict) else None
             tracked_status_for_exit = str(tracked_entry.get("status") or "").lower() if isinstance(tracked_entry, dict) else ""
-            if tracking_enabled and tracked_status_for_exit != "open" and not is_synthetic_reverse:
-                print(f"{asset_name}: exit jelzés figyelmen kívül hagyva (nincs követett nyitott pozíció).")
-                _log_notify_skip(asset_name, "exit", "no_tracked_open_position", exit_state=exit_state)    
+            if tracking_enabled and tracked_status_for_exit not in {"open", "closed"}:
+                print(f"{asset_name}: exit jelzés figyelmen kívül hagyva (nincs követett nyitott/zárt pozíció).")
                 continue
             event_key = _position_event_key(tracked_entry, exit_state)
-            last_exit_signature = asset_state.get("last_exit_signature")
-            if last_exit_signature == exit_signature:
-                print(f" -> EXIT DEDUP: {asset_name} (event signature)")
-                _log_notify_skip(asset_name, "exit", "dedup_exit_signature", exit_state=exit_state)
+            if event_key and asset_state.get("last_position_event_key") == event_key:
+                print(f" -> EXIT POSITION DEDUP: {asset_name} ({exit_state})")
                 continue
+            last_exit_signature = asset_state.get("last_exit_signature")
+            last_exit_sent_utc = asset_state.get("last_exit_sent_utc")
+            if last_exit_signature == exit_signature and last_exit_sent_utc:
+                try:
+                    last_exit_dt = datetime.fromisoformat(str(last_exit_sent_utc).replace("Z", "+00:00"))
+                except Exception:
+                    last_exit_dt = None
+                if last_exit_dt and now_dt - last_exit_dt < timedelta(minutes=EXIT_NOTIFY_COOLDOWN_MINUTES):                    
+                    print(f" -> EXIT DEDUP: {asset_name} ({EXIT_NOTIFY_COOLDOWN_MINUTES}m)")
+                    continue
             state_label = {
                 "scale_out": "🟠 RÉSZZÁRÁS (TP1) - Húzd a Stop-ot Nullába!",
                 "hard_exit": "🔴 AZONNAL ZÁRD A POZÍCIÓT! (Hard Exit)",
@@ -937,67 +544,41 @@ def check_and_notify() -> None:
             else:
                 color = COLOR_ORANGE
 
-            close_direction = _normalize_position_side(exit_signal.get("direction"))
-            if not close_direction and isinstance(tracked_entry, dict):
-                close_direction = _normalize_position_side(tracked_entry.get("side"))
-            close_direction_text = "LONG" if close_direction == "buy" else "SHORT" if close_direction == "sell" else "N/A"
-
-            fields = [
-                {
-                    "name": "🕒 Kártya időbélyeg",
-                    "value": f"`{_format_ts(to_utc_iso(now_dt))}`",
-                    "inline": False,
-                },
-            ]
-            if exit_state == "hard_exit":
-                fields.append(
-                    {
-                        "name": "🎯 Zárandó irány",
-                        "value": f"`{close_direction_text}`",
-                        "inline": False,
-                    }
-                )
-            fields.extend([
-                {
-                    "name": "📊 Árfolyam & Szintek",
-                    "value": f"Spot: `{format_price(spot_price)}`\nEredeti Entry: `{format_price(entry)}`",
-                    "inline": False,
-                },
-                {
-                    "name": "💡 Javaslat oka",
-                    "value": "\n".join(f"• {_hu_reason(r)}" for r in exit_reasons) or "• N/A",
-                    "inline": False,
-                }
-            ])
-
+            p_score_text = f"P Score: **{p_score:.1f}** (Erősség)" if p_score is not None else ""
+            reason_lines = [f"• {_hu_reason(r)}" for r in exit_reasons] or ["• N/A"]
+            if p_score_text:
+                reason_lines.insert(0, p_score_text)
+                
             embed = {
                 "title": state_label,
-                "description": f"Eszköz: `{asset_name}`",
+                "description": f"{_asset_emoji(asset_name)} Eszköz: `{asset_name}`",
                 "color": color,
-                "fields": fields,
+                "fields": [
+                    {
+                        "name": "📊 Árfolyam & Szintek",
+                        "value": f"Spot: `{format_price(spot_price)}`\nEredeti Entry: `{format_price(entry)}`",
+                        "inline": False,
+                    },
+                    {
+                        "name": "💡 Javaslat oka",
+                        "value": "\n".join(reason_lines),
+                        "inline": False,
+                    }
+                ],
                 "footer": {"text": f"Menedzsment • {asset_name}"},
             }
-            sent_ok = send_discord_embed(embed)
-            if sent_ok:
-                asset_state["last_exit_signature"] = exit_signature
-                asset_state["last_exit_sent_utc"] = to_utc_iso(now_dt)
-                if event_key:
-                    asset_state["last_position_event_key"] = event_key
-                notify_state[asset_name] = asset_state
-                notify_state_changed = True
-            if not is_synthetic_reverse:
-                continue
+            send_discord_embed(embed)
+            asset_state["last_exit_signature"] = exit_signature
+            asset_state["last_exit_sent_utc"] = to_utc_iso(now_dt)
+            if event_key:
+                asset_state["last_position_event_key"] = event_key
+            notify_state[asset_name] = asset_state
+            notify_state_changed = True
+            continue
 
         tp1_net_usd = 0.0
         if entry is None or sl is None or tp1 is None:
             print(f"{asset_name}: hiányzó entry/SL/TP1 — jelzés eldobva.")
-            continue
-
-        if not levels_match_direction(direction, entry, sl, tp1, tp2):
-            print(
-                f"{asset_name}: inkonzisztens irány/szintek ({direction}) — jelzés eldobva. "
-                f"entry={format_price(entry)} sl={format_price(sl)} tp1={format_price(tp1)} tp2={format_price(tp2)}"
-            )
             continue
 
         notional = equity_usd * leverage
@@ -1013,7 +594,7 @@ def check_and_notify() -> None:
             allow_entry = tp1_net_usd >= counter_min_net
 
         asset_state = notify_state.get(asset_name) if isinstance(notify_state.get(asset_name), dict) else {}
-        now_dt = loop_now_dt
+        now_dt = datetime.now(timezone.utc)
         entry_signature = _entry_signature(direction, order_type)
         entry_levels_signature = _entry_levels_signature(entry, sl, tp1, tp2)
         last_entry_signature = asset_state.get("last_entry_signature")
@@ -1052,15 +633,11 @@ def check_and_notify() -> None:
             
         title = f"{prefix} {instruction}"
 
-        risk_usd = sl_risk_usd if sl_risk_usd and sl_risk_usd > 0 else 50.0
-        units_text = "N/A"
-        if entry and sl and abs(entry - sl) > 0:
-            units = risk_usd / abs(entry - sl)
-            units_text = f"{units:.2f} Egység (Units)"
-        
         p_score_text = f"P Score: **{p_score:.1f}** (Erősség)" if p_score is not None else ""
-        reasons_text = "\n".join([f"• {_hu_reason(r)}" for r in reasons[:2]]) if reasons else "• Rendszer jelzés"
-        final_reasons = f"{p_score_text}\n{reasons_text}" if p_score_text else reasons_text
+        reason_lines = [f"• {_hu_reason(r)}" for r in reasons[:2]] if reasons else ["• Rendszer jelzés"]
+        if p_score_text:
+            reason_lines.insert(0, p_score_text)
+        reasons_text = "\n".join(reason_lines)
         
         fields = [
             {
@@ -1069,79 +646,49 @@ def check_and_notify() -> None:
                 "inline": False,
             },
             {
-                "name": "⚙️ Paraméterek az eToro-hoz",
-                "value": f"MÉRET: `{units_text}` ({risk_usd} USD kockázat)\nStop Loss (SL): `{format_price(sl)}`\nTake Profit 1 (TP1): `{format_price(tp1)}`"
+                "name": "⚙️ Paraméterek",
+                "value": f"Stop Loss (SL): `{format_price(sl)}`\nTake Profit 1 (TP1): `{format_price(tp1)}`"
                 + (f"\nTake Profit 2 (TP2): `{format_price(tp2)}`" if tp2 else ""),
                 "inline": False,
             },
             {
                 "name": "💡 Indoklás",
-                "value": final_reasons,
+                "value": reasons_text,
                 "inline": False,
             },
         ]
         embed = {
             "title": title,
-            "description": f"Eszköz: `{_asset_emoji(asset_name)} {asset_name}`",
+            "description": f"{_asset_emoji(asset_name)} Eszköz: `{asset_name}`",
             "color": color,
-            "fields": fields + [
-                {
-                    "name": "🕒 Időbélyeg (Budapest)",
-                    "value": f"`{now_dt.astimezone(BUDAPEST_TZ).strftime('%Y-%m-%d %H:%M:%S')}`",
-                    "inline": False,
-                }
-            ],
-            "footer": {"text": f"Signal • Várakozás (30 perc csend indítva)"},
+            "fields": fields,
+            "footer": {"text": "Signal • Várakozás (30 perc csend indítva)"},
         }
 
-        sent_ok = send_discord_embed(embed)
-        if sent_ok:
-            asset_state["last_entry_signature"] = entry_signature
-            asset_state["last_entry_levels_signature"] = entry_levels_signature
-            asset_state["last_entry_sent_utc"] = to_utc_iso(now_dt)
-            notify_state[asset_name] = asset_state
-            notify_state_changed = True
+        send_discord_embed(embed)
+        asset_state["last_entry_signature"] = entry_signature
+        asset_state["last_entry_levels_signature"] = entry_levels_signature
+        asset_state["last_entry_sent_utc"] = to_utc_iso(now_dt)
+        notify_state[asset_name] = asset_state
+        notify_state_changed = True
 
-        if tracking_enabled and direction in {"buy", "sell"} and not has_same_direction_tracked_position:
-            if order_type in {"LIMIT", "STOP"}:
-                manual_positions = position_tracker.register_precision_pending_position(
-                    asset_name,
-                    data,
-                    now_dt,
-                    manual_positions,
-                )
-            elif order_type == "MARKET":    
-                manual_positions = position_tracker.open_position(
-                    asset_name,
-                    side="long" if direction == "buy" else "short",
-                    entry=entry,
-                    sl=sl,
-                    tp1=tp1,
-                    tp2=tp2,
-                    opened_at_utc=to_utc_iso(now_dt),
-                    order_type=order_type,
-                    positions=manual_positions,
-                )
-                if asset_name in manual_positions:
-                    manual_positions[asset_name]["status"] = "open"
-
+        if (
+            tracking_enabled
+            and signal == "precision_arming"
+            and order_type in {"LIMIT", "STOP"}
+        ):
+            manual_positions = position_tracker.register_precision_pending_position(
+                asset_name,
+                data,
+                now_dt,
+                manual_positions,
+            )
             if not DRY_RUN:
                 position_tracker.save_positions_atomic(positions_path, manual_positions)
 
     if notify_state_changed and not DRY_RUN:  
         save_json(notify_state_path, notify_state)
-    print(
-        f"Discord notify summary: attempts={NOTIFY_ATTEMPTS}, successes={NOTIFY_SUCCESSES}, failures={NOTIFY_FAILURES}"
-    )
-    if FAIL_ON_DELIVERY_ERROR and NOTIFY_ATTEMPTS > 0 and NOTIFY_SUCCESSES == 0:
-        raise SystemExit("Discord értesítési kézbesítés sikertelen: 0 sikeres küldés")
 
 
 if __name__ == "__main__":
-    with NOTIFY_LOCK_PATH.open("w", encoding="utf-8") as lock_handle:
-        try:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print("Másik notify_discord folyamat már fut; duplikált küldés elkerülve.")
-            sys.exit(0)
-        check_and_notify()
+    check_and_notify()
