@@ -15427,12 +15427,6 @@ def analyze(asset: str) -> Dict[str, Any]:
         decision_obj["order_flow_tick_snapshot"] = tick_order_flow
     if precision_plan:
         decision_obj["precision_plan"] = precision_plan
-        if decision == "precision_arming":
-            # A precision arming állapot limit alapú belépési tervet jelent,
-            # ezért explicit jelöljük a kimeneti payloadban a belépési típust,
-            # hogy a downstream kártyák MARKET/LIMIT címkéje konzisztens legyen.
-            decision_obj.setdefault("order_type", "LIMIT")
-            decision_obj.setdefault("entry_order_type", "LIMIT")
     if sentiment_signal:
         sentiment_payload = {
             "score": sentiment_signal.score,
@@ -16525,42 +16519,3 @@ if __name__ == "__main__":
         run_on_market_updates()
     else:
         main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
