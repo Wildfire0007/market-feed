@@ -12,6 +12,8 @@ import importlib.util
 import json
 import os
 import sys
+import time
+
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -32,12 +34,31 @@ from config import analysis_settings as settings
 import position_tracker
 import state_db
 
-
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+
+
+def _collect_webhook_urls() -> list[str]:
+    raw = os.getenv("DISCORD_WEBHOOK_URL", "")
+    urls: list[str] = []
+    seen: set[str] = set()
+    for part in raw.replace("\n", ",").split(","):
+        url = part.strip()
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
+DISCORD_WEBHOOK_URLS = _collect_webhook_urls()
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
 ENTRY_COOLDOWN_MINUTES = 30
 EXIT_NOTIFY_COOLDOWN_MINUTES = 30
 DISCORD_NOTIFY_ASSETS = {"GOLD_CFD", "XAGUSD", "USOIL"}
+NOTIFY_ATTEMPTS = 0
+NOTIFY_SUCCESSES = 0
+NOTIFY_FAILURES = 0
+_WEBHOOK_COOLDOWN_UNTIL: Dict[str, float] = {}
+
 
 BASE_DIR = Path(__file__).resolve().parent
 PUBLIC_DIR = Path(os.getenv("NOTIFY_PUBLIC_DIR", "")) if os.getenv("NOTIFY_PUBLIC_DIR") else None
@@ -192,18 +213,71 @@ def _resolve_tp1_hit_ts(position: Dict[str, Any]) -> str:
         return _format_ts(last_signal.get("triggered_at"), fallback="még nem")
     return "még nem"
 
+def _append_notify_event(*_args: Any, **_kwargs: Any) -> None:
+    return
 
-def send_discord_embed(embed_data: Dict[str, Any]) -> None:
-     if DRY_RUN or not DISCORD_WEBHOOK_URL:
+
+def post_batches(webhook_url: str, content: str, embeds: list[Dict[str, Any]], batch_size: int = 10) -> Dict[str, Any]:
+    if requests is None:
+        return {"attempted": False, "success": False, "http_status": None, "error": "requests_missing", "message_id": None, "batch_results": []}
+    now = time.time()
+    if _WEBHOOK_COOLDOWN_UNTIL.get(webhook_url, 0.0) > now:
+        return {"attempted": False, "success": False, "http_status": None, "error": "cooldown", "message_id": None, "batch_results": []}
+
+    payload = {"embeds": embeds[:batch_size]}
+    if content:
+        payload["content"] = content
+    batch_results = []
+    for _ in range(2):
+        try:
+            response = requests.post(webhook_url, json=payload, timeout=5)
+            status = int(getattr(response, "status_code", 0) or 0)
+            if status == 429:
+                retry_after = safe_float(getattr(response, "headers", {}).get("Retry-After")) or 1.0
+                _WEBHOOK_COOLDOWN_UNTIL[webhook_url] = time.time() + retry_after
+                time.sleep(retry_after)
+                batch_results.append({"attempted": True, "success": False, "http_status": status, "error": "rate_limited", "message_id": None, "batch_index": 0, "embed_count": len(payload.get("embeds") or [])})
+                continue
+            ok = 200 <= status < 300
+            batch_results.append({"attempted": True, "success": ok, "http_status": status, "error": None if ok else f"http_{status}", "message_id": None, "batch_index": 0, "embed_count": len(payload.get("embeds") or [])})
+            return {"attempted": True, "success": ok, "http_status": status, "error": None if ok else f"http_{status}", "message_id": None, "batch_results": batch_results}
+        except Exception as exc:
+            batch_results.append({"attempted": True, "success": False, "http_status": None, "error": str(exc), "message_id": None, "batch_index": 0, "embed_count": len(payload.get("embeds") or [])})
+            break
+    last = batch_results[-1] if batch_results else {"http_status": None, "error": "unknown", "success": False}
+    return {"attempted": True, "success": False, "http_status": last.get("http_status"), "error": last.get("error"), "message_id": None, "batch_results": batch_results}
+
+
+def send_discord_embed(embed_data: Dict[str, Any]) -> bool:
+     global NOTIFY_ATTEMPTS, NOTIFY_SUCCESSES, NOTIFY_FAILURES
+     if DRY_RUN or not DISCORD_WEBHOOK_URLS:
          print(f"[DRY RUN] Embed title: {embed_data.get('title')}")
-         return
+         return True
      if requests is None:
          print("Hiba: a 'requests' modul hiányzik; webhook küldés kihagyva.")
-         return
-     try:
-         requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed_data]}, timeout=5)
-     except Exception as exc:
-         print(f"Hiba: {exc}")
+         NOTIFY_FAILURES += 1
+         return False
+
+     NOTIFY_ATTEMPTS += 1
+     payload_candidates = [{"embeds": [embed_data]}]
+     title = str(embed_data.get("title") or "").strip()
+     if title:
+         payload_candidates.append({"content": title})
+
+     for webhook_url in DISCORD_WEBHOOK_URLS:
+         for payload in payload_candidates:
+             try:
+                 response = requests.post(webhook_url, json=payload, timeout=5)
+                 status = int(getattr(response, "status_code", 0) or 0)
+                 _append_notify_event({"url": webhook_url, "status": status, "payload": list(payload.keys())})
+                 if 200 <= status < 300:
+                     NOTIFY_SUCCESSES += 1
+                     return True
+             except Exception as exc:
+                 _append_notify_event({"url": webhook_url, "status": None, "error": str(exc)})
+
+     NOTIFY_FAILURES += 1
+     return False
 
 
 def round_trip_pct(asset: str) -> float:
