@@ -33,44 +33,6 @@ def _normalize_position_side(value: Any) -> Optional[str]:
     return None
 
 
-def _infer_side_from_levels(entry: Any, sl: Any, tp: Any) -> Optional[str]:
-    try:
-        entry_f = float(entry)
-    except (TypeError, ValueError):
-        return None
-
-    def _sign(value: Any) -> int:
-        try:
-            diff = float(value) - entry_f
-        except (TypeError, ValueError):
-            return 0
-        if diff > 0:
-            return 1
-        if diff < 0:
-            return -1
-        return 0
-
-    sl_sign = _sign(sl)
-    tp_sign = _sign(tp)
-
-    if sl_sign and tp_sign:
-        if sl_sign == -1 and tp_sign == 1:
-            return "long"
-        if sl_sign == 1 and tp_sign == -1:
-            return "short"
-        return None
-
-    if sl_sign == -1:
-        return "long"
-    if sl_sign == 1:
-        return "short"
-    if tp_sign == 1:
-        return "long"
-    if tp_sign == -1:
-        return "short"
-    return None
-
-
 LOGGER = logging.getLogger("manual_positions")
 ensure_json_stream_handler(LOGGER, static_fields={"component": "manual_positions"})
 
@@ -240,31 +202,19 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
             normalized_side = _normalize_position_side(metadata.get("side"))
             if normalized_side is None and str(row["status"] or "").upper() == "OPEN":
                 normalized_side = _normalize_position_side(metadata.get("direction"))
-            if normalized_side is None and str(row["status"] or "").upper() == "OPEN":
-                normalized_side = _infer_side_from_levels(
-                    row["entry_price"],
-                    row["sl"],
-                    tp_value,
-                )
+
             positions[asset] = {
                 "side": normalized_side,
                 "status": str(row["status"] or "open").lower(),
                 "entry": row["entry_price"],
                 "size": row["size"],
                 "sl": row["sl"],
-                "tp1": metadata.get("tp1") if metadata.get("tp1") is not None else tp_value,
-                "tp2": metadata.get("tp2") if metadata.get("tp2") is not None else tp_value,
-                "order_type": metadata.get("order_type") or metadata.get("orderType"),
-                "entry_type": metadata.get("entry_type") or metadata.get("entryType"),
-                "trigger_type": metadata.get("trigger_type") or metadata.get("triggerType"),
-                "signal_type": metadata.get("signal_type") or metadata.get("signalType"),
+                "tp1": tp_value,
+                "tp2": tp_value,
                 "opened_at_utc": metadata.get("opened_at_utc"),
                 "closed_at_utc": metadata.get("closed_at_utc"),
                 "cooldown_until_utc": metadata.get("cooldown_until_utc"),
                 "close_reason": metadata.get("close_reason"),
-                "tp1_scaled": bool(metadata.get("tp1_scaled")),
-                "tp1_hit_at_utc": metadata.get("tp1_hit_at_utc"),
-                "last_management_signal": metadata.get("last_management_signal"),
             }
         return positions
     try:
@@ -334,13 +284,6 @@ def _sync_positions_to_db(db_path: Path, data: Dict[str, Any]) -> bool:
     now_iso = _to_utc_iso(datetime.now(timezone.utc))
     try:
         with connection:
-            existing_metadata: Dict[str, Dict[str, Any]] = {}
-            for row in connection.execute("SELECT asset, strategy_metadata FROM positions"):
-                try:
-                    parsed = json.loads(row[1]) if row[1] else {}
-                except Exception:
-                    parsed = {}
-                existing_metadata[str(row[0])] = parsed if isinstance(parsed, dict) else {}
             for asset, payload in data.items():
                 if not isinstance(payload, dict):
                     continue
@@ -357,12 +300,7 @@ def _sync_positions_to_db(db_path: Path, data: Dict[str, Any]) -> bool:
                 sl = payload.get("sl")
                 tp = payload.get("tp2") if payload.get("tp2") is not None else payload.get("tp1")
                 strategy_payload = dict(payload)
-                prev_payload = existing_metadata.get(str(asset), {})
                 strategy_payload.setdefault("side", side)
-                strategy_payload.setdefault("order_type", prev_payload.get("order_type") or prev_payload.get("orderType"))
-                strategy_payload.setdefault("entry_type", prev_payload.get("entry_type") or prev_payload.get("entryType"))
-                strategy_payload.setdefault("signal_type", prev_payload.get("signal_type") or prev_payload.get("signalType"))
-                strategy_payload.setdefault("trigger_type", prev_payload.get("trigger_type") or prev_payload.get("triggerType"))
                 strategy_payload.setdefault("opened_at_utc", payload.get("opened_at_utc") or now_iso)
                 strategy_payload.setdefault("closed_at_utc", payload.get("closed_at_utc"))
                 strategy_payload.setdefault("cooldown_until_utc", payload.get("cooldown_until_utc"))
@@ -506,7 +444,6 @@ def open_position(
     tp1: Optional[float],
     tp2: Optional[float],
     opened_at_utc: str,
-    order_type: Optional[str] = None,
     positions: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     norm_side = _normalize_position_side(side)
@@ -515,7 +452,6 @@ def open_position(
     updated[asset] = {
         "status": "open",
         "side": norm_side,
-        "order_type": str(order_type or "MARKET").upper(),
         "opened_at_utc": opened_at_utc,
         "entry": entry,
         "sl": sl,
