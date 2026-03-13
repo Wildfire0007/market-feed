@@ -274,89 +274,89 @@ def _resolve_entry_type_label(event_type: str, signal_data: Dict[str, Any], trac
 
 
 def send_discord_embed(embed_data: Dict[str, Any]) -> bool:
-     global NOTIFY_ATTEMPTS, NOTIFY_SUCCESSES, NOTIFY_FAILURES
-     NOTIFY_ATTEMPTS += 1
-     event_base = {
-         "timestamp_utc": to_utc_iso(datetime.now(timezone.utc)),
-         "title": str(embed_data.get("title") or ""),
-     }
-     if DRY_RUN:
-         print(f"[DRY RUN] Embed title: {embed_data.get('title')}")
-         _append_notify_event({**event_base, "success": False, "skipped": True, "reason": "dry_run"})
-         NOTIFY_FAILURES += 1
-         return False
-     if not DISCORD_WEBHOOK_URL:
-         print("Hiba: DISCORD_WEBHOOK_URL nincs beállítva; webhook küldés kihagyva.")
-         _append_notify_event({**event_base, "success": False, "skipped": True, "reason": "missing_webhook"})
-         NOTIFY_FAILURES += 1
-         return False
-     if requests is None:
-         try:
-             payload = json.dumps({"embeds": [embed_data]}).encode("utf-8")
-             req = request.Request(
-                 DISCORD_WEBHOOK_URL,
-                 data=payload,
-                 headers={"Content-Type": "application/json"},
-                 method="POST",
-             )
-             with request.urlopen(req, timeout=5) as response:
-                 status_code = int(getattr(response, "status", 0) or 0)
-             ok = 200 <= status_code < 300
-             _append_notify_event({
-                 **event_base,
-                 "success": ok,
-                 "status_code": status_code,
-                 "reason": "ok" if ok else "http_error",
-                 "transport": "urllib",
-             }
-             if not ok:
-                 print(f"Hiba: Discord webhook HTTP {status_code}")
-                 NOTIFY_FAILURES += 1
+    global NOTIFY_ATTEMPTS, NOTIFY_SUCCESSES, NOTIFY_FAILURES
+    NOTIFY_ATTEMPTS += 1
+    event_base = {
+        "timestamp_utc": to_utc_iso(datetime.now(timezone.utc)),
+        "title": str(embed_data.get("title") or ""),
+    }
+    if DRY_RUN:
+        print(f"[DRY RUN] Embed title: {embed_data.get('title')}")
+        _append_notify_event({**event_base, "success": False, "skipped": True, "reason": "dry_run"})
+        NOTIFY_FAILURES += 1
+        return False
+    if not DISCORD_WEBHOOK_URL:
+        print("Hiba: DISCORD_WEBHOOK_URL nincs beállítva; webhook küldés kihagyva.")
+        _append_notify_event({**event_base, "success": False, "skipped": True, "reason": "missing_webhook"})
+        NOTIFY_FAILURES += 1
+        return False
+    if requests is None:
+        try:
+            payload = json.dumps({"embeds": [embed_data]}).encode("utf-8")
+            req = request.Request(
+                DISCORD_WEBHOOK_URL,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with request.urlopen(req, timeout=5) as response:
+                status_code = int(getattr(response, "status", 0) or 0)
+            ok = 200 <= status_code < 300
+            _append_notify_event({
+                **event_base,
+                "success": ok,
+                "status_code": status_code,
+                "reason": "ok" if ok else "http_error",
+                "transport": "urllib",
+            })
+            if not ok:
+                print(f"Hiba: Discord webhook HTTP {status_code}")
+                NOTIFY_FAILURES += 1
             else:
-                 NOTIFY_SUCCESSES += 1
-             return ok
-         except error.HTTPError as exc:
-             _append_notify_event({
-                 **event_base,
-                 "success": False,
-                 "status_code": int(exc.code),
-                 "reason": "http_error",
-                 "transport": "urllib",
-             })
-             print(f"Hiba: Discord webhook HTTP {exc.code}")
-             NOTIFY_FAILURES += 1
-             return False
-         except Exception as exc:
-             _append_notify_event({
-                 **event_base,
-                 "success": False,
-                 "reason": "request_exception",
-                 "transport": "urllib",
-                 "error": str(exc)[:300],
-             })
-             print(f"Hiba: {exc}")
-             NOTIFY_FAILURES += 1
-             return False
-     try:
-         response = requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed_data]}, timeout=5)
-         ok = 200 <= int(response.status_code) < 300
-         _append_notify_event({
-             **event_base,
-             "success": ok,
-             "status_code": int(response.status_code),
-             "reason": "ok" if ok else "http_error",
-         })
-         if not ok:
-             print(f"Hiba: Discord webhook HTTP {response.status_code}")
-             NOTIFY_FAILURES += 1
-         else:
-             NOTIFY_SUCCESSES += 1
-         return ok
-     except Exception as exc:
-         _append_notify_event({**event_base, "success": False, "reason": "request_exception", "error": str(exc)[:300]})
-         print(f"Hiba: {exc}")
-         NOTIFY_FAILURES += 1
-         return False
+                NOTIFY_SUCCESSES += 1
+            return ok
+        except error.HTTPError as exc:
+            _append_notify_event({
+                **event_base,
+                "success": False,
+                "status_code": int(exc.code),
+                "reason": "http_error",
+                "transport": "urllib",
+            })
+            print(f"Hiba: Discord webhook HTTP {exc.code}")
+            NOTIFY_FAILURES += 1
+            return False
+        except Exception as exc:
+            _append_notify_event({
+                **event_base,
+                "success": False,
+                "reason": "request_exception",
+                "transport": "urllib",
+                "error": str(exc)[:300],
+            })
+            print(f"Hiba: {exc}")
+            NOTIFY_FAILURES += 1
+            return False
+    try:
+        response = requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed_data]}, timeout=5)
+        ok = 200 <= int(response.status_code) < 300
+        _append_notify_event({
+            **event_base,
+            "success": ok,
+            "status_code": int(response.status_code),
+            "reason": "ok" if ok else "http_error",
+        })
+        if not ok:
+            print(f"Hiba: Discord webhook HTTP {response.status_code}")
+            NOTIFY_FAILURES += 1
+        else:
+            NOTIFY_SUCCESSES += 1
+        return ok
+    except Exception as exc:
+        _append_notify_event({**event_base, "success": False, "reason": "request_exception", "error": str(exc)[:300]})
+        print(f"Hiba: {exc}")
+        NOTIFY_FAILURES += 1
+        return False
 
 
 def round_trip_pct(asset: str) -> float:
