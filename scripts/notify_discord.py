@@ -51,6 +51,7 @@ def _collect_webhook_urls() -> list[str]:
 
 DISCORD_WEBHOOK_URLS = _collect_webhook_urls()
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
+MANUAL_RUN = "--manual" in sys.argv
 ENTRY_COOLDOWN_MINUTES = 30
 EXIT_NOTIFY_COOLDOWN_MINUTES = 30
 DISCORD_NOTIFY_ASSETS = {"GOLD_CFD", "XAGUSD", "USOIL"}
@@ -264,6 +265,7 @@ def send_discord_embed(embed_data: Dict[str, Any]) -> bool:
      if title:
          payload_candidates.append({"content": title})
 
+     print(f"[notify] webhook_count={len(DISCORD_WEBHOOK_URLS)} title={title or '(no-title)'}")    
      for webhook_url in DISCORD_WEBHOOK_URLS:
          for payload in payload_candidates:
              try:
@@ -273,6 +275,7 @@ def send_discord_embed(embed_data: Dict[str, Any]) -> bool:
                  if 200 <= status < 300:
                      NOTIFY_SUCCESSES += 1
                      return True
+                 print(f"[notify] webhook HTTP status={status} url={webhook_url[:48]}...")
              except Exception as exc:
                  _append_notify_event({"url": webhook_url, "status": None, "error": str(exc)})
 
@@ -759,6 +762,22 @@ def check_and_notify() -> None:
             )
             if not DRY_RUN:
                 position_tracker.save_positions_atomic(positions_path, manual_positions)
+                
+    if MANUAL_RUN and NOTIFY_ATTEMPTS == 0:
+        send_discord_embed({
+            "title": "ℹ️ Discord notifier kézi futás kész",
+            "description": (
+                "Nem volt küldhető új ENTRY/EXIT jelzés ebben a körben.\n"
+                f"STATE_LOADED={os.getenv('STATE_LOADED', 'N/A')}"
+            ),
+            "color": COLOR_BLUE,
+            "footer": {"text": "Manual run összegzés"},
+        })
+
+    print(
+        f"[notify] manual={MANUAL_RUN} attempts={NOTIFY_ATTEMPTS} "
+        f"success={NOTIFY_SUCCESSES} failures={NOTIFY_FAILURES}"
+    )
 
     if notify_state_changed and not DRY_RUN:  
         save_json(notify_state_path, notify_state)
