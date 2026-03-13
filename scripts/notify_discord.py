@@ -300,7 +300,7 @@ def send_discord_embed(embed_data: Dict[str, Any]) -> bool:
                  "status_code": status_code,
                  "reason": "ok" if ok else "http_error",
                  "transport": "urllib",
-             })
+             }
              if not ok:
                  print(f"Hiba: Discord webhook HTTP {status_code}")
              return ok
