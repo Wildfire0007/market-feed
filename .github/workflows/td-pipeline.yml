@@ -7,19 +7,23 @@ name: TD Full Pipeline (5m)
         description: "Kézi futtatáskor is frissítsd a public tartalmat"
         required: false
         default: "true"
-
-concurrency:
-  group: td-full-pipeline
-  cancel-in-progress: false
+  schedule:
+    # GitHub Actions only guarantees cron triggers at a minimum 2-minute cadence,
+    - cron: "*/2 * * * *" # 2 percenként (UTC)
+    - cron: "0 5 * * *" # Napi egyszer 05:00-kor (UTC)
 
 permissions:
   contents: write
+
+concurrency:
+  group: manual-positions-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   trading_and_analysis:
     name: 1) Trading.py → Analysis (egy runneren)
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 40
     env:
       TZ: UTC
       OUT_DIR: public
@@ -32,15 +36,8 @@ jobs:
       RESET_PUBLIC_ON_TRADING_START: "1"
       PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
     steps:
-      - name: Print workflow context
-        run: |
-          echo "event_name=${GITHUB_EVENT_NAME}"
-          echo "ref=${GITHUB_REF}"
-          echo "sha=${GITHUB_SHA}"
-          echo "run_id=${GITHUB_RUN_ID}"
-
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 1
@@ -51,7 +48,7 @@ jobs:
           git reset --hard origin/main
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
@@ -59,22 +56,16 @@ jobs:
 
       - name: Restore Python virtualenv cache
         id: cache-venv
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ hashFiles('requirements.lock') }}
           restore-keys: |
             venv-${{ runner.os }}-
 
-      - name: Ensure virtualenv is available
+      - name: Create virtualenv (cache miss)
+        if: steps.cache-venv.outputs.cache-hit != 'true'
         run: |
-          if [ -x .venv/bin/python ] && .venv/bin/python -c "import requests" >/dev/null 2>&1; then
-            echo "Reusing cached virtualenv"
-            exit 0
-          fi
-
-          echo "Cached virtualenv missing or invalid, rebuilding .venv"
-          rm -rf .venv
           python -m venv .venv
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/pip install -r requirements.lock
@@ -151,18 +142,17 @@ jobs:
           PUBLIC_BASE_URL: ${{ env.PUBLIC_BASE_URL }}
         run: |
           set -euo pipefail
-          mkdir -p public config
-          if [ -f public/trading.db ]; then
-            echo "sqlite position state available from repository checkout"
+          mkdir -p public
+          if curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions.json?ts=${GITHUB_RUN_ID}" -o public/_manual_positions.json; then
+            echo "manual positions restored from public"
           else
-            echo "sqlite position state missing (fresh bootstrap)"
+            echo '{}' > public/_manual_positions.json
+            echo "manual positions fallback created"
           fi
-          curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_notify_state.json?ts=${GITHUB_RUN_ID}" -o public/_notify_state.json || echo '{}' > public/_notify_state.json
-          cp public/_notify_state.json config/_notify_state.json
-          curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true       
-  
+          curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true
+
       - name: Upload pipeline artifact bundle
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: pipeline-artifacts
           path: |
@@ -176,16 +166,12 @@ jobs:
         run: |
           .venv/bin/python analysis.py
 
-      - name: Run position watchdog (precision pending + TP1/SL)
-        run: |
-          .venv/bin/python scripts/position_watchdog.py
-
       - name: Generate latency monitoring snapshot
         run: |
           .venv/bin/python scripts/check_latency_sources.py --output public/monitoring/data_latency.json --pretty
 
       - name: Upload pipeline log artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: pipeline-log
           path: public/monitoring/pipeline.log
@@ -209,11 +195,10 @@ jobs:
           git push origin main
 
       - name: Upload analysis outputs
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: analysis-public
           path: public
-
   deploy_public:
     name: 2) Deploy refreshed public
     needs:
@@ -230,7 +215,6 @@ jobs:
       - name: Deploy public folder to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-
   notify:
     name: 3) Discord értesítő
     needs:
@@ -245,16 +229,10 @@ jobs:
       DISABLE_PIPELINE_MONITOR: ${{ vars.DISABLE_PIPELINE_MONITOR || '0' }}
       WARNINGS_RATIO_TARGET: "0.2"
     steps:
-      - name: Validate Discord webhook secret
-        run: |
-          if [ -z "${DISCORD_WEBHOOK_URL}" ]; then
-            echo "ERROR: DISCORD_WEBHOOK_URL secret is missing or empty." >&2
-            exit 1
-          fi
       - name: Checkout latest signals
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: main
           fetch-depth: 1
 
       - name: Sync with latest main
@@ -268,13 +246,13 @@ jobs:
           mkdir -p public
 
       - name: Download analysis outputs
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v4
         with:
           name: analysis-public
           path: public
 
       - name: Download pipeline log
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v4
         with:
           name: pipeline-log
           path: public/monitoring
@@ -284,24 +262,17 @@ jobs:
           PUBLIC_BASE_URL: ${{ env.PUBLIC_BASE_URL }}
         run: |
           set -euo pipefail
-          mkdir -p public config
-          if [ -f public/trading.db ]; then            
+          mkdir -p public
+          if curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions.json?ts=${GITHUB_RUN_ID}" -o public/_manual_positions.json; then
               echo "STATE_LOADED=1" >> $GITHUB_ENV
           else
+              echo '{}' > public/_manual_positions.json
               echo "STATE_LOADED=0" >> $GITHUB_ENV
           fi
-          if [ -n "${PUBLIC_BASE_URL:-}" ]; then
-            curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_notify_state.json?ts=${GITHUB_RUN_ID}" -o public/_notify_state.json || echo '{}' > public/_notify_state.json
-          else
-            echo '{}' > public/_notify_state.json
-          fi
-          cp public/_notify_state.json config/_notify_state.json
-          if [ -n "${PUBLIC_BASE_URL:-}" ]; then
-            curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true
-          fi
-          
+          curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true
+
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
@@ -309,22 +280,16 @@ jobs:
 
       - name: Restore Python virtualenv cache
         id: cache-venv
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ hashFiles('requirements.lock') }}
           restore-keys: |
             venv-${{ runner.os }}-
 
-      - name: Ensure virtualenv is available
+      - name: Create virtualenv (cache miss)
+        if: steps.cache-venv.outputs.cache-hit != 'true'
         run: |
-          if [ -x .venv/bin/python ] && .venv/bin/python -c "import requests" >/dev/null 2>&1; then
-            echo "Reusing cached virtualenv"
-            exit 0
-          fi
-
-          echo "Cached virtualenv missing or invalid, rebuilding .venv"
-          rm -rf .venv
           python -m venv .venv
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/pip install -r requirements.lock
@@ -378,19 +343,18 @@ jobs:
           PUBLIC_BASE_URL: ${{ env.PUBLIC_BASE_URL }}
           MANUAL_POS_AUDIT_TO_FILE: "1"
           MANUAL_POS_AUDIT_FILE: public/_manual_positions_audit.jsonl
-          NOTIFY_FAIL_ON_DELIVERY_ERROR: "0"
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            python scripts/notify_discord.py --manual
+            .venv/bin/python scripts/notify_discord.py --manual
           else
-            python scripts/notify_discord.py
+            .venv/bin/python scripts/notify_discord.py
           fi
 
       - name: Show manual positions size
         if: always()
         run: |
-          ls -la public/trading.db || true
-          wc -c public/trading.db || true
+          ls -la public/_manual_positions.json || true
+          wc -c public/_manual_positions.json || true
 
       - name: Verify manual position state and audit integrity
         if: always()
@@ -402,7 +366,7 @@ jobs:
           import os
           from pathlib import Path
 
-          positions_path = Path("public/trading.db")
+          positions_path = Path("public/_manual_positions.json")
           audit_path = Path("public/_manual_positions_audit.jsonl")
 
           if not positions_path.exists():
@@ -437,19 +401,18 @@ jobs:
                       dispatch_success = True
 
           if dispatch_success:
-              import sqlite3
-              has_entries = False
               try:
-                  con = sqlite3.connect(positions_path)
-                  row = con.execute("SELECT COUNT(1) FROM positions WHERE status IN ('OPEN','PENDING')").fetchone()
-                  has_entries = bool((row or [0])[0])
-                  con.close()
+                  positions = json.loads(positions_path.read_text())
               except Exception:
-                  has_entries = False
-                  
+                  positions = None
+
+              has_entries = isinstance(positions, dict) and any(
+                  isinstance(v, dict) and v for v in positions.values()
+              )
+
               if not has_entries:
                   raise SystemExit(
-                      "ENTRY dispatch succeeded but trading.db has no OPEN/PENDING positions"
+                      "ENTRY dispatch succeeded but manual_positions.json is empty"
                   )
 
           if not had_dispatch:
@@ -461,14 +424,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p config
-          if [ -f public/trading.db ]; then
-            cp public/trading.db config/trading.db
-          fi
-          if [ -f public/_notify_state.json ]; then
-            cp public/_notify_state.json config/_notify_state.json
-          fi
+          cp public/_manual_positions.json config/manual_positions.json
 
       - name: Publish manual position artifacts
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v3
         with:
           path: public
