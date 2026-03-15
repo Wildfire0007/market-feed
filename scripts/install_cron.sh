@@ -14,11 +14,22 @@ if ! command -v crontab >/dev/null 2>&1; then
   exit 1
 fi
 
+if [[ -z "${DISCORD_WEBHOOK_URL:-}" ]]; then
+  echo "DISCORD_WEBHOOK_URL nincs beállítva. Exportáld (vagy add hozzá a crontab környezethez), majd futtasd újra." >&2
+  exit 1
+fi
+
+if ! compgen -G "${REPO_DIR}/public/*/signal.json" >/dev/null; then
+  echo "Nem található frissülő public/<ASSET>/signal.json input. Generáld a jeleket, majd futtasd újra." >&2
+  exit 1
+fi
+
 CRON_BLOCK=$(cat <<CRON
 # === market-feed begin ===
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 PYTHON_BIN=${PYTHON_BIN}
+DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
 
 */5 * * * * cd ${REPO_DIR} && ./scripts/run_signal_cycle.sh
 * * * * * cd ${REPO_DIR} && flock -n ${REPO_DIR}/public/.position_lifecycle_cron.lock ${PYTHON_BIN} scripts/position_lifecycle.py >> ${REPO_DIR}/public/_cron_position_lifecycle.log 2>&1
