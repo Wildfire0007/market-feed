@@ -46,9 +46,15 @@ jobs:
 
       - name: Commit and push state changes
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add public/*.json public/*.jsonl || true
-          git add -A
-          git commit -m "Auto-update bot state [skip ci]" || echo "No changes to commit"
+          git fetch origin "${GITHUB_REF_NAME}"
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+          git add public || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Auto-update bot state [skip ci]"
           git push
