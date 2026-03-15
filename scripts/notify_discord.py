@@ -53,6 +53,11 @@ def _collect_webhook_urls() -> list[str]:
 DISCORD_WEBHOOK_URLS = _collect_webhook_urls()
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
 MANUAL_RUN = "--manual" in sys.argv
+ENABLE_LEVEL_AUTOCORRECT = os.getenv("NOTIFY_ENABLE_LEVEL_AUTOCORRECT", "").lower() in {"1", "true", "yes"}
+try:
+    AUTOCORRECT_MAX_DELTA_PCT = float(os.getenv("NOTIFY_AUTOCORRECT_MAX_DELTA_PCT") or 0.05)
+except (TypeError, ValueError):
+    AUTOCORRECT_MAX_DELTA_PCT = 0.05
 ENTRY_COOLDOWN_MINUTES = 30
 EXIT_NOTIFY_COOLDOWN_MINUTES = 30
 _notify_assets_raw = os.getenv("DISCORD_NOTIFY_ASSETS", "").strip()
@@ -329,6 +334,20 @@ def calc_rr(entry: float, sl: float, target: float) -> Optional[float]:
     return reward / risk
 
 
+def _autocorrect_level(direction: str, entry: float, level: Optional[float], *, is_stop: bool) -> Tuple[Optional[float], bool]:
+    if level is None or entry <= 0:
+        return level, False
+    should_flip = (direction == "buy" and ((is_stop and level > entry) or (not is_stop and level < entry))) or (
+        direction == "sell" and ((is_stop and level < entry) or (not is_stop and level > entry))
+    )
+    if not should_flip:
+        return level, False
+    mirrored = entry - (level - entry)
+    if abs(mirrored - entry) / entry > AUTOCORRECT_MAX_DELTA_PCT:
+        return level, False
+    return mirrored, True
+
+
 def _entry_signature(direction: str, order_type: str) -> Dict[str, Any]:
     return {
         "direction": direction,
@@ -533,6 +552,20 @@ def check_and_notify() -> None:
             print(f"{asset_name}: bizonytalan irány ({direction}) — jelzés némítva.")
             _mark_skip("invalid_direction")
             continue
+
+        corrected_levels: list[str] = []
+        if ENABLE_LEVEL_AUTOCORRECT and direction in {"buy", "sell"} and entry is not None:
+            sl, sl_fixed = _autocorrect_level(direction, entry, sl, is_stop=True)
+            tp1, tp1_fixed = _autocorrect_level(direction, entry, tp1, is_stop=False)
+            tp2, tp2_fixed = _autocorrect_level(direction, entry, tp2, is_stop=False)
+            if sl_fixed:
+                corrected_levels.append("SL")
+            if tp1_fixed:
+                corrected_levels.append("TP1")
+            if tp2_fixed:
+                corrected_levels.append("TP2")
+            if corrected_levels:
+                print(f"{asset_name}: auto-correct alkalmazva ({', '.join(corrected_levels)}).")
 
         if tracking_enabled and not exit_signal and not has_lifecycle_event:
             tracked_state = position_tracker.compute_state(
@@ -756,10 +789,16 @@ def check_and_notify() -> None:
 
         p_score_text = f"P Score: **{p_score:.1f}** (Erősség)" if p_score is not None else ""
         reason_lines = [f"• {_hu_reason(r)}" for r in reasons[:2]] if reasons else ["• Rendszer jelzés"]
+        if corrected_levels:
+            reason_lines.append(f"• Auto-correct: {', '.join(corrected_levels)}")
         if p_score_text:
             reason_lines.insert(0, p_score_text)
         reasons_text = "\n".join(reason_lines)
-        
+
+        units_text = "N/A"
+        if abs(entry - sl) > 0:
+            units_text = f"{sl_risk_usd / abs(entry - sl):.2f} Egység (Units)"
+            
         fields = [
             {
                 "name": "📊 Árfolyam",
@@ -768,7 +807,11 @@ def check_and_notify() -> None:
             },
             {
                 "name": "⚙️ Paraméterek",
-                "value": f"Stop Loss (SL): `{format_price(sl)}`\nTake Profit 1 (TP1): `{format_price(tp1)}`"
+                "value": (
+                    f"Méret: `{units_text}` ({sl_risk_usd:.2f} USD kockázat)\n"
+                    f"Stop Loss (SL): `{format_price(sl)}`\n"
+                    f"Take Profit 1 (TP1): `{format_price(tp1)}`"
+                )    
                 + (f"\nTake Profit 2 (TP2): `{format_price(tp2)}`" if tp2 else ""),
                 "inline": False,
             },
