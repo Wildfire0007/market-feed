@@ -806,28 +806,7 @@ def check_and_notify() -> None:
             )
             if not DRY_RUN:
                 position_tracker.save_positions_atomic(positions_path, manual_positions)
-                
-    if MANUAL_RUN and NOTIFY_ATTEMPTS == 0:
-        skip_diag = (
-            "\n\nFő blokkoló okok: "
-            + ", ".join(
-                f"{reason}={count}"
-                for reason, count in sorted(skip_reasons.items(), key=lambda item: (-item[1], item[0]))
-            )
-            if skip_reasons
-            else ""
-        )
-        send_discord_embed({
-            "title": "ℹ️ Discord notifier kézi futás kész",
-            "description": (
-                "Nem volt küldhető új ENTRY/EXIT jelzés ebben a körben.\n"
-                f"STATE_LOADED={os.getenv('STATE_LOADED', 'N/A')}"
-                f"{skip_diag}"
-            ),
-            "color": COLOR_BLUE,
-            "footer": {"text": "Manual run összegzés"},
-        })
-
+        
     print(
         f"[notify] manual={MANUAL_RUN} attempts={NOTIFY_ATTEMPTS} "
         f"success={NOTIFY_SUCCESSES} failures={NOTIFY_FAILURES}"
