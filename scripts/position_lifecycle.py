@@ -123,7 +123,11 @@ def process() -> None:
         if not isinstance(pos, dict) or str(pos.get("status") or "") in {"", "closed"}:
             continue
         signal_data = load_json(asset_dir / "signal.json")
-        exit_signal = signal_data.get("position_exit_signal") if isinstance(signal_data, dict) else None
+        if not isinstance(signal_data, dict):
+            continue
+        exit_signal = signal_data.get("position_exit_signal")
+        if not isinstance(exit_signal, dict):
+            exit_signal = signal_data.get("exit_signal")
         if not isinstance(exit_signal, dict):
             continue
         exit_state = str(exit_signal.get("state") or exit_signal.get("action") or "").lower()
