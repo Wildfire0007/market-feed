@@ -58,6 +58,8 @@ try:
     AUTOCORRECT_MAX_DELTA_PCT = float(os.getenv("NOTIFY_AUTOCORRECT_MAX_DELTA_PCT") or 0.05)
 except (TypeError, ValueError):
     AUTOCORRECT_MAX_DELTA_PCT = 0.05
+if AUTOCORRECT_MAX_DELTA_PCT <= 0:
+    AUTOCORRECT_MAX_DELTA_PCT = float("inf")
 ENTRY_COOLDOWN_MINUTES = 30
 EXIT_NOTIFY_COOLDOWN_MINUTES = 30
 _notify_assets_raw = os.getenv("DISCORD_NOTIFY_ASSETS", "").strip()
@@ -343,7 +345,7 @@ def _autocorrect_level(direction: str, entry: float, level: Optional[float], *, 
     if not should_flip:
         return level, False
     mirrored = entry - (level - entry)
-    if abs(mirrored - entry) / entry > AUTOCORRECT_MAX_DELTA_PCT:
+    if AUTOCORRECT_MAX_DELTA_PCT != float("inf") and abs(mirrored - entry) / entry > AUTOCORRECT_MAX_DELTA_PCT:
         return level, False
     return mirrored, True
 
@@ -839,7 +841,7 @@ def check_and_notify() -> None:
         if (
             tracking_enabled
             and signal == "precision_arming"
-            and order_type in {"LIMIT", "STOP"}
+            and order_type in {"LIMIT", "STOP", "MARKET"}
         ):
             manual_positions = position_tracker.register_precision_pending_position(
                 asset_name,
