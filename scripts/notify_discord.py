@@ -141,7 +141,10 @@ def check_and_notify() -> None:
             plan = data.get("precision_plan") or {}
             direction = str(plan.get("direction") or "buy").lower()
             order_type = str(plan.get("order_type") or "LIMIT").upper()
-            entry, sl, tp1, tp2 = safe_float(plan.get("entry") or entry), safe_float(plan.get("stop_loss")
+            entry = safe_float(plan.get("entry") or entry)
+            sl = safe_float(plan.get("stop_loss") or sl)
+            tp1 = safe_float(plan.get("take_profit_1") or tp1)
+            tp2 = safe_float(plan.get("take_profit_2") or tp2)
 
         if direction not in {"buy", "sell"}:
             continue
