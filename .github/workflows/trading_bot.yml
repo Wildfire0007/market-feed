@@ -1,0 +1,54 @@
+name: Trading Bot
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [trading_bot_run]
+
+permissions:
+  contents: write
+
+env:
+  DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+jobs:
+  run-trading-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          pip install requests
+
+      - name: Step 1 - Analysis
+        run: python analysis.py
+
+      - name: Step 2 - Notify Discord
+        run: python scripts/notify_discord.py
+
+      - name: Step 3 - Position lifecycle
+        run: python scripts/position_lifecycle.py
+
+      - name: Step 4 - Notify management Discord
+        run: python scripts/notify_management_discord.py
+
+      - name: Commit and push state changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/*.json public/*.jsonl || true
+          git add -A
+          git commit -m "Auto-update bot state [skip ci]" || echo "No changes to commit"
+          git push
