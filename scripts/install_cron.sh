@@ -47,3 +47,4 @@ crontab "${TMP_FILE}"
 rm -f "${TMP_FILE}"
 
 echo "Cron beállítva a market-feed ütemezéshez."
+echo "Log fájlok: ${REPO_DIR}/public/_cron_position_lifecycle.log és ${REPO_DIR}/public/_cron_notify_management.log"
