@@ -13,12 +13,14 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 requests = importlib.import_module("requests") if importlib.util.find_spec("requests") else None
+BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
 
 BASE_DIR = Path(__file__).resolve().parent
 PUBLIC_DIR = Path(os.getenv("NOTIFY_PUBLIC_DIR", "")) if os.getenv("NOTIFY_PUBLIC_DIR") else BASE_DIR / "public"
@@ -71,6 +73,10 @@ def to_utc_iso(dt: datetime) -> str:
     return dt.replace(microsecond=0).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def format_budapest_time(dt: datetime) -> str:
+    return dt.astimezone(BUDAPEST_TZ).strftime("%Y-%m-%d %H:%M:%S CET/CEST")
+
+
 def _position_key(asset: str, position: Dict[str, Any]) -> str:
     opened = str(position.get("opened_at_utc") or "")
     if opened:
@@ -102,6 +108,7 @@ def _event_triggered(event: str, side: str, spot: Optional[float], pos: Dict[str
 
 
 def _build_embed(event: str, asset: str, side: str, entry: Any, spot: Any, reason: str) -> Dict[str, Any]:
+    now_dt = datetime.now(timezone.utc)    
     side_label = "LONG" if side == "long" else "SHORT"
     presets = {
         "tp1_hit": ("🟠 RÉSZZÁRÁS (TP1) ELÉRVE!", "Húzd a Stop-Loss-t a belépési árra (Nullába) az eTorón!", COLOR_ORANGE),
@@ -119,8 +126,9 @@ def _build_embed(event: str, asset: str, side: str, entry: Any, spot: Any, reaso
             {"name": "Irány", "value": f"`{side_label}`", "inline": True},
             {"name": "Eredeti Belépő", "value": f"`{format_price(entry)}`", "inline": True},
             {"name": "Aktuális Spot Ár", "value": f"`{format_price(spot)}`", "inline": True},
+            {"name": "🕒 Időbélyeg", "value": f"`{format_budapest_time(now_dt)}` (Budapest)", "inline": False},
         ],
-        "footer": {"text": "Management Notify • Anti-spam aktív"},
+        "footer": {"text": f"Management Notify • Budapest: {format_budapest_time(now_dt)} • Anti-spam aktív"},
     }
 
 
