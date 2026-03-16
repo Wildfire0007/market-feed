@@ -7,6 +7,7 @@ LOG_FILE="${REPO_DIR}/public/_cron_signal_cycle.log"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 ANALYSIS_TIMEOUT="${ANALYSIS_TIMEOUT:-240}"
 NOTIFY_TIMEOUT="${NOTIFY_TIMEOUT:-60}"
+MGMT_NOTIFY_TIMEOUT="${MGMT_NOTIFY_TIMEOUT:-60}"
 
 mkdir -p "${REPO_DIR}/public"
 
@@ -16,5 +17,6 @@ mkdir -p "${REPO_DIR}/public"
   echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] cycle start"
   timeout "${ANALYSIS_TIMEOUT}" "${PYTHON_BIN}" analysis.py
   timeout "${NOTIFY_TIMEOUT}" "${PYTHON_BIN}" scripts/notify_discord.py
+  timeout "${MGMT_NOTIFY_TIMEOUT}" "${PYTHON_BIN}" scripts/notify_management_discord.py  
   echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] cycle ok"
 } 9>"${LOCK_FILE}" >>"${LOG_FILE}" 2>&1
