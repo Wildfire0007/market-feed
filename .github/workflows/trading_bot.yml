@@ -71,6 +71,7 @@ jobs:
 
           mgmt_state = Path("public/_management_notify_state.json")
           mgmt_updated = mgmt_state.exists() and mgmt_state.stat().st_size > 2
+          mgmt_mtime = int(mgmt_state.stat().st_mtime) if mgmt_state.exists() else None
 
           print(json.dumps({
               "positions_total": total,
@@ -80,6 +81,7 @@ jobs:
               "lifecycle_open_assets": open_assets,
               "lifecycle_pending_assets": pending_assets,
               "management_notify_state_updated": mgmt_updated,
+              "management_notify_state_mtime": mgmt_mtime,
           }, indent=2))
           PY
 
