@@ -1,9 +1,6 @@
 name: Trading Bot
 
 on:
-  workflow_run:
-    workflows: ["TD Full Pipeline (5m)"]
-    types: [completed]
   workflow_dispatch:
  
 permissions:
@@ -14,7 +11,6 @@ env:
 
 jobs:
   run-trading-bot:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     concurrency:
       group: trading_bot_cycle
@@ -37,17 +33,55 @@ jobs:
           fi
           pip install requests
 
-      - name: Step 1 - Analysis
-        run: python analysis.py
-
-      - name: Step 2 - Notify Discord
-        run: python scripts/notify_discord.py
-
-      - name: Step 3 - Position lifecycle
+      - name: Position lifecycle (manual recovery)
         run: python scripts/position_lifecycle.py
 
-      - name: Step 4 - Notify management Discord
+      - name: Notify management Discord (manual recovery)
         run: python scripts/notify_management_discord.py
+
+      - name: Run-end lifecycle diagnostics
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import sqlite3
+          from pathlib import Path
+
+          db_path = Path("public/trading_data.db")
+          if db_path.exists():
+              conn = sqlite3.connect(db_path)
+              cur = conn.cursor()
+              total = cur.execute("SELECT COUNT(*) FROM positions").fetchone()[0]
+              open_pending = cur.execute(
+                  "SELECT COUNT(*) FROM positions WHERE LOWER(COALESCE(status, '')) IN ('open','pending')"
+              ).fetchone()[0]
+              conn.close()
+          else:
+              total = 0
+              open_pending = 0
+
+          inbox_path = Path("public/_position_lifecycle_inbox.jsonl")
+          inbox_lines = len(inbox_path.read_text().splitlines()) if inbox_path.exists() else 0
+
+          state_path = Path("public/_position_lifecycle_state.json")
+          state = json.loads(state_path.read_text()) if state_path.exists() else {}
+          positions = state.get("positions") or {}
+          open_assets = sorted([k for k, v in positions.items() if str((v or {}).get("status") or "").lower() == "open"])
+          pending_assets = sorted([k for k, v in positions.items() if str((v or {}).get("status") or "").lower() == "pending"])
+
+          mgmt_state = Path("public/_management_notify_state.json")
+          mgmt_updated = mgmt_state.exists() and mgmt_state.stat().st_size > 2
+
+          print(json.dumps({
+              "positions_total": total,
+              "positions_open_pending": open_pending,
+              "lifecycle_inbox_rows": inbox_lines,
+              "lifecycle_state_exists": state_path.exists(),
+              "lifecycle_open_assets": open_assets,
+              "lifecycle_pending_assets": pending_assets,
+              "management_notify_state_updated": mgmt_updated,
+          }, indent=2))
+          PY
 
       - name: Commit and push state changes
         run: |
