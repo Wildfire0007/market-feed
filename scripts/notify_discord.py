@@ -85,6 +85,10 @@ def to_utc_iso(dt: datetime) -> str:
     return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def format_budapest_time(dt: datetime) -> str:
+    return dt.astimezone(BUDAPEST_TZ).strftime("%Y-%m-%d %H:%M:%S CET/CEST")
+
+
 def _asset_emoji(asset: str) -> str:
     key = str(asset or "").upper()
     if key in {"XAU", "XAUUSD", "GOLD_CFD", "GOLDCFD"}:
@@ -196,8 +200,9 @@ def check_and_notify() -> None:
                 {"name": "📊 Árfolyam", "value": f"Spot ár: `{format_price(safe_float((data.get('spot') or {}).get('price')))}`\nBelépő: `{format_price(entry)}`", "inline": False},
                 {"name": "⚙️ Paraméterek az eToro-hoz", "value": f"MÉRET: `{units_text}` ({sl_risk_usd} USD kockázat)\nSL: `{format_price(sl)}`\nTP1: `{format_price(tp1)}`" + (f"\nTP2: `{format_price(tp2)}`" if tp2 else ""), "inline": False},
                 {"name": "💡 Indoklás", "value": reasons_text, "inline": False},
+                {"name": "🕒 Időbélyeg", "value": f"`{format_budapest_time(now_dt)}` (Budapest)", "inline": False},
             ],
-            "footer": {"text": "Signal • Várakozás (30 perc csend indítva)"},
+            "footer": {"text": f"Signal • Budapest: {format_budapest_time(now_dt)} • Várakozás (30 perc csend indítva)"},
         }
 
         if not DRY_RUN and requests and DISCORD_WEBHOOK_URLS:
