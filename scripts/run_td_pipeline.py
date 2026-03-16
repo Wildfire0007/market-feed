@@ -98,6 +98,11 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         help="Skip Discord notification dispatch",
     )
     parser.add_argument(
+        "--skip-management-discord",
+        action="store_true",
+        help="Skip management Discord notification dispatch",
+    )
+    parser.add_argument(
         "--skip-position-watchdog",
         action="store_true",
         help="Skip precision pending + TP1/SL position watchdog",
@@ -253,6 +258,13 @@ def main(argv: List[str] | None = None) -> int:
         notify_cmd = [python, "scripts/notify_discord.py"]
         notify_cmd.extend(args.notify_arg)
         _run_step("Discord notify", notify_cmd, optional=True)
+
+    if not args.skip_management_discord:
+        _run_step(
+            "Discord management notify",
+            [python, "scripts/notify_management_discord.py"],
+            optional=True,
+        )
     
     if not args.skip_spot_watchdog:
         spot_cooldown_seconds = max(float(args.spot_watchdog_cooldown_minutes), 0.0) * 60.0
