@@ -183,23 +183,6 @@ jobs:
           name: pipeline-log
           path: public/monitoring/pipeline.log
           if-no-files-found: error
-          
-      - name: Commit and push refreshed public outputs
-        if: github.ref == 'refs/heads/main'
-        run: |
-          set -euo pipefail
-          git status
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git fetch origin main
-          git pull --rebase --autostash origin main
-          git add public
-          if git diff --cached --quiet; then
-            echo "No changes in public/ to commit."
-            exit 0
-          fi
-          git commit -m "Auto-update analysis outputs (public/) [skip ci]"
-          git push origin main
 
       - name: Upload analysis outputs
         uses: actions/upload-artifact@v4
@@ -360,6 +343,68 @@ jobs:
             .venv/bin/python scripts/notify_discord.py
           fi
 
+      - name: Step 2.5 - Position lifecycle
+        run: .venv/bin/python scripts/position_lifecycle.py
+
+      - name: Step 3 - Notify management Discord
+        run: .venv/bin/python scripts/notify_management_discord.py
+
+      - name: Run-end lifecycle diagnostics
+        if: always()
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import sqlite3
+          from pathlib import Path
+
+          db_path = Path("public/trading_data.db")
+          if db_path.exists():
+              conn = sqlite3.connect(db_path)
+              cur = conn.cursor()
+              total = cur.execute("SELECT COUNT(*) FROM positions").fetchone()[0]
+              open_pending = cur.execute(
+                  "SELECT COUNT(*) FROM positions WHERE LOWER(COALESCE(status, '')) IN ('open','pending')"
+              ).fetchone()[0]
+              conn.close()
+          else:
+              total = 0
+              open_pending = 0
+
+          inbox_path = Path("public/_position_lifecycle_inbox.jsonl")
+          inbox_lines = len(inbox_path.read_text().splitlines()) if inbox_path.exists() else 0
+
+          state_path = Path("public/_position_lifecycle_state.json")
+          open_assets = []
+          pending_assets = []
+          if state_path.exists():
+              state = json.loads(state_path.read_text() or "{}")
+              for symbol, info in (state.get("positions") or {}).items():
+                  status = str((info or {}).get("status") or "").lower()
+                  if status == "open":
+                      open_assets.append(symbol)
+                  elif status == "pending":
+                      pending_assets.append(symbol)
+
+          mgmt_state = Path("public/_management_notify_state.json")
+          mgmt_updated = mgmt_state.exists() and mgmt_state.stat().st_size > 2
+
+          print(
+              json.dumps(
+                  {
+                      "positions_total": total,
+                      "positions_open_pending": open_pending,
+                      "lifecycle_inbox_rows": inbox_lines,
+                      "lifecycle_state_exists": state_path.exists(),
+                      "lifecycle_open_assets": sorted(open_assets),
+                      "lifecycle_pending_assets": sorted(pending_assets),
+                      "management_notify_state_updated": mgmt_updated,
+                  },
+                  indent=2,
+              )
+          )
+          PY
+
       - name: Show manual positions size
         if: always()
         run: |
@@ -435,6 +480,23 @@ jobs:
           set -euo pipefail
           mkdir -p config
           cp public/_manual_positions.json config/manual_positions.json
+
+      - name: Commit and push refreshed public outputs
+        if: github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          git status
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git fetch origin main
+          git pull --rebase --autostash origin main
+          git add public config/manual_positions.json
+          if git diff --cached --quiet; then
+            echo "No changes in tracked state to commit."
+            exit 0
+          fi
+          git commit -m "Auto-update analysis and lifecycle state (public/) [skip ci]"
+          git push origin main
 
       - name: Publish manual position artifacts
         uses: actions/upload-pages-artifact@v3
