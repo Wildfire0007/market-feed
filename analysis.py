@@ -10459,9 +10459,36 @@ def analyze(asset: str) -> Dict[str, Any]:
     gold_reversal_meta: Dict[str, Any] = {}
     gold_reversal_hits = 0
     gold_reversal_reasons: List[str] = []
+    usoil_reversal_active = False
+    usoil_reversal_side: Optional[str] = None
+    usoil_reversal_meta: Dict[str, Any] = {}
     xag_reversal_active = False
     xag_reversal_side: Optional[str] = None
     xag_reversal_meta: Dict[str, Any] = {}
+
+    def _micro_confirm(side: str) -> bool:
+        if side not in {"short", "long"}:
+            return False
+        if k1m_closed.empty or len(k1m_closed) < 3:
+            return False
+        try:
+            c1 = k1m_closed["close"].astype(float).tail(3)
+            atr_move_ratio = None
+            if atr5 is not None and np.isfinite(float(atr5)) and price_for_calc is not None and np.isfinite(float(price_for_calc)) and float(price_for_calc) > 0:
+                atr_move_ratio = abs(float(atr5) / float(price_for_calc))
+            min_move_ratio = max(0.0001, min(0.0025, (atr_move_ratio or 0.0002) * 0.2))
+            min_move = abs(float(c1.iloc[-1])) * min_move_ratio
+            net_move = abs(float(c1.iloc[-1]) - float(c1.iloc[0]))
+            vol_ok = True
+            if "volume" in k1m_closed and len(k1m_closed) >= 20:
+                v = k1m_closed["volume"].astype(float)
+                vol_ok = bool(float(v.tail(3).sum()) > 3.0 * float(v.tail(20).median()))
+            if side == "short":
+                return bool(c1.iloc[-1] < c1.iloc[-2] < c1.iloc[-3] and net_move >= min_move and vol_ok)
+            return bool(c1.iloc[-1] > c1.iloc[-2] > c1.iloc[-3] and net_move >= min_move and vol_ok)
+        except Exception:
+            return False
+
     if asset == "GOLD_CFD":
         rsi_extreme = np.isfinite(rsi14_val) and (rsi14_val < 30 or rsi14_val > 70)
         if rsi_extreme:
@@ -10511,16 +10538,65 @@ def analyze(asset: str) -> Dict[str, Any]:
                 "sl_pct": [0.005, 0.008],
             }
         )
+        gold_micro_confirm_short = _micro_confirm("short")
+        gold_micro_confirm_long = _micro_confirm("long")
+        gold_reversal_meta["micro_confirm_short"] = gold_micro_confirm_short
+        gold_reversal_meta["micro_confirm_long"] = gold_micro_confirm_long
+        if bias_conflict:
+            if trend_bias == "long" and not gold_micro_confirm_short:
+                gold_reversal_meta["blocked_reason"] = "missing_micro_confirmation"
+                if "GOLD reversal blokkolva: hiányzó 1m mikro megerősítés trend ellen" not in reasons:
+                    reasons.append("GOLD reversal blokkolva: hiányzó 1m mikro megerősítés trend ellen")
+            if trend_bias == "short" and not gold_micro_confirm_long:
+                gold_reversal_meta["blocked_reason"] = "missing_micro_confirmation"
+                if "GOLD reversal blokkolva: hiányzó 1m mikro megerősítés trend ellen" not in reasons:
+                    reasons.append("GOLD reversal blokkolva: hiányzó 1m mikro megerősítés trend ellen")
         if gold_reversal_hits >= 2 and (adx_weak or bias_conflict):
-            gold_reversal_meta["active"] = True
-            gold_reversal_meta["reasons"] = gold_reversal_reasons.copy()
-            reasons.append("GOLD reversal mód engedélyezve — legalább 2 jelzés aktív")
-            dynamic_tp_profile["reversal"] = {"tp1": 1.0, "tp2": 1.2, "rr": 1.1}
-            entry_thresholds_meta["gold_reversal"] = gold_reversal_meta
+            if gold_reversal_meta.get("blocked_reason") == "missing_micro_confirmation":
+                gold_reversal_meta["active"] = False
+                gold_reversal_meta["reasons"] = gold_reversal_reasons.copy()
+                entry_thresholds_meta["gold_reversal"] = gold_reversal_meta
+            else:
+                gold_reversal_meta["active"] = True
+                gold_reversal_meta["reasons"] = gold_reversal_reasons.copy()
+                reasons.append("GOLD reversal mód engedélyezve — legalább 2 jelzés aktív")
+                dynamic_tp_profile["reversal"] = {"tp1": 1.0, "tp2": 1.2, "rr": 1.1}
+                entry_thresholds_meta["gold_reversal"] = gold_reversal_meta
         elif gold_reversal_reasons:
             gold_reversal_meta["active"] = False
             gold_reversal_meta["reasons"] = gold_reversal_reasons.copy()
             entry_thresholds_meta["gold_reversal"] = gold_reversal_meta
+
+    if asset == "USOIL":
+        adx_value_safe = float(adx_value) if adx_value is not None and np.isfinite(adx_value) else None
+        trend_weak = adx_value_safe is None or adx_value_safe < 20.0
+        usoil_reversal_meta = {
+            "rsi": rsi14_val if np.isfinite(rsi14_val) else None,
+            "adx_value": adx_value_safe,
+            "micro_confirm_short": _micro_confirm("short"),
+            "micro_confirm_long": _micro_confirm("long"),
+        }
+        if np.isfinite(rsi14_val):
+            if rsi14_val >= 75 and trend_bias == "long" and trend_weak and usoil_reversal_meta["micro_confirm_short"]:
+                usoil_reversal_active = True
+                usoil_reversal_side = "sell"
+            elif rsi14_val <= 25 and trend_bias == "short" and trend_weak and usoil_reversal_meta["micro_confirm_long"]:
+                usoil_reversal_active = True
+                usoil_reversal_side = "buy"
+        if (trend_bias == "long" and rsi14_val >= 75 and not usoil_reversal_meta["micro_confirm_short"]) or (
+            trend_bias == "short" and rsi14_val <= 25 and not usoil_reversal_meta["micro_confirm_long"]
+        ):
+            usoil_reversal_meta["blocked_reason"] = "missing_micro_confirmation"
+        if usoil_reversal_active and usoil_reversal_side in {"buy", "sell"}:
+            usoil_reversal_meta["active"] = True
+            usoil_reversal_meta["direction"] = "short" if usoil_reversal_side == "sell" else "long"
+            usoil_reversal_meta["tp_targets"] = [1.0, 1.4]
+            dynamic_tp_profile["reversal"] = {"tp1": 1.0, "tp2": 1.4, "rr": 1.0}
+            reasons.append("USOIL reversal setup aktív — mikro megerősítés mellett")
+        else:
+            usoil_reversal_meta["active"] = False
+        if usoil_reversal_meta:
+            entry_thresholds_meta["usoil_reversal"] = usoil_reversal_meta
 
     if asset == "XAGUSD":
         price_now = safe_float(last5_close)
@@ -10605,6 +10681,10 @@ def analyze(asset: str) -> Dict[str, Any]:
         pattern_long = _wick_reversal(k5m_closed, "long")
         bos_short = bool(micro_bos_short)
         bos_long = bool(micro_bos_long)
+        micro_confirm_short = False
+        micro_confirm_long = False
+        micro_confirm_short = _micro_confirm("short")
+        micro_confirm_long = _micro_confirm("long")
 
         xag_reversal_meta = {
             "rsi": rsi14_val if np.isfinite(rsi14_val) else None,
@@ -10616,6 +10696,8 @@ def analyze(asset: str) -> Dict[str, Any]:
             "pattern_long": pattern_long,
             "bos_short": bos_short,
             "bos_long": bos_long,
+            "micro_confirm_short": micro_confirm_short,
+            "micro_confirm_long": micro_confirm_long,
             "adx_value": adx_value_safe,
         }
 
@@ -10640,6 +10722,13 @@ def analyze(asset: str) -> Dict[str, Any]:
         )
         short_conditions = short_conditions_base and trend_weak
         long_conditions = long_conditions_base and trend_weak
+
+        if short_conditions and trend_bias == "long" and not micro_confirm_short:
+            short_conditions = False
+            xag_reversal_meta["blocked_reason"] = "missing_micro_confirmation"
+        if long_conditions and trend_bias == "short" and not micro_confirm_long:
+            long_conditions = False
+            xag_reversal_meta["blocked_reason"] = "missing_micro_confirmation"
 
         trend_blocked = False
         trend_strong = adx_value_safe is not None and adx_value_safe >= 22.0
@@ -10668,6 +10757,10 @@ def analyze(asset: str) -> Dict[str, Any]:
             if xag_reversal_meta.get("blocked_reason") == "adx_strong":
                 reasons.append(
                     "XAGUSD reversal blokkolva: ADX túl erős (>=20)"
+                )
+            elif xag_reversal_meta.get("blocked_reason") == "missing_micro_confirmation":
+                reasons.append(
+                    "XAGUSD reversal blokkolva: hiányzó 1m mikro megerősítés trend ellen"
                 )
             else:
                 reasons.append(
@@ -13807,6 +13900,26 @@ def analyze(asset: str) -> Dict[str, Any]:
         else:
             decision = "no entry"
 
+    if asset == "USOIL" and usoil_reversal_active and usoil_reversal_side in {"buy", "sell"}:
+        mode = "reversal"
+        decision = usoil_reversal_side
+        required_list = ["session", "data_integrity", "spread_guard", "reversal_signal"]
+        missing = []
+        if not session_ok_flag:
+            missing.append("session")
+        if not data_integrity_ok:
+            missing.append("data_integrity")
+        if not spread_gate_ok:
+            missing.append("spread_guard")
+        if decision in {"buy", "sell"} and not missing:
+            position_size_scale *= 0.7
+            if not compute_levels(decision, 1.0, tp1_mult=1.0, tp2_mult=1.4):
+                decision = "no entry"
+            else:
+                reversal_mode_used = True
+        else:
+            decision = "no entry"
+
     usoil_strong_trend_block = False
     if asset == "USOIL" and trend_bias in {"long", "short"} and effective_bias in {"long", "short"}:
         adx_safe = float(adx_value) if adx_value is not None and np.isfinite(adx_value) else None
@@ -15144,7 +15257,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     combined_probability = _combine_probability(
         P, ml_probability, ml_enabled=bool(ML_PROBABILITY_ACTIVE)
     )
-
+  
     alignment_state = alignment_state_for_signal(decision, bias4h, bias1h, bias5m)
     alignment_detail = {
         "bias_4h": bias4h,
@@ -15153,8 +15266,22 @@ def analyze(asset: str) -> Dict[str, Any]:
         "signal": decision if decision in {"buy", "sell"} else None,
         "effective_bias": effective_bias,
     }
+    counter_micro_confirm = False
+    counter_cooldown_path = os.path.join(outdir, "signal_state.json")
+    counter_cooldown_state = load_json(counter_cooldown_path) or {}
+    if not isinstance(counter_cooldown_state, dict):
+        counter_cooldown_state = {}
+    counter_cooldown_until = parse_utc_timestamp(counter_cooldown_state.get("counter_trend_cooldown_until_utc"))
+    counter_cooldown_active = bool(
+        decision in {"buy", "sell"}
+        and alignment_state == "COUNTER"
+        and counter_cooldown_until
+        and analysis_now < counter_cooldown_until
+    )
+    if decision in {"buy", "sell"} and alignment_state == "COUNTER" and not k1m_closed.empty and len(k1m_closed) >= 3:
+        counter_micro_confirm = _micro_confirm("short" if decision == "sell" else "long")
     if (
-        asset in {"GOLD_CFD", "XAGUSD"}
+        asset in {"GOLD_CFD", "USOIL", "XAGUSD"}
         and decision in {"buy", "sell"}
         and alignment_state == "COUNTER"
     ):
@@ -15162,7 +15289,37 @@ def analyze(asset: str) -> Dict[str, Any]:
             "state": alignment_state,
             "detail": alignment_detail,
             "action": "soft",
+            "counter_micro_confirm": counter_micro_confirm,
+            "counter_cooldown_active": counter_cooldown_active,
         }
+        entry_thresholds_meta["counter_trend_backtest_flag"] = {
+            "enabled": True,
+            "candidate_signal": decision,
+            "blocked_by_micro": bool(not counter_micro_confirm),
+            "blocked_by_cooldown": bool(counter_cooldown_active),
+            "requires_posthoc_eval": True,
+        }
+        if counter_cooldown_active or not counter_micro_confirm:
+            reason = (
+                f"{asset}: trenddel ellentétes jelzés cooldown alatt (counter-trend), "
+                "átmenetileg tiltva."
+                if counter_cooldown_active
+                else f"{asset}: trenddel ellentétes jelzéshez kell 1m mikro megerősítés "
+                "(utolsó 3 gyertya a jelzés irányába + volume szűrő)."
+            )
+            if reason not in reasons:
+                reasons.append(reason)
+            missing_key = "counter_trend_cooldown" if counter_cooldown_active else "counter_micro_confirmation"
+            if missing_key not in missing:
+                missing.append(missing_key)
+            cooldown_until = analysis_now + timedelta(minutes=5)
+            counter_cooldown_state["counter_trend_cooldown_until_utc"] = to_utc_iso(cooldown_until)
+            counter_cooldown_state["counter_trend_block_count"] = int(counter_cooldown_state.get("counter_trend_block_count") or 0) + 1
+            save_json(counter_cooldown_path, counter_cooldown_state)
+            decision = "no entry"
+            entry = sl = tp1 = tp2 = rr = None
+            execution_playbook = []
+            momentum_trailing_plan = None
 
     if asset == "GOLD_CFD" and decision in {"buy", "sell"} and alignment_state == "COUNTER":
         flow_rules = get_precision_flow_rules(asset)
