@@ -34,6 +34,9 @@ STATE_PATH = PUBLIC_DIR / "_management_notify_state.json"
 LIFECYCLE_STATE_PATH = PUBLIC_DIR / "_position_lifecycle_state.json"
 
 COLOR_GREEN, COLOR_RED, COLOR_ORANGE = 0x2ECC71, 0xE74C3C, 0xE67E22
+SPOT_MAX_AGE_SECONDS = max(5, int(os.getenv("MANAGEMENT_SPOT_MAX_AGE_SECONDS", "180")))
+ENABLE_LIVE_QUOTE_FALLBACK = os.getenv("MANAGEMENT_LIVE_QUOTE_FALLBACK", "1").strip().lower() not in {"0", "false", "no"}
+MANAGEMENT_DIAG_PATH = PUBLIC_DIR / "debug" / "management_notify_events.jsonl"
 
 
 def load_json(path: Path) -> Dict[str, Any]:
@@ -75,6 +78,47 @@ def to_utc_iso(dt: datetime) -> str:
 
 def format_budapest_time(dt: datetime) -> str:
     return dt.astimezone(BUDAPEST_TZ).strftime("%Y-%m-%d %H:%M:%S CET/CEST")
+
+
+def _parse_iso(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _spot_timestamp(signal: Dict[str, Any]) -> Optional[datetime]:
+    spot = signal.get("spot") if isinstance(signal.get("spot"), dict) else {}
+    meta = spot.get("meta") if isinstance(spot.get("meta"), dict) else {}
+    for candidate in (spot.get("utc"), meta.get("timestamp"), spot.get("retrieved_at_utc"), signal.get("utc")):
+        ts = _parse_iso(candidate)
+        if ts is not None:
+            return ts
+    return None
+
+
+def _fetch_live_quote(asset: str) -> Dict[str, Any]:
+    if not ENABLE_LIVE_QUOTE_FALLBACK:
+        return {}
+    try:
+        import Trading
+
+        quote = Trading.td_spot_with_fallback(asset)
+        return quote if isinstance(quote, dict) else {}
+    except Exception:
+        return {}
+
+
+def _append_diag(asset: str, payload: Dict[str, Any]) -> None:
+    event = {"asset": asset, "ts_utc": to_utc_iso(datetime.now(timezone.utc)), **payload}
+    try:
+        MANAGEMENT_DIAG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with MANAGEMENT_DIAG_PATH.open("a", encoding="utf-8") as h:
+            h.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def _position_key(asset: str, position: Dict[str, Any]) -> str:
@@ -181,24 +225,64 @@ def process() -> None:
 
         signal = load_json(PUBLIC_DIR / asset / "signal.json")
         spot = safe_float((signal.get("spot") or {}).get("price"))
+        spot_ts = _spot_timestamp(signal)
+        spot_age = None
+        if spot_ts is not None:
+            spot_age = max(0.0, (datetime.now(timezone.utc) - spot_ts).total_seconds())
+        spot_fresh = spot is not None and spot_age is not None and spot_age <= SPOT_MAX_AGE_SECONDS
+
+        if not spot_fresh:
+            live_quote = _fetch_live_quote(asset)
+            live_price = safe_float(live_quote.get("price"))
+            live_ts = _parse_iso(live_quote.get("utc") or live_quote.get("retrieved_at_utc"))
+            live_age = None
+            if live_ts is not None:
+                live_age = max(0.0, (datetime.now(timezone.utc) - live_ts).total_seconds())
+            live_fresh = live_price is not None and live_age is not None and live_age <= SPOT_MAX_AGE_SECONDS
+            if live_fresh:
+                spot = live_price
+                spot_fresh = True
+                _append_diag(asset, {
+                    "event": "spot_fallback_used",
+                    "source": live_quote.get("source"),
+                    "spot": spot,
+                    "age_seconds": live_age,
+                })
         exit_signal = signal.get("exit_signal") if isinstance(signal.get("exit_signal"), dict) else signal.get("position_exit_signal")
         exit_state = str((exit_signal or {}).get("state") or (exit_signal or {}).get("action") or "").lower()
         exit_reason = str((exit_signal or {}).get("reason") or (exit_signal or {}).get("comment") or "")
 
         key = _position_key(asset, pos)
         sent_events = notify_state.get(key) if isinstance(notify_state.get(key), dict) else {}
+        skip_reason = ""
+        sent_now = []
 
         for event in ("hard_exit", "sl_hit", "tp2_hit", "tp1_hit"):
             if sent_events.get(event):
+                continue
+            if event in {"sl_hit", "tp2_hit", "tp1_hit"} and not spot_fresh:
+                skip_reason = "spot_stale_or_missing"
                 continue
             if not _event_triggered(event, side, spot, pos, exit_state):
                 continue
             _send_embed(_build_embed(event, asset, side, pos.get("entry"), spot, exit_reason))
             sent_events[event] = now_iso
+            sent_now.append(event)
             notify_changed = True
             if event in {"sl_hit", "tp2_hit", "hard_exit"}:
                 break
 
+        _append_diag(asset, {
+            "event": "management_eval",
+            "position_key": key,
+            "side": side,
+            "spot": spot,
+            "spot_fresh": spot_fresh,
+            "spot_age_seconds": spot_age,
+            "skip_reason": skip_reason,
+            "sent_events": sent_now,
+            "exit_state": exit_state,
+        })
         notify_state[key] = sent_events
 
     if notify_changed and not DRY_RUN:
