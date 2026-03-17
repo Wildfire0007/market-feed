@@ -48,7 +48,7 @@ Környezeti változók:
   ORDER_FLOW_WS_TIMEOUT = "20" (WebSocket timeout sec)
 """
 
-import os, json, time, math, logging, shutil, sqlite3
+import os, json, time, math, logging, shutil, sqlite3, hashlib
 import threading
 from datetime import datetime, timezone, time as dt_time
 from pathlib import Path
@@ -182,6 +182,13 @@ ORDER_FLOW_WS_TIMEOUT = float(os.getenv("ORDER_FLOW_WS_TIMEOUT", str(max(ORDER_F
 ORDER_FLOW_WS_ENABLED = bool(ORDER_FLOW_WS_URL and websocket is not None)
 FORCED_SNAPSHOT_MAX_AGE = 300.0
 RESET_PUBLIC_ON_TRADING_START = os.getenv("RESET_PUBLIC_ON_TRADING_START", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+PUBLIC_SYNC_MAX_AGE_SECONDS = max(60.0, _env_float("PUBLIC_SYNC_MAX_AGE_SECONDS", 6 * 3600.0))
+PUBLIC_SYNC_REQUIRE_CHECKSUM = os.getenv("PUBLIC_SYNC_REQUIRE_CHECKSUM", "1").strip().lower() in {
     "1",
     "true",
     "yes",
@@ -1324,15 +1331,55 @@ def _write_public_refresh_marker(
 ) -> None:
     pipeline_dir = os.path.join(out_dir, "pipeline")
     ensure_dir(pipeline_dir)
-    save_json(
-        os.path.join(pipeline_dir, "public_refresh.json"),
-        {
-            "trading_started_at_utc": started_at.isoformat(),
-            "trading_completed_at_utc": completed_at.isoformat(),
-            "duration_seconds": duration_seconds,
-            "out_dir": out_dir,
-        },
-    )
+    refresh_payload = {
+        "trading_started_at_utc": started_at.isoformat(),
+        "trading_completed_at_utc": completed_at.isoformat(),
+        "duration_seconds": duration_seconds,
+        "out_dir": out_dir,
+    }
+    refresh_path = os.path.join(pipeline_dir, "public_refresh.json")
+    save_json(refresh_path, refresh_payload)
+    refresh_bytes = json.dumps(refresh_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    checksum_path = os.path.join(pipeline_dir, "public_refresh.sha256")
+    Path(checksum_path).write_text(hashlib.sha256(refresh_bytes).hexdigest(), encoding="utf-8")
+
+
+def _validate_public_refresh_sync_state(out_dir: str, logger: logging.Logger) -> None:
+    refresh_path = Path(out_dir) / "pipeline" / "public_refresh.json"
+    if not refresh_path.exists():
+        logger.warning("Public sync marker missing at startup: %s", refresh_path)
+        return
+
+    payload = json.loads(refresh_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Invalid public refresh marker format: {refresh_path}")
+
+    completed_at = _parse_iso_utc(payload.get("trading_completed_at_utc"))
+    if completed_at is None:
+        raise RuntimeError(f"Missing trading_completed_at_utc in {refresh_path}")
+
+    age_seconds = (datetime.now(timezone.utc) - completed_at).total_seconds()
+    if age_seconds > PUBLIC_SYNC_MAX_AGE_SECONDS:
+        raise RuntimeError(
+            "Public sync marker is stale "
+            f"({age_seconds:.1f}s > {PUBLIC_SYNC_MAX_AGE_SECONDS:.1f}s): {refresh_path}"
+        )
+
+    checksum_path = refresh_path.with_suffix(".sha256")
+    if not checksum_path.exists():
+        if PUBLIC_SYNC_REQUIRE_CHECKSUM:
+            raise RuntimeError(f"Missing public sync checksum file: {checksum_path}")
+        logger.warning("Public sync checksum missing, skipping hash validation: %s", checksum_path)
+        return
+
+    expected_checksum = checksum_path.read_text(encoding="utf-8").strip().lower()
+    actual_bytes = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    actual_checksum = hashlib.sha256(actual_bytes).hexdigest()
+    if expected_checksum != actual_checksum:
+        raise RuntimeError(
+            "Public sync checksum mismatch "
+            f"(expected={expected_checksum}, actual={actual_checksum}, file={refresh_path})"
+        )
 
 
 def _refresh_entry_gate_stats_recent(
@@ -4660,6 +4707,7 @@ def main():
     logger = logging.getLogger("market_feed.trading")
     _reset_out_dir_if_requested(OUT_DIR, logger)
     ensure_dir(OUT_DIR)
+    _validate_public_refresh_sync_state(OUT_DIR, logger)
     pipeline_log_path = None
     try:
         pipeline_log_path = get_pipeline_log_path()
