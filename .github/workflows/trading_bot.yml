@@ -2,6 +2,10 @@ name: Trading Bot
 
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows: ["TD Full Pipeline (5m)"]
+    types:
+      - completed
  
 permissions:
   contents: write
@@ -11,6 +15,7 @@ env:
 
 jobs:
   run-trading-bot:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     concurrency:
       group: trading_bot_cycle
