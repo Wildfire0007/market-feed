@@ -95,6 +95,23 @@ def _parse_utc_timestamp(raw: Any) -> Optional[datetime]:
         return None
 
 
+def _infer_side_from_levels(entry: Optional[float], sl: Optional[float], tp: Optional[float]) -> Optional[str]:
+    entry_val = _safe_float(entry)
+    sl_val = _safe_float(sl)
+    tp_val = _safe_float(tp)
+    if entry_val is None:
+        return None
+    if sl_val is not None and sl_val < entry_val and (tp_val is None or tp_val > entry_val):
+        return "long"
+    if sl_val is not None and sl_val > entry_val and (tp_val is None or tp_val < entry_val):
+        return "short"
+    if tp_val is not None and tp_val > entry_val and sl_val is None:
+        return "long"
+    if tp_val is not None and tp_val < entry_val and sl_val is None:
+        return "short"
+    return None
+
+
 def _to_utc_iso(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -202,15 +219,18 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
             normalized_side = _normalize_position_side(metadata.get("side"))
             if normalized_side is None and str(row["status"] or "").upper() == "OPEN":
                 normalized_side = _normalize_position_side(metadata.get("direction"))
+            if normalized_side is None and str(row["status"] or "").upper() == "OPEN":
+                normalized_side = _infer_side_from_levels(row["entry_price"], row["sl"], tp_value)
 
             positions[asset] = {
+                **metadata,
                 "side": normalized_side,
                 "status": str(row["status"] or "open").lower(),
                 "entry": row["entry_price"],
                 "size": row["size"],
                 "sl": row["sl"],
-                "tp1": tp_value,
-                "tp2": tp_value,
+                "tp1": metadata.get("tp1", tp_value),
+                "tp2": metadata.get("tp2", tp_value),
                 "opened_at_utc": metadata.get("opened_at_utc"),
                 "closed_at_utc": metadata.get("closed_at_utc"),
                 "cooldown_until_utc": metadata.get("cooldown_until_utc"),
@@ -300,6 +320,19 @@ def _sync_positions_to_db(db_path: Path, data: Dict[str, Any]) -> bool:
                 sl = payload.get("sl")
                 tp = payload.get("tp2") if payload.get("tp2") is not None else payload.get("tp1")
                 strategy_payload = dict(payload)
+                existing_row = connection.execute(
+                    "SELECT strategy_metadata FROM positions WHERE asset = ? LIMIT 1",
+                    (asset,),
+                ).fetchone()
+                existing_payload: Dict[str, Any] = {}
+                if existing_row and existing_row[0]:
+                    try:
+                        parsed_existing = json.loads(existing_row[0])
+                    except Exception:
+                        parsed_existing = None
+                    if isinstance(parsed_existing, dict):
+                        existing_payload = parsed_existing
+                strategy_payload = {**existing_payload, **strategy_payload}
                 strategy_payload.setdefault("side", side)
                 strategy_payload.setdefault("opened_at_utc", payload.get("opened_at_utc") or now_iso)
                 strategy_payload.setdefault("closed_at_utc", payload.get("closed_at_utc"))
