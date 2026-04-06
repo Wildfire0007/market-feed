@@ -1,27 +1,27 @@
 {
   "asset": "BTCUSD",
   "ok": true,
-  "retrieved_at_utc": "2026-04-06T20:17:00Z",
+  "retrieved_at_utc": "2026-04-06T20:22:00Z",
   "source": "Twelve Data (lokális JSON)",
   "spot": {
-    "price": 69783.71,
-    "utc": "2026-04-06T20:16:34Z",
-    "retrieved_at_utc": "2026-04-06T20:16:34Z",
+    "price": 69843.99,
+    "utc": "2026-04-06T20:21:33Z",
+    "retrieved_at_utc": "2026-04-06T20:21:33Z",
     "source": "twelvedata:quote",
     "realtime_override": false,
     "fallback_used": false,
-    "confidence": 0.9999999999999999,
-    "avg_latency_profile": 25.999999999999996,
+    "confidence": 1.0,
+    "avg_latency_profile": 27.0,
     "realtime_stats": null
   },
-  "signal": "no entry",
-  "probability": 29,
-  "probability_raw": 29,
-  "entry": null,
-  "sl": null,
-  "tp1": null,
-  "tp2": null,
-  "rr": null,
+  "signal": "buy",
+  "probability": 69,
+  "probability_raw": 69,
+  "entry": 69843.99,
+  "sl": 69145.55010000001,
+  "tp1": 71240.8698,
+  "tp2": 71939.3097,
+  "rr": 3.0,
   "leverage": 2.0,
   "position_size_scale": 0.25,
   "range_time_stop": {
@@ -40,18 +40,18 @@
   "biases": {
     "raw_4h": "neutral",
     "raw_1h": "long",
-    "raw_5m": "neutral",
+    "raw_5m": "long",
     "adjusted_4h": "neutral",
     "adjusted_1h": "long",
-    "adjusted_5m": "neutral"
+    "adjusted_5m": "long"
   },
-  "alignment_state": "MIXED",
+  "alignment_state": "TREND",
   "alignment_detail": {
     "bias_4h": "neutral",
     "bias_1h": "long",
-    "bias_5m": "neutral",
-    "signal": null,
-    "effective_bias": "neutral"
+    "bias_5m": "long",
+    "signal": "buy",
+    "effective_bias": "long"
   },
   "gates": {
     "mode": "core",
@@ -66,10 +66,13 @@
       "rr_math>=1.6",
       "tp_min_profit",
       "min_stoploss",
-      "tp1_net>=+0.6%"
+      "tp1_net>=+0.6%",
+      "precision_score>=52",
+      "precision_flow_alignment",
+      "precision_trigger_sync"
     ],
     "missing": [
-      "P_score>=35"
+      "tp1_net>=+0.6%"
     ],
     "session_window_status": {
       "entry_open": true,
@@ -90,12 +93,14 @@
             "atr_ok"
           ],
           "missing": [
-            "micro_bos_long"
+            "micro_bos_long",
+            "momentum_volume"
           ],
           "met": false,
           "label": "Crypto momentum long",
           "missing_pretty": [
-            "1m micro BOS long"
+            "1m micro BOS long",
+            "Momentum volume ráta"
           ],
           "requires_pretty": [
             "1m micro BOS long",
@@ -132,14 +137,10 @@
             "bos5m_long",
             "atr_ok"
           ],
-          "missing": [
-            "bos5m_long"
-          ],
-          "met": false,
+          "missing": [],
+          "met": true,
           "label": "5m BOS long  ATR",
-          "missing_pretty": [
-            "5m BOS long"
-          ],
+          "missing_pretty": [],
           "requires_pretty": [
             "5m BOS long",
             "ATR gate"
@@ -184,7 +185,19 @@
           ]
         }
       ],
-      "matched": false
+      "selected": {
+        "direction": "long",
+        "label": "5m BOS long  ATR",
+        "requires": [
+          "bos5m_long",
+          "atr_ok"
+        ],
+        "requires_pretty": [
+          "5m BOS long",
+          "ATR gate"
+        ]
+      },
+      "matched": true
     }
   },
   "gate_skips": [
@@ -197,8 +210,8 @@
     "within_entry_window": true,
     "within_monitor_window": true,
     "weekday_ok": true,
-    "now_utc": "2026-04-06T20:17:00.387166+00:00",
-    "now_budapest": "2026-04-06T22:17:00.387166+02:00",
+    "now_utc": "2026-04-06T20:22:00.274186+00:00",
+    "now_budapest": "2026-04-06T22:22:00.274186+02:00",
     "windows_utc": [
       [
         0,
@@ -231,7 +244,7 @@
       6
     ],
     "status_profile": "default",
-    "minutes_to_session_close": 222,
+    "minutes_to_session_close": 217,
     "session_close_reason": "entry_window",
     "next_session_open_utc": "2026-04-07T00:00:00+00:00",
     "next_session_open_budapest": "2026-04-07T02:00:00+02:00",
@@ -245,7 +258,7 @@
   "momentum_diagnostics": {
     "evaluated": true,
     "used_for_decision": false,
-    "direction_result": null,
+    "direction_result": "buy",
     "required": [
       "session",
       "regime",
@@ -259,10 +272,7 @@
       "tp1_net>=+0.6%",
       "intraday_range_guard"
     ],
-    "missing": [
-      "bias",
-      "momentum_trigger"
-    ],
+    "missing": [],
     "soft_flags": [
       "regime",
       "ofi"
@@ -270,86 +280,86 @@
     "liquidity_data_available": false,
     "flow_data_available": true,
     "ofi_available": true,
-    "momentum_trigger_ok": null,
+    "momentum_trigger_ok": true,
     "momentum_atr_ok": true,
-    "trigger_desc": null,
+    "trigger_desc": "EMA9×21 momentum cross",
     "precision_data_gap_mode": false
   },
   "diagnostics": {
     "timeframes": {
       "k1m": {
-        "last_raw_utc": "2026-04-06T20:15:00Z",
-        "last_closed_utc": "2026-04-06T20:15:00Z",
+        "last_raw_utc": "2026-04-06T20:20:00Z",
+        "last_closed_utc": "2026-04-06T20:20:00Z",
         "latency_seconds": 120,
         "expected_max_delay_seconds": 180,
-        "source_mtime_utc": "2026-04-06T20:16:34Z",
+        "source_mtime_utc": "2026-04-06T20:21:36Z",
         "stale_for_signals": false,
         "freshness_limit_seconds": 240.0,
         "freshness_violation": false,
         "freshness_retries": 0,
         "used_symbol": "BTC/USD",
         "used_exchange": "Coinbase Pro",
-        "retrieved_at_utc": "2026-04-06T20:16:34Z",
-        "latency_guard_seconds": 94,
-        "latency_guard_adjustment_seconds": 26,
+        "retrieved_at_utc": "2026-04-06T20:21:36Z",
+        "latency_guard_seconds": 96,
+        "latency_guard_adjustment_seconds": 24,
         "critical_stale": false
       },
       "k5m": {
-        "last_raw_utc": "2026-04-06T20:15:00Z",
-        "last_closed_utc": "2026-04-06T20:15:00Z",
+        "last_raw_utc": "2026-04-06T20:20:00Z",
+        "last_closed_utc": "2026-04-06T20:20:00Z",
         "latency_seconds": 120,
         "expected_max_delay_seconds": 300,
-        "source_mtime_utc": "2026-04-06T20:16:34Z",
+        "source_mtime_utc": "2026-04-06T20:21:44Z",
         "stale_for_signals": false,
         "freshness_limit_seconds": 900.0,
         "freshness_violation": false,
         "freshness_retries": 0,
         "used_symbol": "BTC/USD",
         "used_exchange": "Coinbase Pro",
-        "retrieved_at_utc": "2026-04-06T20:16:34Z",
-        "latency_guard_seconds": 94,
-        "latency_guard_adjustment_seconds": 26,
+        "retrieved_at_utc": "2026-04-06T20:21:44Z",
+        "latency_guard_seconds": 104,
+        "latency_guard_adjustment_seconds": 16,
         "critical_stale": false
       },
       "k1h": {
         "last_raw_utc": "2026-04-06T20:00:00Z",
         "last_closed_utc": "2026-04-06T20:00:00Z",
-        "latency_seconds": 1020,
+        "latency_seconds": 1320,
         "expected_max_delay_seconds": 3600,
-        "source_mtime_utc": "2026-04-06T20:16:34Z",
+        "source_mtime_utc": "2026-04-06T20:21:37Z",
         "stale_for_signals": false,
         "freshness_limit_seconds": 5400.0,
         "freshness_violation": false,
         "freshness_retries": 0,
         "used_symbol": "BTC/USD",
         "used_exchange": "Coinbase Pro",
-        "retrieved_at_utc": "2026-04-06T20:16:34Z",
-        "latency_guard_seconds": 994,
-        "latency_guard_adjustment_seconds": 26,
+        "retrieved_at_utc": "2026-04-06T20:21:37Z",
+        "latency_guard_seconds": 1297,
+        "latency_guard_adjustment_seconds": 23,
         "critical_stale": false
       },
       "k4h": {
         "last_raw_utc": "2026-04-06T20:00:00Z",
         "last_closed_utc": "2026-04-06T20:00:00Z",
-        "latency_seconds": 1020,
+        "latency_seconds": 1320,
         "expected_max_delay_seconds": 14400,
-        "source_mtime_utc": "2026-04-06T20:16:34Z",
+        "source_mtime_utc": "2026-04-06T20:21:46Z",
         "stale_for_signals": false,
         "freshness_limit_seconds": 21600.0,
         "freshness_violation": false,
         "freshness_retries": 0,
         "used_symbol": "BTC/USD",
         "used_exchange": "Coinbase Pro",
-        "retrieved_at_utc": "2026-04-06T20:16:34Z",
-        "latency_guard_seconds": 994,
-        "latency_guard_adjustment_seconds": 26,
+        "retrieved_at_utc": "2026-04-06T20:21:46Z",
+        "latency_guard_seconds": 1306,
+        "latency_guard_adjustment_seconds": 14,
         "critical_stale": false
       },
       "spot": {
-        "last_raw_utc": "2026-04-06T20:16:34Z",
-        "latency_seconds": 26,
+        "last_raw_utc": "2026-04-06T20:21:33Z",
+        "latency_seconds": 27,
         "expected_max_delay_seconds": 300,
-        "source_mtime_utc": "2026-04-06T20:16:35Z",
+        "source_mtime_utc": "2026-04-06T20:21:46Z",
         "source": "twelvedata:quote",
         "fallback_used": false,
         "realtime_override": false,
@@ -362,11 +372,11 @@
       }
     },
     "source_files": {
-      "spot.json": "2026-04-06T20:16:35Z",
-      "klines_1m.json": "2026-04-06T20:16:34Z",
-      "klines_5m.json": "2026-04-06T20:16:34Z",
-      "klines_1h.json": "2026-04-06T20:16:34Z",
-      "klines_4h.json": "2026-04-06T20:16:34Z"
+      "spot.json": "2026-04-06T20:21:46Z",
+      "klines_1m.json": "2026-04-06T20:21:36Z",
+      "klines_5m.json": "2026-04-06T20:21:44Z",
+      "klines_1h.json": "2026-04-06T20:21:37Z",
+      "klines_4h.json": "2026-04-06T20:21:46Z"
     },
     "latency_flags": [],
     "refresh_tips": [
@@ -378,17 +388,23 @@
     ]
   },
   "reasons": [
-    "Intraday bias gate feltételek hiányosak — Crypto momentum long: 1m micro BOS long | Crypto momentum short: 1m micro BOS short, Momentum volume ráta | 5m BOS long  ATR: 5m BOS long | 5m BOS short  ATR: 5m BOS short | Micro BOS short  ATR (momentum nélkül): 1m micro BOS short",
-    "Bias neutrálsávban",
+    "Bias override: Intraday 5m BOS long  ATR (+19.5)",
     "Regime filter inaktív",
-    "ATR erősség 1.20× küszöb (+12.2)",
+    "5M BOS trendirányba (+16.0)",
+    "ATR erősség 1.11× küszöb (+11.7)",
     "Range expanzió támogatja a momentumot (+3.0)",
     "Fib zóna konfluencia (0.618–0.886) (+18.0)",
     "Order flow neutrális (−4.8)",
+    "Buy pressure támogatja a setupot (+5)",
     "Mesterlövész mód: P-score minimum 35 érvényesítve",
     "Regime kapu: CHOPPY miatt −10 P-score, pozícióskálázás csökkentve",
     "Strukturális kapu lazítva: momentum erős, BOS hiány engedve",
-    "missing: P_score>=35"
+    "BTC ATR1h stop igazítás: kockázat ×1.15",
+    "TP1 nettó profit ≈ 0.60%",
+    "Precision plan: entry 69795.0–69862.8, SL 69727.3",
+    "Precision confidence medium (72.0)",
+    "Precision limit belépő parkolva 20 percig",
+    "missing: tp1_net>=+0.6%"
   ],
   "realtime_transport": "http",
   "data_integrity_diagnostics": {
@@ -406,10 +422,10 @@
       "k1m"
     ],
     "spot": {
-      "last_raw_utc": "2026-04-06T20:16:34Z",
-      "latency_seconds": 26,
+      "last_raw_utc": "2026-04-06T20:21:33Z",
+      "latency_seconds": 27,
       "expected_max_delay_seconds": 300,
-      "source_mtime_utc": "2026-04-06T20:16:35Z",
+      "source_mtime_utc": "2026-04-06T20:21:46Z",
       "source": "twelvedata:quote",
       "fallback_used": false,
       "realtime_override": false,
@@ -421,37 +437,37 @@
       "used_exchange": "Coinbase Pro"
     },
     "k5m": {
-      "last_raw_utc": "2026-04-06T20:15:00Z",
-      "last_closed_utc": "2026-04-06T20:15:00Z",
+      "last_raw_utc": "2026-04-06T20:20:00Z",
+      "last_closed_utc": "2026-04-06T20:20:00Z",
       "latency_seconds": 120,
       "expected_max_delay_seconds": 300,
-      "source_mtime_utc": "2026-04-06T20:16:34Z",
+      "source_mtime_utc": "2026-04-06T20:21:44Z",
       "stale_for_signals": false,
       "freshness_limit_seconds": 900.0,
       "freshness_violation": false,
       "freshness_retries": 0,
       "used_symbol": "BTC/USD",
       "used_exchange": "Coinbase Pro",
-      "retrieved_at_utc": "2026-04-06T20:16:34Z",
-      "latency_guard_seconds": 94,
-      "latency_guard_adjustment_seconds": 26,
+      "retrieved_at_utc": "2026-04-06T20:21:44Z",
+      "latency_guard_seconds": 104,
+      "latency_guard_adjustment_seconds": 16,
       "critical_stale": false
     },
     "k1m": {
-      "last_raw_utc": "2026-04-06T20:15:00Z",
-      "last_closed_utc": "2026-04-06T20:15:00Z",
+      "last_raw_utc": "2026-04-06T20:20:00Z",
+      "last_closed_utc": "2026-04-06T20:20:00Z",
       "latency_seconds": 120,
       "expected_max_delay_seconds": 180,
-      "source_mtime_utc": "2026-04-06T20:16:34Z",
+      "source_mtime_utc": "2026-04-06T20:21:36Z",
       "stale_for_signals": false,
       "freshness_limit_seconds": 240.0,
       "freshness_violation": false,
       "freshness_retries": 0,
       "used_symbol": "BTC/USD",
       "used_exchange": "Coinbase Pro",
-      "retrieved_at_utc": "2026-04-06T20:16:34Z",
-      "latency_guard_seconds": 94,
-      "latency_guard_adjustment_seconds": 26,
+      "retrieved_at_utc": "2026-04-06T20:21:36Z",
+      "latency_guard_seconds": 96,
+      "latency_guard_adjustment_seconds": 24,
       "critical_stale": false
     }
   },
@@ -472,13 +488,13 @@
     "p_score_min": 35.0,
     "spread_max_atr_pct": 0.45,
     "tp_net_min": 0.006,
-    "rr_required": null,
-    "tp_min_profit_pct": null,
+    "rr_required": 2.0,
+    "tp_min_profit_pct": 0.0062,
     "manual_trade_required_tp1_gross_pct": null,
     "manual_trade_model": null,
     "min_stoploss_pct": 0.01,
     "atr_abs_min_used": 55.0,
-    "atr_low_threshold": 0.0012066713263407397,
+    "atr_low_threshold": 0.0012094064762008467,
     "atr_overlay_min": null,
     "bos_lookback": 28,
     "fib_tolerance": 0.015,
@@ -513,14 +529,14 @@
     "status": "disabled",
     "unavailable_reason": "ml_scoring_disabled"
   },
-  "ema21_slope_1h": 0.012853242215119196,
+  "ema21_slope_1h": 0.012920609594320594,
   "ema21_slope_threshold": 0.015,
   "ema21_relation_1h": "above",
   "last_swing_high_1h": 69975.9,
   "last_swing_low_1h": 69784.3,
-  "last_close_1h": 69783.71,
-  "bos_5m_dir": "bos_down",
-  "atr1h": 443.32357142857137,
+  "last_close_1h": 69843.99,
+  "bos_5m_dir": "bos_up",
+  "atr1h": 446.45571428571463,
   "momentum_volume_ratio": null,
   "momentum_liquidity_ok": true,
   "dynamic_tp_profile": {
@@ -536,30 +552,30 @@
     },
     "regime": "normal",
     "reference": {
-      "current": 100.65999999999829,
-      "q20": 55.95200000000124,
-      "q50": 87.49714285714435,
+      "current": 94.0535714285704,
+      "q20": 56.48714285714377,
+      "q50": 88.58000000000175,
       "q80": 149.2061428571438
     }
   },
   "order_flow_metrics": {
     "imbalance": 0.025210084033613446,
-    "pressure": 1.2650420168067913,
+    "pressure": 1.0131092436974594,
     "delta_volume": 3.0,
     "aggressor_ratio": null,
-    "imbalance_z": 2.2520945416570335,
+    "imbalance_z": 0.32693127407914724,
     "status": "synthetic_volume"
   },
   "intraday_profile": {
     "asset": "BTCUSD",
-    "timestamp": "2026-04-06T20:17:00Z",
+    "timestamp": "2026-04-06T20:22:00Z",
     "day_start_utc": "2026-04-05T22:00:00Z",
-    "day_open": 69596.46,
+    "day_open": 69616.61,
     "day_high": 70378.48,
     "day_low": 69150.37,
     "day_range": 1228.1100000000006,
-    "range_vs_atr": 12.200576197099359,
-    "range_position": 0.5157029907744508,
+    "range_vs_atr": 13.057558382381012,
+    "range_position": 0.5647865419221483,
     "range_bias": "balanced",
     "range_state": "expansion",
     "range_compression": false,
@@ -570,8 +586,8 @@
       "long": false,
       "short": false
     },
-    "micro_range_position": 0.558275907765741,
-    "micro_range_vs_atr": 2.9986091794158716,
+    "micro_range_position": 0.757984362576235,
+    "micro_range_vs_atr": 3.209234858553254,
     "micro_range_guard": {
       "long": false,
       "short": false
@@ -585,8 +601,8 @@
     "opening_gap": null,
     "opening_gap_pct": null,
     "opening_gap_direction": "flat",
-    "price_reference": 69783.71,
-    "elapsed_minutes": 1337,
+    "price_reference": 69843.99,
+    "elapsed_minutes": 1342,
     "notes": [
       "Range expanzió >1.5×ATR — agresszív menedzsment indokolt."
     ]
@@ -601,10 +617,10 @@
       "weakening": -0.5
     },
     "btc_ofi_state": {
-      "z": 2.2520945416570335,
-      "state": "strong"
+      "z": 0.32693127407914724,
+      "state": "neutral"
     },
-    "adx_value": 18.657498146436122,
+    "adx_value": 19.475169397394126,
     "adx_trend_threshold": 20.0,
     "adx_regime_initial": "range",
     "btc_rr_adx": {
@@ -616,11 +632,11 @@
       "be_trigger_r": 0.26
     },
     "btc_atr_floor_usd": 80.0,
-    "btc_atr_floor_ratio": 0.001146399353086845,
+    "btc_atr_floor_ratio": 0.0011454099343408072,
     "btc_atr_floor_passed": true,
     "btc_atr_ratio_threshold": 0.0012,
     "btc_atr_gate_threshold_usd": 80.0,
-    "btc_atr_value_usd": 100.65999999999829,
+    "btc_atr_value_usd": 94.0535714285704,
     "btc_atr_gate_ok": true,
     "atr_multiplier": 1.0,
     "atr_threshold_base": 0.0012,
@@ -629,28 +645,28 @@
     "atr_threshold_intraday": 0.0009599999999999999,
     "atr_percentile_meta": {
       "bucket": "close",
-      "samples": 148,
+      "samples": 149,
       "profile": "baseline",
       "percentile": 0.34,
-      "threshold": 0.0012066713263407397
+      "threshold": 0.0012094064762008467
     },
-    "atr_threshold_percentile": 0.0012066713263407397,
+    "atr_threshold_percentile": 0.0012094064762008467,
     "spread_ratio": null,
     "atr_soft_gate": {
       "enabled": true,
-      "rel_atr": 0.0014424569860214981,
-      "threshold": 0.0012066713263407397,
+      "rel_atr": 0.0013466236884314654,
+      "threshold": 0.0012094064762008467,
       "tolerance_pct": 0.15,
       "penalty_max": 6.0,
-      "diff_ratio": -0.19540172583348295,
+      "diff_ratio": -0.11345830779876774,
       "mode": "pass"
     },
     "atr_ratio_ok": true,
-    "atr_threshold_effective": 0.0012066713263407397,
+    "atr_threshold_effective": 0.0012094064762008467,
     "spread_gate_ok": true,
     "volatility_gate": {
       "ok": true,
-      "current_atr": 100.65999999999829,
+      "current_atr": 94.0535714285704,
       "floor": null
     },
     "atr_abs_min_used": 55.0,
@@ -664,30 +680,31 @@
         "type": "pct",
         "round_trip_pct": 0.01,
         "overnight_pct": 0.0
-      }
+      },
+      "risk_pct_estimate": 0.9999999999999963
     },
     "fib_tolerance_fraction": 0.015,
-    "btc_atr_ratio": 1.195401725833483,
+    "btc_atr_ratio": 1.1134583077987676,
     "btc_volume_ratio": 0.0,
     "btc_range_expansion": true,
-    "btc_momentum_cross": false,
-    "btc_momentum_ofi_ok": true,
+    "btc_momentum_cross": true,
+    "btc_momentum_ofi_ok": false,
     "btc_momentum_atr_ok": true,
     "p_score_inputs": {
       "fib_ok": true,
       "ema21_dist_ok": false,
       "order_flow_status": "synthetic_volume",
       "order_flow_imbalance": 0.025210084033613446,
-      "order_flow_pressure": 1.2650420168067913,
+      "order_flow_pressure": 1.0131092436974594,
       "order_flow_aggressor": null,
-      "ofi_z": 2.2520945416570335,
-      "realtime_confidence": 0.9999999999999999
+      "ofi_z": 0.32693127407914724,
+      "realtime_confidence": 1.0
     },
     "dynamic_score_engine": {
-      "base_score": 39.38249438861435,
-      "final_score": 29.382494388614347
+      "base_score": 79.39083388040605,
+      "final_score": 69.39083388040605
     },
-    "ofi_z": 2.2520945416570335,
+    "ofi_z": 0.32693127407914724,
     "vwap_confluence": {
       "trend_pullback": false,
       "mean_revert": false
@@ -696,11 +713,18 @@
       "bos_ok": false,
       "vwap_ok": false,
       "ofi_ok": false,
-      "ofi_z": null,
+      "ofi_z": 0.32693127407914724,
+      "available": [
+        "bos",
+        "vwap",
+        "ofi"
+      ],
+      "missing": [],
+      "required_hits": 2,
       "hits": 0
     },
     "btc_structure_combo": {
-      "active_direction": null,
+      "active_direction": "long",
       "active": {
         "micro": false,
         "vwap": false,
@@ -711,7 +735,7 @@
         "long": {
           "micro": false,
           "vwap": false,
-          "ofi": true,
+          "ofi": false,
           "price_above_vwap": false,
           "price_below_vwap": false
         },
@@ -754,6 +778,57 @@
       "core_rr_min": 1.6,
       "momentum_rr_min": 1.6
     },
+    "core_no_chase": {
+      "slip": 0.0,
+      "slip_r": 0.0,
+      "limit_r": 0.25,
+      "entry": 69843.99,
+      "trigger": 69843.99,
+      "sl": 69145.55010000001,
+      "evaluated": true,
+      "violated": false
+    },
+    "slippage_guard": {
+      "core": {
+        "slip": 0.0,
+        "allowed": 111.75038399999961,
+        "limit_r": 0.16,
+        "slip_r": 0.0,
+        "entry_price": 69843.99,
+        "trigger_price": 69843.99,
+        "risk_abs": 698.4398999999976
+      }
+    },
+    "precision_gate_state": {
+      "score_ready": true,
+      "score": 72.0,
+      "threshold": 52.0,
+      "flow_ready": true,
+      "trigger_ready": true,
+      "trigger_state": "fire",
+      "sync_ready": true,
+      "flow_ready_only": false,
+      "trigger_ready_only": false,
+      "flow_blockers": [],
+      "profile": "baseline",
+      "position_sizing_floor": 0.01,
+      "trigger_wait_since": null,
+      "trigger_wait_minutes": null,
+      "trigger_fallback": false,
+      "precision_state": "precision_arming",
+      "precision_soft_block": false,
+      "precision_profile": "baseline",
+      "btc_precision_threshold": 52.0,
+      "precision_ready_since": null,
+      "precision_arming_since": null,
+      "precision_events": 1,
+      "precision_hits_ready": 0,
+      "precision_hits_arming": 1,
+      "precision_hits_soft_block": 0,
+      "precision_hits_sync_ready": 1,
+      "precision_hits_flow_ready_only": 0,
+      "precision_hits_trigger_ready_only": 0
+    },
     "precision_score_threshold": 52.0,
     "precision_timeouts": {
       "ready": 15,
@@ -761,27 +836,55 @@
     },
     "soft_gate_reasons": [
       "core_regime",
-      "core_bias",
       "structure_momentum_override"
-    ]
+    ],
+    "btc_level_checks": {
+      "core": {
+        "profile": "baseline",
+        "mode": "core",
+        "side": "buy",
+        "entry": 69843.99,
+        "sl": 69145.55010000001,
+        "tp1": 71240.8698,
+        "tp2": 71939.3097,
+        "risk_abs": 698.4398999999976,
+        "tp1_mult": 2.0,
+        "tp2_mult": 3.0,
+        "rr_required": 2.0,
+        "sl_buffer": 698.4398999999976,
+        "sl_buffer_min": 90.0,
+        "sl_buffer_abs_min": 90.0,
+        "btc_profile": "baseline",
+        "spread_usd": 0.0,
+        "spread_limit_atr_mult": 0.7,
+        "tp_pct": 0.019999999999999928,
+        "tp_min_pct": 0.0062,
+        "rr": 2.0,
+        "rr_min": 2.0,
+        "tp1_distance": 1396.8797999999952,
+        "sl_distance": 698.4398999999976,
+        "rr_tp2": 3.0,
+        "blockers": []
+      }
+    }
   },
   "entry_gate_context_hu": {
     "atr_kapu": {
       "ok": true,
-      "rel_atr": 0.0014424569860214981,
-      "threshold": 0.0012066713263407397,
+      "rel_atr": 0.0013466236884314654,
+      "threshold": 0.0012094064762008467,
       "abs_ok": true,
       "overlay_ok": true,
       "btc_atr_gate": true,
-      "timestamp_utc": "2026-04-06 20:17:00",
-      "timestamp_bud": "2026-04-06 22:17:00"
+      "timestamp_utc": "2026-04-06 20:22:00",
+      "timestamp_bud": "2026-04-06 22:22:00"
     },
     "spread_kapu": {
       "ok": true,
       "spread_ratio_atr": null,
       "spread_limit_atr": 0.45,
-      "timestamp_utc": "2026-04-06 20:17:00",
-      "timestamp_bud": "2026-04-06 22:17:00"
+      "timestamp_utc": "2026-04-06 20:22:00",
+      "timestamp_bud": "2026-04-06 22:22:00"
     },
     "kockazat_guard": {
       "max_risk_pct": 1.2,
@@ -791,19 +894,19 @@
         "round_trip_pct": 0.01,
         "overnight_pct": 0.0
       },
-      "timestamp_utc": "2026-04-06 20:17:00",
-      "timestamp_bud": "2026-04-06 22:17:00"
+      "timestamp_utc": "2026-04-06 20:22:00",
+      "timestamp_bud": "2026-04-06 22:22:00"
     },
     "profil_kuszobok": {
       "profil": "baseline",
       "p_score_min": 38.0,
       "p_score_min_base": 38.0,
-      "atr_kuszob_rel": 0.0012066713263407397,
+      "atr_kuszob_rel": 0.0012094064762008467,
       "atr_abs_min": 55.0,
       "fib_tures_frac": 0.015,
-      "fib_tures_atr": 332.49267857142854,
-      "timestamp_utc": "2026-04-06 20:17:00",
-      "timestamp_bud": "2026-04-06 22:17:00"
+      "fib_tures_atr": 334.84178571428595,
+      "timestamp_utc": "2026-04-06 20:22:00",
+      "timestamp_bud": "2026-04-06 22:22:00"
     },
     "bos_visszatekintes": 28,
     "fib_zona": {
@@ -813,9 +916,9 @@
         0.886
       ],
       "tures_frac": 0.015,
-      "tures_atr": 332.49267857142854,
-      "timestamp_utc": "2026-04-06 20:17:00",
-      "timestamp_bud": "2026-04-06 22:17:00"
+      "tures_atr": 334.84178571428595,
+      "timestamp_utc": "2026-04-06 20:22:00",
+      "timestamp_bud": "2026-04-06 22:22:00"
     },
     "session_ablak_utc": {
       "entry": [
@@ -844,25 +947,22 @@
         "ofi": false
       },
       "soft_1of3": false,
-      "timestamp_utc": "2026-04-06 20:17:00",
-      "timestamp_bud": "2026-04-06 22:17:00"
+      "timestamp_utc": "2026-04-06 20:22:00",
+      "timestamp_bud": "2026-04-06 22:22:00"
     },
     "rr_kapuk": {
       "core_rr_min": 1.6,
       "momentum_rr_min": 1.6,
       "relaxalt": false,
       "indok": null,
-      "timestamp_utc": "2026-04-06 20:17:00",
-      "timestamp_bud": "2026-04-06 22:17:00"
+      "timestamp_utc": "2026-04-06 20:22:00",
+      "timestamp_bud": "2026-04-06 22:22:00"
     },
     "momentum_kapu": {
-      "momentum_ok": false,
-      "momentum_direction": null,
-      "momentum_reason": "missing:bias,momentum_trigger",
-      "momentum_missing": [
-        "bias",
-        "momentum_trigger"
-      ],
+      "momentum_ok": true,
+      "momentum_direction": "buy",
+      "momentum_reason": "EMA9×21 momentum cross",
+      "momentum_missing": [],
       "momentum_soft_gates": [
         "regime",
         "ofi"
@@ -871,100 +971,448 @@
       "momentum_structure_ok": false,
       "momentum_atr_ok": true,
       "momentum_liquidity_ok": true,
-      "momentum_trigger_ok": false,
-      "momentum_ofi_z": 2.2520945416570335,
-      "timestamp_utc": "2026-04-06 20:17:00",
-      "timestamp_bud": "2026-04-06 22:17:00"
+      "momentum_trigger_ok": true,
+      "momentum_ofi_z": 0.32693127407914724,
+      "timestamp_utc": "2026-04-06 20:22:00",
+      "timestamp_bud": "2026-04-06 22:22:00"
     },
     "soft_gate_reasons": [
       "core_regime",
-      "core_bias",
       "structure_momentum_override"
-    ]
+    ],
+    "precision_kapu": {
+      "score_ready": true,
+      "score": 72.0,
+      "threshold": 52.0,
+      "flow_ready": true,
+      "trigger_ready": true,
+      "trigger_state": "fire",
+      "sync_ready": true,
+      "flow_ready_only": false,
+      "trigger_ready_only": false,
+      "flow_blockers": [],
+      "profile": "baseline",
+      "position_sizing_floor": 0.01,
+      "trigger_wait_since": null,
+      "trigger_wait_minutes": null,
+      "trigger_fallback": false,
+      "precision_state": "precision_arming",
+      "precision_soft_block": false,
+      "precision_profile": "baseline",
+      "btc_precision_threshold": 52.0,
+      "precision_ready_since": null,
+      "precision_arming_since": null,
+      "precision_events": 1,
+      "precision_hits_ready": 0,
+      "precision_hits_arming": 1,
+      "precision_hits_soft_block": 0,
+      "precision_hits_sync_ready": 1,
+      "precision_hits_flow_ready_only": 0,
+      "precision_hits_trigger_ready_only": 0,
+      "timestamp_utc": "2026-04-06 20:22:00",
+      "timestamp_bud": "2026-04-06 22:22:00"
+    }
   },
   "volatility_overlay": {
     "implied_vol": null,
-    "realised_vol": 0.0004723754509259751,
+    "realised_vol": 0.00047855529500017097,
     "realised_window_minutes": 120,
     "regime": "historical",
     "premium": null,
     "source_path": null,
     "implied_realised_ratio": null
   },
-  "invalid_levels": {
-    "buy": 69562.63821428572,
-    "sell": 70197.56178571428
+  "precision_plan": {
+    "asset": "BTCUSD",
+    "direction": "buy",
+    "score": 72.0,
+    "confidence": "medium",
+    "entry": 69840.18,
+    "entry_window": [
+      69795.03428571428,
+      69862.75285714286
+    ],
+    "stop_loss": 69727.31571428571,
+    "take_profit_1": 70065.90857142856,
+    "take_profit_2": 70178.77285714285,
+    "risk": 112.86428571428446,
+    "liquidity_levels": [
+      69736.53,
+      69766.97,
+      69783.7,
+      69820.64,
+      69840.18
+    ],
+    "factors": [
+      "order flow pressure +1.01",
+      "ATR1m 37.4671",
+      "ATR5m 94.0536",
+      "price near liquidity pocket"
+    ],
+    "score_threshold": 52.0,
+    "score_ready": true,
+    "trigger_state": "fire",
+    "trigger_ready": true,
+    "trigger_levels": {
+      "window_low": 69795.03428571428,
+      "window_high": 69862.75285714286,
+      "fire": 69840.18,
+      "arm": 69862.75285714286,
+      "disarm": 69795.03428571428
+    },
+    "ready_ts": "2026-04-06T20:19:00Z",
+    "order_flow_ready": true,
+    "order_flow_strength": 0.75,
+    "microstructure_score": 72.0,
+    "trigger_progress": 1.0,
+    "trigger_confidence": 0.823,
+    "trigger_reasons": [
+      "pressure 1.01",
+      "delta +3.0",
+      "order flow optional (volume unavailable)",
+      "price inside window (flow ready)"
+    ],
+    "order_flow_status": "synthetic_volume",
+    "order_flow_optional": true,
+    "order_flow_settings": {
+      "imbalance_threshold": 0.6,
+      "pressure_threshold": 0.7,
+      "imbalance_margin": 1.1,
+      "pressure_margin": 1.1,
+      "min_signals": 1,
+      "strength_floor": 0.74,
+      "block_ratio": 0.0,
+      "delta_blocker_abs_max": 10.0
+    },
+    "order_flow_snapshot": {
+      "imbalance": 0.025210084033613446,
+      "pressure": 1.0131092436974594,
+      "delta_volume": 3.0,
+      "aggressor_ratio": null,
+      "status": "synthetic_volume"
+    },
+    "order_flow_signals": 2,
+    "order_flow_blockers": [],
+    "order_flow_stalled": false,
+    "alternates": {
+      "sell": {
+        "direction": "sell",
+        "entry": 69851.84,
+        "entry_window": [
+          69829.26714285713,
+          69896.9857142857
+        ],
+        "stop_loss": 69964.70428571428,
+        "take_profit_1": 69626.11142857143,
+        "take_profit_2": 69513.24714285714,
+        "risk": 112.86428571428446,
+        "score": 62.0,
+        "confidence": "medium",
+        "trigger_levels": {
+          "window_low": 69829.26714285713,
+          "window_high": 69896.9857142857,
+          "fire": 69851.84,
+          "arm": 69829.26714285713,
+          "disarm": 69896.9857142857
+        },
+        "order_flow_ready": true
+      }
+    },
+    "ready_timeout_minutes": 15,
+    "arming_timeout_minutes": 20,
+    "context": {
+      "intraday_profile": {
+        "range_state": "expansion",
+        "range_position": 0.5647865419221483,
+        "range_vs_atr": 13.057558382381012
+      }
+    }
   },
-  "invalid_buffer_abs": 221.66178571428568,
+  "execution_playbook": [
+    {
+      "step": "entry",
+      "description": "Long belépő 69843.99000 környékén",
+      "risk_abs": 698.4398999999976,
+      "confidence": 1.0
+    },
+    {
+      "step": "position_scale",
+      "description": "Pozícióméret skálázás ×0.25",
+      "scale": 0.25
+    },
+    {
+      "step": "scalp_window",
+      "description": "Precision belépő zóna 69795.03429–69862.75286",
+      "confidence": "medium"
+    },
+    {
+      "step": "tp1",
+      "description": "50% pozíció zárása TP1-n 71240.86980",
+      "rr": 2.0
+    },
+    {
+      "step": "tp2",
+      "description": "Fennmaradó pozíció célár TP2 71939.30970",
+      "rr": 3.0
+    },
+    {
+      "step": "time_stop",
+      "description": "Time-stop 24 percig, ha nem érjük el 0.32R-t, profit giveback 40%",
+      "timeout_minutes": 24,
+      "breakeven_trigger_r": 0.32,
+      "giveback_ratio": 0.4
+    },
+    {
+      "step": "precision_limit",
+      "description": "Precision parkolt limit belépő 69795.03429–69862.75286 — 20 perc timeout",
+      "direction": "buy",
+      "confidence": "medium",
+      "entry_window": [
+        69795.03428571428,
+        69862.75285714286
+      ],
+      "timeout_minutes": 20
+    },
+    {
+      "step": "precision_trigger",
+      "state": "fire",
+      "description": "Precision trigger: fire",
+      "entry_window": [
+        69795.03428571428,
+        69862.75285714286
+      ],
+      "trigger_levels": {
+        "window_low": 69795.03428571428,
+        "window_high": 69862.75285714286,
+        "fire": 69840.18,
+        "arm": 69862.75285714286,
+        "disarm": 69795.03428571428
+      },
+      "ready_ts": "2026-04-06T20:19:00Z",
+      "score": 72.0,
+      "score_threshold": 52.0,
+      "score_ready": true,
+      "trigger_ready": true,
+      "order_flow_ready": true,
+      "order_flow_strength": 0.75,
+      "trigger_progress": 1.0,
+      "trigger_confidence": 0.823,
+      "reasons": [
+        "pressure 1.01",
+        "delta +3.0",
+        "order flow optional (volume unavailable)",
+        "price inside window (flow ready)"
+      ]
+    }
+  ],
+  "invalid_levels": {
+    "buy": 69561.07214285714,
+    "sell": 70199.12785714286
+  },
+  "invalid_buffer_abs": 223.22785714285732,
   "short_term_diagnostics": {
     "k1m": {
       "status": "ok",
-      "last_close": 69783.71,
-      "start_close": 69708.44,
+      "last_close": 69843.99,
+      "start_close": 69783.71,
       "bars": 5,
       "direction": "up",
-      "delta": 75.27000000000407,
-      "ema_fast": 69740.89170276656,
-      "ema_slow": 69726.17479069416,
+      "delta": 60.279999999998836,
+      "ema_fast": 69810.29391796255,
+      "ema_slow": 69770.67821844891,
       "ema_relation": "fast_above",
-      "ema_slow_slope": 5.753520930578816,
+      "ema_slow_slope": 7.331178155116504,
       "ema_slow_slope_direction": "up"
     },
     "k5m": {
       "status": "ok",
-      "last_close": 69783.71,
-      "start_close": 69691.99,
+      "last_close": 69843.99,
+      "start_close": 69716.59,
       "bars": 3,
       "direction": "up",
-      "delta": 91.72000000000116,
-      "ema_fast": 69755.99640445937,
-      "ema_slow": 69756.38067912457,
-      "ema_relation": "fast_below",
-      "ema_slow_slope": 2.732932087543304,
+      "delta": 127.40000000000873,
+      "ema_fast": 69785.32312356749,
+      "ema_slow": 69770.40301408019,
+      "ema_relation": "fast_above",
+      "ema_slow_slope": 7.358698591982829,
       "ema_slow_slope_direction": "up"
     },
-    "k1m_last_closed_utc": "2026-04-06T20:15:00Z",
-    "k5m_last_closed_utc": "2026-04-06T20:15:00Z",
-    "trend_alignment": "aligned"
+    "k1m_last_closed_utc": "2026-04-06T20:20:00Z",
+    "k5m_last_closed_utc": "2026-04-06T20:20:00Z",
+    "trend_alignment": "aligned",
+    "decision_alignment": "aligned",
+    "tp1_distance_abs": 1396.8797999999952,
+    "tp1_distance_pct": 1.9999999999999927,
+    "sl_distance_abs": 698.4398999999976,
+    "sl_distance_pct": 0.9999999999999963,
+    "tp1_distance_atr5": 14.851959141826578,
+    "sl_distance_atr5": 7.425979570913289
   },
   "short_term_diagnostics_note_hu": "A rövid távú diagnosztika kizárólag zárt 1m/5m gyertyákat használ; nincs look-ahead vagy jövőbeli adat. Ez irány- és kockázat-ellenőrzés, nem garantált árfolyam-előrejelzés.",
   "short_term_diagnostics_summary_hu": "Hozzáadott 1m/5m mikrotrend snapshotok, trend- és döntés-illeszkedés, TP/SL távolságok és ATR-normalizált viszonyok a döntési payloadban.",
   "action_plan": {
-    "status": "standby",
-    "priority": "low",
-    "summary": "Nincs belépő – dolgozd le a hiányzó feltételeket.",
-    "steps": [],
+    "status": "execute_entry",
+    "priority": "high",
+    "summary": "Új long setup kész (69% valószínűség) | Precision trigger aktív",
+    "steps": [
+      {
+        "order": 1,
+        "category": "entry",
+        "instruction": "Long belépő 69843.99000 környékén",
+        "source": "execution_playbook",
+        "risk_abs": 698.4398999999976,
+        "confidence": 1.0
+      },
+      {
+        "order": 2,
+        "category": "position_scale",
+        "instruction": "Pozícióméret skálázás ×0.25",
+        "source": "execution_playbook"
+      },
+      {
+        "order": 3,
+        "category": "scalp_window",
+        "instruction": "Precision belépő zóna 69795.03429–69862.75286",
+        "source": "execution_playbook",
+        "confidence": "medium"
+      },
+      {
+        "order": 4,
+        "category": "tp1",
+        "instruction": "50% pozíció zárása TP1-n 71240.86980",
+        "source": "execution_playbook",
+        "rr": 2.0
+      },
+      {
+        "order": 5,
+        "category": "tp2",
+        "instruction": "Fennmaradó pozíció célár TP2 71939.30970",
+        "source": "execution_playbook",
+        "rr": 3.0
+      },
+      {
+        "order": 6,
+        "category": "time_stop",
+        "instruction": "Time-stop 24 percig, ha nem érjük el 0.32R-t, profit giveback 40%",
+        "source": "execution_playbook"
+      },
+      {
+        "order": 7,
+        "category": "precision_limit",
+        "instruction": "Precision parkolt limit belépő 69795.03429–69862.75286 — 20 perc timeout",
+        "source": "execution_playbook",
+        "confidence": "medium",
+        "entry_window": [
+          69795.03428571428,
+          69862.75285714286
+        ]
+      },
+      {
+        "order": 8,
+        "category": "precision_trigger",
+        "instruction": "Precision trigger: fire",
+        "source": "execution_playbook",
+        "entry_window": [
+          69795.03428571428,
+          69862.75285714286
+        ],
+        "trigger_levels": {
+          "window_low": 69795.03428571428,
+          "window_high": 69862.75285714286,
+          "fire": 69840.18,
+          "arm": 69862.75285714286,
+          "disarm": 69795.03428571428
+        }
+      },
+      {
+        "order": 9,
+        "category": "risk",
+        "instruction": "Stop-loss szint: 69145.6 (long)",
+        "source": "levels",
+        "stop_loss": 69145.55010000001
+      },
+      {
+        "order": 10,
+        "category": "take_profit",
+        "instruction": "TP1: 71240.9 (részleges zárás).",
+        "source": "levels",
+        "tp1": 71240.8698
+      },
+      {
+        "order": 11,
+        "category": "take_profit",
+        "instruction": "TP2: 71939.3 (végcél).",
+        "source": "levels",
+        "tp2": 71939.3097
+      },
+      {
+        "order": 12,
+        "category": "precision_window",
+        "instruction": "Figyeld a long belépő zónát 69795.0–69862.8.",
+        "source": "precision",
+        "entry_window": [
+          69795.03428571428,
+          69862.75285714286
+        ]
+      },
+      {
+        "order": 13,
+        "category": "precision_stop",
+        "instruction": "Precision SL előkészítése: 69727.3.",
+        "source": "precision",
+        "stop_loss": 69727.31571428571
+      },
+      {
+        "order": 14,
+        "category": "precision_trigger",
+        "instruction": "Aktiváld az árriasztást a precision trigger szintekre.",
+        "source": "precision",
+        "trigger_levels": {
+          "window_low": 69795.03428571428,
+          "window_high": 69862.75285714286,
+          "fire": 69840.18,
+          "arm": 69862.75285714286,
+          "disarm": 69795.03428571428
+        }
+      }
+    ],
     "blockers": [
-      "P_score>=35",
+      "TP1 nettó profit érje el a +0.6% küszöböt.",
       "BTC trigger feltételek hiányosak."
     ],
     "blockers_raw": [
-      "P_score>=35",
+      "tp1_net>=+0.6%",
       "triggers"
     ],
     "notes": [
       "Belépési döntés – összefogás: mód: nincs; ATR kapu: OK; core trigger: hiányzik; momentum override: inaktív; RR min: 1.50",
       "Range expanzió >1.5×ATR — agresszív menedzsment indokolt.",
-      "Összesített valószínűség: 29%.",
+      "Összesített valószínűség: 69%.",
       "Ajánlott tőkeáttétel: ×2.0.",
-      "Intraday bias gate feltételek hiányosak — Crypto momentum long: 1m micro BOS long | Crypto momentum short: 1m micro BOS short, Momentum volume ráta | 5m BOS long  ATR: 5m BOS long | 5m BOS short  ATR: 5m BOS short | Micro BOS short  ATR (momentum nélkül): 1m micro BOS short",
-      "Bias neutrálsávban",
+      "Célzott RR: 3.00R.",
+      "Belépő–stop távolság ≈ 1.00% (698.43990 ár).",
+      "Maximális számla kockázat: 1.2%.",
+      "Precision score: 72.00 / küszöb 52.",
+      "Precision confidence: medium.",
+      "Precision trigger állapot: fire.",
+      "Bias override: Intraday 5m BOS long  ATR (+19.5)",
       "Regime filter inaktív",
-      "ATR erősség 1.20× küszöb (+12.2)",
+      "5M BOS trendirányba (+16.0)",
+      "ATR erősség 1.11× küszöb (+11.7)",
       "Range expanzió támogatja a momentumot (+3.0)",
       "Fib zóna konfluencia (0.618–0.886) (+18.0)"
     ],
     "context": {
       "asset": "BTCUSD",
-      "decision": "no entry",
-      "probability": 29,
+      "decision": "buy",
+      "probability": 69,
       "session_open": true,
       "session_entry_open": true,
       "session_status": "open",
       "intraday_profile": {
         "range_state": "expansion",
-        "range_position": 0.5157029907744508,
-        "range_vs_atr": 12.200576197099359,
+        "range_position": 0.5647865419221483,
+        "range_vs_atr": 13.057558382381012,
         "range_guard": {
           "long": false,
           "short": false
@@ -972,16 +1420,31 @@
         "opening_break": "none"
       },
       "next_session_open_utc": "2026-04-07T00:00:00+00:00",
+      "precision_state": "precision_arming",
+      "precision_trigger_state": "fire",
+      "precision_direction": "buy",
       "btc_entry_summary": {
         "profile": "baseline",
         "enter_mode": null,
         "atr_gate": {
           "ok": true,
-          "value": 100.65999999999829,
+          "value": 94.0535714285704,
           "threshold": 80.0
         },
         "core_triggers": {
-          "ok": false
+          "ok": false,
+          "bos_ok": false,
+          "vwap_ok": false,
+          "ofi_ok": false,
+          "ofi_z": 0.32693127407914724,
+          "available": [
+            "bos",
+            "vwap",
+            "ofi"
+          ],
+          "missing": [],
+          "required_hits": 2,
+          "hits": 0
         },
         "momentum_override": {
           "ok": false,
@@ -1019,51 +1482,54 @@
       "rr_math>=1.6",
       "tp_min_profit",
       "min_stoploss",
-      "tp1_net>=+0.6%"
+      "tp1_net>=+0.6%",
+      "precision_score>=52",
+      "precision_flow_alignment",
+      "precision_trigger_sync"
     ],
     "missing": [
-      "P_score>=35"
+      "tp1_net>=+0.6%"
     ],
     "blockers": [
-      "P_score>=35",
+      "TP1 nettó profit érje el a +0.6% küszöböt.",
       "BTC trigger feltételek hiányosak."
     ],
-    "p_score_used": 29
+    "p_score_used": 69
   },
   "position_diagnostics": {
     "state": null,
     "severity": null,
     "reasons": [],
-    "p_score_used": 29
+    "p_score_used": 69
   },
   "active_position_meta": {
-    "ema21_slope_abs": 0.012853242215119196,
-    "ema21_slope_signed": 0.012853242215119196,
+    "ema21_slope_abs": 0.012920609594320594,
+    "ema21_slope_signed": 0.012920609594320594,
     "ema21_slope_threshold": 0.015,
     "ema21_relation": "above",
-    "structure_5m": "bos_down",
+    "structure_5m": "bos_up",
     "stale_timeframes": {
       "k1m": false,
       "k5m": false,
       "k1h": false,
       "k4h": false
     },
-    "atr1h": 443.32357142857137,
-    "atr1h_trail_floor": 221.66178571428568,
-    "atr5": 100.65999999999829,
-    "atr5_rel": 0.0014424569860214981,
-    "atr5_threshold": 0.0012066713263407397,
+    "atr1h": 446.45571428571463,
+    "atr1h_trail_floor": 223.22785714285732,
+    "atr5": 94.0535714285704,
+    "atr5_rel": 0.0013466236884314654,
+    "atr5_threshold": 0.0012094064762008467,
     "bos1h_long": false,
     "bos1h_short": true,
     "regime_ok": false,
-    "effective_bias": "neutral",
-    "last_close_1h": 69783.71,
+    "effective_bias": "long",
+    "last_close_1h": 69843.99,
     "last_swing_high_1h": 69975.9,
     "last_swing_low_1h": 69784.3,
-    "invalid_level_sell": 70197.56178571428,
-    "invalid_level_buy": 69562.63821428572,
-    "invalid_buffer_abs": 221.66178571428568,
-    "p_score": 29,
+    "invalid_level_sell": 70199.12785714286,
+    "invalid_level_buy": 69561.07214285714,
+    "invalid_buffer_abs": 223.22785714285732,
+    "p_score": 69,
     "probability_calibrated": null,
     "probability_threshold": null,
     "probability_model_raw": null,
@@ -1072,44 +1538,306 @@
       "tp1_r": 2.0,
       "tp2_r": 3.0
     },
-    "realtime_confidence": 0.9999999999999999,
-    "avg_latency_profile": 25.999999999999996,
+    "realtime_confidence": 1.0,
+    "avg_latency_profile": 27.0,
+    "precision_plan": {
+      "asset": "BTCUSD",
+      "direction": "buy",
+      "score": 72.0,
+      "confidence": "medium",
+      "entry": 69840.18,
+      "entry_window": [
+        69795.03428571428,
+        69862.75285714286
+      ],
+      "stop_loss": 69727.31571428571,
+      "take_profit_1": 70065.90857142856,
+      "take_profit_2": 70178.77285714285,
+      "risk": 112.86428571428446,
+      "liquidity_levels": [
+        69736.53,
+        69766.97,
+        69783.7,
+        69820.64,
+        69840.18
+      ],
+      "factors": [
+        "order flow pressure +1.01",
+        "ATR1m 37.4671",
+        "ATR5m 94.0536",
+        "price near liquidity pocket"
+      ],
+      "score_threshold": 52.0,
+      "score_ready": true,
+      "trigger_state": "fire",
+      "trigger_ready": true,
+      "trigger_levels": {
+        "window_low": 69795.03428571428,
+        "window_high": 69862.75285714286,
+        "fire": 69840.18,
+        "arm": 69862.75285714286,
+        "disarm": 69795.03428571428
+      },
+      "ready_ts": "2026-04-06T20:19:00Z",
+      "order_flow_ready": true,
+      "order_flow_strength": 0.75,
+      "microstructure_score": 72.0,
+      "trigger_progress": 1.0,
+      "trigger_confidence": 0.823,
+      "trigger_reasons": [
+        "pressure 1.01",
+        "delta +3.0",
+        "order flow optional (volume unavailable)",
+        "price inside window (flow ready)"
+      ],
+      "order_flow_status": "synthetic_volume",
+      "order_flow_optional": true,
+      "order_flow_settings": {
+        "imbalance_threshold": 0.6,
+        "pressure_threshold": 0.7,
+        "imbalance_margin": 1.1,
+        "pressure_margin": 1.1,
+        "min_signals": 1,
+        "strength_floor": 0.74,
+        "block_ratio": 0.0,
+        "delta_blocker_abs_max": 10.0
+      },
+      "order_flow_snapshot": {
+        "imbalance": 0.025210084033613446,
+        "pressure": 1.0131092436974594,
+        "delta_volume": 3.0,
+        "aggressor_ratio": null,
+        "status": "synthetic_volume"
+      },
+      "order_flow_signals": 2,
+      "order_flow_blockers": [],
+      "order_flow_stalled": false,
+      "alternates": {
+        "sell": {
+          "direction": "sell",
+          "entry": 69851.84,
+          "entry_window": [
+            69829.26714285713,
+            69896.9857142857
+          ],
+          "stop_loss": 69964.70428571428,
+          "take_profit_1": 69626.11142857143,
+          "take_profit_2": 69513.24714285714,
+          "risk": 112.86428571428446,
+          "score": 62.0,
+          "confidence": "medium",
+          "trigger_levels": {
+            "window_low": 69829.26714285713,
+            "window_high": 69896.9857142857,
+            "fire": 69851.84,
+            "arm": 69829.26714285713,
+            "disarm": 69896.9857142857
+          },
+          "order_flow_ready": true
+        }
+      },
+      "ready_timeout_minutes": 15,
+      "arming_timeout_minutes": 20,
+      "context": {
+        "intraday_profile": {
+          "range_state": "expansion",
+          "range_position": 0.5647865419221483,
+          "range_vs_atr": 13.057558382381012
+        }
+      }
+    },
+    "precision_trigger": {
+      "state": "fire",
+      "ready_ts": "2026-04-06T20:19:00Z",
+      "entry_window": [
+        69795.03428571428,
+        69862.75285714286
+      ],
+      "trigger_levels": {
+        "window_low": 69795.03428571428,
+        "window_high": 69862.75285714286,
+        "fire": 69840.18,
+        "arm": 69862.75285714286,
+        "disarm": 69795.03428571428
+      },
+      "score": 72.0,
+      "score_threshold": 52.0,
+      "score_ready": true,
+      "trigger_ready": true,
+      "order_flow_ready": true,
+      "order_flow_strength": 0.75,
+      "trigger_progress": 1.0,
+      "trigger_confidence": 0.823,
+      "reasons": [
+        "pressure 1.01",
+        "delta +3.0",
+        "order flow optional (volume unavailable)",
+        "price inside window (flow ready)"
+      ]
+    },
     "action_plan": {
-      "status": "standby",
-      "priority": "low",
-      "summary": "Nincs belépő – dolgozd le a hiányzó feltételeket.",
-      "steps": [],
+      "status": "execute_entry",
+      "priority": "high",
+      "summary": "Új long setup kész (69% valószínűség) | Precision trigger aktív",
+      "steps": [
+        {
+          "order": 1,
+          "category": "entry",
+          "instruction": "Long belépő 69843.99000 környékén",
+          "source": "execution_playbook",
+          "risk_abs": 698.4398999999976,
+          "confidence": 1.0
+        },
+        {
+          "order": 2,
+          "category": "position_scale",
+          "instruction": "Pozícióméret skálázás ×0.25",
+          "source": "execution_playbook"
+        },
+        {
+          "order": 3,
+          "category": "scalp_window",
+          "instruction": "Precision belépő zóna 69795.03429–69862.75286",
+          "source": "execution_playbook",
+          "confidence": "medium"
+        },
+        {
+          "order": 4,
+          "category": "tp1",
+          "instruction": "50% pozíció zárása TP1-n 71240.86980",
+          "source": "execution_playbook",
+          "rr": 2.0
+        },
+        {
+          "order": 5,
+          "category": "tp2",
+          "instruction": "Fennmaradó pozíció célár TP2 71939.30970",
+          "source": "execution_playbook",
+          "rr": 3.0
+        },
+        {
+          "order": 6,
+          "category": "time_stop",
+          "instruction": "Time-stop 24 percig, ha nem érjük el 0.32R-t, profit giveback 40%",
+          "source": "execution_playbook"
+        },
+        {
+          "order": 7,
+          "category": "precision_limit",
+          "instruction": "Precision parkolt limit belépő 69795.03429–69862.75286 — 20 perc timeout",
+          "source": "execution_playbook",
+          "confidence": "medium",
+          "entry_window": [
+            69795.03428571428,
+            69862.75285714286
+          ]
+        },
+        {
+          "order": 8,
+          "category": "precision_trigger",
+          "instruction": "Precision trigger: fire",
+          "source": "execution_playbook",
+          "entry_window": [
+            69795.03428571428,
+            69862.75285714286
+          ],
+          "trigger_levels": {
+            "window_low": 69795.03428571428,
+            "window_high": 69862.75285714286,
+            "fire": 69840.18,
+            "arm": 69862.75285714286,
+            "disarm": 69795.03428571428
+          }
+        },
+        {
+          "order": 9,
+          "category": "risk",
+          "instruction": "Stop-loss szint: 69145.6 (long)",
+          "source": "levels",
+          "stop_loss": 69145.55010000001
+        },
+        {
+          "order": 10,
+          "category": "take_profit",
+          "instruction": "TP1: 71240.9 (részleges zárás).",
+          "source": "levels",
+          "tp1": 71240.8698
+        },
+        {
+          "order": 11,
+          "category": "take_profit",
+          "instruction": "TP2: 71939.3 (végcél).",
+          "source": "levels",
+          "tp2": 71939.3097
+        },
+        {
+          "order": 12,
+          "category": "precision_window",
+          "instruction": "Figyeld a long belépő zónát 69795.0–69862.8.",
+          "source": "precision",
+          "entry_window": [
+            69795.03428571428,
+            69862.75285714286
+          ]
+        },
+        {
+          "order": 13,
+          "category": "precision_stop",
+          "instruction": "Precision SL előkészítése: 69727.3.",
+          "source": "precision",
+          "stop_loss": 69727.31571428571
+        },
+        {
+          "order": 14,
+          "category": "precision_trigger",
+          "instruction": "Aktiváld az árriasztást a precision trigger szintekre.",
+          "source": "precision",
+          "trigger_levels": {
+            "window_low": 69795.03428571428,
+            "window_high": 69862.75285714286,
+            "fire": 69840.18,
+            "arm": 69862.75285714286,
+            "disarm": 69795.03428571428
+          }
+        }
+      ],
       "blockers": [
-        "P_score>=35",
+        "TP1 nettó profit érje el a +0.6% küszöböt.",
         "BTC trigger feltételek hiányosak."
       ],
       "blockers_raw": [
-        "P_score>=35",
+        "tp1_net>=+0.6%",
         "triggers"
       ],
       "notes": [
         "Belépési döntés – összefogás: mód: nincs; ATR kapu: OK; core trigger: hiányzik; momentum override: inaktív; RR min: 1.50",
         "Range expanzió >1.5×ATR — agresszív menedzsment indokolt.",
-        "Összesített valószínűség: 29%.",
+        "Összesített valószínűség: 69%.",
         "Ajánlott tőkeáttétel: ×2.0.",
-        "Intraday bias gate feltételek hiányosak — Crypto momentum long: 1m micro BOS long | Crypto momentum short: 1m micro BOS short, Momentum volume ráta | 5m BOS long  ATR: 5m BOS long | 5m BOS short  ATR: 5m BOS short | Micro BOS short  ATR (momentum nélkül): 1m micro BOS short",
-        "Bias neutrálsávban",
+        "Célzott RR: 3.00R.",
+        "Belépő–stop távolság ≈ 1.00% (698.43990 ár).",
+        "Maximális számla kockázat: 1.2%.",
+        "Precision score: 72.00 / küszöb 52.",
+        "Precision confidence: medium.",
+        "Precision trigger állapot: fire.",
+        "Bias override: Intraday 5m BOS long  ATR (+19.5)",
         "Regime filter inaktív",
-        "ATR erősség 1.20× küszöb (+12.2)",
+        "5M BOS trendirányba (+16.0)",
+        "ATR erősség 1.11× küszöb (+11.7)",
         "Range expanzió támogatja a momentumot (+3.0)",
         "Fib zóna konfluencia (0.618–0.886) (+18.0)"
       ],
       "context": {
         "asset": "BTCUSD",
-        "decision": "no entry",
-        "probability": 29,
+        "decision": "buy",
+        "probability": 69,
         "session_open": true,
         "session_entry_open": true,
         "session_status": "open",
         "intraday_profile": {
           "range_state": "expansion",
-          "range_position": 0.5157029907744508,
-          "range_vs_atr": 12.200576197099359,
+          "range_position": 0.5647865419221483,
+          "range_vs_atr": 13.057558382381012,
           "range_guard": {
             "long": false,
             "short": false
@@ -1117,16 +1845,31 @@
           "opening_break": "none"
         },
         "next_session_open_utc": "2026-04-07T00:00:00+00:00",
+        "precision_state": "precision_arming",
+        "precision_trigger_state": "fire",
+        "precision_direction": "buy",
         "btc_entry_summary": {
           "profile": "baseline",
           "enter_mode": null,
           "atr_gate": {
             "ok": true,
-            "value": 100.65999999999829,
+            "value": 94.0535714285704,
             "threshold": 80.0
           },
           "core_triggers": {
-            "ok": false
+            "ok": false,
+            "bos_ok": false,
+            "vwap_ok": false,
+            "ofi_ok": false,
+            "ofi_z": 0.32693127407914724,
+            "available": [
+              "bos",
+              "vwap",
+              "ofi"
+            ],
+            "missing": [],
+            "required_hits": 2,
+            "hits": 0
           },
           "momentum_override": {
             "ok": false,
@@ -1151,25 +1894,102 @@
           ]
         }
       }
-    }
+    },
+    "execution_playbook": [
+      {
+        "step": "entry",
+        "description": "Long belépő 69843.99000 környékén",
+        "risk_abs": 698.4398999999976,
+        "confidence": 1.0
+      },
+      {
+        "step": "position_scale",
+        "description": "Pozícióméret skálázás ×0.25",
+        "scale": 0.25
+      },
+      {
+        "step": "scalp_window",
+        "description": "Precision belépő zóna 69795.03429–69862.75286",
+        "confidence": "medium"
+      },
+      {
+        "step": "tp1",
+        "description": "50% pozíció zárása TP1-n 71240.86980",
+        "rr": 2.0
+      },
+      {
+        "step": "tp2",
+        "description": "Fennmaradó pozíció célár TP2 71939.30970",
+        "rr": 3.0
+      },
+      {
+        "step": "time_stop",
+        "description": "Time-stop 24 percig, ha nem érjük el 0.32R-t, profit giveback 40%",
+        "timeout_minutes": 24,
+        "breakeven_trigger_r": 0.32,
+        "giveback_ratio": 0.4
+      },
+      {
+        "step": "precision_limit",
+        "description": "Precision parkolt limit belépő 69795.03429–69862.75286 — 20 perc timeout",
+        "direction": "buy",
+        "confidence": "medium",
+        "entry_window": [
+          69795.03428571428,
+          69862.75285714286
+        ],
+        "timeout_minutes": 20
+      },
+      {
+        "step": "precision_trigger",
+        "state": "fire",
+        "description": "Precision trigger: fire",
+        "entry_window": [
+          69795.03428571428,
+          69862.75285714286
+        ],
+        "trigger_levels": {
+          "window_low": 69795.03428571428,
+          "window_high": 69862.75285714286,
+          "fire": 69840.18,
+          "arm": 69862.75285714286,
+          "disarm": 69795.03428571428
+        },
+        "ready_ts": "2026-04-06T20:19:00Z",
+        "score": 72.0,
+        "score_threshold": 52.0,
+        "score_ready": true,
+        "trigger_ready": true,
+        "order_flow_ready": true,
+        "order_flow_strength": 0.75,
+        "trigger_progress": 1.0,
+        "trigger_confidence": 0.823,
+        "reasons": [
+          "pressure 1.01",
+          "delta +3.0",
+          "order flow optional (volume unavailable)",
+          "price inside window (flow ready)"
+        ]
+      }
+    ]
   },
   "intervention_watch": {
     "irs": 10,
     "band": "LOW",
-    "since_utc": "2026-04-06T20:17:00Z",
-    "updated_utc": "2026-04-06T20:17:00Z",
+    "since_utc": "2026-04-06T20:22:00Z",
+    "updated_utc": "2026-04-06T20:22:00Z",
     "reasons": [],
     "policy": [
       "increase_spread_buffer_when_volatility>=1.5×",
       "discord_alert_cooldown:10m"
     ],
     "metrics": {
-      "price": 69783.71,
-      "roc_30m_pct": 0.08941304509651928,
-      "roc_5m_pct": 0.017428307096522138,
-      "atr5_usd": 100.65999999999829,
-      "atr5_ratio": 0.7422052751327108,
-      "range_position_pct": 80.52871079683129,
+      "price": 69843.99,
+      "roc_30m_pct": 0.21839014322922634,
+      "roc_5m_pct": 0.018638072256441443,
+      "atr5_usd": 94.0535714285704,
+      "atr5_ratio": 0.7036138526565495,
+      "range_position_pct": 82.50212793819183,
       "session_points": 0.0,
       "comms_points": 0.0,
       "comms_from_flag": 0.0,
@@ -1181,7 +2001,7 @@
         "range": 10.0,
         "comms": 0.0
       },
-      "variance_ratio": 0.29455804061443663
+      "variance_ratio": 0.2849295981711119
     },
     "score_breakdown": {
       "speed": 0.0,
@@ -1191,7 +2011,13 @@
     },
     "news_flag": 0
   },
-  "trade_levels": {},
+  "trade_levels": {
+    "entry": 69843.99,
+    "sl": 69145.55010000001,
+    "tp1": 71240.8698,
+    "tp2": 71939.3097,
+    "rr": 3.0
+  },
   "position_state": {
     "tracking_enabled": true,
     "side": null,
