@@ -19,6 +19,25 @@ def _reload_analysis(monkeypatch: pytest.MonkeyPatch):
     return importlib.import_module("analysis")
 
 
+def pytest_ignore_collect(collection_path, config):
+    path = Path(str(collection_path))
+    if not path.is_file():
+        return False
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    import_targets = {
+        "numpy": ("import numpy", "from numpy", "import analysis", "from analysis", "import Trading", "import ml_model", "from ml_model", "scripts.intraday_report"),
+        "pandas": ("import pandas", "from pandas"),
+        "requests": ("import requests", "from requests", "import Trading"),
+    }
+    for module, markers in import_targets.items():
+        if any(marker in text for marker in markers):
+            try:
+                importlib.import_module(module)
+            except ModuleNotFoundError:
+                return True
+    return False
+
+
 @pytest.fixture
 def fixed_now():
     return datetime(2024, 1, 10, 15, 0, tzinfo=timezone.utc)
