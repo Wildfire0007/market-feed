@@ -14,7 +14,7 @@ import sys
 import fcntl
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -111,14 +111,152 @@ def _hu_reason(reason: str) -> str:
     return reason_map.get(str(reason or "").strip().lower(), str(reason or "N/A"))
 
 
+def _format_minutes(minutes: Optional[float]) -> str:
+    if minutes is None:
+        return "N/A"
+    total = max(1, int(round(minutes)))
+    if total < 60:
+        return f"{total} perc"
+    hours, mins = divmod(total, 60)
+    return f"{hours}ó {mins}p" if mins else f"{hours} óra"
+
+
+def _median(values: List[float]) -> Optional[float]:
+    clean = sorted(v for v in values if v > 0)
+    if not clean:
+        return None
+    mid = len(clean) // 2
+    if len(clean) % 2:
+        return clean[mid]
+    return (clean[mid - 1] + clean[mid]) / 2.0
+
+
+def _percentile(values: List[float], pct: float) -> Optional[float]:
+    clean = sorted(v for v in values if v > 0)
+    if not clean:
+        return None
+    idx = max(0, min(len(clean) - 1, int(round((len(clean) - 1) * pct))))
+    return clean[idx]
+
+
+def _load_close_series(asset_dir: Path, filename: str) -> Tuple[List[float], int]:
+    payload = load_json(asset_dir / filename)
+    rows = payload.get("values") or (payload.get("raw") or {}).get("values") or []
+    parsed: List[Tuple[str, float]] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        close = safe_float(row.get("close"))
+        stamp = str(row.get("datetime") or row.get("timestamp") or "")
+        if close is not None and stamp:
+            parsed.append((stamp, close))
+    parsed.sort(key=lambda item: item[0])
+    interval = 5 if "5m" in filename else 1
+    return [close for _, close in parsed[-120:]], interval
+
+
+def _estimate_tp_eta_minutes(asset_dir: Path, direction: str, entry: float, tp1: float) -> Dict[str, Any]:
+    closes, interval_minutes = _load_close_series(asset_dir, "klines_1m.json")
+    if len(closes) < 12:
+        closes, interval_minutes = _load_close_series(asset_dir, "klines_5m.json")
+    if len(closes) < 3:
+        return {"available": False, "reason": "missing_price_history"}
+
+    favorable: List[float] = []
+    absolute: List[float] = []
+    for prev, cur in zip(closes, closes[1:]):
+        delta = cur - prev
+        absolute.append(abs(delta) / interval_minutes)
+        if direction == "buy" and delta > 0:
+            favorable.append(delta / interval_minutes)
+        elif direction == "sell" and delta < 0:
+            favorable.append(abs(delta) / interval_minutes)
+
+    distance = abs(tp1 - entry)
+    fast_speed = _percentile(favorable, 0.75)
+    base_speed = _median(favorable) or _median(absolute)
+    conservative_speed = _percentile(favorable, 0.25) or _median(absolute)
+    if not base_speed:
+        return {"available": False, "reason": "flat_price_history"}
+
+    return {
+        "available": True,
+        "fast_minutes": distance / fast_speed if fast_speed else None,
+        "base_minutes": distance / base_speed,
+        "conservative_minutes": distance / conservative_speed if conservative_speed else None,
+        "source_interval_minutes": interval_minutes,
+    }
+
+
+def build_expected_trade_outcome(
+    asset_dir: Path,
+    asset_name: str,
+    data: Dict[str, Any],
+    direction: str,
+    entry: float,
+    sl: float,
+    tp1: float,
+    manual_trade_model: Dict[str, Any],
+) -> Dict[str, Any]:
+    equity_usd = safe_float(manual_trade_model.get("equity_usd")) or 100.0
+    leverage = safe_float(manual_trade_model.get("leverage")) or 20.0
+    tp1_close_fraction = safe_float(manual_trade_model.get("tp1_close_fraction")) or 1.0
+    min_net_usd = safe_float(manual_trade_model.get("tp1_min_net_usd")) or 10.0
+    eta_min = safe_float(manual_trade_model.get("eta_min_minutes")) or 5.0
+    eta_max = safe_float(manual_trade_model.get("eta_max_minutes")) or 240.0
+    max_chase_r = safe_float(manual_trade_model.get("max_chase_r")) or 0.2
+    valid_for = safe_float(manual_trade_model.get("signal_valid_minutes")) or 10.0
+
+    cost_pct = float((settings.ASSET_COST_MODEL.get(asset_name) or {}).get("round_trip_pct", 0.0))
+    gross_pct = abs(entry - tp1) / entry if entry else 0.0
+    net_pct = gross_pct - cost_pct
+    notional = equity_usd * leverage
+    tp1_net_usd = net_pct * notional * tp1_close_fraction
+    risk = abs(entry - sl)
+    spot = safe_float((data.get("spot") or {}).get("price")) or entry
+    chase_r = 0.0
+    if risk > 0:
+        if direction == "buy" and spot > entry:
+            chase_r = (spot - entry) / risk
+        elif direction == "sell" and spot < entry:
+            chase_r = (entry - spot) / risk
+
+    eta = _estimate_tp_eta_minutes(asset_dir, direction, entry, tp1)
+    eta_base = safe_float(eta.get("base_minutes"))
+    eta_gate = bool(eta.get("available") and eta_base is not None and eta_min <= eta_base <= eta_max)
+    profit_gate = tp1_net_usd >= min_net_usd
+    no_chase_gate = chase_r <= max_chase_r
+
+    return {
+        "equity_usd": round(equity_usd, 2),
+        "leverage": round(leverage, 2),
+        "notional_usd": round(notional, 2),
+        "tp1_net_usd": round(tp1_net_usd, 2),
+        "min_required_net_usd": round(min_net_usd, 2),
+        "tp1_net_pct": round(net_pct, 6),
+        "eta_minutes_fast": round(eta["fast_minutes"], 1) if eta.get("fast_minutes") else None,
+        "eta_minutes_base": round(eta_base, 1) if eta_base is not None else None,
+        "eta_minutes_conservative": round(eta["conservative_minutes"], 1) if eta.get("conservative_minutes") else None,
+        "eta_source_interval_minutes": eta.get("source_interval_minutes"),
+        "eta_available": bool(eta.get("available")),
+        "eta_unavailable_reason": eta.get("reason"),
+        "valid_for_minutes": round(valid_for, 1),
+        "max_chase_r": round(max_chase_r, 3),
+        "current_chase_r": round(chase_r, 3),
+        "max_entry_price": round(entry + risk * max_chase_r, 6) if direction == "buy" and risk > 0 else None,
+        "min_entry_price": round(entry - risk * max_chase_r, 6) if direction == "sell" and risk > 0 else None,
+        "profit_gate_pass": profit_gate,
+        "eta_gate_pass": eta_gate,
+        "no_chase_pass": no_chase_gate,
+        "passes": profit_gate and eta_gate and no_chase_gate,
+    }
+
+
 def check_and_notify() -> None:
     if not PUBLIC_DIR.exists():
         return
     manual_trade_model = settings.MANUAL_TRADE_MODEL or {}
-    equity_usd = safe_float(manual_trade_model.get("equity_usd")) or 100.0
-    leverage = safe_float(manual_trade_model.get("leverage")) or 20.0
-    tp1_close_fraction = safe_float(manual_trade_model.get("tp1_close_fraction")) or 1.0
-    tp1_min_net_usd = safe_float(manual_trade_model.get("tp1_min_net_usd")) or 5.0
+    tp1_min_net_usd = safe_float(manual_trade_model.get("tp1_min_net_usd")) or 10.0
     sl_risk_usd = safe_float(manual_trade_model.get("sl_risk_usd")) or 50.0
     
     notify_state_path = PUBLIC_DIR / "_notify_state.json"
@@ -168,8 +306,9 @@ def check_and_notify() -> None:
         if None in (entry, sl, tp1):
             continue
 
-        tp1_net_usd = (abs(entry - tp1) / entry - float((settings.ASSET_COST_MODEL.get(asset_name) or {}).get("round_trip_pct", 0.0))) * (equity_usd * leverage) * tp1_close_fraction
-        if tp1_net_usd < tp1_min_net_usd:
+        expected = build_expected_trade_outcome(asset_dir, asset_name, data, direction, entry, sl, tp1, manual_trade_model)
+        tp1_net_usd = safe_float(expected.get("tp1_net_usd")) or 0.0
+        if not expected.get("passes"):
             continue
 
         units_text = f"{sl_risk_usd / abs(entry - sl):.2f} Egység (Units)" if abs(entry - sl) > 0 else "N/A"
@@ -191,14 +330,28 @@ def check_and_notify() -> None:
         p_score = safe_float(data.get("probability_raw"))
         reasons = "\n".join([f"• {_hu_reason(r)}" for r in (data.get("reasons") or [])[:2]]) or "• Rendszer jelzés"
         reasons_text = f"P Score: **{p_score:.1f}** (Erősség)\n{reasons}" if p_score else reasons
-
+        eta_text = (
+            f"Gyors: `{_format_minutes(safe_float(expected.get('eta_minutes_fast')))}`\n"
+            f"Normál: `{_format_minutes(safe_float(expected.get('eta_minutes_base')))}`\n"
+            f"Konzervatív: `{_format_minutes(safe_float(expected.get('eta_minutes_conservative')))}`\n"
+            f"Jel érvényessége: `{_format_minutes(safe_float(expected.get('valid_for_minutes')))}`"
+        )
+        entry_limit_text = (
+            f"Ne nyiss, ha spot > `{format_price(expected.get('max_entry_price'))}`"
+            if direction == "buy"
+            else f"Ne nyiss, ha spot < `{format_price(expected.get('min_entry_price'))}`"
+        )
+        
         embed = {
             "title": title,
             "description": f"{_asset_emoji(asset_name)} Eszköz: `{asset_name}`",
             "color": color,
             "fields": [
                 {"name": "📊 Árfolyam", "value": f"Spot ár: `{format_price(safe_float((data.get('spot') or {}).get('price')))}`\nBelépő: `{format_price(entry)}`", "inline": False},
+                {"name": "🎯 Profit cél", "value": f"Várható nettó TP1: `+${tp1_net_usd:.2f}`\nMinimum: `${tp1_min_net_usd:.2f}`\nTőkeáttételes méret: `${expected.get('notional_usd'):.2f}`", "inline": False},
+                {"name": "⏱️ Várható idő TP1-ig", "value": eta_text, "inline": False},
                 {"name": "⚙️ Paraméterek az eToro-hoz", "value": f"MÉRET: `{units_text}` ({sl_risk_usd} USD kockázat)\nSL: `{format_price(sl)}`\nTP1: `{format_price(tp1)}`" + (f"\nTP2: `{format_price(tp2)}`" if tp2 else ""), "inline": False},
+                {"name": "🎯 Belépési pontosság", "value": f"Aktuális chase: `{expected.get('current_chase_r')}R`\n{entry_limit_text}", "inline": False},                
                 {"name": "💡 Indoklás", "value": reasons_text, "inline": False},
                 {"name": "🕒 Időbélyeg", "value": f"`{format_budapest_time(now_dt)}` (Budapest)", "inline": False},
             ],
@@ -227,6 +380,7 @@ def check_and_notify() -> None:
             "tp1": tp1,
             "tp2": tp2,
             "entry_signature": entry_sig,
+            "expected_trade_outcome": expected,    
         })
 
     if notify_changed and not DRY_RUN:
