@@ -102,3 +102,40 @@ def test_expected_trade_outcome_uses_asset_leverage(tmp_path, monkeypatch):
 
     assert outcome["leverage"] == 2.0
     assert outcome["notional_usd"] == 200.0
+
+
+def test_expected_trade_outcome_uses_capped_xag_and_oil_leverage(tmp_path, monkeypatch):
+    _write_klines(tmp_path, [100 + i * 0.1 for i in range(30)])
+    monkeypatch.setattr(
+        notify_discord.settings,
+        "ASSET_COST_MODEL",
+        {"XAGUSD": {"round_trip_pct": 0.0}, "USOIL": {"round_trip_pct": 0.0}},
+    )
+    monkeypatch.setattr(notify_discord.settings, "LEVERAGE", {"XAGUSD": 10.0, "USOIL": 10.0})
+
+    for asset in ("XAGUSD", "USOIL"):
+        outcome = notify_discord.build_expected_trade_outcome(
+            tmp_path,
+            asset,
+            {"spot": {"price": 100.0}},
+            "buy",
+            100.0,
+            99.0,
+            100.6,
+            {
+                "equity_usd": 100,
+                "leverage": 20,
+                "tp1_close_fraction": 1.0,
+                "tp1_min_net_usd": 1,
+                "eta_min_minutes": 1,
+                "eta_max_minutes": 20,
+                "max_chase_r": 0.2,
+            },
+        )
+
+        assert outcome["leverage"] == 10.0
+        assert outcome["tp1_net_usd"] == 6.0
+
+
+def test_default_discord_notify_assets_are_metals_and_oil_only():
+    assert notify_discord.DISCORD_NOTIFY_ASSETS == {"GOLD_CFD", "XAGUSD", "USOIL"}
