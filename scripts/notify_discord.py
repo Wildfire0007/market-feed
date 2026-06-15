@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import fcntl
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -24,6 +25,7 @@ if str(ROOT_DIR) not in sys.path:
 requests = importlib.import_module("requests") if importlib.util.find_spec("requests") else None
 BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
 from config import analysis_settings as settings
+from scripts.reset_notify_state import build_default_state, _default_asset_state
 
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
 ENTRY_COOLDOWN_MINUTES = 30
@@ -45,6 +47,101 @@ NOTIFY_LOCK_PATH = PUBLIC_DIR / ".notify_discord.lock"
 COLOR_GREEN, COLOR_RED, COLOR_YELLOW = 0x2ECC71, 0xE74C3C, 0xF1C40F
 LIFECYCLE_INBOX_PATH = PUBLIC_DIR / "_position_lifecycle_inbox.jsonl"
 
+LAST_SENT_RETENTION_DAYS = 14
+
+
+@dataclass
+class EntryAuditRecord:
+    asset: str
+    intent: str
+    decision: str
+    setup_grade: str
+    stable: bool
+    send_kind: str
+    should_notify: bool
+    manual_state: Dict[str, Any]
+    manual_tracking_enabled: bool
+    can_write_positions: bool
+    state_loaded: bool
+    positions_file: str
+    gates_missing: List[str]
+    notify_reason: Optional[str] = None
+    display_stable: bool = False
+
+
+def _parse_utc(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _sanitize_last_sent(asset: str, record: Dict[str, Any], archived: List[Dict[str, Any]], *, now: datetime) -> None:
+    record["last_sent_known"] = True
+    stamp = _parse_utc(record.get("last_sent"))
+    if not stamp:
+        if record.get("last_sent"):
+            archived.append({"asset": asset, "last_sent": record.get("last_sent"), "reason": "invalid-format"})
+        record["last_sent"] = None
+        return
+    if stamp > now:
+        archived.append({"asset": asset, "last_sent": record.get("last_sent"), "reason": "future"})
+        record["last_sent"] = None
+        return
+    if stamp < now - timedelta(days=LAST_SENT_RETENTION_DAYS):
+        archived.append({"asset": asset, "last_sent": record.get("last_sent"), "reason": "expired"})
+        record["last_sent"] = None
+
+
+def missing_from_sig(sig: Dict[str, Any]) -> List[str]:
+    missing = ((sig.get("gates") or {}).get("missing") or []) if isinstance(sig, dict) else []
+    translations = {"precision warning": "Precision figyelmeztetés"}
+    return [translations.get(str(item).strip().lower(), str(item)) for item in missing]
+
+
+
+def update_asset_send_state(
+    record: Dict[str, Any],
+    *,
+    decision: str,
+    now: datetime,
+    cooldown_minutes: float,
+    mode: Optional[str],
+) -> Dict[str, Any]:
+    updated = dict(record)
+    updated["last_sent"] = to_utc_iso(now)
+    updated["last_sent_decision"] = decision
+    updated["last_sent_mode"] = mode
+    updated["last_sent_known"] = True
+    updated["cooldown_until"] = (
+        to_utc_iso(now + timedelta(minutes=cooldown_minutes)) if cooldown_minutes and cooldown_minutes > 0 else None
+    )
+    return updated
+
+
+def build_pipeline_diag_embed(payload: Dict[str, Any], *, now: datetime) -> Dict[str, Any]:
+    trading = payload.get("trading") or {}
+    analysis_payload = payload.get("analysis") or {}
+    hashes = ((payload.get("artifacts") or {}).get("hashes") or {})
+    description = (
+        f"Trading→analysis: {trading.get('duration_seconds', 'N/A')}s / "
+        f"{analysis_payload.get('duration_seconds', 'N/A')}s\n"
+        f"Frissítve: {to_utc_iso(now)}"
+    )
+    hash_lines = []
+    for name, meta in sorted(hashes.items()):
+        if isinstance(meta, dict) and meta.get("sha256"):
+            hash_lines.append(f"{name}: {str(meta.get('sha256'))[:12]}… ({meta.get('size', 'N/A')} B)")
+        else:
+            hash_lines.append(f"{name}: hiányzik")
+    return {
+        "title": "Pipeline diagnosztika",
+        "description": description,
+        "color": COLOR_YELLOW,
+        "fields": [{"name": "Artefakt-hash", "value": "\n".join(hash_lines) or "N/A", "inline": False}],
+    }
 
 def _append_lifecycle_entry_event(path: Path, payload: Dict[str, Any]) -> None:
     try:
