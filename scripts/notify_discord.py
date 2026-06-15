@@ -28,7 +28,13 @@ from config import analysis_settings as settings
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
 ENTRY_COOLDOWN_MINUTES = 30
 DISCORD_WEBHOOK_URLS = [url.strip() for url in os.getenv("DISCORD_WEBHOOK_URL", "").replace("\\n", ",").split(",") if url.strip()]
-DISCORD_NOTIFY_ASSETS = {p.strip().upper() for p in os.getenv("DISCORD_NOTIFY_ASSETS", "").split(",") if p.strip()}
+DEFAULT_DISCORD_NOTIFY_ASSETS = {"GOLD_CFD", "XAGUSD", "USOIL"}
+_DISCORD_NOTIFY_ASSETS_ENV = {p.strip().upper() for p in os.getenv("DISCORD_NOTIFY_ASSETS", "").split(",") if p.strip()}
+DISCORD_NOTIFY_ASSETS = (
+    _DISCORD_NOTIFY_ASSETS_ENV & DEFAULT_DISCORD_NOTIFY_ASSETS
+    if _DISCORD_NOTIFY_ASSETS_ENV
+    else set(DEFAULT_DISCORD_NOTIFY_ASSETS)
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 PUBLIC_DIR = Path(os.getenv("NOTIFY_PUBLIC_DIR", "")) if os.getenv("NOTIFY_PUBLIC_DIR") else BASE_DIR / "public"
