@@ -13430,7 +13430,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     manual_trade_context: Dict[str, Any] = {}
     if asset in manual_trade_assets:
         mt_equity = safe_float(manual_trade_model.get("equity_usd"))
-        mt_leverage = safe_float(manual_trade_model.get("leverage"))
+        mt_leverage = safe_float(LEVERAGE.get(asset)) or safe_float(manual_trade_model.get("leverage"))
         mt_tp1_frac = safe_float(manual_trade_model.get("tp1_close_fraction"))
         mt_tp1_min_net = safe_float(manual_trade_model.get("tp1_min_net_usd"))
         mt_tp2_min_net = safe_float(manual_trade_model.get("tp2_min_net_usd"))
