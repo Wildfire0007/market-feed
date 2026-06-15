@@ -188,6 +188,19 @@ def _estimate_tp_eta_minutes(asset_dir: Path, direction: str, entry: float, tp1:
     }
 
 
+def _manual_trade_model_for_asset(asset_name: str, manual_trade_model: Dict[str, Any]) -> Dict[str, Any]:
+    model = dict(manual_trade_model)
+    overrides = manual_trade_model.get("asset_overrides")
+    asset_override = overrides.get(asset_name.upper()) if isinstance(overrides, dict) else None
+    if isinstance(asset_override, dict):
+        model.update(asset_override)
+    leverage_map = getattr(settings, "LEVERAGE", {}) or {}
+    asset_leverage = safe_float(leverage_map.get(asset_name.upper()))
+    if asset_leverage is not None and "leverage" not in (asset_override or {}):
+        model["leverage"] = asset_leverage
+    return model
+
+
 def build_expected_trade_outcome(
     asset_dir: Path,
     asset_name: str,
@@ -198,14 +211,15 @@ def build_expected_trade_outcome(
     tp1: float,
     manual_trade_model: Dict[str, Any],
 ) -> Dict[str, Any]:
-    equity_usd = safe_float(manual_trade_model.get("equity_usd")) or 100.0
-    leverage = safe_float(manual_trade_model.get("leverage")) or 20.0
-    tp1_close_fraction = safe_float(manual_trade_model.get("tp1_close_fraction")) or 1.0
-    min_net_usd = safe_float(manual_trade_model.get("tp1_min_net_usd")) or 10.0
-    eta_min = safe_float(manual_trade_model.get("eta_min_minutes")) or 5.0
-    eta_max = safe_float(manual_trade_model.get("eta_max_minutes")) or 240.0
-    max_chase_r = safe_float(manual_trade_model.get("max_chase_r")) or 0.2
-    valid_for = safe_float(manual_trade_model.get("signal_valid_minutes")) or 10.0
+    model = _manual_trade_model_for_asset(asset_name, manual_trade_model)
+    equity_usd = safe_float(model.get("equity_usd")) or 100.0
+    leverage = safe_float(model.get("leverage")) or 20.0
+    tp1_close_fraction = safe_float(model.get("tp1_close_fraction")) or 1.0
+    min_net_usd = safe_float(model.get("tp1_min_net_usd")) or 10.0
+    eta_min = safe_float(model.get("eta_min_minutes")) or 5.0
+    eta_max = safe_float(model.get("eta_max_minutes")) or 240.0
+    max_chase_r = safe_float(model.get("max_chase_r")) or 0.2
+    valid_for = safe_float(model.get("signal_valid_minutes")) or 10.0
 
     cost_pct = float((settings.ASSET_COST_MODEL.get(asset_name) or {}).get("round_trip_pct", 0.0))
     gross_pct = abs(entry - tp1) / entry if entry else 0.0
