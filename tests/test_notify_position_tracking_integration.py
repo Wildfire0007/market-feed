@@ -164,7 +164,7 @@ def test_notify_persists_open_after_market_precision_entry_card(tmp_path, monkey
 
     monkeypatch.setattr(notify.position_tracker, "open_position", _open_position)
     monkeypatch.setattr(
-       notify.position_tracker,
+        notify.position_tracker,
         "save_positions_atomic",
         lambda path, data: persisted.append((path, data.copy())),
     )
@@ -215,7 +215,7 @@ def test_precision_arming_defaults_to_limit_when_plan_order_type_missing(tmp_pat
 
     persisted = []
 
-   def _register(asset, signal_payload, now_dt, positions):
+    def _register(asset, signal_payload, now_dt, positions):
         next_positions = dict(positions)
         next_positions[asset] = {"status": "pending", "order_type": "LIMIT"}
         return next_positions
