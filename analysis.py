@@ -6530,6 +6530,142 @@ def apply_signal_stability_layer(
     return payload
 
 
+def _daily_budget_candidate_score(payload: Dict[str, Any]) -> float:
+    """Return a deterministic ranking score for daily top-entry budgeting."""
+
+    precision_plan = payload.get("precision_plan") if isinstance(payload, dict) else None
+    if not isinstance(precision_plan, dict):
+        precision_plan = (payload.get("active_position_meta") or {}).get("precision_plan")
+    precision_score = safe_float((precision_plan or {}).get("score")) if isinstance(precision_plan, dict) else None
+    p_score = safe_float(payload.get("probability_raw"))
+    if p_score is None:
+        p_score = safe_float((payload.get("entry_thresholds") or {}).get("p_score"))
+    rr = safe_float(payload.get("rr"))
+    if rr is None:
+        rr = safe_float((payload.get("trade_levels") or {}).get("rr"))
+    realtime_confidence = safe_float(payload.get("realtime_confidence"))
+    if realtime_confidence is None:
+        realtime_confidence = safe_float((payload.get("active_position_meta") or {}).get("realtime_confidence"))
+
+    return (
+        float(precision_score or 0.0) * 1.5
+        + float(p_score or 0.0)
+        + float(rr or 0.0) * 10.0
+        + float(realtime_confidence or 0.0) * 5.0
+    )
+
+
+def _apply_daily_top_entry_budget(
+    asset_results: Dict[str, Dict[str, Any]],
+    *,
+    public_dir: Path,
+    now_dt: datetime,
+) -> Dict[str, Any]:
+    """Keep only the configured top N entry notifications for the target day."""
+
+    stability_cfg = _resolve_signal_stability_config()
+    budget_cfg = stability_cfg.get("daily_trade_budget") if isinstance(stability_cfg, dict) else None
+    if not isinstance(budget_cfg, dict) or not budget_cfg.get("enabled"):
+        return {}
+
+    target_assets = {str(asset).upper() for asset in budget_cfg.get("assets", []) if asset}
+    if not target_assets:
+        return {}
+    try:
+        target_max = max(1, int(budget_cfg.get("target_max", 2)))
+    except (TypeError, ValueError):
+        target_max = 2
+
+    budget_day = now_dt.astimezone(timezone.utc).date().isoformat()
+    state_path = public_dir / "daily_trade_budget_state.json"
+    state = load_json(str(state_path)) or {}
+    if not isinstance(state, dict) or state.get("day") != budget_day:
+        state = {"day": budget_day, "selected": []}
+    selected_records = [item for item in state.get("selected", []) if isinstance(item, dict)]
+    used_keys = {str(item.get("key")) for item in selected_records if item.get("key")}
+    remaining_slots = max(0, target_max - len(selected_records))
+
+    candidates: List[Tuple[float, str, str, Dict[str, Any]]] = []
+    for asset, payload in asset_results.items():
+        asset_key = str(asset).upper()
+        if asset_key not in target_assets or not isinstance(payload, dict):
+            continue
+        notify = payload.get("notify") if isinstance(payload.get("notify"), dict) else {}
+        if not notify.get("should_notify") or payload.get("intent") != "entry":
+            continue
+        side = str(payload.get("signal") or payload.get("decision") or "").lower()
+        if side not in {"buy", "sell"}:
+            continue
+        event_key = f"{budget_day}:{asset_key}:{side}"
+        if event_key in used_keys:
+            payload["daily_trade_budget"] = {
+                "enabled": True,
+                "day": budget_day,
+                "status": "already_selected",
+                "target_max": target_max,
+            }
+            continue
+        candidates.append((_daily_budget_candidate_score(payload), asset_key, event_key, payload))
+
+    candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+    selected_keys = {event_key for _, _, event_key, _ in candidates[:remaining_slots]}
+
+    for rank, (score, asset_key, event_key, payload) in enumerate(candidates, start=1):
+        notify = payload.setdefault("notify", {})
+        if event_key in selected_keys:
+            selected_records.append(
+                {
+                    "key": event_key,
+                    "asset": asset_key,
+                    "side": str(payload.get("signal") or "").lower(),
+                    "selected_at_utc": to_utc_iso(now_dt),
+                    "rank_score": round(float(score), 6),
+                }
+            )
+            payload["daily_trade_budget"] = {
+                "enabled": True,
+                "day": budget_day,
+                "status": "selected",
+                "rank": rank,
+                "rank_score": round(float(score), 6),
+                "target_max": target_max,
+            }
+        else:
+            notify["should_notify"] = False
+            notify["reason"] = (
+                "daily_top_budget_ranked_out"
+                if remaining_slots > 0
+                else "daily_trade_budget_exhausted"
+            )
+            payload["daily_trade_budget"] = {
+                "enabled": True,
+                "day": budget_day,
+                "status": "ranked_out" if remaining_slots > 0 else "exhausted",
+                "rank": rank,
+                "rank_score": round(float(score), 6),
+                "target_max": target_max,
+            }
+            signal_state_path = public_dir / asset_key / "signal_state.json"
+            signal_state = load_json(str(signal_state_path)) or {}
+            if isinstance(signal_state, dict):
+                signal_state["last_notified_intent"] = None
+                signal_state["last_notified_side"] = None
+                signal_state["last_notified_at_utc"] = None
+                save_json(str(signal_state_path), signal_state)
+        save_json(str(public_dir / asset_key / "signal.json"), payload)
+
+    state["selected"] = selected_records[:target_max]
+    save_json(str(state_path), state)
+    return {
+        "enabled": True,
+        "day": budget_day,
+        "target_assets": sorted(target_assets),
+        "target_max": target_max,
+        "selected": state["selected"],
+        "candidates_seen": len(candidates),
+    }
+
+      
 def _load_heartbeat_timestamp(path: Path) -> Optional[datetime]:
     try:
         payload = load_json(str(path)) or {}
@@ -16530,6 +16666,15 @@ def main():
                 else:
                     asset_results[asset_key] = result
 
+    daily_budget_summary = _apply_daily_top_entry_budget(
+        asset_results,
+        public_dir=Path(PUBLIC_DIR),
+        now_dt=analysis_started_at,
+    )
+    if daily_budget_summary:
+        summary["daily_trade_budget"] = daily_budget_summary
+
+  
     for asset in ASSETS:
         res = asset_results.get(asset)
         if res is None:
