@@ -130,15 +130,30 @@ def _normalize_manual_trade_model(raw: Any) -> Dict[str, Any]:
         "equity_usd": 100.0,
         "leverage": 20.0,
         "tp1_close_fraction": 1.0,
-        "tp1_min_net_usd": 5.0,
+        "tp1_min_net_usd": 10.0,
         "tp2_min_net_usd": 10.0,
         "sl_risk_usd": 10.0,
+        "eta_min_minutes": 5.0,
+        "eta_max_minutes": 240.0,
+        "max_chase_r": 0.2,
+        "signal_valid_minutes": 10.0,
         "assets": ["GOLD_CFD", "XAGUSD"],
     }
     if not isinstance(raw, dict):
         return dict(defaults)
     model: Dict[str, Any] = dict(defaults)
-    for key in ("equity_usd", "leverage", "tp1_close_fraction", "tp1_min_net_usd", "tp2_min_net_usd", "sl_risk_usd"):
+    for key in (
+        "equity_usd",
+        "leverage",
+        "tp1_close_fraction",
+        "tp1_min_net_usd",
+        "tp2_min_net_usd",
+        "sl_risk_usd",
+        "eta_min_minutes",
+        "eta_max_minutes",
+        "max_chase_r",
+        "signal_valid_minutes",
+    ):
         value = raw.get(key, defaults[key])
         try:
             model[key] = float(value)
