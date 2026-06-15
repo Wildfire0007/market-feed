@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 
 from analysis import compute_order_flow_metrics, compute_precision_entry
+from order_flow import aggregate_ticks
 
 
 def _make_series(length: int = 150) -> pd.DataFrame:
@@ -26,6 +27,20 @@ def test_compute_order_flow_metrics_marks_volume_unavailable():
     assert metrics["status"] == "volume_unavailable"
     assert metrics["imbalance"] is None
     assert metrics["pressure"] is None
+
+
+def test_aggregate_ticks_sorts_by_parsed_utc_timestamp():
+    ticks = pd.DataFrame(
+        [
+            {"timestamp": "2025-01-01T00:30:00+01:00", "price": 100.0, "volume": 1.0},
+            {"timestamp": "2024-12-31T23:45:00Z", "price": 101.0, "volume": 1.0},
+        ]
+    )
+
+    metrics = aggregate_ticks(ticks)
+
+    assert metrics["price_change"] == 1.0
+    assert metrics["imbalance"] == 1.0
 
 
 def test_precision_entry_treats_missing_order_flow_as_optional():
