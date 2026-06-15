@@ -26,13 +26,13 @@ def aggregate_ticks(df: pd.DataFrame) -> Dict[str, Any]:
     if df.empty:
         raise ValueError("input dataframe is empty")
 
-    df = df.sort_values("timestamp").reset_index(drop=True)
     df["price"] = df["price"].astype(float)
     df["volume"] = df["volume"].astype(float)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
     df = df.dropna(subset=["timestamp", "price", "volume"])
     if df.empty:
         raise ValueError("no valid tick rows after cleaning")
+    df = df.sort_values("timestamp").reset_index(drop=True)
 
     side = []
     prev_price = df["price"].iloc[0]
