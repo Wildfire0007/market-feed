@@ -61,7 +61,11 @@ def copy_sources(sources: Iterable[str], target_root: Path) -> List[str]:
         destination = target_root / source_path.name
         if destination.exists():
             shutil.rmtree(destination)
-        shutil.copytree(source_path, destination)
+        shutil.copytree(
+            source_path,
+            destination,
+            ignore=shutil.ignore_patterns("*.py", "*.pyc", "__pycache__"),
+        )
         copied.append(str(source_path))
 
     return copied
