@@ -7,7 +7,7 @@
         "BTCUSD",
         "USOIL"
     ],
-    "entry_logic": {        
+    "entry_logic": {
         "spread_max_atr_pct": {
             "GOLD_CFD": 0.8,
             "XAGUSD": 0.8
@@ -15,7 +15,8 @@
         "p_score_min": {
             "GOLD_CFD": 30.0,
             "XAGUSD": 28.0
-        }
+        },
+        "soft_penalty_cap": 12
     },
     "manual_pos_audit_to_file": true,
     "leverage": {
@@ -67,13 +68,13 @@
         "GOLD_CFD": 0.7,
         "USOIL": 0.65,
         "NVDA": 0.7,
-        "XAGUSD": 0.60
+        "XAGUSD": 0.6
     },
     "session_bucket_proxies": {
         "BTCUSD": "NVDA"
     },
     "entry_threshold_profiles": {
-            "baseline": {
+        "baseline": {
             "p_score_min": {
                 "default": 34.0,
                 "BTCUSD": 32.0,
@@ -81,7 +82,7 @@
                 "GOLD_CFD": 32.0,
                 "NVDA": 30.0,
                 "USOIL": 32.0,
-                "XAGUSD": 34.0              
+                "XAGUSD": 34.0
             },
             "atr_threshold_multiplier": {
                 "default": 0.7,
@@ -174,7 +175,7 @@
                 "session",
                 "data"
             ]
-        },    
+        },
         "suppressed": {
             "p_score_min": {
                 "default": 30.0,
@@ -193,9 +194,23 @@
                 "NVDA": 0.85,
                 "USOIL": 0.85,
                 "XAGUSD": 0.85
-             }
+            }
+        },
+        "precision_metal_oil": {
+            "p_score_min": {
+                "default": 40.0,
+                "GOLD_CFD": 32.0,
+                "XAGUSD": 30.0,
+                "USOIL": 31.0
+            },
+            "atr_threshold_multiplier": {
+                "default": 0.6,
+                "GOLD_CFD": 0.5,
+                "XAGUSD": 0.5,
+                "USOIL": 0.55
+            }  
         }
-    },     
+    },
     "atr_period_profiles": {
         "baseline": {
             "default": 14,
@@ -1679,7 +1694,7 @@
                     "tp_min_abs": 0.6,
                     "sl_buffer": {
                         "atr_mult": 0.35,
-                        "abs_min": 0.10
+                        "abs_min": 0.1
                     },
                     "max_slippage_r": 0.22,
                     "max_spread_atr_pct": 0.5,
@@ -2369,6 +2384,18 @@
         "2025-11-12: USOIL risk sablon 1.6 RR és cooldown csökkentés 20/15 percre.",
         "2025-11-13: Normál profil ATR(13), ATR-min és max spread limitek finomhangolva (EURUSD, GOLD_CFD, NVDA, USOIL, BTCUSD, XAGUSD); Fib zóna toleranciák frissítve.",
         "2025-11-14: Cooldown lazítás (belépési és hard exit várakozások rövidítése) a több napi jelzésért.",
-        "2025-11-15: BTCUSD flip-flop guard szigorítás (min_bars_same_direction_before_flip 3→4)."
-    ]
+        "2025-11-15: BTCUSD flip-flop guard szigorítás (min_bars_same_direction_before_flip 3→4).",
+        {
+            "date": "2026-07-04",
+            "change": "Add profit_target config, precision_metal_oil profile, soft penalty cap, and set XAGUSD/USOIL leverage to 20 for manual trading target consistency."
+        }
+    ],
+    "profit_target": {
+        "margin_usd": 100,
+        "net_tp1_usd_min": 10,
+        "use_config_leverage": true,
+        "tp2_rr_multiple": 2.0,
+        "sl_rr_min": 1.5,
+        "max_required_move_atr1h_mult": 1.2
+    }        
 }
