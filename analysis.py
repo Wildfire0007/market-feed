@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 LOCAL_TZ = ZoneInfo("Europe/Budapest")
 
 from logging_utils import ensure_json_file_handler
+from profit_target import build_profit_target_levels
 
 LOGGER = logging.getLogger(__name__)
 
@@ -253,7 +254,7 @@ def classify_gate_failure(gate: str) -> str:
     preventing a trade outright.
     """
 
-    critical = {"session", "session_open", "data_integrity", "spread", "spread_guard", "risk_reward", "metal_bias_5m_alignment"}
+    critical = {"session", "session_open", "data_integrity", "spread", "spread_guard", "risk_reward", "profit_target_feasibility"}    
     return "critical" if gate in critical else "soft"
 
 # --- Elemzendő eszközök ---
@@ -367,6 +368,22 @@ BTC_PROFILE_CONFIG: Dict[str, Any] = dict(
 )
 
 SETTINGS: Dict[str, Any] = load_config()
+PROFIT_TARGET_CONFIG: Dict[str, Any] = dict(SETTINGS.get("profit_target") or {})
+SOFT_PENALTY_CAP: float = float((SETTINGS.get("entry_logic") or {}).get("soft_penalty_cap", 12.0) or 12.0)
+
+
+def _cap_soft_penalty(score_before: float, score_after: float, cap: float = SOFT_PENALTY_CAP) -> float:
+    """Cap cumulative soft-gate P-score deduction."""
+    return max(float(score_after), float(score_before) - abs(float(cap)))
+
+
+def _bos_direction_to_bias(structure_flag: str) -> Optional[str]:
+    if structure_flag == "bos_up":
+        return "long"
+    if structure_flag == "bos_down":
+        return "short"
+    return None
+  
 
 ADAPTIVE_PARAMS_PATH = Path("public") / "adaptive_params.json"
 _ADAPTIVE_PARAMS_MISSING: Set[str] = set()
@@ -13051,13 +13068,16 @@ def analyze(asset: str) -> Dict[str, Any]:
     intraday_relaxed_guards: List[str] = []
     intraday_relax_scale = get_intraday_relax_size_scale(asset)
 
+    bos_bias5m = _bos_direction_to_bias(structure_flag)      
     metal_bias_5m_alignment_ok = True
     if (
         asset in {"GOLD_CFD", "XAGUSD"}
         and effective_bias in {"long", "short"}
-        and bias5m in {"long", "short"}
+        and bos_bias5m in {"long", "short"}    
     ):
-        metal_bias_5m_alignment_ok = bias5m == effective_bias
+        metal_bias_5m_alignment_ok = bos_bias5m == effective_bias
+    if asset in {"GOLD_CFD", "XAGUSD"} and bos_bias5m and bias5m in {"long", "short"} and bos_bias5m != bias5m:
+        entry_thresholds_meta["direction_5m_disagreement"] = {"bos_bias5m": bos_bias5m, "ema_bias5m": bias5m}  
   
     conds_core = {
         "session": bool(session_ok_flag),
@@ -13117,8 +13137,9 @@ def analyze(asset: str) -> Dict[str, Any]:
     if not spread_gate_ok:
         reasons.append("Spread gate: aktuális spread meghaladja az ATR arány limitet")
     if not metal_bias_5m_alignment_ok:
-        reasons.append("Fém irány guard: 5m trend ellentétes a belépési biasszal")
-      
+        reasons.append("Fém irány guard: 5m BOS irány ellentétes a belépési biasszal")
+
+    soft_penalty_score_before = float(P)  
     if not regime_ok and "regime" in conds_core:
         P -= 10.0
         reasons.append("Regime kapu: CHOPPY miatt −10 P-score, pozícióskálázás csökkentve")
@@ -13140,6 +13161,8 @@ def analyze(asset: str) -> Dict[str, Any]:
         if "structure_momentum_override" not in soft_gate_reasons:
             soft_gate_reasons.append("structure_momentum_override")
 
+    P = _cap_soft_penalty(soft_penalty_score_before, P)
+    entry_thresholds_meta["soft_penalty_cap"] = SOFT_PENALTY_CAP  
     P = max(0.0, min(100.0, P))
 
     size_multiplier = calculate_position_size_multiplier(regime_label, atr_ok, P)
@@ -15508,6 +15531,34 @@ def analyze(asset: str) -> Dict[str, Any]:
         execution_playbook = []
         momentum_trailing_plan = None
 
+    if decision in {"buy", "sell"} and PROFIT_TARGET_CONFIG and entry is not None:
+        pt_result = build_profit_target_levels(
+            asset=asset,
+            side=decision,
+            entry=float(entry),
+            leverage=float(lev),
+            config=PROFIT_TARGET_CONFIG,
+            asset_cost_model=ASSET_COST_MODEL,
+            default_cost_model=DEFAULT_COST_MODEL,
+            min_stoploss_pct=float(min_stoploss_pct or 0.0),
+            atr5=float(atr5_val or 0.0),
+            atr1h=float(atr1h) if atr1h is not None else None,
+            atr5_noise_mult=float(ATR5_MIN_MULT_ASSET.get(asset, ATR5_MIN_MULT) or 0.4),
+        )
+        entry_thresholds_meta["profit_target"] = pt_result.meta
+        if not pt_result.feasible:
+            if "profit_target_feasibility" not in missing:
+                missing.append("profit_target_feasibility")
+            if pt_result.reason and pt_result.reason not in missing:
+                missing.append(pt_result.reason)
+            reasons.append("Profit target infeasible: TP1/SL/volatilitási korlát ütközik")
+            decision = "no entry"
+            entry = sl = tp1 = tp2 = rr = None
+            execution_playbook = []
+            momentum_trailing_plan = None
+        else:
+            entry, sl, tp1, tp2, rr = pt_result.entry, pt_result.sl, pt_result.tp1, pt_result.tp2, pt_result.rr_tp1
+  
     if decision in {"buy", "sell"} and not levels_match_direction(decision, entry, sl, tp1, tp2):
         if "direction_level_mismatch" not in missing:
             missing.append("direction_level_mismatch")
