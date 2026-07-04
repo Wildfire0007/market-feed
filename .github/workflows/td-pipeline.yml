@@ -9,7 +9,7 @@ name: TD Full Pipeline (5m)
         default: "true"
   schedule:
     # GitHub Actions only guarantees cron triggers at a minimum 2-minute cadence,
-    - cron: "*/2 * * * *" # 2 percenként (UTC)
+    - cron: "*/5 * * * *" # 5 percenként (UTC, TD free-tier kímélés)TC)
     - cron: "0 5 * * *" # Napi egyszer 05:00-kor (UTC)
 
 permissions:
@@ -27,7 +27,7 @@ jobs:
     env:
       TZ: UTC
       OUT_DIR: public
-      TD_PAUSE: "0.3"
+      TD_PAUSE: "8"
       TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
       SESSION_OVERRIDE_24_7: "1"
       PIPELINE_MAX_LAG_SECONDS: "800"
@@ -35,6 +35,7 @@ jobs:
       ML_PROBABILITY_MANUAL_OVERRIDE: "1"
       RESET_PUBLIC_ON_TRADING_START: "1"
       PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -93,8 +94,19 @@ jobs:
       # Trading always runs first. Public is synced immediately afterwards
       # so that analysis consumes the fresh trading artefacts instead of
       # anything stale from a previous workflow run.
-      - name: Run Trading.py (pull all OHLC  spot)
-        run: .venv/bin/python Trading.py
+      - name: Run Trading.py (pull all OHLC spot with backoff)
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if .venv/bin/python Trading.py; then
+              exit 0
+            fi
+            sleep_seconds=$((attempt * attempt * 30))
+            echo "Trading.py failed on attempt ${attempt}; sleeping ${sleep_seconds}s before retry"
+            sleep "${sleep_seconds}"
+          done
+          echo "Trading.py failed after retries" >&2
+          exit 1           
 
       - name: Sync pipeline artifacts into public (before analysis)
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.force_public_sync != 'false'
@@ -172,6 +184,11 @@ jobs:
       - name: Run analysis (ML disabled)
         run: |
           .venv/bin/python analysis.py
+
+      - name: Heartbeat watchdog
+        if: always()
+        run: |
+          .venv/bin/python scripts/heartbeat_watchdog.py --max-age-min 30 || true
 
       - name: Generate latency monitoring snapshot
         run: |
