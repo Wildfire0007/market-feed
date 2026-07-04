@@ -10,6 +10,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# Offline fallback: expose lightweight stubs (tests/_stubs) ONLY when the real
+# package is not installed. The real packages from requirements.lock always
+# take precedence, so schema validation and time freezing behave identically
+# to production when dependencies are available.
+_STUBS_DIR = Path(__file__).resolve().parent / "_stubs"
+for _stub_pkg in ("jsonschema", "freezegun"):
+    try:
+        importlib.import_module(_stub_pkg)
+    except ModuleNotFoundError:
+        if str(_STUBS_DIR) not in sys.path:
+            sys.path.append(str(_STUBS_DIR))
+        break
 
 def _reload_analysis(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("SESSION_STATUS_PROFILE", raising=False)
