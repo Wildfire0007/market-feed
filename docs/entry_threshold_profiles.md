@@ -78,3 +78,10 @@ riportban vagy debug logban is.
 
    Az opcionális `--suggest-buffer` kapcsolóval átírhatod, hogy hány ponttal
    csökkentett értéket javasoljon a riport (alapértelmezetten 5).
+
+## Precision metal/oil profil
+
+A `precision_metal_oil` profil csak a kézi fókuszú `GOLD_CFD`, `XAGUSD` és
+`USOIL` eszközökre készült. A profil induló P-score értékei a frissített
+`reports/gate_tuning.md` frontier alapján hangolandók tovább; a soft penalty
+cap induló értéke `entry_logic.soft_penalty_cap = 12`.
