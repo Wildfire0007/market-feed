@@ -77,6 +77,8 @@ def main() -> None:
     parser.add_argument("--root", required=True, help="Directory containing timestamped public snapshots")
     parser.add_argument("--asset", help="Optional asset filter")
     parser.add_argument("--csv", help="Optional path to write the aggregated CSV")
+    parser.add_argument("--grid", action="store_true", help="Grid-search p_score_min and penalty cap")
+    parser.add_argument("--report", default="reports/gate_tuning.md", help="Markdown report path for --grid")    
     args = parser.parse_args()
 
     root = Path(args.root)
@@ -87,6 +89,29 @@ def main() -> None:
     if df.empty:
         raise SystemExit("No snapshots found. Ensure the --root directory matches the exported history.")
 
+    if args.grid:
+        rows = []
+        assets = {"GOLD_CFD", "XAGUSD", "USOIL"}
+        base = df[df["asset"].isin(assets)].copy()
+        for p_min in range(25, 41):
+            for cap in range(8, 17):
+                scores = pd.to_numeric(base["p_score"], errors="coerce").fillna(0.0)
+                eligible = base[scores >= p_min]
+                days = max(1.0, float(eligible["timestamp"].nunique()))
+                rows.append((p_min, cap, len(eligible) / days))
+        report = Path(args.report)
+        report.parent.mkdir(parents=True, exist_ok=True)
+        lines = [
+            "# Gate tuning frontier",
+            "",
+            "| p_score_min | penalty_cap | signals/day | TP1-before-SL | expectancy USD |",
+            "|---:|---:|---:|---:|---:|",
+        ]
+        for p_min, cap, freq in rows:
+            lines.append(f"| {p_min} | {cap} | {freq:.2f} | n/a | n/a |")
+        report.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(f"Written grid report to {report}")
+    
     grouped = df.groupby(["asset", "signal"]).size().unstack(fill_value=0)
     print("Signal distribution:\n", grouped)
 
