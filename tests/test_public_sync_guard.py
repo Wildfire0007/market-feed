@@ -51,3 +51,24 @@ def test_validate_public_refresh_sync_state_rejects_checksum_mismatch(tmp_path, 
 
     with pytest.raises(RuntimeError, match="checksum mismatch"):
         Trading._validate_public_refresh_sync_state(str(tmp_path), Trading.logging.getLogger("test"))
+
+
+def test_copy_sources_excludes_python_sources_and_caches(tmp_path):
+    from scripts.update_public import copy_sources
+
+    source_root = tmp_path / "source"
+    reports = source_root / "reports"
+    cache = reports / "__pycache__"
+    cache.mkdir(parents=True)
+    (reports / "dummy.py").write_text("print('do not publish')\n", encoding="utf-8")
+    (reports / "dummy.json").write_text('{"publish": true}\n', encoding="utf-8")
+    (cache / "dummy.pyc").write_bytes(b"cache")
+
+    target = tmp_path / "public"
+
+    copy_sources([str(reports)], target)
+
+    copied_reports = target / "reports"
+    assert (copied_reports / "dummy.json").is_file()
+    assert not (copied_reports / "dummy.py").exists()
+    assert not (copied_reports / "__pycache__").exists()
