@@ -25,3 +25,7 @@ ATR-adaptive pending validity uses `base_minutes * median_atr5m_20d / current_at
 | Market scan, gates, heartbeat diagnostics, pipeline diagnostics | Informational only | DIAGNOSTIC |
 
 `DISCORD_WEBHOOK_URL_ACTIONABLE` and `DISCORD_WEBHOOK_URL_DIAGNOSTIC` are optional; if unset, both fall back to `DISCORD_WEBHOOK_URL`.
+
+## Manual position audit log retention
+
+`config/analysis_settings.json` controls append-only manual position audit file retention with `audit_log.max_mb` (rotate once the active JSONL file exceeds this size in MiB) and `audit_log.keep_files` (number of rotated `*.jsonl` files to retain).
