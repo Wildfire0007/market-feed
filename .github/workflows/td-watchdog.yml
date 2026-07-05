@@ -1,0 +1,26 @@
+name: TD Watchdog
+
+"on":
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      DISCORD_WEBHOOK_URL_ACTIONABLE: ${{ secrets.DISCORD_WEBHOOK_URL_ACTIONABLE }}
+      DISCORD_WEBHOOK_URL_DIAGNOSTIC: ${{ secrets.DISCORD_WEBHOOK_URL_DIAGNOSTIC }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install watchdog dependency
+        run: python -m pip install requests
+      - name: Heartbeat watchdog
+        run: python scripts/heartbeat_watchdog.py --max-age-min 30 || true
+      - name: State unknown guard
+        run: python scripts/state_unknown_guard.py
