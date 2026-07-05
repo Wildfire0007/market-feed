@@ -1207,6 +1207,7 @@ ADX_RANGE_BE_TRIGGER = float(ADX_RANGE_BAND.get("breakeven_trigger_r") or 0.0)
 ADX_RANGE_GIVEBACK = float(ADX_RANGE_BAND.get("giveback_ratio") or 0.0)
 
 OFI_Z_TRIGGER = float(OFI_Z_SETTINGS.get("trigger") or 0.0)
+BTC_OFI_Z = get_adaptive_ofi_settings("BTCUSD")
 OFI_Z_WEAKENING = float(OFI_Z_SETTINGS.get("weakening") or 0.0)
 OFI_Z_LOOKBACK = int(OFI_Z_SETTINGS.get("lookback_bars") or 0)
 
@@ -6253,11 +6254,14 @@ def apply_signal_stability_layer(
             cooldown_cfg = (config.get("cooldowns") or {}).get(
                 "min_minutes_between_entry_notifications", {}
             )
-            min_between = _resolve_asset_value(cooldown_cfg, asset, 0)
+            min_between = _resolve_asset_value(cooldown_cfg, asset, 30)
+            if not min_between or min_between <= 0:
+                min_between = 30          
             last_intent = state.get("last_notified_intent")
             last_ts = parse_utc_timestamp(state.get("last_notified_at_utc"))
             if (
                 last_intent == "entry"
+                and (not state.get("last_notified_side") or state.get("last_notified_side") == entry_side)              
                 and last_ts
                 and now_dt - last_ts < timedelta(minutes=min_between)
             ):
@@ -6284,13 +6288,25 @@ def apply_signal_stability_layer(
                         notify["should_notify"] = False
                         notify["reason"] = "flip_flop_guard"
 
+        if notify.get("reason") == "no_state_change":
+            last_ts = parse_utc_timestamp(state.get("last_notified_at_utc"))
+            if state.get("last_notified_intent") == "entry" and last_ts and now_dt - last_ts < timedelta(minutes=30):
+                notify["reason"] = "entry_cooldown_active"
+                notify["cooldown_until_utc"] = to_utc_iso(last_ts + timedelta(minutes=30))
+      
         if notify["should_notify"] and config.get("only_notify_on_state_change", False):
             last_intent = state.get("last_notified_intent")
             last_side = state.get("last_notified_side")
             if intent == last_intent and (intent != "entry" or entry_side == last_side):
                 if not invalidated_recently:
-                    notify["should_notify"] = False
-                    notify["reason"] = "no_state_change"
+                    last_ts = parse_utc_timestamp(state.get("last_notified_at_utc"))
+                    if intent == "entry" and (not state.get("last_notified_side") or state.get("last_notified_side") == entry_side) and last_ts and now_dt - last_ts < timedelta(minutes=30):
+                        notify["should_notify"] = False
+                        notify["reason"] = "entry_cooldown_active"
+                        notify["cooldown_until_utc"] = to_utc_iso(last_ts + timedelta(minutes=30))
+                    else:
+                        notify["should_notify"] = False
+                        notify["reason"] = "no_state_change"
                 else:
                     notify["reason"] = "state_invalidated_recently"
 
@@ -8058,7 +8074,6 @@ def compute_precision_entry(
         k1m,
         k5m,
         direction,
-        require_stabilization=require_stabilization,
     ):
         score += 12.0
         factors.append("micro BOS + retest confirmed")
@@ -9202,10 +9217,10 @@ def analyze(asset: str) -> Dict[str, Any]:
             realtime_confidence = float(min(1.0, realtime_confidence + 0.05))
 
     display_spot = safe_float(spot_price)
-    k1m_closed = ensure_closed_candles(k1m, now, candle_seconds=60)
-    k5m_closed = ensure_closed_candles(k5m, now, candle_seconds=300)
-    k1h_closed = ensure_closed_candles(k1h, now, candle_seconds=3600)
-    k4h_closed = ensure_closed_candles(k4h, now, candle_seconds=14400)
+    k1m_closed = ensure_closed_candles(k1m, now, 60)
+    k5m_closed = ensure_closed_candles(k5m, now, 300)
+    k1h_closed = ensure_closed_candles(k1h, now, 3600)
+    k4h_closed = ensure_closed_candles(k4h, now, 14400)
 
     tick_order_flow = load_tick_order_flow(asset, outdir)
     order_flow_metrics = compute_order_flow_metrics(k1m_closed, k5m_closed, tick_order_flow)
@@ -10552,15 +10567,13 @@ def analyze(asset: str) -> Dict[str, Any]:
         k1m_closed,
         k5m_closed,
         "long",
-        bos_lookback,
-        require_stabilization=require_micro_stabilization,
+        bos_lookback,       
     )
     micro_bos_short = micro_bos_with_retest(
         k1m_closed,
         k5m_closed,
         "short",
-        bos_lookback,
-        require_stabilization=require_micro_stabilization,
+        bos_lookback,        
     )
     if stale_timeframes.get("k1m") or stale_timeframes.get("k5m"):
         micro_bos_long = micro_bos_short = False
@@ -13072,6 +13085,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     intraday_relaxed_guards: List[str] = []
     intraday_relax_scale = get_intraday_relax_size_scale(asset)
 
+    structure_flag = locals().get("structure_flag", "range")          
     bos_bias5m = _bos_direction_to_bias(structure_flag)      
     metal_bias_5m_alignment_ok = True
     if (
