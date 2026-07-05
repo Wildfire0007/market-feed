@@ -27,7 +27,7 @@ import csv
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -139,6 +139,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="fire,executed",
         help="Comma separated precision states considered as executed entries",
     )
+    parser.add_argument(
+        "--summary",
+        default=str(PUBLIC_DIR / "journal" / "summary.json"),
+        help="Path to regenerate journal outcome summary JSON",
+    )
+    parser.add_argument(
+        "--now",
+        default=None,
+        help="UTC timestamp used for horizon guard (default: current UTC)",
+    )  
     parser.add_argument(
         "--precision-skip-signals",
         default="precision_ready,precision_arming",
@@ -640,6 +650,23 @@ def _build_labelled_dataset(
     return pd.DataFrame(rows)
 
 
+def _fmt_optional(value: Optional[float]) -> object:
+    if value is None or not np.isfinite(value):
+        return ""
+    return round(float(value), 4)
+
+
+def _wilson_interval(successes: int, total: int, z: float = 1.959963984540054) -> Tuple[float, float]:
+    """Return Wilson score 95% CI: (p + z²/2n ± z*sqrt((p(1-p)+z²/4n)/n))/(1+z²/n)."""
+    if total <= 0:
+        return 0.0, 0.0
+    p_hat = successes / total
+    denom = 1.0 + (z * z) / total
+    centre = p_hat + (z * z) / (2.0 * total)
+    margin = z * ((p_hat * (1.0 - p_hat) + (z * z) / (4.0 * total)) / total) ** 0.5
+    return (centre - margin) / denom, (centre + margin) / denom
+
+
 def _update_journal(
     journal_path: Path,
     journal_df: pd.DataFrame,
@@ -651,14 +678,54 @@ def _update_journal(
         if not mask.any():
             continue
         idx = mask.idxmax()
+        existing = str(journal_df.at[idx, "validation_outcome"] or "").strip() if "validation_outcome" in journal_df.columns else ""
+        if existing:
+            continue      
         journal_df.at[idx, "validation_outcome"] = result.outcome
-        journal_df.at[idx, "validation_rr"] = result.risk_r_multiple
-        journal_df.at[idx, "max_favorable_excursion"] = result.max_favorable_rr
-        journal_df.at[idx, "max_adverse_excursion"] = result.max_adverse_rr
-        journal_df.at[idx, "time_to_outcome_minutes"] = result.time_to_outcome_minutes
+        journal_df.at[idx, "validation_rr"] = _fmt_optional(result.risk_r_multiple)
+        journal_df.at[idx, "max_favorable_excursion"] = _fmt_optional(result.max_favorable_rr)
+        journal_df.at[idx, "max_adverse_excursion"] = _fmt_optional(result.max_adverse_rr)
+        journal_df.at[idx, "time_to_outcome_minutes"] = _fmt_optional(result.time_to_outcome_minutes)  
         updated = True
     if updated:
-        journal_df.to_csv(journal_path, index=False)
+        journal_df.to_csv(journal_path, index=False, lineterminator="\n")
+
+
+def _trade_expectancy_usd(row: pd.Series) -> float:
+    try:
+        rr = float(row.get("validation_rr") or 0.0)
+    except (TypeError, ValueError):
+        rr = 0.0
+    return rr * 10.0
+
+
+def _summary_bucket(frame: pd.DataFrame) -> Dict[str, Any]:
+    labelled = frame[frame.get("validation_outcome", pd.Series(dtype=str)).astype(str).str.strip() != ""]
+    count = int(len(labelled))
+    tp = int((labelled["validation_outcome"].astype(str) == OUTCOME_PROFIT).sum()) if count else 0
+    stopped = int((labelled["validation_outcome"].astype(str) == OUTCOME_STOP).sum()) if count else 0
+    lo, hi = _wilson_interval(tp, count)
+    rr = pd.to_numeric(labelled.get("validation_rr"), errors="coerce") if count else pd.Series(dtype=float)
+    expectancy = labelled.apply(_trade_expectancy_usd, axis=1).mean() if count else 0.0
+    return {
+        "labeled_trade_count": count,
+        "tp1_before_sl_rate": round(tp / count, 4) if count else 0.0,
+        "tp1_before_sl_wilson_95": [round(lo, 4), round(hi, 4)],
+        "stopped_rate": round(stopped / count, 4) if count else 0.0,
+        "ambiguous_count": int((labelled["validation_outcome"].astype(str) == OUTCOME_AMBIGUOUS).sum()) if count else 0,
+        "no_fill_count": int((labelled["validation_outcome"].astype(str) == OUTCOME_NO_FILL).sum()) if count else 0,
+        "average_validation_rr": round(float(rr.mean()) if not rr.dropna().empty else 0.0, 4),
+        "expectancy_usd": round(float(expectancy) if np.isfinite(expectancy) else 0.0, 4),
+    }
+
+
+def _write_summary(summary_path: Path, journal_df: pd.DataFrame, *, now: pd.Timestamp) -> None:
+    assets = sorted(set(journal_df.get("asset", pd.Series(dtype=str)).dropna().astype(str).str.upper()))
+    payload = {"generated_at_utc": now.isoformat().replace("+00:00", "Z"), "assets": {}, "combined": _summary_bucket(journal_df)}
+    for asset in assets:
+        payload["assets"][asset] = _summary_bucket(journal_df[journal_df["asset"].astype(str).str.upper() == asset])
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")      
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -666,8 +733,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     journal_path = Path(args.journal)
     if not journal_path.exists():
         raise FileNotFoundError(f"Trade journal not found: {journal_path}")
-    journal_df = pd.read_csv(journal_path)
+    journal_df = pd.read_csv(journal_path, keep_default_na=False)
+    for col in ("validation_outcome", "validation_rr", "max_favorable_excursion", "max_adverse_excursion", "time_to_outcome_minutes"):
+        if col not in journal_df.columns:
+            journal_df[col] = ""
     processing_df = journal_df.copy()
+    now = pd.to_datetime(args.now, utc=True) if args.now else pd.Timestamp.utcnow()
+    horizon_guard = now - pd.Timedelta(minutes=int(max(args.horizon, 1)))
+    ts = pd.to_datetime(processing_df.get("analysis_timestamp"), utc=True, errors="coerce")
+    unlabeled = processing_df["validation_outcome"].astype(str).str.strip() == ""
+    processing_df = processing_df.loc[unlabeled & (ts <= horizon_guard)].copy()  
 
     skip_signals = {
         token.strip().lower()
@@ -757,6 +832,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.update_journal:
             _update_journal(journal_path, journal_df, trade_results)
 
+    _write_summary(Path(args.summary), journal_df, now=now)
+  
     if summary:
         print("\nOutcome summary:")
         for asset, counts in summary.items():
