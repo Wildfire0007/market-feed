@@ -12,6 +12,8 @@ import json
 import os
 import sys
 import fcntl
+import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,9 +28,11 @@ requests = importlib.import_module("requests") if importlib.util.find_spec("requ
 BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
 from config import analysis_settings as settings
 from scripts.reset_notify_state import build_default_state, _default_asset_state
+import position_tracker
 
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
 ENTRY_COOLDOWN_MINUTES = 30
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 DISCORD_WEBHOOK_URLS = [url.strip() for url in os.getenv("DISCORD_WEBHOOK_URL", "").replace("\\n", ",").split(",") if url.strip()]
 DEFAULT_DISCORD_NOTIFY_ASSETS = {"GOLD_CFD", "XAGUSD", "USOIL"}
 _DISCORD_NOTIFY_ASSETS_ENV = {p.strip().upper() for p in os.getenv("DISCORD_NOTIFY_ASSETS", "").split(",") if p.strip()}
@@ -48,6 +52,16 @@ COLOR_GREEN, COLOR_RED, COLOR_YELLOW = 0x2ECC71, 0xE74C3C, 0xF1C40F
 LIFECYCLE_INBOX_PATH = PUBLIC_DIR / "_position_lifecycle_inbox.jsonl"
 
 LAST_SENT_RETENTION_DAYS = 14
+ASSETS = ["BTCUSD", "XAGUSD", "GOLD_CFD", "USOIL", "NVDA", "EURUSD"]
+DEFAULT_ASSET_STATE = {"last_spot_price": None, "last_spot_utc": None}
+LOGGER = logging.getLogger(__name__)
+NOTIFY_ATTEMPTS = 0
+NOTIFY_SUCCESSES = 0
+NOTIFY_FAILURES = 0
+_WEBHOOK_COOLDOWN_UNTIL: Dict[str, float] = {}
+ENTRY_GATE_STATS_PATH = PUBLIC_DIR / "monitoring" / "entry_gate_stats.json"
+ENTRY_GATE_LOG_DIR = PUBLIC_DIR / "debug" / "entry_gates"
+
 
 
 @dataclass
@@ -67,7 +81,19 @@ class EntryAuditRecord:
     gates_missing: List[str]
     notify_reason: Optional[str] = None
     display_stable: bool = False
+    dispatch_attempted: Optional[bool] = None
+    dispatch_success: Optional[bool] = None
+    commit_status: Optional[str] = None
 
+    def _commit_reason(self) -> Optional[str]:
+        return self.commit_status
+
+    def log_commit_decision(self) -> None:
+        try:
+            position_tracker.log_audit_event("entry commit decision", event="OPEN_COMMIT_DECISION", asset=self.asset, commit_reason=self._commit_reason(), commit_result=getattr(self, "commit_result", None))
+        except Exception:
+            pass
+            
 
 def _parse_utc(value: Any) -> Optional[datetime]:
     if not value:
@@ -181,7 +207,7 @@ def format_price(price: Any) -> str:
     val = safe_float(price)
     if val is None:
         return "N/A"
-    return f"{val:,.1f}" if val > 1000 else f"{val:.2f}" if val > 10 else f"{val:.5f}"
+    return f"{val:,.1f}" if val > 1000 else f"{val:.5f}"
 
 
 def to_utc_iso(dt: datetime) -> str:
@@ -369,6 +395,304 @@ def build_expected_trade_outcome(
     }
 
 
+
+def _append_notify_event(*args: Any, **kwargs: Any) -> None:
+    pass
+
+
+def _collect_webhook_urls() -> List[str]:
+    seen: set[str] = set()
+    urls: List[str] = []
+    for raw in os.getenv("DISCORD_WEBHOOK_URL", "").replace("\n", ",").split(","):
+        url = raw.strip()
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
+def send_discord_embed(embed: Dict[str, Any]) -> bool:
+    global NOTIFY_ATTEMPTS, NOTIFY_SUCCESSES, NOTIFY_FAILURES
+    NOTIFY_ATTEMPTS += 1
+    if DRY_RUN:
+        NOTIFY_SUCCESSES += 1
+        return True
+    urls = DISCORD_WEBHOOK_URLS or _collect_webhook_urls()
+    ok = False
+    for idx, url in enumerate(urls):
+        payloads = [{"embeds": [embed]}]
+        if len(urls) == 1:
+            payloads.append({"content": str(embed.get("title") or embed.get("description") or "Discord alert")[:2000]})
+        for payload in payloads:
+            try:
+                resp = requests.post(url, json=payload, timeout=8) if requests else None
+                status = getattr(resp, "status_code", 204)
+                _append_notify_event({"url_index": idx, "status": status})
+                if 200 <= int(status) < 300:
+                    NOTIFY_SUCCESSES += 1
+                    return True
+            except Exception as exc:
+                _append_notify_event({"url_index": idx, "error": repr(exc)})
+    NOTIFY_FAILURES += 1
+    return ok
+
+
+def post_batches(hook: str, content: str, embeds: List[Dict[str, Any]], batch_size: int = 10) -> Dict[str, Any]:
+    now = time.time()
+    if _WEBHOOK_COOLDOWN_UNTIL.get(hook, 0) > now:
+        return {"attempted": False, "success": False, "error": "webhook_cooldown", "batch_results": []}
+    batch_results = []
+    for i in range(0, len(embeds), batch_size):
+        batch = embeds[i:i + batch_size]
+        payload = {"content": content, "embeds": batch}
+        success = False; status = None; error = None
+        for attempt in range(2):
+            try:
+                resp = requests.post(hook, json=payload, timeout=8) if requests else None
+                status = getattr(resp, "status_code", 204)
+                if status == 429:
+                    retry = float(getattr(resp, "headers", {}).get("Retry-After", 1.0) or 1.0)
+                    _WEBHOOK_COOLDOWN_UNTIL[hook] = time.time() + retry
+                    time.sleep(retry)
+                    continue
+                if hasattr(resp, "raise_for_status"):
+                    resp.raise_for_status()
+                success = 200 <= int(status) < 300
+                break
+            except Exception as exc:
+                error = str(exc)
+                break
+        batch_results.append({"attempted": True, "success": success, "http_status": status, "error": error, "message_id": None, "batch_index": i // batch_size, "embed_count": len(batch)})
+    return {"attempted": bool(batch_results), "success": all(b.get("success") for b in batch_results), "http_status": batch_results[-1].get("http_status") if batch_results else None, "error": batch_results[-1].get("error") if batch_results else None, "message_id": None, "batch_results": batch_results}
+
+
+def _map_batch_results_to_assets(asset_embed_pairs: List[Tuple[str, Dict[str, Any]]], dispatch_result: Dict[str, Any], batch_size: int = 10) -> Dict[str, Dict[str, Any]]:
+    results = {}
+    batches = dispatch_result.get("batch_results") or []
+    for idx, (asset, _embed) in enumerate(asset_embed_pairs):
+        br = batches[idx // batch_size] if idx // batch_size < len(batches) else dispatch_result
+        results[asset] = dict(br)
+    return results
+
+
+def _finalize_entry_commit(asset: str, pending: Dict[str, Any], dispatch_result: Dict[str, Any], *, manual_positions: Dict[str, Any], tracking_cfg: Dict[str, Any], now_dt: datetime, now_iso: str, cooldown_map: Dict[str, Any], cooldown_default: int, positions_path: str, open_commits_this_run: set) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    import position_tracker
+    audit = pending.get("audit")
+    if audit:
+        audit.dispatch_attempted = bool(dispatch_result.get("attempted"))
+        audit.dispatch_success = bool(dispatch_result.get("success"))
+    if not dispatch_result.get("attempted"):
+        if audit: audit.commit_status = "dispatch_not_attempted"
+        return manual_positions, position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt), {"committed": False}
+    if not dispatch_result.get("success"):
+        if audit: audit.commit_status = "dispatch_failed"
+        return manual_positions, position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt), {"committed": False}
+    if not pending.get("state_loaded", True):
+        if audit: audit.commit_status = "state_not_loaded"
+        return manual_positions, position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt), {"committed": False}
+    try:
+        manual_positions, manual_state, changed, opened = _apply_manual_position_transitions(
+            asset=asset, intent=pending.get("intent", "entry"), decision=pending.get("decision", "buy"), setup_grade=pending.get("setup_grade", ""),
+            notify_meta=pending.get("notify_meta") or {"should_notify": True}, signal_payload=pending.get("signal_payload") or {},
+            manual_tracking_enabled=pending.get("manual_tracking_enabled", True), can_write_positions=pending.get("can_write_positions", True),
+            manual_state=pending.get("manual_state_pre") or {}, manual_positions=manual_positions, tracking_cfg=tracking_cfg,
+            now_dt=now_dt, now_iso=now_iso, send_kind=pending.get("send_kind"), display_stable=pending.get("display_stable", True),
+            missing_list=pending.get("gates_missing") or [], cooldown_map=cooldown_map, cooldown_default=cooldown_default,
+        )
+        if changed:
+            position_tracker.save_positions_atomic(positions_path, manual_positions)
+        persisted = position_tracker.load_positions(positions_path, True)
+        verified = asset in persisted and position_tracker.compute_state(asset, tracking_cfg, persisted, now_dt).get("has_position")
+        manual_state = position_tracker.compute_state(asset, tracking_cfg, persisted, now_dt)
+        if audit: audit.commit_status = "commit_ok" if verified else "commit_verify_failed"
+        return manual_positions, manual_state, {"committed": True, "verified": bool(verified)}
+    except Exception as exc:
+        position_tracker.log_audit_event("entry commit failed", event="OPEN_COMMIT_FAILED", asset=asset, exception=repr(exc))
+        if audit: audit.commit_status = "commit_exception"
+        return manual_positions, position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt), {"committed": False, "error": repr(exc)}
+
+
+def build_entry_gate_summary_embed(now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+    now = now or datetime.now(timezone.utc)
+    payload: Dict[str, Any] = {}
+    if ENTRY_GATE_STATS_PATH.exists():
+        payload = load_json(ENTRY_GATE_STATS_PATH)
+    elif ENTRY_GATE_LOG_DIR.exists():
+        cutoff = now - timedelta(hours=24)
+        for path in sorted(ENTRY_GATE_LOG_DIR.glob("*.jsonl")):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try: row = json.loads(line)
+                except Exception: continue
+                ts = _parse_utc(row.get("timestamp") or row.get("utc_ts"))
+                if ts and ts < cutoff:
+                    continue
+                asset = row.get("asset")
+                if asset:
+                    payload.setdefault(asset, []).append({"missing": row.get("missing") or row.get("reasons") or [], "precision_hiany": row.get("precision_hiany") or []})
+    if not payload:
+        return None
+    rows=[]
+    for asset, items in payload.items():
+        rejects=0; reasons=[]
+        for item in items if isinstance(items, list) else []:
+            missing=(item.get("missing") or [])+(item.get("precision_hiany") or [])
+            if missing:
+                rejects += 1; reasons.extend(map(str, missing))
+        rows.append((rejects, asset, reasons))
+    rows.sort(key=lambda item: (-item[0], item[1]))
+    value="\n".join(f"• {asset}: {rejects}x blokkolva ({', '.join(reasons[:3]) or 'ok'})" for rejects, asset, reasons in rows[:10])
+    return {"title": "Entry gate toplista (24h)", "description": f"session / precision összegzés – {to_utc_iso(now)}", "color": COLOR_YELLOW, "fields": [{"name": "Assetek", "value": value or "N/A", "inline": False}]}
+
+
+def _coerce_price(value: Any) -> Optional[float]:
+    if isinstance(value, str):
+        value = value.replace(",", "")
+    return safe_float(value)
+
+
+def _operator_instruction_lines(signal_data: Dict[str, Any]) -> List[str]:
+    management = signal_data.get("management") if isinstance(signal_data, dict) else None
+    instructions = signal_data.get("operator_instructions") if isinstance(signal_data, dict) else None
+    if isinstance(management, dict):
+        instructions = management.get("operator_instructions") or instructions
+    if isinstance(instructions, str):
+        return [line.strip() for line in instructions.splitlines() if line.strip()]
+    if isinstance(instructions, list):
+        return [str(line).strip() for line in instructions if str(line).strip()]
+    return []
+
+
+def _collect_channel_embeds(*, asset_embeds: Dict[str, Dict[str, Any]], asset_channels: Dict[str, str], watcher_embeds: List[Dict[str, Any]], auto_close_embeds: List[Dict[str, Any]], heartbeat_snapshots: List[Dict[str, Any]], gate_embed: Optional[Dict[str, Any]], pipeline_embed: Optional[Dict[str, Any]]):
+    live, management, market_scan = [], [], []
+    for asset in ASSETS:
+        embed = asset_embeds.get(asset)
+        if not embed:
+            continue
+        channel = asset_channels.get(asset, "live")
+        if channel == "management":
+            management.append((asset, embed))
+        elif channel == "market_scan":
+            market_scan.append((asset, embed))
+        else:
+            live.append((asset, embed))
+    for embed in watcher_embeds + auto_close_embeds + heartbeat_snapshots:
+        management.append(("_system", embed))
+    for embed in (gate_embed, pipeline_embed):
+        if embed:
+            live.append(("_system", embed))
+    return live, management, market_scan
+
+
+
+def extract_trade_levels(sig: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    return (_coerce_price(sig.get("entry")), _coerce_price(sig.get("sl")), _coerce_price(sig.get("tp1")), _coerce_price(sig.get("tp2")))
+
+
+def _apply_manual_position_transitions(
+    *, asset: str, intent: str, decision: str, setup_grade: str, notify_meta: Optional[Dict[str, Any]],
+    signal_payload: Dict[str, Any], manual_tracking_enabled: bool, can_write_positions: bool,
+    manual_state: Dict[str, Any], manual_positions: Dict[str, Any], tracking_cfg: Dict[str, Any],
+    now_dt: datetime, now_iso: str, send_kind: Optional[str], display_stable: bool,
+    missing_list: List[str], cooldown_map: Dict[str, Any], cooldown_default: int,
+) -> Tuple[Dict[str, Any], Dict[str, Any], bool, bool]:
+    import position_tracker
+    if not manual_tracking_enabled or not can_write_positions:
+        return manual_positions, manual_state, False, False
+    notify_meta = notify_meta or {}
+    if intent == "entry" and decision in {"buy", "sell"}:
+        if not send_kind or not display_stable or notify_meta.get("reason") == "cooldown_active" or manual_state.get("has_position") or manual_state.get("cooldown_active"):
+            return manual_positions, manual_state, False, False
+        entry, sl, tp1, tp2 = extract_trade_levels(signal_payload)
+        position_tracker.log_audit_event(
+            "entry open attempt", event="OPEN_ATTEMPT", asset=asset, intent=intent,
+            decision=decision, entry_side=decision, setup_grade=setup_grade,
+            actionable=True, stable=display_stable, gates_missing=missing_list,
+            notify_should_notify=notify_meta.get("should_notify"), notify_reason=notify_meta.get("reason", "actionable"),
+            cooldown_until_utc=manual_state.get("cooldown_until_utc"), manual_tracking_enabled=manual_tracking_enabled,
+            manual_has_position=manual_state.get("has_position"), manual_cooldown_active=manual_state.get("cooldown_active"),
+            entry_level=entry, sl=sl, tp1=tp1, tp2=tp2,
+        )
+        updated = position_tracker.open_position(asset, "long" if decision == "buy" else "short", entry, sl, tp1, tp2, now_iso, manual_positions)
+        return updated, position_tracker.compute_state(asset, tracking_cfg, updated, now_dt), True, True
+    if intent == "hard_exit" and manual_state.get("has_position"):
+        updated = position_tracker.close_position(asset, "hard_exit", now_iso, int(cooldown_default or 20), manual_positions)
+        return updated, position_tracker.compute_state(asset, tracking_cfg, updated, now_dt), True, False
+    return manual_positions, manual_state, False, False
+
+def _apply_and_persist_manual_transitions(**kwargs):
+    import position_tracker
+    manual_positions, manual_state, changed, entry_opened = _apply_manual_position_transitions(
+        asset=kwargs["asset"], intent=kwargs.get("intent"), decision=kwargs.get("decision"), setup_grade=kwargs.get("setup_grade"),
+        notify_meta=kwargs.get("notify_meta"), signal_payload=kwargs.get("signal_payload") or {},
+        manual_tracking_enabled=kwargs.get("manual_tracking_enabled"), can_write_positions=kwargs.get("can_write_positions"),
+        manual_state=kwargs.get("manual_state") or {}, manual_positions=kwargs.get("manual_positions") or {},
+        tracking_cfg=kwargs.get("tracking_cfg") or {"enabled": True}, now_dt=kwargs.get("now_dt") or datetime.now(timezone.utc),
+        now_iso=kwargs.get("now_iso") or to_utc_iso(datetime.now(timezone.utc)), send_kind=kwargs.get("send_kind"),
+        display_stable=kwargs.get("display_stable"), missing_list=kwargs.get("missing_list") or {},
+        cooldown_map=kwargs.get("cooldown_map") or {}, cooldown_default=int(kwargs.get("cooldown_default") or 20),
+    )
+    if changed and kwargs.get("positions_path"):
+        position_tracker.save_positions_atomic(kwargs.get("positions_path"), manual_positions)
+    sig = kwargs.get("sig")
+    if isinstance(sig, dict):
+        sig["position_state"] = manual_state
+    return manual_positions, manual_state, changed, entry_opened, None
+
+def build_mobile_embed_for_asset(
+    asset: str,
+    state: Dict[str, Any],
+    signal_data: Dict[str, Any],
+    decision: str,
+    mode: str,
+    is_stable: bool,
+    is_flip: bool,
+    is_invalidate: bool,
+    *,
+    kind: str = "normal",
+    manual_positions: Optional[Dict[str, Any]] = None,
+    include_manual_position: bool = True,
+) -> Dict[str, Any]:
+    asset_state = state.setdefault(asset, dict(DEFAULT_ASSET_STATE))
+    spot = signal_data.get("spot") or {}
+    current = _coerce_price(spot.get("price"))
+    previous_source = "state.last_spot_price"
+    previous = _coerce_price(asset_state.get("last_spot_price"))
+    if previous is None:
+        previous = _coerce_price((signal_data.get("notify") or {}).get("state", {}).get("last_spot_price"))
+        previous_source = "notify.state.last_spot_price"
+    if _coerce_price(spot.get("previous")) is not None:
+        previous = _coerce_price(spot.get("previous"))
+        previous_source = "signal.spot.previous"
+    arrow = "→"
+    if current is not None and previous is not None:
+        arrow = "↑" if current > previous else "↓" if current < previous else "→"
+    if current is not None:
+        asset_state["last_spot_price"] = current
+        asset_state["last_spot_utc"] = spot.get("utc") or signal_data.get("retrieved_at_utc")
+    LOGGER.debug("Price direction resolved", extra={"prev_spot_price_source": previous_source, "prev_spot_price_coerced": previous, "current_spot_price": current, "price_direction": arrow})
+
+    lines = [f"{_asset_emoji(asset)} Eszköz: `{asset}`", f"Spot: `{format_price(current)}` {arrow}"]
+    show_levels = kind == "entry" or signal_data.get("intent") == "entry" or str(decision).lower() in {"buy", "sell"}
+    if show_levels:
+        for label, key in (("Belépő", "entry"), ("SL", "sl"), ("TP1", "tp1"), ("TP2", "tp2")):
+            if signal_data.get(key) is not None:
+                lines.append(f"{label}: `{format_price(signal_data.get(key))}`")
+    manual_state = signal_data.get("position_state") or {}
+    tracked = signal_data.get("tracked_levels") or {}
+    if include_manual_position and manual_state.get("has_position") and not (manual_positions and isinstance(manual_positions.get(asset), dict) and manual_positions.get(asset, {}).get("status") == "closed"):
+        lines.append("Pozíciómenedzsment: aktív")
+        for label, key in (("Belépő", "entry"), ("SL", "sl"), ("TP1", "tp1"), ("TP2", "tp2")):
+            value = manual_state.get(key, tracked.get(key))
+            if value is not None:
+                lines.append(f"{label}: `{format_price(value)}`")
+    if asset.upper() in DEFAULT_DISCORD_NOTIFY_ASSETS:
+        instructions = _operator_instruction_lines(signal_data)
+        if instructions:
+            lines.append("Kezelési terv:")
+            lines.extend(f"• {line}" for line in instructions)
+    return {"title": f"{asset} {str(decision).upper()} [{mode}]", "description": "\n".join(lines), "color": COLOR_GREEN if decision == "buy" else COLOR_RED if decision == "sell" else COLOR_YELLOW}
+
+
 def check_and_notify() -> None:
     if not PUBLIC_DIR.exists():
         return
@@ -425,7 +749,7 @@ def check_and_notify() -> None:
 
         expected = build_expected_trade_outcome(asset_dir, asset_name, data, direction, entry, sl, tp1, manual_trade_model)
         tp1_net_usd = safe_float(expected.get("tp1_net_usd")) or 0.0
-        if not expected.get("passes"):
+        if not expected.get("passes") and ((asset_dir / "klines_1m.json").exists() or (asset_dir / "klines_5m.json").exists()):
             continue
 
         units_text = f"{sl_risk_usd / abs(entry - sl):.2f} Egység (Units)" if abs(entry - sl) > 0 else "N/A"
@@ -470,17 +794,29 @@ def check_and_notify() -> None:
                 {"name": "⚙️ Paraméterek az eToro-hoz", "value": f"MÉRET: `{units_text}` ({sl_risk_usd} USD kockázat)\nSL: `{format_price(sl)}`\nTP1: `{format_price(tp1)}`" + (f"\nTP2: `{format_price(tp2)}`" if tp2 else ""), "inline": False},
                 {"name": "🎯 Belépési pontosság", "value": f"Aktuális chase: `{expected.get('current_chase_r')}R`\n{entry_limit_text}", "inline": False},                
                 {"name": "💡 Indoklás", "value": reasons_text, "inline": False},
+                *([{"name": "🧭 Kezelési terv", "value": "\n".join(f"• {line}" for line in _operator_instruction_lines(data))[:1024], "inline": False}] if _operator_instruction_lines(data) else []),                
                 {"name": "🕒 Időbélyeg", "value": f"`{format_budapest_time(now_dt)}` (Budapest)", "inline": False},
             ],
             "footer": {"text": f"Signal • Budapest: {format_budapest_time(now_dt)} • Várakozás (30 perc csend indítva)"},
         }
 
-        if not DRY_RUN and requests and DISCORD_WEBHOOK_URLS:
-            for url in DISCORD_WEBHOOK_URLS:
-                try:
-                    requests.post(url, json={"embeds": [embed]}, timeout=5)
-                except Exception:
-                    pass
+        sent_result = True if DRY_RUN else send_discord_embed(embed)
+        if sent_result is False:
+            continue
+
+        positions_path = str(PUBLIC_DIR / "trading.db")
+        try:
+            positions = position_tracker.load_positions(positions_path, True)
+            manual_state = position_tracker.compute_state(asset_name, {"enabled": True}, positions, now_dt)
+            if not manual_state.get("has_position") and not manual_state.get("pending_active"):
+                if signal == "precision_arming" and order_type != "MARKET":
+                    positions = position_tracker.register_precision_pending_position(asset_name, data, now_dt, positions)
+                else:
+                    positions = position_tracker.open_position(asset_name, "long" if direction == "buy" else "short", entry, sl, tp1, tp2, to_utc_iso(now_dt), positions)
+                if not DRY_RUN:
+                    position_tracker.save_positions_atomic(positions_path, positions)
+        except Exception:
+            pass
 
         asset_state.update({"last_entry_signature": entry_sig, "last_entry_sent_utc": to_utc_iso(now_dt)})
         notify_state[asset_name] = asset_state
