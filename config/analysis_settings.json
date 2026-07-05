@@ -208,7 +208,8 @@
                 "GOLD_CFD": 0.5,
                 "XAGUSD": 0.5,
                 "USOIL": 0.55
-            }  
+            },
+            "choppy_hard_block": true
         }
     },
     "atr_period_profiles": {
@@ -274,40 +275,40 @@
     "weekday_entry_threshold_profile": "day",
     "entry_profile_schedule_by_tod": {
         "default": {
-            "open": "baseline",
-            "mid": "baseline",
-            "close": "baseline"
+            "open": "day",
+            "mid": "day",
+            "close": "day"
         },
         "assets": {
             "BTCUSD": {
-                "open": "baseline",
-                "mid": "baseline",
-                "close": "baseline"
+                "open": "day",
+                "mid": "day",
+                "close": "day"
             },
             "EURUSD": {
-                "open": "baseline",
-                "mid": "baseline",
-                "close": "baseline"
+                "open": "day",
+                "mid": "day",
+                "close": "day"
             },
             "GOLD_CFD": {
-                "open": "baseline",
-                "mid": "baseline",
-                "close": "baseline"
+                "open": "day",
+                "mid": "day",
+                "close": "day"
             },
             "XAGUSD": {
-                "open": "baseline",
-                "mid": "baseline",
-                "close": "baseline"
+                "open": "day",
+                "mid": "day",
+                "close": "day"
             },
             "USOIL": {
-                "open": "baseline",
-                "mid": "baseline",
-                "close": "baseline"
+                "open": "day",
+                "mid": "day",
+                "close": "day"
             },
             "NVDA": {
-                "open": "baseline",
-                "mid": "baseline",
-                "close": "baseline"
+                "open": "day",
+                "mid": "day",
+                "close": "day"
             }
         }
     },
@@ -1341,10 +1342,10 @@
         "GOLD_CFD": {
             "entry": [
                 [
+                    7,                    
                     0,
-                    0,
-                    23,
-                    55
+                    16,
+                    30                    
                 ]
             ],
             "monitor": [
@@ -1359,10 +1360,10 @@
         "USOIL": {
             "entry": [
                 [
+                    7,
                     0,
-                    0,
-                    22,
-                    0
+                    16,
+                    30
                 ]
             ],
             "monitor": [
@@ -1413,10 +1414,10 @@
         "XAGUSD": {
             "entry": [
                 [
+                    7,
                     0,
-                    0,
-                    23,
-                    55
+                    16,
+                    30
                 ]
             ],
             "monitor": [
@@ -2388,6 +2389,14 @@
         {
             "date": "2026-07-04",
             "change": "Add profit_target config, precision_metal_oil profile, soft penalty cap, and set XAGUSD/USOIL leverage to 20 for manual trading target consistency."
+        },
+        {
+            "date": "2026-07-04",
+            "change": "Activate precision_metal_oil per-asset for GOLD_CFD/XAGUSD/USOIL, narrow entry windows to 07:00-16:30 UTC, add CHOPPY hard block, daily risk limits, and TP1 management instructions."
+        },
+        {
+            "date": "2026-07-04",
+            "change": "Align time-of-day entry profile schedule with global day profile so non-overridden assets remain on day."            
         }
     ],
     "profit_target": {
@@ -2397,5 +2406,34 @@
         "tp2_rr_multiple": 2.0,
         "sl_rr_min": 1.5,
         "max_required_move_atr1h_mult": 1.2
+    },
+    "active_entry_threshold_profile_by_asset": {
+        "GOLD_CFD": "precision_metal_oil",
+        "XAGUSD": "precision_metal_oil",
+        "USOIL": "precision_metal_oil"
+    },
+    "session_windows_note": "Entry 07:00-16:30 UTC for GOLD_CFD/XAGUSD/USOIL; 12:00-16:00 UTC London-NY overlap is statistically preferred pending journal outcome measurement.",
+    "risk_limits": {
+        "enabled": true,
+        "daily_loss_limit_usd": 15,
+        "daily_max_losing_trades": 2,
+        "day_boundary_utc": "00:00",
+        "count_ambiguous_as_loss": true,
+        "lockout_scope": [
+            "GOLD_CFD",
+            "XAGUSD",
+            "USOIL"
+        ]
+    },
+    "tp1_management": {
+        "enabled_assets": [
+            "GOLD_CFD",
+            "XAGUSD",
+            "USOIL"
+        ],
+        "partial_close_pct": 0.5,
+        "move_sl_to_breakeven": true,
+        "breakeven_offset_covers_costs": true,
+        "session_force_close_buffer_min": 20
     }        
 }
