@@ -28,7 +28,10 @@ if not PUBLIC_DIR.exists() and (BASE_DIR.parent / "public").exists():
     PUBLIC_DIR = BASE_DIR.parent / "public"
 
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
-DISCORD_WEBHOOK_URLS = [url.strip() for url in os.getenv("DISCORD_WEBHOOK_URL", "").replace("\\n", ",").split(",") if url.strip()]
+def _webhook_urls() -> list[str]:
+    raw = os.getenv("DISCORD_WEBHOOK_URL_ACTIONABLE") or os.getenv("DISCORD_WEBHOOK_URL", "")
+    return [url.strip() for url in raw.replace("\\n", ",").replace("\n", ",").split(",") if url.strip()]
+DISCORD_WEBHOOK_URLS = _webhook_urls()
 LOCK_PATH = PUBLIC_DIR / ".notify_management_discord.lock"
 STATE_PATH = PUBLIC_DIR / "_management_notify_state.json"
 LIFECYCLE_STATE_PATH = PUBLIC_DIR / "_position_lifecycle_state.json"
@@ -155,7 +158,7 @@ def _build_embed(event: str, asset: str, side: str, entry: Any, spot: Any, reaso
     now_dt = datetime.now(timezone.utc)    
     side_label = "LONG" if side == "long" else "SHORT"
     presets = {
-        "tp1_hit": ("🟠 RÉSZZÁRÁS (TP1) ELÉRVE!", "Húzd a Stop-Loss-t a belépési árra (Nullába) az eTorón!", COLOR_ORANGE),
+        "tp1_hit": ("🟠 RÉSZZÁRÁS (TP1) ELÉRVE!", "Zárd a pozíciót TP1-en / húzd a Stop-Loss-t nullába a konfiguráció szerint.", COLOR_ORANGE),        
         "tp2_hit": ("🟢 CÉLÁR ELÉRVE!", "Pozíció nyereségben lezárva.", COLOR_GREEN),
         "sl_hit": ("🔴 STOP LOSS KIÜTVE!", "Pozíció veszteségben lezárva.", COLOR_RED),
         "hard_exit": ("🔴 AZONNAL ZÁRD A POZÍCIÓT! (Hard Exit)", f"Ok: {reason or 'Hard exit jelzés'}", COLOR_RED),
@@ -177,9 +180,10 @@ def _build_embed(event: str, asset: str, side: str, entry: Any, spot: Any, reaso
 
 
 def _send_embed(embed: Dict[str, Any]) -> None:
-    if DRY_RUN or not requests or not DISCORD_WEBHOOK_URLS:
+    urls = _webhook_urls() or DISCORD_WEBHOOK_URLS
+    if DRY_RUN or not requests or not urls:
         return
-    for url in DISCORD_WEBHOOK_URLS:
+    for url in urls:
         try:
             requests.post(url, json={"embeds": [embed]}, timeout=5)
         except Exception:
