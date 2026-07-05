@@ -77,7 +77,7 @@ class _RotatingJsonFileHandler(logging.FileHandler):
         if self._max_bytes <= 0 or not path.exists() or path.stat().st_size <= self._max_bytes:
             return
         if self.stream:
-           self.stream.close()
+            self.stream.close()
             self.stream = None
         if self._keep_files <= 0:
             path.unlink(missing_ok=True)
@@ -241,7 +241,7 @@ def _audit_file_path() -> Path:
 
 def _audit_rotation_limits() -> Tuple[int, int]:
     cfg = _audit_log_config()
-   max_mb = cfg.get("max_mb", 10)
+    max_mb = cfg.get("max_mb", 10)
     keep_files = cfg.get("keep_files", 2)
     try:
         max_bytes = max(0, int(float(max_mb) * 1024 * 1024))
