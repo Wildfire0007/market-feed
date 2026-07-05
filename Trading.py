@@ -1012,7 +1012,7 @@ def _ensure_spot_db_initialized() -> None:
     with _SPOT_DB_LOCK:
         if _SPOT_DB_INITIALIZED:
             return
-        state_db.initialize()
+        state_db.initialize(state_db.DEFAULT_DB_PATH)
         _SPOT_DB_INITIALIZED = True
 
 
@@ -1030,7 +1030,7 @@ def _upsert_spot_price(
         return
     try:
         _ensure_spot_db_initialized()
-        connection = state_db.connect()
+        connection = state_db.connect(state_db.DEFAULT_DB_PATH)
     except sqlite3.Error:
         return
     now_ts = now_utc()
@@ -3928,6 +3928,8 @@ def _catalog_exchange_map(entries: List[Dict[str, Any]], symbol: str) -> Dict[st
 def _select_preferred_exchange(options: Dict[str, str], *candidates: Optional[str]) -> Optional[str]:
     if not options:
         return None
+    if len(options) == 1:
+        return next(iter(options.values()))      
     for candidate in candidates:
         if not candidate:
             continue
@@ -3947,7 +3949,7 @@ def _apply_symbol_catalog_filter(
 ) -> List[Tuple[str, Optional[str]]]:
     if not attempts:
         return attempts
-    if _SYMBOL_META_DISABLED or not API_KEY or cfg.get("disable_symbol_catalog"):
+    if _SYMBOL_META_DISABLED:  
         return attempts
 
     preferred_exchange = str(cfg.get("exchange") or "").strip()
