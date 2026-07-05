@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from logging_utils import ensure_json_file_handler, ensure_json_stream_handler
+from logging_utils import JsonFormatter, ensure_json_stream_handler
 import state_db
 
 PENDING_EXPIRY_MINUTES = 30
@@ -34,7 +34,6 @@ def _normalize_position_side(value: Any) -> Optional[str]:
 
 
 LOGGER = logging.getLogger("manual_positions")
-ensure_json_stream_handler(LOGGER, static_fields={"component": "manual_positions"})
 
 
 class PositionFileError(RuntimeError):
@@ -46,9 +45,62 @@ _AUDIT_CONTEXT: Dict[str, Any] = {
     "tz_name": "Europe/Budapest",
 }
 _FILE_LOGGER_ATTACHED = False
+_LOGGER_CONFIGURED = False
 
 _DB_INITIALIZED = False
 _DB_PATH: Optional[Path] = None
+
+
+class _RotatingJsonFileHandler(logging.FileHandler):
+    def __init__(
+        self,
+        filename: Path,
+        *,
+        max_bytes: int,
+        keep_files: int,
+        encoding: str = "utf-8",
+    ) -> None:
+        self._max_bytes = max_bytes
+        self._keep_files = keep_files
+        super().__init__(filename, encoding=encoding)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._rotate_if_needed()
+        super().emit(record)
+
+    def _rotated_path(self, index: int) -> Path:
+        path = Path(self.baseFilename)
+        return path.with_name(f"{path.stem}.{index}{path.suffix}")
+
+    def _rotate_if_needed(self) -> None:
+        path = Path(self.baseFilename)
+        if self._max_bytes <= 0 or not path.exists() or path.stat().st_size <= self._max_bytes:
+            return
+        if self.stream:
+           self.stream.close()
+            self.stream = None
+        if self._keep_files <= 0:
+            path.unlink(missing_ok=True)
+            self.stream = self._open()
+            return
+        self._rotated_path(self._keep_files).unlink(missing_ok=True)
+        for index in range(self._keep_files - 1, 0, -1):
+            src = self._rotated_path(index)
+            if src.exists():
+                os.replace(src, self._rotated_path(index + 1))
+        os.replace(path, self._rotated_path(1))
+        self.stream = self._open()
+
+
+def _configure_logger() -> None:
+    global _LOGGER_CONFIGURED
+    if _LOGGER_CONFIGURED:
+        return
+    ensure_json_stream_handler(LOGGER, static_fields={"component": "manual_positions"})
+    _LOGGER_CONFIGURED = True
+
+
+_configure_logger()
 
 
 def _ensure_db_initialized(db_path: Optional[Path] = None) -> None:
@@ -171,6 +223,37 @@ def _should_log_to_file() -> bool:
         return False
 
 
+def _audit_log_config() -> Dict[str, Any]:
+    cfg_path = resolve_repo_path("config/analysis_settings.json")
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        audit_cfg = cfg.get("audit_log") if isinstance(cfg, dict) else {}
+        return audit_cfg if isinstance(audit_cfg, dict) else {}
+    except Exception:
+        return {}
+
+
+def _audit_file_path() -> Path:
+    return resolve_repo_path(
+        os.getenv("MANUAL_POS_AUDIT_FILE") or "public/_manual_positions_audit.jsonl"
+    )
+
+
+def _audit_rotation_limits() -> Tuple[int, int]:
+    cfg = _audit_log_config()
+   max_mb = cfg.get("max_mb", 10)
+    keep_files = cfg.get("keep_files", 2)
+    try:
+        max_bytes = max(0, int(float(max_mb) * 1024 * 1024))
+    except (TypeError, ValueError):
+        max_bytes = 10 * 1024 * 1024
+    try:
+        keep_count = max(0, int(keep_files))
+    except (TypeError, ValueError):
+        keep_count = 2
+    return max_bytes, keep_count
+
+    
 def _maybe_attach_file_handler() -> None:
     global _FILE_LOGGER_ATTACHED
     if _FILE_LOGGER_ATTACHED:
@@ -179,10 +262,19 @@ def _maybe_attach_file_handler() -> None:
         return
 
     try:
-        path = resolve_repo_path("public/_manual_positions_audit.jsonl")
-        ensure_json_file_handler(
-            LOGGER, path, static_fields={"component": "manual_positions"}
-        )
+        path = _audit_file_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        max_bytes, keep_files = _audit_rotation_limits()
+        for handler in LOGGER.handlers:
+            if getattr(handler, "_manual_positions_audit_file", False):
+                _FILE_LOGGER_ATTACHED = True
+                return
+        handler = _RotatingJsonFileHandler(path, max_bytes=max_bytes, keep_files=keep_files)
+        handler.setFormatter(JsonFormatter(static_fields={"component": "manual_positions"}))
+        handler._manual_positions_audit_file = True  # type: ignore[attr-defined]
+        LOGGER.addHandler(handler)
+        LOGGER.setLevel(logging.INFO)
+        LOGGER.propagate = False
         _FILE_LOGGER_ATTACHED = True
     except Exception:
         # Best-effort; keep pipeline running even if audit file logging fails.
