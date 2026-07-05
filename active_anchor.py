@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 import state_db
 
 _DB_INITIALIZED = False
+_DB_PATH: Optional[str] = None
 
 def _safe_float(value: Any) -> Optional[float]:
     try:
@@ -45,11 +46,13 @@ def _utc_now_iso() -> str:
 
 
 def _ensure_db_initialized(db_path: Optional[str] = None) -> None:
-    global _DB_INITIALIZED
-    if _DB_INITIALIZED:
+    global _DB_INITIALIZED, _DB_PATH
+    target = str(db_path or state_db.DEFAULT_DB_PATH)
+    if _DB_INITIALIZED and _DB_PATH == target:
         return
-    state_db.initialize(db_path or state_db.DEFAULT_DB_PATH)
+    state_db.initialize(target)        
     _DB_INITIALIZED = True
+    _DB_PATH = target    
 
 
 def _load_anchor_state_from_db(db_path: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
@@ -338,9 +341,9 @@ def reset_anchor_state(
 
     pruned: Dict[str, Dict[str, Any]] = {}
     for asset, payload in state.items():
-        timestamp_raw = payload.get("last_update") or payload.get("timestamp")
+        timestamp_raw = payload.get("last_update")
         timestamp = _parse_iso(timestamp_raw)
-        if timestamp is None or timestamp >= cutoff:
+        if timestamp is not None and timestamp >= cutoff:
             pruned[asset] = payload
 
     if pruned != state and not dry_run:
