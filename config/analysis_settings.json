@@ -1342,10 +1342,10 @@
         "GOLD_CFD": {
             "entry": [
                 [
-                    7,                    
+                    7,
                     0,
                     16,
-                    30                    
+                    30
                 ]
             ],
             "monitor": [
@@ -2396,7 +2396,11 @@
         },
         {
             "date": "2026-07-04",
-            "change": "Align time-of-day entry profile schedule with global day profile so non-overridden assets remain on day."            
+            "change": "Align time-of-day entry profile schedule with global day profile so non-overridden assets remain on day."
+        },
+        {
+            "date": "2026-07-05",
+            "change": "Add Discord operator lifecycle semantics, state-unknown watchdog thresholds, two-channel notification routing, and daily digest timing."            
         }
     ],
     "profit_target": {
@@ -2435,5 +2439,26 @@
         "move_sl_to_breakeven": true,
         "breakeven_offset_covers_costs": true,
         "session_force_close_buffer_min": 20
+    },
+    "position_lifecycle": {
+        "tp1_closes_position": true,
+        "entry_validity_minutes": 120,
+        "entry_validity_atr_adaptive": true,
+        "hard_exit": {
+            "immediate_on": [
+                "macro_lockout",
+                "volatility_shock"
+            ],
+            "volatility_shock_atr5m_median_mult": 3.0,
+            "trend_reversal_requires": {
+                "h1_bias_flip": true,
+                "m5_structure_break": true,
+                "consecutive_runs": 2
+            }
+        },
+        "ambiguous_bar_counts_as": "sl",
+        "state_unknown_max_age_minutes": 15,
+        "state_unknown_include_pending": false,
+        "daily_digest_utc": "20:30"
     }        
 }
