@@ -41,6 +41,7 @@ from ml_model import FEATURE_LOG_DIR, MODEL_FEATURES, PUBLIC_DIR  # noqa: E402
 
 DEFAULT_HORIZON_MINUTES = 12 * 60  # 12 hours
 OUTCOME_PROFIT = "tp_hit"
+OUTCOME_TP1_CLOSED = "tp1_closed"
 OUTCOME_STOP = "stopped"
 OUTCOME_NO_EXIT = "no_exit"
 OUTCOME_NO_FILL = "no_fill"
