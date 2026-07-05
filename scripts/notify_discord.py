@@ -508,8 +508,9 @@ def _finalize_entry_commit(asset: str, pending: Dict[str, Any], dispatch_result:
         return manual_positions, manual_state, {"committed": True, "verified": bool(verified)}
     except Exception as exc:
         position_tracker.log_audit_event("entry commit failed", event="OPEN_COMMIT_FAILED", asset=asset, exception=repr(exc))
+        position_tracker.log_audit_event("entry dispatched but not committed", event="ENTRY_DISPATCHED_BUT_NOT_COMMITTED", asset=asset, exception=repr(exc))        
         if audit: audit.commit_status = "commit_exception"
-        return manual_positions, position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt), {"committed": False, "error": repr(exc)}
+        return manual_positions, position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt), {"committed": False, "error": repr(exc), "exception": repr(exc)}        
 
 
 def build_entry_gate_summary_embed(now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
@@ -600,7 +601,7 @@ def _apply_manual_position_transitions(
         return manual_positions, manual_state, False, False
     notify_meta = notify_meta or {}
     if intent == "entry" and decision in {"buy", "sell"}:
-        if not send_kind or not display_stable or notify_meta.get("reason") == "cooldown_active" or manual_state.get("has_position") or manual_state.get("cooldown_active"):
+        if not send_kind or not display_stable or notify_meta.get("reason") == "cooldown_active" or manual_state.get("has_position") or manual_state.get("pending_active") or manual_state.get("cooldown_active"):        
             return manual_positions, manual_state, False, False
         entry, sl, tp1, tp2 = extract_trade_levels(signal_payload)
         position_tracker.log_audit_event(
@@ -612,7 +613,7 @@ def _apply_manual_position_transitions(
             manual_has_position=manual_state.get("has_position"), manual_cooldown_active=manual_state.get("cooldown_active"),
             entry_level=entry, sl=sl, tp1=tp1, tp2=tp2,
         )
-        updated = position_tracker.open_position(asset, "long" if decision == "buy" else "short", entry, sl, tp1, tp2, now_iso, manual_positions)
+        updated = position_tracker.open_position(asset, "long" if decision == "buy" else "short", entry, sl, tp1, tp2, now_iso, positions=manual_positions)        
         return updated, position_tracker.compute_state(asset, tracking_cfg, updated, now_dt), True, True
     if intent == "hard_exit" and manual_state.get("has_position"):
         updated = position_tracker.close_position(asset, "hard_exit", now_iso, int(cooldown_default or 20), manual_positions)
@@ -693,6 +694,59 @@ def build_mobile_embed_for_asset(
     return {"title": f"{asset} {str(decision).upper()} [{mode}]", "description": "\n".join(lines), "color": COLOR_GREEN if decision == "buy" else COLOR_RED if decision == "sell" else COLOR_YELLOW}
 
 
+
+def _position_lifecycle_embed(asset: str, pos: Dict[str, Any], signal_data: Dict[str, Any], now_dt: datetime) -> Optional[Dict[str, Any]]:
+    status = str(pos.get("status") or "").lower()
+    spot = safe_float((signal_data.get("spot") or {}).get("price"))
+    if status == "open":
+        order_type = str(pos.get("order_type") or pos.get("orderType") or "Automatikus aktiválás").upper()
+        if order_type == "AUTOMATIKUS AKTIVÁLÁS":
+            order_type = "Automatikus aktiválás"
+        opened = _parse_utc(pos.get("opened_at_utc"))
+        opened_txt = opened.astimezone(BUDAPEST_TZ).strftime("%Y-%m-%d %H:%M:%S") if opened else "N/A"
+        lines = [
+            f"{_asset_emoji(asset)} Eszköz: `{asset}`",
+            "Állapot: `Nyitott`",
+            f"Spot: `{_lifecycle_price(spot)}`",
+            f"Belépő típus: `{order_type}`",
+            f"Aktiválva: `{opened_txt}`",
+            f"Belépő: `{_lifecycle_price(pos.get('entry'))}`",
+            f"SL: `{_lifecycle_price(pos.get('sl'))}`",
+            f"TP1: `{_lifecycle_price(pos.get('tp1'))}`",
+            f"TP2: `{_lifecycle_price(pos.get('tp2'))}`",
+        ]
+        return {"title": f"{asset} pozíció aktiválva", "description": "\n".join(lines), "color": COLOR_GREEN}
+    if status == "closed":
+        lines = [
+            f"{_asset_emoji(asset)} Eszköz: `{asset}`",
+            "Állapot: `Lezárt`",
+            f"Ok: `{pos.get('close_reason') or 'closed'}`",
+            f"Spot: `{_lifecycle_price(spot)}`",
+            f"SL: `{_lifecycle_price(pos.get('sl'))}`",
+        ]
+        return {"title": f"{asset} pozíció lezárva", "description": "\n".join(lines), "color": COLOR_YELLOW}
+    return None
+
+def _lifecycle_price(value: Any) -> str:
+    val = safe_float(value)
+    return "N/A" if val is None else f"{val:.2f}"
+
+def _levels_match_direction(direction: str, entry: Optional[float], sl: Optional[float], tp1: Optional[float]) -> bool:
+    if None in (entry, sl, tp1):
+        return False
+    return (sl < entry < tp1) if direction == "buy" else (tp1 < entry < sl)
+
+def _send_hard_exit_embed(asset: str, pos: Dict[str, Any], now_dt: datetime) -> None:
+    side = str(pos.get("side") or "").lower()
+    side_label = "LONG" if side in {"long", "buy"} else "SHORT" if side in {"short", "sell"} else "N/A"
+    embed = {
+        "title": f"🔴 AZONNAL ZÁRD A POZÍCIÓT! – {asset}",
+        "description": f"{_asset_emoji(asset)} Eszköz: `{asset}`\nOk: `ellentétes belépési jel`",
+        "color": COLOR_RED,
+        "fields": [{"name": "🎯 Zárandó irány", "value": side_label, "inline": False}],
+    }
+    send_discord_embed(embed)
+    
 def check_and_notify() -> None:
     if not PUBLIC_DIR.exists():
         return
@@ -713,15 +767,37 @@ def check_and_notify() -> None:
         if not data:
             continue
 
+        now_dt = datetime.now(timezone.utc)
+        positions_path = str(PUBLIC_DIR / "trading.db")
+        try:
+            positions = position_tracker.load_positions(positions_path, True)
+        except Exception:
+            positions = {}
+        pos = positions.get(asset_name) if isinstance(positions, dict) else None
+        asset_state = notify_state.get(asset_name) or {}
+        if isinstance(pos, dict) and str(pos.get("status") or "").lower() == "pending":
+            continue
+        if isinstance(pos, dict) and str(pos.get("status") or "").lower() in {"open", "closed"}:
+            lifecycle_sig = f"{pos.get('status')}:{pos.get('opened_at_utc') or pos.get('closed_at_utc') or pos.get('close_reason')}"
+            if asset_state.get("last_lifecycle_signature") != lifecycle_sig:
+                lifecycle_embed = _position_lifecycle_embed(asset_name, pos, data, now_dt)
+                if lifecycle_embed:
+                    send_discord_embed(lifecycle_embed)
+                    asset_state["last_lifecycle_signature"] = lifecycle_sig
+                    notify_state[asset_name] = asset_state
+                    notify_changed = True
+
         signal = str(data.get("signal") or "no entry").lower()
+        plan = data.get("precision_plan") if isinstance(data.get("precision_plan"), dict) else {}
+        if signal == "no entry" and plan.get("trigger_state") == "fire":
+            signal = "precision_arming"        
         if signal not in {"buy", "sell", "precision_arming"}:
             continue
 
         entry, sl, tp1, tp2 = safe_float(data.get("entry")), safe_float(data.get("sl")), safe_float(data.get("tp1")), safe_float(data.get("tp2"))
         order_type, direction = str(data.get("order_type") or "MARKET").upper(), signal
         
-        if signal == "precision_arming":
-            plan = data.get("precision_plan") or {}
+        if signal == "precision_arming":            
             direction = str(plan.get("direction") or "buy").lower()
             order_type = str(plan.get("order_type") or "LIMIT").upper()
             entry = safe_float(plan.get("entry") or entry)
@@ -732,21 +808,23 @@ def check_and_notify() -> None:
         if direction not in {"buy", "sell"}:
             continue
 
-        # AUTO-CORRECT (No Max Delta Limits)
-        if entry is not None and sl is not None:
-            if direction == "sell" and sl < entry:
-                sl = entry + (entry - sl)
-            elif direction == "buy" and sl > entry:
-                sl = entry - (sl - entry)
-        if entry is not None and tp1 is not None:
-            if direction == "sell" and tp1 > entry:
-                tp1 = entry - (tp1 - entry)
-            elif direction == "buy" and tp1 < entry:
-                tp1 = entry + (entry - tp1)
-
-        if None in (entry, sl, tp1):
+        if not _levels_match_direction(direction, entry, sl, tp1):
             continue
 
+        if isinstance(pos, dict) and str(pos.get("status") or "").lower() == "open":
+            current_side = "buy" if str(pos.get("side") or "").lower() in {"long", "buy"} else "sell" if str(pos.get("side") or "").lower() in {"short", "sell"} else None
+            if current_side and current_side != direction:
+                _send_hard_exit_embed(asset_name, pos, now_dt)
+                try:
+                    positions = position_tracker.close_position(asset_name, "hard_exit", to_utc_iso(now_dt), ENTRY_COOLDOWN_MINUTES, positions)
+                    if not DRY_RUN:
+                        position_tracker.save_positions_atomic(positions_path, positions)
+                except Exception:
+                    pass
+            elif current_side:
+                continue
+
+        
         expected = build_expected_trade_outcome(asset_dir, asset_name, data, direction, entry, sl, tp1, manual_trade_model)
         tp1_net_usd = safe_float(expected.get("tp1_net_usd")) or 0.0
         if not expected.get("passes") and ((asset_dir / "klines_1m.json").exists() or (asset_dir / "klines_5m.json").exists()):
@@ -754,8 +832,6 @@ def check_and_notify() -> None:
 
         units_text = f"{sl_risk_usd / abs(entry - sl):.2f} Egység (Units)" if abs(entry - sl) > 0 else "N/A"
 
-        now_dt = datetime.now(timezone.utc)
-        asset_state = notify_state.get(asset_name) or {}
         entry_sig = f"{direction}_{order_type}"
 
         if asset_state.get("last_entry_signature") == entry_sig and asset_state.get("last_entry_sent_utc"):
@@ -800,19 +876,17 @@ def check_and_notify() -> None:
             "footer": {"text": f"Signal • Budapest: {format_budapest_time(now_dt)} • Várakozás (30 perc csend indítva)"},
         }
 
-        sent_result = True if DRY_RUN else send_discord_embed(embed)
+        sent_result = send_discord_embed(embed)
         if sent_result is False:
             continue
 
-        positions_path = str(PUBLIC_DIR / "trading.db")
-        try:
-            positions = position_tracker.load_positions(positions_path, True)
+        try:            
             manual_state = position_tracker.compute_state(asset_name, {"enabled": True}, positions, now_dt)
             if not manual_state.get("has_position") and not manual_state.get("pending_active"):
                 if signal == "precision_arming" and order_type != "MARKET":
                     positions = position_tracker.register_precision_pending_position(asset_name, data, now_dt, positions)
                 else:
-                    positions = position_tracker.open_position(asset_name, "long" if direction == "buy" else "short", entry, sl, tp1, tp2, to_utc_iso(now_dt), positions)
+                    positions = position_tracker.open_position(asset_name, "long" if direction == "buy" else "short", entry, sl, tp1, tp2, to_utc_iso(now_dt), positions=positions)                    
                 if not DRY_RUN:
                     position_tracker.save_positions_atomic(positions_path, positions)
         except Exception:
