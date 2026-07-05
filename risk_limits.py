@@ -37,7 +37,8 @@ def _day_start(now: datetime, boundary: str) -> datetime:
 
 
 def _notify_daily_lockout_once(state: Dict[str, Any], *, now: datetime) -> None:
-    urls = [u.strip() for u in os.getenv("DISCORD_WEBHOOK_URL", "").replace("\n", ",").split(",") if u.strip()]
+    raw = os.getenv("DISCORD_WEBHOOK_URL_ACTIONABLE") or os.getenv("DISCORD_WEBHOOK_URL", "")
+    urls = [u.strip() for u in raw.replace("\n", ",").split(",") if u.strip()]    
     if not urls or requests is None:
         return
     day = now.astimezone(timezone.utc).date().isoformat()
