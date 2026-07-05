@@ -36,6 +36,8 @@ jobs:
       RESET_PUBLIC_ON_TRADING_START: "1"
       PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      DISCORD_WEBHOOK_URL_ACTIONABLE: ${{ secrets.DISCORD_WEBHOOK_URL_ACTIONABLE }}
+      DISCORD_WEBHOOK_URL_DIAGNOSTIC: ${{ secrets.DISCORD_WEBHOOK_URL_DIAGNOSTIC }}      
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -185,11 +187,10 @@ jobs:
         run: |
           .venv/bin/python analysis.py
 
-      - name: Heartbeat watchdog
-        if: always()
-        run: |
-          .venv/bin/python scripts/heartbeat_watchdog.py --max-age-min 30 || true
-
+      - name: Heartbeat watchdog moved to standalone workflow
+        if: ${{ false }}
+        run: echo "Handled by .github/workflows/td-watchdog.yml"      
+        
       - name: Generate latency monitoring snapshot
         run: |
           .venv/bin/python scripts/check_latency_sources.py --output public/monitoring/data_latency.json --pretty
@@ -230,6 +231,8 @@ jobs:
     timeout-minutes: 15
     env:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      DISCORD_WEBHOOK_URL_ACTIONABLE: ${{ secrets.DISCORD_WEBHOOK_URL_ACTIONABLE }}
+      DISCORD_WEBHOOK_URL_DIAGNOSTIC: ${{ secrets.DISCORD_WEBHOOK_URL_DIAGNOSTIC }}      
       DISCORD_COOLDOWN_MIN: ${{ secrets.DISCORD_COOLDOWN_MIN }}
       DISCORD_COOLDOWN_MOMENTUM_MIN: ${{ secrets.DISCORD_COOLDOWN_MOMENTUM_MIN }}
       PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
@@ -365,6 +368,9 @@ jobs:
 
       - name: Step 3 - Notify management Discord
         run: .venv/bin/python scripts/notify_management_discord.py
+
+      - name: Daily actionable digest
+        run: .venv/bin/python scripts/daily_actionable_digest.py
 
       - name: Run-end lifecycle diagnostics
         if: always()
