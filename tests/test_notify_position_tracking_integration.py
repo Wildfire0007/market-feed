@@ -823,3 +823,47 @@ def test_notify_treats_no_entry_with_precision_trigger_as_precision_arming(tmp_p
     notify.check_and_notify()
 
     assert any("NYISS SHORT" in (item.get("title") or "") for item in sent)
+
+
+def test_notify_repeated_unchanged_entry_sends_once_and_persists_one_open(tmp_path, monkeypatch):
+    public_dir = tmp_path / "public"
+    signal_path = public_dir / "XAGUSD" / "signal.json"
+    _write_signal(
+        signal_path,
+        {
+            "signal": "buy",
+            "entry": 25.0,
+            "sl": 24.8,
+            "tp1": 25.2,
+            "tp2": 25.4,
+            "spot": {"price": 25.0},
+            "gates": {"missing": []},
+            "biases": {},
+            "reasons": ["teszt"],
+            "alignment_state": "TREND",
+        },
+    )
+
+    monkeypatch.setattr(notify, "PUBLIC_DIR", public_dir)
+    monkeypatch.setattr(notify, "DISCORD_NOTIFY_ASSETS", {"XAGUSD"})
+    monkeypatch.setattr(notify, "DRY_RUN", False)
+    monkeypatch.setattr(notify, "DISCORD_WEBHOOK_URL", "")
+
+    positions = {}
+    monkeypatch.setattr(notify.position_tracker, "load_positions", lambda *_: dict(positions))
+
+    def _save(_path, data):
+        positions.clear()
+        positions.update(data)
+
+    monkeypatch.setattr(notify.position_tracker, "save_positions_atomic", _save)
+    sent = []
+    monkeypatch.setattr(notify, "send_discord_embed", lambda embed: sent.append(embed))
+
+    notify.check_and_notify()
+    notify.check_and_notify()
+
+    entry_cards = [embed for embed in sent if "NYISS LONG" in (embed.get("title") or "")]
+    assert len(entry_cards) == 1
+    assert len(positions) == 1
+    assert positions["XAGUSD"]["status"] == "open"
