@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import builtins
 import os
 import sys
 from dataclasses import dataclass
@@ -29,6 +30,8 @@ from scripts.notify_discord import to_utc_iso
 from scripts.reset_notify_state import build_default_state as build_notify_default_state
 import position_tracker
 from config import analysis_settings as settings
+
+builtins.json = json
 
 PUBLIC_DIR = Path(os.getenv("PUBLIC_DIR", "public"))
 NOTIFY_STATE_PATH = PUBLIC_DIR / "_notify_state.json"
