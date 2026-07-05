@@ -28,14 +28,25 @@ def freeze_time(dt_string: str, tz_offset: int = 0):
         def utcnow(cls):
             return frozen_utc.replace(tzinfo=None)
 
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            with patch("datetime.datetime", FrozenDateTime):
-                return func(*args, **kwargs)
+    class FrozenTime:
+        def __init__(self):
+            self._patch = patch("datetime.datetime", FrozenDateTime)
 
-        return wrapper
+        def __enter__(self):
+            self._patch.__enter__()
+            return self
+            
+        def __exit__(self, exc_type, exc, tb):
+            return self._patch.__exit__(exc_type, exc, tb)
 
-    return decorator
+        def __call__(self, func):
+            @wraps(func)
+            def wrapper(*args, **kwargs):
+                with self:
+                    return func(*args, **kwargs)
 
+            return wrapper
+
+    return FrozenTime()
+    
 __all__ = ["freeze_time"]
