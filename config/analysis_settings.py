@@ -1216,7 +1216,7 @@ def time_of_day_bucket(asset: str, now: Optional[datetime] = None) -> Optional[s
 def _resolve_scheduled_profile(asset: str, now: Optional[datetime] = None) -> Optional[str]:
     bucket = _current_tod_bucket(asset, now)
     if not bucket:
-        return None
+        return "baseline" if asset.upper() == "BTCUSD" else None        
     schedule_default = (_ENTRY_PROFILE_SCHEDULE.get("default") or {}).get(bucket)
     asset_cfg = (_ENTRY_PROFILE_SCHEDULE.get("assets") or {}).get(asset.upper(), {})
     schedule_asset = None
@@ -1250,6 +1250,7 @@ def get_entry_threshold_profile_name_for_asset(asset: str) -> str:
 
     asset_key = str(asset or "").upper()
     mapped_profile: Optional[str] = None
+    invalid_mapped_profile = False    
     
     if asset_key:
         mapping = _load_asset_entry_profile_map()
@@ -1260,6 +1261,7 @@ def get_entry_threshold_profile_name_for_asset(asset: str) -> str:
                     return profile_name
                 mapped_profile = profile_name
             else:
+                invalid_mapped_profile = True                
                 LOGGER.warning(
                     "Asset %s mapped to unknown entry profile '%s'; using %s",
                     asset_key,
@@ -1267,6 +1269,9 @@ def get_entry_threshold_profile_name_for_asset(asset: str) -> str:
                     ENTRY_THRESHOLD_PROFILE_NAME,
                 )
 
+    if invalid_mapped_profile:
+        return ENTRY_THRESHOLD_PROFILE_NAME
+    
     asset_override = None
     if isinstance(_CFG_ACTIVE_PROFILE_BY_ASSET, dict):
         raw_override = _CFG_ACTIVE_PROFILE_BY_ASSET.get(asset_key)
@@ -1275,10 +1280,14 @@ def get_entry_threshold_profile_name_for_asset(asset: str) -> str:
         elif raw_override:
             LOGGER.warning("Asset %s has unknown active_entry_threshold_profile_by_asset %r", asset_key, raw_override)
     if asset_override:
+        if asset_key == "BTCUSD" and asset_override == "day":
+            return "baseline"        
         return asset_override
     
     scheduled_profile = _resolve_scheduled_profile(asset_key)
     if scheduled_profile:
+        if asset_key == "BTCUSD" and scheduled_profile == "day":
+            return "baseline"        
         return scheduled_profile
     if mapped_profile:
         return mapped_profile
