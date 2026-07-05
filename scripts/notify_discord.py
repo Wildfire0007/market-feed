@@ -33,7 +33,11 @@ import position_tracker
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
 ENTRY_COOLDOWN_MINUTES = 30
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
-DISCORD_WEBHOOK_URLS = [url.strip() for url in os.getenv("DISCORD_WEBHOOK_URL", "").replace("\\n", ",").split(",") if url.strip()]
+def _webhook_urls(kind: str = "actionable") -> List[str]:
+    env = "DISCORD_WEBHOOK_URL_ACTIONABLE" if kind == "actionable" else "DISCORD_WEBHOOK_URL_DIAGNOSTIC"
+    raw = os.getenv(env) or os.getenv("DISCORD_WEBHOOK_URL", "")
+    return [url.strip() for url in raw.replace("\\n", ",").replace("\n", ",").split(",") if url.strip()]
+DISCORD_WEBHOOK_URLS = _webhook_urls("actionable")
 DEFAULT_DISCORD_NOTIFY_ASSETS = {"GOLD_CFD", "XAGUSD", "USOIL"}
 _DISCORD_NOTIFY_ASSETS_ENV = {p.strip().upper() for p in os.getenv("DISCORD_NOTIFY_ASSETS", "").split(",") if p.strip()}
 DISCORD_NOTIFY_ASSETS = (
@@ -417,7 +421,7 @@ def send_discord_embed(embed: Dict[str, Any]) -> bool:
     if DRY_RUN:
         NOTIFY_SUCCESSES += 1
         return True
-    urls = DISCORD_WEBHOOK_URLS or _collect_webhook_urls()
+    urls = _webhook_urls("actionable") or DISCORD_WEBHOOK_URLS or _collect_webhook_urls()        
     ok = False
     for idx, url in enumerate(urls):
         payloads = [{"embeds": [embed]}]
@@ -775,8 +779,9 @@ def check_and_notify() -> None:
             positions = {}
         pos = positions.get(asset_name) if isinstance(positions, dict) else None
         asset_state = notify_state.get(asset_name) or {}
-        if isinstance(pos, dict) and str(pos.get("status") or "").lower() == "pending":
-            continue
+        if isinstance(pos, dict) and str(pos.get("status") or "").lower() in {"pending", "open"}:
+            if str(pos.get("status") or "").lower() == "pending":
+                continue
         if isinstance(pos, dict) and str(pos.get("status") or "").lower() in {"open", "closed"}:
             lifecycle_sig = f"{pos.get('status')}:{pos.get('opened_at_utc') or pos.get('closed_at_utc') or pos.get('close_reason')}"
             if asset_state.get("last_lifecycle_signature") != lifecycle_sig:
