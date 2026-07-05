@@ -24,3 +24,12 @@ The management plan includes a force-close timestamp when the session close can 
 ## Probabilistic targets
 
 Targets, hit rates, and expectancy statistics are probabilistic validation aids. No output text encodes or implies an accuracy guarantee.
+
+## Notification lifecycle configuration
+
+`position_lifecycle.tp1_closes_position` closes tracked manual trades on TP1 with `tp1_closed`.
+`entry_validity_minutes` is the base pending-entry lifetime. When `entry_validity_atr_adaptive` is true, the worker scales it by median/current ATR5m, clamped to 25%-200%.
+`hard_exit.immediate_on` lists reasons that bypass hysteresis; `volatility_shock_atr5m_median_mult` defines ATR shock; `trend_reversal_requires.consecutive_runs` persists the confirmation counter.
+`ambiguous_bar_counts_as` controls same-bar SL/TP handling and defaults to `sl`.
+`state_unknown_max_age_minutes` controls stale heartbeat alerts, and `state_unknown_include_pending` can include pending orders.
+`daily_digest_utc` controls the one-per-day actionable digest time.
