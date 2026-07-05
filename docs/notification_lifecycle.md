@@ -1,0 +1,27 @@
+# Discord notification lifecycle
+
+Manual operators act only on actionable cards; silence means no action is required.
+
+```
+flat --ENTRY--> pending --price trades through entry--> open
+  ^              |                                      |
+  |              +--validity expires (silent)-----------+
+  |                                                     |
+  +-- CLOSE / HARD EXIT / TP1 closes position <---------+
+```
+
+ATR-adaptive pending validity uses `base_minutes * median_atr5m_20d / current_atr5m`, clamped to 25%-200% of the configured base.
+
+## Event → channel matrix
+
+| Event | Meaning | Channel |
+|---|---|---|
+| ENTRY | Open position card | ACTIONABLE |
+| BE / `tp1_hit` | Close/partial close and move SL to breakeven | ACTIONABLE |
+| CLOSE | SL, TP2 or session force-close | ACTIONABLE |
+| HARD EXIT | Macro lockout, volatility shock, or confirmed trend reversal | ACTIONABLE |
+| STATE UNKNOWN | Open position with stale heartbeat/data | ACTIONABLE |
+| Daily risk lockout | Daily lockout alert | ACTIONABLE |
+| Market scan, gates, heartbeat diagnostics, pipeline diagnostics | Informational only | DIAGNOSTIC |
+
+`DISCORD_WEBHOOK_URL_ACTIONABLE` and `DISCORD_WEBHOOK_URL_DIAGNOSTIC` are optional; if unset, both fall back to `DISCORD_WEBHOOK_URL`.
