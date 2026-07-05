@@ -198,7 +198,7 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
         connection.row_factory = sqlite3.Row
         try:
             rows = connection.execute(
-                "SELECT * FROM positions WHERE status IN ('OPEN', 'PENDING')"
+                "SELECT * FROM positions WHERE status IN ('OPEN', 'PENDING', 'CLOSED')"                
             ).fetchall()
         finally:
             connection.close()
@@ -216,10 +216,11 @@ def load_positions(path: str, treat_missing_as_flat: bool) -> Dict[str, Any]:
                     parsed = None
                 if isinstance(parsed, dict):
                     metadata = parsed
-            normalized_side = _normalize_position_side(metadata.get("side"))
-            if normalized_side is None and str(row["status"] or "").upper() == "OPEN":
+            row_status = str(row["status"] or "").upper()
+            normalized_side = None if row_status == "CLOSED" else _normalize_position_side(metadata.get("side"))
+            if normalized_side is None and row_status == "OPEN":
                 normalized_side = _normalize_position_side(metadata.get("direction"))
-            if normalized_side is None and str(row["status"] or "").upper() == "OPEN":
+            if normalized_side is None and row_status == "OPEN":
                 normalized_side = _infer_side_from_levels(row["entry_price"], row["sl"], tp_value)
 
             positions[asset] = {
