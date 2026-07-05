@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any
 
 import position_tracker
+import state_db
 
 
 class _ListHandler(logging.Handler):
@@ -17,6 +18,14 @@ class _ListHandler(logging.Handler):
 
 def _parse_lines(out: str):
     return [json.loads(line) for line in out.splitlines() if line.strip()]
+
+
+def _reset_audit_file_handler():
+    for handler in list(position_tracker.LOGGER.handlers):
+        if getattr(handler, "_manual_positions_audit_file", False):
+            position_tracker.LOGGER.removeHandler(handler)
+            handler.close()
+    position_tracker._FILE_LOGGER_ATTACHED = False
 
 
 def test_open_and_save_emit_audit_fields(capfd, tmp_path, monkeypatch):
@@ -101,3 +110,46 @@ def test_audit_includes_github_run_id(capfd, monkeypatch):
     entries = _parse_lines(merged)
     entries.extend(buffer)
     assert any(entry.get("gh_run_id") == "123456" for entry in entries)
+
+
+def test_audit_file_rotation_keeps_configured_count(tmp_path, monkeypatch):
+    _reset_audit_file_handler()
+    audit_path = tmp_path / "_manual_positions_audit.jsonl"
+    monkeypatch.setenv("MANUAL_POS_AUDIT_TO_FILE", "1")
+    monkeypatch.setenv("MANUAL_POS_AUDIT_FILE", str(audit_path))
+    monkeypatch.setattr(position_tracker, "_audit_rotation_limits", lambda: (80, 2))
+
+    position_tracker.set_audit_context(source="test", run_id="ROTATE")
+    for index in range(6):
+        position_tracker.log_audit_event("rotation probe", event="ROTATE_PROBE", index=index)
+
+    _reset_audit_file_handler()
+    assert audit_path.exists()
+    assert (tmp_path / "_manual_positions_audit.1.jsonl").exists()
+    assert (tmp_path / "_manual_positions_audit.2.jsonl").exists()
+    assert not (tmp_path / "_manual_positions_audit.3.jsonl").exists()
+
+
+def test_manual_positions_logger_setup_is_idempotent():
+    position_tracker._LOGGER_CONFIGURED = False
+    before = len(position_tracker.LOGGER.handlers)
+    position_tracker._configure_logger()
+    position_tracker._configure_logger()
+    assert len(position_tracker.LOGGER.handlers) == before
+
+
+def test_load_positions_emits_one_db_load_audit_record(tmp_path, monkeypatch):
+    _reset_audit_file_handler()
+    audit_path = tmp_path / "_manual_positions_audit.jsonl"
+    db_path = tmp_path / "trading.db"
+    state_db.initialize(db_path)
+    monkeypatch.setenv("MANUAL_POS_AUDIT_TO_FILE", "1")
+    monkeypatch.setenv("MANUAL_POS_AUDIT_FILE", str(audit_path))
+
+    position_tracker.set_audit_context(source="test", run_id="LOAD")
+    position_tracker._maybe_attach_file_handler()
+    position_tracker.load_positions(str(db_path), treat_missing_as_flat=False)
+
+    _reset_audit_file_handler()
+    records = [json.loads(line) for line in audit_path.read_text().splitlines() if line.strip()]
+    assert [record.get("event") for record in records].count("LOAD_POSITIONS_DB") == 1
