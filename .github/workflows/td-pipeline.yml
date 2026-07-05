@@ -164,13 +164,19 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p public
-          if curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions.json?ts=${GITHUB_RUN_ID}" -o public/_manual_positions.json; then
-            echo "manual positions restored from public"
-          else
+          if [ -z "${PUBLIC_BASE_URL:-}" ]; then
+            echo "PUBLIC_BASE_URL not set — skipping remote state load"
             echo '{}' > public/_manual_positions.json
-            echo "manual positions fallback created"
+            echo "STATE_LOADED=0" >> "$GITHUB_ENV"
+          else
+            if curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions.json?ts=${GITHUB_RUN_ID}" -o public/_manual_positions.json; then
+              echo "manual positions restored from public"
+            else
+              echo '{}' > public/_manual_positions.json
+              echo "manual positions fallback created"
+            fi
+            curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true
           fi
-          curl -fsSL -H "Cache-Control: no-cache" "${PUBLIC_BASE_URL}/_manual_positions_audit.jsonl?ts=${GITHUB_RUN_ID}" -o public/_manual_positions_audit.jsonl || true
 
       - name: Upload pipeline artifact bundle
         uses: actions/upload-artifact@v4
