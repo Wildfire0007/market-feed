@@ -2,9 +2,17 @@
 from __future__ import annotations
 
 import csv
+import json
+import os
+import sys
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+try:
+    import requests
+except Exception:  # pragma: no cover - optional runtime dependency
+    requests = None
 
 LOSS_OUTCOMES = {"stopped"}
 
@@ -26,6 +34,40 @@ def _day_start(now: datetime, boundary: str) -> datetime:
     start = datetime.combine(now.astimezone(timezone.utc).date(), time(hour, minute, tzinfo=timezone.utc))
     return start if now >= start else start - timedelta(days=1)
 
+
+
+def _notify_daily_lockout_once(state: Dict[str, Any], *, now: datetime) -> None:
+    urls = [u.strip() for u in os.getenv("DISCORD_WEBHOOK_URL", "").replace("\n", ",").split(",") if u.strip()]
+    if not urls or requests is None:
+        return
+    day = now.astimezone(timezone.utc).date().isoformat()
+    state_path = Path(os.getenv("RISK_LOCKOUT_NOTIFY_STATE", "public/monitoring/risk_lockout_notify_state.json"))
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+    except Exception:
+        payload = {}
+    if payload.get("last_notified_utc_day") == day:
+        return
+    msg = (
+        f"Napi kockázati lockout aktív ({day} UTC).\n"
+        f"Realizált PnL: {state.get('realized_pnl_usd')} USD\n"
+        f"Vesztes ügyletek: {state.get('losing_trades')} / címkézett: {state.get('labeled_trades')}\n"
+        f"Napi ablak kezdete: {state.get('day_start_utc')}"
+    )
+    embed = {"title": "⛔ Daily risk lockout", "description": msg, "color": 0xE74C3C}
+    sent = False
+    for url in urls:
+        try:
+            requests.post(url, json={"embeds": [embed]}, timeout=8)
+            sent = True
+        except Exception as exc:
+            print(f"Discord risk lockout alert failed: {exc}", file=sys.stderr)
+    if sent:
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps({"last_notified_utc_day": day, "last_notified_at_utc": now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")}, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
 def evaluate_daily_lockout(config: Dict[str, Any], journal_path: Path, *, now: datetime) -> Dict[str, Any]:
     """Compute today's labeled loss count/PnL and return a hard-lockout decision."""
@@ -58,4 +100,7 @@ def evaluate_daily_lockout(config: Dict[str, Any], journal_path: Path, *, now: d
                 if outcome in loss_outcomes or rr < 0:
                     losses += 1
     locked = pnl <= -float(cfg.get("daily_loss_limit_usd", 15) or 15) or losses >= int(cfg.get("daily_max_losing_trades", 2) or 2)
-    return {"enabled": True, "locked": locked, "day_start_utc": start.isoformat().replace("+00:00", "Z"), "realized_pnl_usd": round(pnl, 4), "losing_trades": losses, "labeled_trades": count}
+    result = {"enabled": True, "locked": locked, "day_start_utc": start.isoformat().replace("+00:00", "Z"), "realized_pnl_usd": round(pnl, 4), "losing_trades": losses, "labeled_trades": count}
+    if locked:
+        _notify_daily_lockout_once(result, now=now)
+    return result   
