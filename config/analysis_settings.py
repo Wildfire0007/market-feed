@@ -1089,6 +1089,7 @@ _MODE_PROFILE_MAP = {
 }
 _ENV_MODE_PROFILE = _MODE_PROFILE_MAP.get(_TRADING_MODE)
 _CFG_ACTIVE_PROFILE = _get_config_value("active_entry_threshold_profile")
+_CFG_ACTIVE_PROFILE_BY_ASSET = _get_config_value("active_entry_threshold_profile_by_asset") or {}
 _CFG_WEEKDAY_PROFILE = _get_config_value("weekday_entry_threshold_profile")
 _ENTRY_PROFILE_SCHEDULE = _get_config_value("entry_profile_schedule_by_tod") or {}
 
@@ -1266,6 +1267,16 @@ def get_entry_threshold_profile_name_for_asset(asset: str) -> str:
                     ENTRY_THRESHOLD_PROFILE_NAME,
                 )
 
+    asset_override = None
+    if isinstance(_CFG_ACTIVE_PROFILE_BY_ASSET, dict):
+        raw_override = _CFG_ACTIVE_PROFILE_BY_ASSET.get(asset_key)
+        if isinstance(raw_override, str) and raw_override in ENTRY_THRESHOLD_PROFILES:
+            asset_override = raw_override
+        elif raw_override:
+            LOGGER.warning("Asset %s has unknown active_entry_threshold_profile_by_asset %r", asset_key, raw_override)
+    if asset_override:
+        return asset_override
+    
     scheduled_profile = _resolve_scheduled_profile(asset_key)
     if scheduled_profile:
         return scheduled_profile
@@ -1777,10 +1788,21 @@ FUNDING_RATE_RULES: Dict[str, Any] = dict(_get_config_value("funding_rate_rules"
 
 
 def get_p_score_min(asset: str) -> float:
-    """Return the configured minimum P-score for the active profile."""
+    """Return the configured minimum P-score for the asset-resolved active profile."""
 
-    return P_SCORE_MIN_ASSET.get(asset, P_SCORE_MIN_DEFAULT)
+    asset_key = str(asset or "").upper()
+    profile = get_entry_threshold_profile_for_asset(asset_key)
+    score_map = profile.get("p_score_min", {})
+    return float(score_map.get(asset_key, score_map.get("default", P_SCORE_MIN_DEFAULT)))
+    
+def entry_profile_flag(asset: str, flag: str, default: bool = False) -> bool:
+    """Return a boolean flag from the raw resolved entry profile config."""
 
+    profile_name = get_entry_threshold_profile_name_for_asset(asset)
+    raw = _ENTRY_THRESHOLD_PROFILES_RAW.get(profile_name) or {}
+    if isinstance(raw, dict) and flag in raw:
+        return bool(raw.get(flag))
+    return default
 
 def is_momentum_asset(asset: str) -> bool:
     """Return ``True`` when ``asset`` participates in the momentum strategy."""
