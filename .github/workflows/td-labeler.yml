@@ -1,0 +1,43 @@
+name: TD Journal Labeler
+
+"on":
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: td-labeler-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  label_journal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.lock
+      - run: python -m pip install -r requirements.lock
+      - name: Label journal outcomes
+        run: python scripts/label_trades.py --update-journal --journal public/journal/trade_journal.csv --price-root public --summary public/journal/summary.json
+      - name: Commit journal labels
+        run: |
+          set -euo pipefail
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add public/journal/trade_journal.csv public/journal/summary.json
+          if git diff --cached --quiet; then
+            echo "No journal labels changed."
+            exit 0
+          fi
+          git commit -m "Update journal validation outcomes [skip ci]"
+          git push origin main
