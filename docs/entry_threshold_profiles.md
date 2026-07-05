@@ -85,3 +85,11 @@ A `precision_metal_oil` profil csak a kézi fókuszú `GOLD_CFD`, `XAGUSD` és
 `USOIL` eszközökre készült. A profil induló P-score értékei a frissített
 `reports/gate_tuning.md` frontier alapján hangolandók tovább; a soft penalty
 cap induló értéke `entry_logic.soft_penalty_cap = 12`.
+
+## Per-asset active profile overrides
+
+`active_entry_threshold_profile_by_asset` can override the global `active_entry_threshold_profile` for elected assets. GOLD_CFD, XAGUSD, and USOIL use `precision_metal_oil`; other assets continue to fall back to the global `day` profile unless explicitly overridden.
+
+`precision_metal_oil.choppy_hard_block=true` turns CHOPPY from a soft P-score penalty into a hard block or those three assets only while that profile is active.
+
+The GOLD_CFD/XAGUSD/USOIL entry windows are narrowed to 07:00–16:30 UTC in config. The 12:00–16:00 UTC London–NY overlap is the statistically preferred sub-window pending measurement from journal outcomes.
