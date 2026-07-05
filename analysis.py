@@ -32,6 +32,8 @@ LOCAL_TZ = ZoneInfo("Europe/Budapest")
 
 from logging_utils import ensure_json_file_handler
 from profit_target import build_profit_target_levels
+from risk_limits import evaluate_daily_lockout
+from trade_management import build_management_plan
 
 LOGGER = logging.getLogger(__name__)
 
@@ -330,6 +332,7 @@ from config.analysis_settings import (
     get_max_risk_pct,
     get_min_stoploss_pct,
     get_p_score_min,
+    entry_profile_flag,  
     get_realtime_price_guard,
     get_sl_buffer_config, 
     get_spread_max_atr_pct,
@@ -369,6 +372,7 @@ BTC_PROFILE_CONFIG: Dict[str, Any] = dict(
 
 SETTINGS: Dict[str, Any] = load_config()
 PROFIT_TARGET_CONFIG: Dict[str, Any] = dict(SETTINGS.get("profit_target") or {})
+TP1_MANAGEMENT_CONFIG: Dict[str, Any] = dict(SETTINGS.get("tp1_management") or {})
 SOFT_PENALTY_CAP: float = float((SETTINGS.get("entry_logic") or {}).get("soft_penalty_cap", 12.0) or 12.0)
 
 
@@ -13139,10 +13143,17 @@ def analyze(asset: str) -> Dict[str, Any]:
     if not metal_bias_5m_alignment_ok:
         reasons.append("Fém irány guard: 5m BOS irány ellentétes a belépési biasszal")
 
-    soft_penalty_score_before = float(P)  
+    soft_penalty_score_before = float(P)
     if not regime_ok and "regime" in conds_core:
-        P -= 10.0
-        reasons.append("Regime kapu: CHOPPY miatt −10 P-score, pozícióskálázás csökkentve")
+        if asset in {"GOLD_CFD", "XAGUSD", "USOIL"} and asset_entry_profile == "precision_metal_oil" and entry_profile_flag(asset, "choppy_hard_block"):
+            if "choppy_hard_block" not in critical_missing:
+                critical_missing.append("choppy_hard_block")
+            if "choppy_hard_block" not in missing:
+                missing.append("choppy_hard_block")
+            reasons.append("Regime kapu: CHOPPY hard block aktív a precision_metal_oil profilban")
+        else:
+            P -= 10.0
+            reasons.append("Regime kapu: CHOPPY miatt −10 P-score, pozícióskálázás csökkentve")
     if not atr_ok:
         P -= 5.0
         position_size_scale *= 0.5
@@ -15558,6 +15569,20 @@ def analyze(asset: str) -> Dict[str, Any]:
             momentum_trailing_plan = None
         else:
             entry, sl, tp1, tp2, rr = pt_result.entry, pt_result.sl, pt_result.tp1, pt_result.tp2, pt_result.rr_tp1
+
+    if decision in {"buy", "sell"}:
+        risk_state = evaluate_daily_lockout(SETTINGS, Path(PUBLIC_DIR) / "journal" / "trade_journal.csv", now=analysis_now)
+        entry_thresholds_meta["daily_risk_lockout"] = risk_state
+        if risk_state.get("locked"):
+            if "daily_risk_lockout" not in missing:
+                missing.append("daily_risk_lockout")
+            risk_reason = "Napi kockázati limit elérve — belépés tiltva a nap végéig"
+            if risk_reason not in reasons:
+                reasons.append(risk_reason)
+            decision = "no entry"
+            entry = sl = tp1 = tp2 = rr = None
+            execution_playbook = []
+            momentum_trailing_plan = None
   
     if decision in {"buy", "sell"} and not levels_match_direction(decision, entry, sl, tp1, tp2):
         if "direction_level_mismatch" not in missing:
@@ -15709,6 +15734,21 @@ def analyze(asset: str) -> Dict[str, Any]:
         "k5m": tf_meta.get("k5m"),
         "k1m": tf_meta.get("k1m"),
     }
+    management_plan = build_management_plan(
+        asset=asset,
+        side=decision,
+        entry=float(entry) if entry is not None else None,
+        tp1=float(tp1) if tp1 is not None else None,
+        tp2=float(tp2) if tp2 is not None else None,
+        config=TP1_MANAGEMENT_CONFIG,
+        asset_cost_model=ASSET_COST_MODEL,
+        default_cost_model=DEFAULT_COST_MODEL,
+        session_meta=session_meta,
+    )
+    if management_plan:
+        decision_obj["management"] = management_plan
+        execution_playbook.append({"step": "tp1_management", "description": " | ".join(management_plan.get("operator_instructions") or [])})
+  
     decision_obj["profile_resolution"] = profile_resolution
     decision_obj["effective_thresholds"] = effective_thresholds
     if news_lockout_active:
