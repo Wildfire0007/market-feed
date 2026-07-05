@@ -259,7 +259,7 @@ def main(argv: List[str] | None = None) -> int:
         notify_cmd.extend(args.notify_arg)
         _run_step("Discord notify", notify_cmd, optional=True)
 
-    if not args.skip_management_discord:
+    if not args.skip_discord and not args.skip_management_discord:
         _run_step(
             "Discord management notify",
             [python, "scripts/notify_management_discord.py"],
