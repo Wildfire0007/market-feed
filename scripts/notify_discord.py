@@ -99,7 +99,7 @@ class EntryAuditRecord:
         except Exception:
             pass
             
-
+            
 def _parse_utc(value: Any) -> Optional[datetime]:
     if not value:
         return None
@@ -422,7 +422,7 @@ def send_discord_embed(embed: Dict[str, Any]) -> bool:
     if DRY_RUN:
         NOTIFY_SUCCESSES += 1
         return True
-    urls = _webhook_urls("actionable") or DISCORD_WEBHOOK_URLS or _collect_webhook_urls()        
+    urls = _webhook_urls("actionable") or DISCORD_WEBHOOK_URLS or _collect_webhook_urls()
     ok = False
     for idx, url in enumerate(urls):
         payloads = [{"embeds": [embed]}]
@@ -432,13 +432,13 @@ def send_discord_embed(embed: Dict[str, Any]) -> bool:
             try:
                 resp = requests.post(url, json=payload, timeout=8) if requests else None
                 status = getattr(resp, "status_code", 204)
-                ok_status = _webhook_log_response(LOGGER, "notify_discord", "actionable", resp)                
+                ok_status = _webhook_log_response(LOGGER, "notify_discord", "actionable", resp)
                 _append_notify_event({"url_index": idx, "status": status})
                 if ok_status:
                     NOTIFY_SUCCESSES += 1
                     return True
             except Exception as exc:
-                _webhook_log_exception(LOGGER, "notify_discord", "actionable", exc)                
+                _webhook_log_exception(LOGGER, "notify_discord", "actionable", exc)
                 _append_notify_event({"url_index": idx, "error": repr(exc)})
     NOTIFY_FAILURES += 1
     return ok
@@ -457,7 +457,7 @@ def post_batches(hook: str, content: str, embeds: List[Dict[str, Any]], batch_si
             try:
                 resp = requests.post(hook, json=payload, timeout=8) if requests else None
                 status = getattr(resp, "status_code", 204)
-                _webhook_log_response(LOGGER, "notify_discord", "actionable", resp)                
+                _webhook_log_response(LOGGER, "notify_discord", "actionable", resp)
                 if status == 429:
                     retry = float(getattr(resp, "headers", {}).get("Retry-After", 1.0) or 1.0)
                     _WEBHOOK_COOLDOWN_UNTIL[hook] = time.time() + retry
@@ -468,7 +468,7 @@ def post_batches(hook: str, content: str, embeds: List[Dict[str, Any]], batch_si
                 success = 200 <= int(status) < 300
                 break
             except Exception as exc:
-                _webhook_log_exception(LOGGER, "notify_discord", "actionable", exc)                
+                _webhook_log_exception(LOGGER, "notify_discord", "actionable", exc)
                 error = str(exc)
                 break
         batch_results.append({"attempted": True, "success": success, "http_status": status, "error": error, "message_id": None, "batch_index": i // batch_size, "embed_count": len(batch)})
@@ -517,9 +517,9 @@ def _finalize_entry_commit(asset: str, pending: Dict[str, Any], dispatch_result:
         return manual_positions, manual_state, {"committed": True, "verified": bool(verified)}
     except Exception as exc:
         position_tracker.log_audit_event("entry commit failed", event="OPEN_COMMIT_FAILED", asset=asset, exception=repr(exc))
-        position_tracker.log_audit_event("entry dispatched but not committed", event="ENTRY_DISPATCHED_BUT_NOT_COMMITTED", asset=asset, exception=repr(exc))        
+        position_tracker.log_audit_event("entry dispatched but not committed", event="ENTRY_DISPATCHED_BUT_NOT_COMMITTED", asset=asset, exception=repr(exc))
         if audit: audit.commit_status = "commit_exception"
-        return manual_positions, position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt), {"committed": False, "error": repr(exc), "exception": repr(exc)}        
+        return manual_positions, position_tracker.compute_state(asset, tracking_cfg, manual_positions, now_dt), {"committed": False, "error": repr(exc), "exception": repr(exc)}
 
 
 def build_entry_gate_summary_embed(now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
@@ -560,16 +560,31 @@ def _coerce_price(value: Any) -> Optional[float]:
     return safe_float(value)
 
 
-def _operator_instruction_lines(signal_data: Dict[str, Any]) -> List[str]:
+def _operator_instruction_lines(signal_data: Dict[str, Any], *, size_units: Optional[float] = None, expiry_dt: Optional[datetime] = None) -> Li
     management = signal_data.get("management") if isinstance(signal_data, dict) else None
     instructions = signal_data.get("operator_instructions") if isinstance(signal_data, dict) else None
     if isinstance(management, dict):
         instructions = management.get("operator_instructions") or instructions
     if isinstance(instructions, str):
-        return [line.strip() for line in instructions.splitlines() if line.strip()]
-    if isinstance(instructions, list):
-        return [str(line).strip() for line in instructions if str(line).strip()]
-    return []
+        lines = [line.strip() for line in instructions.splitlines() if line.strip()]
+    elif isinstance(instructions, list):
+        lines = [str(line).strip() for line in instructions if str(line).strip()]
+    else:
+        lines = []
+    if isinstance(management, dict):
+        lifecycle_cfg = getattr(settings, "POSITION_LIFECYCLE", None) or getattr(settings, "position_lifecycle", None) or {}
+        tp1_closes = bool(management["tp1_closes_position"] if "tp1_closes_position" in management else lifecycle_cfg.get("tp1_closes_position", False))
+        if tp1_closes:
+            lines = [line for line in lines if "TP1 elérésénél" not in line and "TP1 után" not in line]
+            lines.insert(0, "TP1 elérésénél zárd a TELJES pozíciót.")
+        else:
+            partial = safe_float(management.get("partial_close_pct")) or 0.5
+            if size_units is not None:
+                units_partial = size_units * partial
+                lines = [line.replace(f"{partial:.0%}-át manuálisan.", f"{partial:.0%}-át (≈{units_partial:.2f} egység) manuálisan.") for line in lines]
+    if expiry_dt is not None:
+        lines.append(f"Ha {expiry_dt:%H:%M} UTC-ig nem töltődik, töröld a megbízást — külön értesítést is kapsz.")
+    return lines
 
 
 def _collect_channel_embeds(*, asset_embeds: Dict[str, Dict[str, Any]], asset_channels: Dict[str, str], watcher_embeds: List[Dict[str, Any]], auto_close_embeds: List[Dict[str, Any]], heartbeat_snapshots: List[Dict[str, Any]], gate_embed: Optional[Dict[str, Any]], pipeline_embed: Optional[Dict[str, Any]]):
@@ -610,7 +625,7 @@ def _apply_manual_position_transitions(
         return manual_positions, manual_state, False, False
     notify_meta = notify_meta or {}
     if intent == "entry" and decision in {"buy", "sell"}:
-        if not send_kind or not display_stable or notify_meta.get("reason") == "cooldown_active" or manual_state.get("has_position") or manual_state.get("pending_active") or manual_state.get("cooldown_active"):        
+        if not send_kind or not display_stable or notify_meta.get("reason") == "cooldown_active" or manual_state.get("has_position") or manual_state.get("pending_active") or manual_state.get("cooldown_active"):
             return manual_positions, manual_state, False, False
         entry, sl, tp1, tp2 = extract_trade_levels(signal_payload)
         position_tracker.log_audit_event(
@@ -622,7 +637,7 @@ def _apply_manual_position_transitions(
             manual_has_position=manual_state.get("has_position"), manual_cooldown_active=manual_state.get("cooldown_active"),
             entry_level=entry, sl=sl, tp1=tp1, tp2=tp2,
         )
-        updated = position_tracker.open_position(asset, "long" if decision == "buy" else "short", entry, sl, tp1, tp2, now_iso, positions=manual_positions)        
+        updated = position_tracker.open_position(asset, "long" if decision == "buy" else "short", entry, sl, tp1, tp2, now_iso, positions=manual_positions)
         return updated, position_tracker.compute_state(asset, tracking_cfg, updated, now_dt), True, True
     if intent == "hard_exit" and manual_state.get("has_position"):
         updated = position_tracker.close_position(asset, "hard_exit", now_iso, int(cooldown_default or 20), manual_positions)
@@ -767,7 +782,7 @@ def check_and_notify() -> None:
     notify_state = load_json(notify_state_path)
     notify_changed = False
 
-    for asset_dir in [d for d in PUBLIC_DIR.iterdir() if d.is_dir() and not d.name.startswith("_")]:    
+    for asset_dir in [d for d in PUBLIC_DIR.iterdir() if d.is_dir() and not d.name.startswith("_")]:
         asset_name = asset_dir.name
         if DISCORD_NOTIFY_ASSETS and asset_name.upper() not in DISCORD_NOTIFY_ASSETS:
             continue
@@ -800,14 +815,14 @@ def check_and_notify() -> None:
         signal = str(data.get("signal") or "no entry").lower()
         plan = data.get("precision_plan") if isinstance(data.get("precision_plan"), dict) else {}
         if signal == "no entry" and plan.get("trigger_state") == "fire":
-            signal = "precision_arming"        
+            signal = "precision_arming"
         if signal not in {"buy", "sell", "precision_arming"}:
             continue
 
         entry, sl, tp1, tp2 = safe_float(data.get("entry")), safe_float(data.get("sl")), safe_float(data.get("tp1")), safe_float(data.get("tp2"))
         order_type, direction = str(data.get("order_type") or "MARKET").upper(), signal
         
-        if signal == "precision_arming":            
+        if signal == "precision_arming":
             direction = str(plan.get("direction") or "buy").lower()
             order_type = str(plan.get("order_type") or "LIMIT").upper()
             entry = safe_float(plan.get("entry") or entry)
@@ -840,7 +855,8 @@ def check_and_notify() -> None:
         if not expected.get("passes") and ((asset_dir / "klines_1m.json").exists() or (asset_dir / "klines_5m.json").exists()):
             continue
 
-        units_text = f"{sl_risk_usd / abs(entry - sl):.2f} Egység (Units)" if abs(entry - sl) > 0 else "N/A"
+        size_units = sl_risk_usd / abs(entry - sl) if abs(entry - sl) > 0 else None
+        units_text = f"{size_units:.2f} Egység (Units)" if size_units is not None else "N/A"        
 
         entry_sig = f"{direction}_{order_type}"
 
@@ -857,11 +873,13 @@ def check_and_notify() -> None:
         p_score = safe_float(data.get("probability_raw"))
         reasons = "\n".join([f"• {_hu_reason(r)}" for r in (data.get("reasons") or [])[:2]]) or "• Rendszer jelzés"
         reasons_text = f"P Score: **{p_score:.1f}** (Erősség)\n{reasons}" if p_score else reasons
+        valid_minutes = safe_float(expected.get('valid_for_minutes'))
+        expiry_dt = now_dt + timedelta(minutes=valid_minutes or 0)        
         eta_text = (
             f"Gyors: `{_format_minutes(safe_float(expected.get('eta_minutes_fast')))}`\n"
             f"Normál: `{_format_minutes(safe_float(expected.get('eta_minutes_base')))}`\n"
             f"Konzervatív: `{_format_minutes(safe_float(expected.get('eta_minutes_conservative')))}`\n"
-            f"Jel érvényessége: `{_format_minutes(safe_float(expected.get('valid_for_minutes')))}`"
+            f"Jel érvényessége: `{_format_minutes(valid_minutes)}` (érvényes eddig: `{expiry_dt:%H:%M} UTC` / `{expiry_dt.astimezone(BUDAPEST_TZ):%H:%M} Budapest`)"
         )
         entry_limit_text = (
             f"Ne nyiss, ha spot > `{format_price(expected.get('max_entry_price'))}`"
@@ -878,9 +896,9 @@ def check_and_notify() -> None:
                 {"name": "🎯 Profit cél", "value": f"Várható nettó TP1: `+${tp1_net_usd:.2f}`\nMinimum: `${tp1_min_net_usd:.2f}`\nTőkeáttételes méret: `${expected.get('notional_usd'):.2f}`", "inline": False},
                 {"name": "⏱️ Várható idő TP1-ig", "value": eta_text, "inline": False},
                 {"name": "⚙️ Paraméterek az eToro-hoz", "value": f"MÉRET: `{units_text}` ({sl_risk_usd} USD kockázat)\nSL: `{format_price(sl)}`\nTP1: `{format_price(tp1)}`" + (f"\nTP2: `{format_price(tp2)}`" if tp2 else ""), "inline": False},
-                {"name": "🎯 Belépési pontosság", "value": f"Aktuális chase: `{expected.get('current_chase_r')}R`\n{entry_limit_text}", "inline": False},                
+                {"name": "🎯 Belépési pontosság", "value": f"Aktuális chase: `{expected.get('current_chase_r')}R`\n{entry_limit_text}", "inline": False},
                 {"name": "💡 Indoklás", "value": reasons_text, "inline": False},
-                *([{"name": "🧭 Kezelési terv", "value": "\n".join(f"• {line}" for line in _operator_instruction_lines(data))[:1024], "inline": False}] if _operator_instruction_lines(data) else []),                
+                *([{"name": "🧭 Kezelési terv", "value": "\n".join(f"• {line}" for line in _operator_instruction_lines(data, size_units=size_units, expiry_dt=expiry_dt))[:1024], "inline": False}] if _operator_instruction_lines(data, size_units=size_units, expiry_dt=expiry_dt) else []),
                 {"name": "🕒 Időbélyeg", "value": f"`{format_budapest_time(now_dt)}` (Budapest)", "inline": False},
             ],
             "footer": {"text": f"Signal • Budapest: {format_budapest_time(now_dt)} • Várakozás (30 perc csend indítva)"},
@@ -890,13 +908,13 @@ def check_and_notify() -> None:
         if sent_result is False:
             continue
 
-        try:            
+        try:
             manual_state = position_tracker.compute_state(asset_name, {"enabled": True}, positions, now_dt)
             if not manual_state.get("has_position") and not manual_state.get("pending_active"):
                 if signal == "precision_arming" and order_type != "MARKET":
                     positions = position_tracker.register_precision_pending_position(asset_name, data, now_dt, positions)
                 else:
-                    positions = position_tracker.open_position(asset_name, "long" if direction == "buy" else "short", entry, sl, tp1, tp2, to_utc_iso(now_dt), positions=positions)                    
+                    positions = position_tracker.open_position(asset_name, "long" if direction == "buy" else "short", entry, sl, tp1, tp2, to_utc_iso(now_dt), positions=positions)
                 if not DRY_RUN:
                     position_tracker.save_positions_atomic(positions_path, positions)
         except Exception:
@@ -917,7 +935,9 @@ def check_and_notify() -> None:
             "tp1": tp1,
             "tp2": tp2,
             "entry_signature": entry_sig,
-            "expected_trade_outcome": expected,    
+            "expected_trade_outcome": expected,
+            "management": data.get("management") if isinstance(data.get("management"), dict) else {},
+            "size_units": size_units,    
         })
 
     if notify_changed and not DRY_RUN:
