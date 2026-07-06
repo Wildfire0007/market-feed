@@ -14,12 +14,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
+import logging
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 requests = importlib.import_module("requests") if importlib.util.find_spec("requests") else None
+from scripts.webhook_delivery import log_exception as _webhook_log_exception, log_response as _webhook_log_response
+LOGGER = logging.getLogger(__name__)
 BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -185,9 +188,10 @@ def _send_embed(embed: Dict[str, Any]) -> None:
         return
     for url in urls:
         try:
-            requests.post(url, json={"embeds": [embed]}, timeout=5)
-        except Exception:
-            pass
+            resp = requests.post(url, json={"embeds": [embed]}, timeout=5)
+            _webhook_log_response(LOGGER, "notify_management_discord", "actionable", resp)
+        except Exception as exc:
+            _webhook_log_exception(LOGGER, "notify_management_discord", "actionable", exc)            
 
 
 def _load_open_positions() -> Dict[str, Dict[str, Any]]:
