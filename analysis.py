@@ -15599,6 +15599,22 @@ def analyze(asset: str) -> Dict[str, Any]:
                 missing.append("profit_target_feasibility")
             if pt_result.reason and pt_result.reason not in missing:
                 missing.append(pt_result.reason)
+            pt_meta = pt_result.meta or {}
+            _append_gate_gap_log([
+                {
+                    "asset": asset,
+                    "kapu": "profit_target_feasibility",
+                    "profil": entry_thresholds_meta.get("profile"),
+                    "required_move": pt_meta.get("required_gross_move"),
+                    "atr1h": pt_meta.get("atr1h_pct"),
+                    "ceiling": pt_meta.get("required_move_atr1h_ceiling"),
+                    "érték": pt_meta.get("required_gross_move"),
+                    "küszöb": pt_meta.get("required_move_atr1h_ceiling"),
+                    "rés": pt_meta.get("required_move_over_ceiling"),
+                    "ok": False,
+                    "timestamp_utc": to_utc_iso(analysis_now),
+                }
+            ])              
             reasons.append("Profit target infeasible: TP1/SL/volatilitási korlát ütközik")
             decision = "no entry"
             entry = sl = tp1 = tp2 = rr = None
