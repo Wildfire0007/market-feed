@@ -5,8 +5,11 @@ import argparse
 import json
 import os
 import sys
+import logging
 
 import requests
+from scripts.webhook_delivery import log_exception as _webhook_log_exception, log_response as _webhook_log_response
+LOGGER = logging.getLogger(__name__)
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,8 +42,10 @@ def main() -> int:
     embed = {"title": "⚠️ TD pipeline heartbeat stale", "description": msg, "color": 0xE74C3C}
     for url in urls:
         try:
-            requests.post(url, json={"embeds": [embed]}, timeout=8)
+            resp = requests.post(url, json={"embeds": [embed]}, timeout=8)
+            _webhook_log_response(LOGGER, "heartbeat_watchdog", "diagnostic", resp)            
         except Exception as exc:
+            _webhook_log_exception(LOGGER, "heartbeat_watchdog", "diagnostic", exc)            
             print(f"Discord alert failed: {exc}", file=sys.stderr)
     return 1
 
