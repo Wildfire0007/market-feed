@@ -107,3 +107,35 @@ def test_invalid_session_status_profile_fallback(monkeypatch):
         assert settings.SESSION_STATUS_PROFILE_NAME == "default"
     finally:
         _reload_for_status_profile(monkeypatch, None)
+
+
+def test_session_closed_signal_label_distinguishes_entry_window(monkeypatch):
+    _, analysis_module = _reload_for_status_profile(
+        monkeypatch, None, forced_now=datetime(2026, 7, 6, 17, 0, tzinfo=timezone.utc)
+    )
+    try:
+        for asset in ("GOLD_CFD", "XAGUSD", "USOIL"):
+            entry_open, info = analysis_module.session_state(
+                asset, now=datetime(2026, 7, 6, 17, 0, tzinfo=timezone.utc)
+            )
+            assert entry_open is False
+            assert info["market_open"] is True
+            assert analysis_module.session_closed_signal_label(info) == "entry window closed"
+    finally:
+        _reload_for_status_profile(monkeypatch, None)
+
+
+def test_session_closed_signal_label_keeps_weekend_market_closed(monkeypatch):
+    _, analysis_module = _reload_for_status_profile(
+        monkeypatch, None, forced_now=datetime(2026, 7, 4, 17, 0, tzinfo=timezone.utc)
+    )
+    try:
+        for asset in ("GOLD_CFD", "XAGUSD", "USOIL"):
+            entry_open, info = analysis_module.session_state(
+                asset, now=datetime(2026, 7, 4, 17, 0, tzinfo=timezone.utc)
+            )
+            assert entry_open is False
+            assert info["market_open"] is False
+            assert analysis_module.session_closed_signal_label(info) == "market closed"
+    finally:
+        _reload_for_status_profile(monkeypatch, None)        
