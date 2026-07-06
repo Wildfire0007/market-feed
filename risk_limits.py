@@ -5,9 +5,13 @@ import csv
 import json
 import os
 import sys
+import logging
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from scripts.webhook_delivery import log_exception as _webhook_log_exception, log_response as _webhook_log_response
+LOGGER = logging.getLogger(__name__)
 
 try:
     import requests
@@ -59,9 +63,10 @@ def _notify_daily_lockout_once(state: Dict[str, Any], *, now: datetime) -> None:
     sent = False
     for url in urls:
         try:
-            requests.post(url, json={"embeds": [embed]}, timeout=8)
-            sent = True
+            resp = requests.post(url, json={"embeds": [embed]}, timeout=8)
+            sent = _webhook_log_response(LOGGER, "risk_limits", "actionable", resp) or sent
         except Exception as exc:
+            _webhook_log_exception(LOGGER, "risk_limits", "actionable", exc)            
             print(f"Discord risk lockout alert failed: {exc}", file=sys.stderr)
     if sent:
         try:
