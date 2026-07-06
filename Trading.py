@@ -142,7 +142,19 @@ TD_PAUSE_MAX = float(os.getenv("TD_PAUSE_MAX", str(max(TD_PAUSE * 6, 4.0))))
 TD_MAX_RETRIES = int(os.getenv("TD_MAX_RETRIES", "3"))
 TD_BACKOFF_BASE = float(os.getenv("TD_BACKOFF_BASE", str(max(TD_PAUSE, 0.25))))
 TD_BACKOFF_MAX = float(os.getenv("TD_BACKOFF_MAX", "8.0"))
-TD_REQUESTS_PER_MINUTE = max(10, _env_int("TD_REQUESTS_PER_MINUTE", 55))
+def _config_int(key: str, default: int) -> int:
+    try:
+        cfg_path = Path(os.getenv("ANALYSIS_CONFIG_FILE", "config/analysis_settings.json"))
+        if cfg_path.exists():
+            value = (json.loads(cfg_path.read_text(encoding="utf-8")) or {}).get(key)
+            if value is not None:
+                return int(float(value))
+    except Exception:
+        pass
+    return default
+
+
+TD_REQUESTS_PER_MINUTE = max(10, _env_int("TD_REQUESTS_PER_MINUTE", _config_int("td_calls_per_minute_max", 45)))
 TD_REQUEST_BURST = max(1, _env_int("TD_REQUEST_BURST", min(10, TD_REQUESTS_PER_MINUTE)))
 TD_RESPONSE_CACHE_TTL = max(5.0, float(os.getenv("TD_RESPONSE_CACHE_TTL", "90")))
 REALTIME_FLAG = os.getenv("TD_REALTIME_SPOT", "0").lower() in {"1", "true", "yes", "on"}
@@ -2041,9 +2053,19 @@ def td_get(path: str, **params) -> Dict[str, Any]:
                     response.status_code if response is not None else None
                 )
                 last_status = effective_status
-                if error_code in {400, 404, 422}:
+                if throttled:
+                    LOGGER.warning(
+                        "Twelve Data 429/rate-limit response on %s attempt %d/%d: %s",
+                        path,
+                        attempt,
+                        TD_MAX_RETRIES,
+                        message,
+                    )
+                if error_code in {400, 404, 422} and not throttled:              
                     raise td_error
                 if attempt == TD_MAX_RETRIES:
+                    if throttled and cached_response:
+                        break                  
                     raise td_error
             else:
                 TD_RATE_LIMITER.record_success()
@@ -2056,6 +2078,14 @@ def td_get(path: str, **params) -> Dict[str, Any]:
             if exc.response is not None:
                 retry_after_hint = _parse_retry_after(exc.response.headers.get("Retry-After"))
             throttled = last_status in {429, 503}
+            if last_status == 429:
+                LOGGER.warning(
+                    "Twelve Data HTTP 429 on %s attempt %d/%d; retry_after=%s",
+                    path,
+                    attempt,
+                    TD_MAX_RETRIES,
+                    retry_after_hint,
+                )          
             cache_ready = bool(throttled and cached_response)
             TD_RATE_LIMITER.record_failure(
                 throttled=throttled,
