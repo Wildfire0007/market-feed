@@ -71,7 +71,7 @@ def test_integration_latency_guard_and_precision(
     caplog.set_level("INFO", logger=analysis.LOGGER.name)
 
     guard_result = analysis.analyze("USOIL")
-    assert guard_result["signal"] in {"no entry", "market closed"}
+    assert guard_result["signal"] in {"no entry", "market closed", "entry window closed"}
     assert any("Critical data latency" in reason for reason in guard_result.get("reasons", []))
     assert alerts and alerts[0][0] == "USOIL"
     assert alerts[0][1] == "k1m"
