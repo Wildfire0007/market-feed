@@ -13,6 +13,8 @@ import json
 import os
 import sys
 import fcntl
+import importlib
+import importlib.util
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -22,6 +24,9 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from config import analysis_settings as settings
+from scripts.webhook_delivery import log_exception as _webhook_log_exception, log_response as _webhook_log_response
+
+requests = importlib.import_module("requests") if importlib.util.find_spec("requests") else None
 
 BASE_DIR = Path(__file__).resolve().parent
 PUBLIC_DIR = Path(os.getenv("NOTIFY_PUBLIC_DIR", "")) if os.getenv("NOTIFY_PUBLIC_DIR") else BASE_DIR / "public"
@@ -31,6 +36,7 @@ if not PUBLIC_DIR.exists() and (BASE_DIR.parent / "public").exists():
 LOCK_PATH = PUBLIC_DIR / ".position_lifecycle.lock"
 INBOX_PATH = PUBLIC_DIR / "_position_lifecycle_inbox.jsonl"
 STATE_PATH = PUBLIC_DIR / "_position_lifecycle_state.json"
+EXPIRY_NOTIFY_STATE_PATH = PUBLIC_DIR / "_position_expiry_notify_state.json"
 CLOSE_STATES = {"hard_exit", "stop_loss_hit", "take_profit_hit", "take_profit_2_hit", "closed"}
 
 
@@ -75,6 +81,53 @@ def save_json(path: Path, payload: Dict[str, Any]) -> None:
         pass
 
 
+
+def _webhook_urls() -> list[str]:
+    raw = os.getenv("DISCORD_WEBHOOK_URL_ACTIONABLE") or os.getenv("DISCORD_WEBHOOK_URL", "")
+    return [url.strip() for url in raw.replace("\\n", ",").replace("\n", ",").split(",") if url.strip()]
+
+
+def _position_key(asset: str, pos: Dict[str, Any]) -> str:
+    return f"{asset}|{pos.get('pending_since_utc') or pos.get('updated_at_utc') or ''}|{pos.get('entry')}|{pos.get('order_type')}"
+
+
+def _send_expiry_cancel_alert(asset: str, pos: Dict[str, Any], now: datetime) -> bool:
+    side = str(pos.get("side") or "").lower()
+    direction = "BUY" if side == "long" else "SELL"
+    side_label = "LONG" if side == "long" else "SHORT"
+    order_type = str(pos.get("order_type") or "LIMIT").upper()
+    embed = {
+        "title": "❌ JEL LEJÁRT – TÖRÖLD A MEGBÍZÁST",
+        "color": 0xE74C3C,
+        "fields": [
+            {"name": "Eszköz", "value": f"`{asset}`", "inline": True},
+            {"name": "Irány", "value": f"`{side_label}`", "inline": True},
+            {"name": "Megbízás", "value": f"`{order_type} @ {pos.get('entry')}`", "inline": True},
+            {"name": "Utasítás", "value": f"Töröld a függő {asset} {direction} {order_type} megbízást a brókernél most — a jel érvényessége lejárt.", "inline": False},
+            {"name": "🕒 Időbélyeg", "value": f"`{to_utc_iso(now)}` UTC", "inline": False},
+        ],
+    }
+    sent = False
+    for url in _webhook_urls():
+        if requests is None:
+            continue
+        try:
+            resp = requests.post(url, json={"embeds": [embed]}, timeout=8)
+            sent = _webhook_log_response(__import__("logging").getLogger(__name__), "position_lifecycle", "actionable", resp) or sent
+        except Exception as exc:
+            _webhook_log_exception(__import__("logging").getLogger(__name__), "position_lifecycle", "actionable", exc)
+    return sent
+
+
+def _notify_expired_once(asset: str, pos: Dict[str, Any], now: datetime) -> None:
+    st = load_json(EXPIRY_NOTIFY_STATE_PATH)
+    key = _position_key(asset, pos)
+    if st.get(key):
+        return
+    if _send_expiry_cancel_alert(asset, pos, now):
+       st[key] = to_utc_iso(now)
+        save_json(EXPIRY_NOTIFY_STATE_PATH, st)
+    
 def _read_inbox_new_lines(path: Path, last_line: int) -> tuple[list[Dict[str, Any]], int]:
     if not path.exists():
         return [], last_line
@@ -148,7 +201,7 @@ def _close(pos: Dict[str, Any], reason: str, now: datetime, *, outcome: Optional
 def process() -> None:
     if not PUBLIC_DIR.exists():
         return
-    cfg = _cfg()        
+    cfg = _cfg()
     state = load_json(STATE_PATH)
     meta = state.get("_meta") if isinstance(state.get("_meta"), dict) else {}
     positions = state.get("positions") if isinstance(state.get("positions"), dict) else {}
@@ -166,11 +219,12 @@ def process() -> None:
         if direction not in {"buy", "sell"}:
             continue
         ts = str(evt.get("ts_utc") or to_utc_iso(now_dt))
-        positions[asset] = {"status": "open" if order_type == "MARKET" else "pending", "side": "long" if direction == "buy" else "short", "entry": safe_float(evt.get("entry")), "sl": safe_float(evt.get("sl")), "tp1": safe_float(evt.get("tp1")), "tp2": safe_float(evt.get("tp2")), "order_type": order_type, "source_signal": str(evt.get("signal") or ""), "entry_signature": str(evt.get("entry_signature") or ""), "pending_since_utc": ts if order_type != "MARKET" else None, "updated_at_utc": ts, "opened_at_utc": ts if order_type == "MARKET" else None}    
+        mgmt = evt.get("management") if isinstance(evt.get("management"), dict) else {}
+        positions[asset] = {"status": "open" if order_type == "MARKET" else "pending", "side": "long" if direction == "buy" else "short", "entry": safe_float(evt.get("entry")), "sl": safe_float(evt.get("sl")), "tp1": safe_float(evt.get("tp1")), "tp2": safe_float(evt.get("tp2")), "order_type": order_type, "source_signal": str(evt.get("signal") or ""), "entry_signature": str(evt.get("entry_signature") or ""), "pending_since_utc": ts if order_type != "MARKET" else None, "updated_at_utc": ts, "opened_at_utc": ts if order_type == "MARKET" else None, "size_units": safe_float(evt.get("size_units")), "breakeven_sl": safe_float(mgmt.get("breakeven_sl")), "partial_close_pct": safe_float(mgmt.get("partial_close_pct")), "tp1_closes_position": bool(cfg.get("tp1_closes_position", True))}          
 
     hard_cfg = cfg.get("hard_exit", {}) if isinstance(cfg.get("hard_exit"), dict) else {}
     immediate_on = set(hard_cfg.get("immediate_on") or [])
-    ambiguous_as = str(cfg.get("ambiguous_bar_counts_as", "sl")).lower()    
+    ambiguous_as = str(cfg.get("ambiguous_bar_counts_as", "sl")).lower()
     for asset_dir in sorted([d for d in PUBLIC_DIR.iterdir() if d.is_dir() and not d.name.startswith("_")], key=lambda p: p.name):
         asset, pos = asset_dir.name, positions.get(asset_dir.name)
         if not isinstance(pos, dict) or str(pos.get("status") or "").lower() in {"", "closed"}:
@@ -186,6 +240,7 @@ def process() -> None:
                 since = parse_utc(pos.get("pending_since_utc") or pos.get("updated_at_utc")) or now_dt
                 if now_dt - since >= timedelta(minutes=_validity_minutes(signal, cfg)):
                     pos.update({"status": "closed", "close_reason": "expired", "outcome": "expired", "closed_at_utc": to_utc_iso(now_dt), "updated_at_utc": to_utc_iso(now_dt)})
+                    _notify_expired_once(asset, pos, now_dt)                    
             positions[asset] = pos
             continue
         exit_signal = signal.get("position_exit_signal") if isinstance(signal.get("position_exit_signal"), dict) else signal.get("exit_signal")
