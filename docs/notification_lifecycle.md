@@ -33,4 +33,4 @@ ATR-adaptive pending validity uses `base_minutes * median_atr5m_20d / current_at
 ## Notify state preservation and webhook audit
 The TD notify job refreshes `public/` from the analysis artifact, so notify-owned state is saved before `rm -rf public` and restored after artifact download. The saved paths include the daily digest dedup file, state-unknown guard state, risk lockout notify state, management/lifecycle state, lifecycle inbox, and notify lock files.
 
-Webhook delivery attempts from notification scripts append JSON lines to `public/monitoring/webhook_delivery.jsonl` with `ts_utc`, `script`, `channel_kind`, `status`, and `ok`. The file is rotated when it grows beyond the helper cap.
+Webhook delivery attempts from notification scripts append JSON lines to `public/monitoring/webhook_delivery.jsonl` with `ts_utc`, `script`, `channel_kind`, `status`, and `ok`. The file is rotated according to `webhook_delivery_log.max_mb` (MiB threshold, default 5) and `webhook_delivery_log.keep_files` (rotated files retained, default 1).
