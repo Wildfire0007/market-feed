@@ -50,6 +50,69 @@ def pytest_ignore_collect(collection_path, config):
     return False
 
 
+
+
+def _public_snapshot(root: Path):
+    if not root.exists():
+        return None
+    return {
+        path.relative_to(root): (path.stat().st_mtime_ns, path.stat().st_size)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+def pytest_sessionstart(session):
+    session.config._public_guard_tmp = session.config.cache.mkdir("isolated_public")
+    import os
+    os.environ.setdefault("NOTIFY_PUBLIC_DIR", str(session.config._public_guard_tmp))
+    os.environ.setdefault("PUBLIC_DIR", str(session.config._public_guard_tmp))
+    os.environ.setdefault("MANUAL_POS_AUDIT_FILE", str(session.config._public_guard_tmp / "_manual_positions_audit.jsonl"))
+    session.config._public_guard_root = PROJECT_ROOT / "public"
+    session.config._public_guard_snapshot = _public_snapshot(session.config._public_guard_root)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    before = getattr(session.config, "_public_guard_snapshot", None)
+    if before is None:
+        return
+    root = getattr(session.config, "_public_guard_root", PROJECT_ROOT / "public")
+    after = _public_snapshot(root) or {}
+    created = sorted(after.keys() - before.keys())
+    deleted = sorted(before.keys() - after.keys())
+    modified = sorted(path for path in before.keys() & after.keys() if before[path] != after[path])
+    offenders = [*(f"created: {path}" for path in created), *(f"modified: {path}" for path in modified), *(f"deleted: {path}" for path in deleted)]
+    if offenders:
+        raise pytest.UsageError("Tests changed files under public/:\n" + "\n".join(offenders))
+
+
+@pytest.fixture(autouse=True)
+def isolate_public_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    public_dir = tmp_path / "public"
+    monkeypatch.setenv("NOTIFY_PUBLIC_DIR", str(public_dir))
+    monkeypatch.setenv("PUBLIC_DIR", str(public_dir))
+    monkeypatch.setenv("MANUAL_POS_AUDIT_FILE", str(public_dir / "_manual_positions_audit.jsonl"))
+    try:
+        import state_db
+        monkeypatch.setattr(state_db, "DEFAULT_DB_PATH", tmp_path / "trading.db")
+    except Exception:
+        pass
+    module = sys.modules.get("analysis")
+    if module is not None:
+        monkeypatch.setattr(module, "PUBLIC_DIR", str(public_dir), raising=False)
+        monkeypatch.setattr(module, "ENTRY_GATE_LOG_DIR", public_dir / "debug" / "entry_gates", raising=False)
+        monkeypatch.setattr(module, "ENTRY_GATE_STATS_PATH", public_dir / "debug" / "entry_gate_stats.json", raising=False)
+        monkeypatch.setattr(module, "ENTRY_GATE_GAP_LOG_PATH", public_dir / "debug" / "entry_gate_gap_log.jsonl", raising=False)
+    for module_name in ("scripts.notify_discord", "scripts.notify_management_discord"):
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        monkeypatch.setattr(module, "PUBLIC_DIR", public_dir, raising=False)
+        monkeypatch.setattr(module, "ENTRY_GATE_STATS_PATH", public_dir / "monitoring" / "entry_gate_stats.json", raising=False)
+        monkeypatch.setattr(module, "ENTRY_GATE_LOG_DIR", public_dir / "debug" / "entry_gates", raising=False)
+        monkeypatch.setattr(module, "MANAGEMENT_DIAG_PATH", public_dir / "debug" / "management_notify_events.jsonl", raising=False)
+        monkeypatch.setattr(module, "LIFECYCLE_INBOX_PATH", public_dir / "_position_lifecycle_inbox.jsonl", raising=False)
+
 @pytest.fixture
 def fixed_now():
     return datetime(2024, 1, 10, 15, 0, tzinfo=timezone.utc)
@@ -67,8 +130,20 @@ def analysis_module(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fixed_now: 
                 return fixed_now.replace(tzinfo=None)
             return fixed_now.astimezone(tz)
 
+    public_dir = tmp_path    
     monkeypatch.setattr(analysis, "datetime", FixedDateTime)
-    monkeypatch.setattr(analysis, "PUBLIC_DIR", str(tmp_path))
+    monkeypatch.setattr(analysis, "PUBLIC_DIR", str(public_dir))
+    monkeypatch.setattr(analysis, "ENTRY_GATE_LOG_DIR", public_dir / "debug" / "entry_gates", raising=False)
+    monkeypatch.setattr(analysis, "ENTRY_GATE_STATS_PATH", public_dir / "debug" / "entry_gate_stats.json", raising=False)
+    monkeypatch.setattr(analysis, "ENTRY_GATE_GAP_LOG_PATH", public_dir / "debug" / "entry_gate_gap_log.jsonl", raising=False)
+    lifecycle = dict(getattr(analysis, "POSITION_LIFECYCLE", {}) or {})
+    lifecycle["positions_file"] = str(public_dir / "trading.db")
+    lifecycle["pending_exit_file"] = str(public_dir / "trading.db")
+    monkeypatch.setattr(analysis, "POSITION_LIFECYCLE", lifecycle, raising=False)
+    if isinstance(getattr(analysis, "SETTINGS", None), dict):
+        settings_copy = dict(analysis.SETTINGS)
+        settings_copy["position_lifecycle"] = lifecycle
+        monkeypatch.setattr(analysis, "SETTINGS", settings_copy, raising=False)    
     return analysis
 
 
