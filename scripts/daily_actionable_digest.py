@@ -33,7 +33,17 @@ def _journal_today(journal: Path, day: str):
                 sent += 1
                 outcome=str(r.get('validation_outcome') or '').strip().lower()
                 if outcome: outcomes[outcome]=outcomes.get(outcome,0)+1
-    return sent,outcomes    
+    return sent,outcomes
+def _entry_cards_today(path: Path, day: str):
+    count=0
+    if path.exists():
+        for line in path.read_text(encoding='utf-8').splitlines():
+            try: row=json.loads(line)
+            except Exception: continue
+            script=str(row.get('script') or '')
+            ok=bool(row.get('ok'))
+            if script=='notify_discord' and ok and _same_utc_day(row.get('ts_utc'), day): count += 1
+    return count                    
 def main():
     cfg=getattr(settings,'POSITION_LIFECYCLE',{}) or {}; now=datetime.now(timezone.utc); day=now.date().isoformat()
     hh,mm=[int(x) for x in str(cfg.get('daily_digest_utc','20:30')).split(':')[:2]]
@@ -45,9 +55,11 @@ def main():
     expired=sum(1 for p in lifecycle.values() if isinstance(p,dict) and str(p.get('close_reason')).lower()=='expired' and _same_utc_day(p.get('closed_at_utc'), day))
     journal=PUBLIC/'journal'/'trade_journal.csv'
     sent_count,outcomes=_journal_today(journal, day)
+    entry_cards=_entry_cards_today(PUBLIC/'monitoring'/'webhook_delivery.jsonl', day)    
     risk_cfg=load(ROOT/'config'/'analysis_settings.json')
     pnl=compute_daily_labeled_pnl(risk_cfg, journal, now=now)
-    desc=(f"Mai jelzések: {sent_count} kiküldött / {expired} lejárt\n"
+    desc=(f"Mai jelzés-jelöltek: {sent_count} / {expired} lejárt\n"
+          f"Kiküldött ENTRY kártyák: {entry_cards}\n"
           f"Realizált napi PnL: ${pnl.get('realized_pnl_usd',0.0):.2f} (vesztes ügyletek: {pnl.get('losing_trades',0)})\n\n"
           f"Aktív/pending pozíciók:\n"+("\n".join(active) or 'nincs')+f"\n\nKimenetek: {outcomes or 'N/A'}")
     embed={'title':f'📋 Napi actionable összefoglaló – {day} UTC','description':desc,'color':0x3498DB}
