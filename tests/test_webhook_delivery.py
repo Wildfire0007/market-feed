@@ -25,17 +25,31 @@ def test_webhook_delivery_jsonl_populated(tmp_path, monkeypatch):
 
 
 def test_daily_digest_state_written_only_on_success(tmp_path, monkeypatch):
+    (tmp_path / "journal").mkdir()
+    (tmp_path / "journal" / "trade_journal.csv").write_text("analysis_timestamp,asset\n2026-07-06T20:00:00Z,GOLD_CFD\n", encoding="utf-8")
+    (tmp_path / "monitoring").mkdir()
+    (tmp_path / "monitoring" / "webhook_delivery.jsonl").write_text(json.dumps({"ts_utc":"2026-07-06T20:10:00Z","script":"notify_discord","ok":True}) + "\n", encoding="utf-8")
+    payloads = []    
     monkeypatch.setattr(daily_actionable_digest, "PUBLIC", tmp_path)
     monkeypatch.setattr(daily_actionable_digest, "STATE", tmp_path / "monitoring" / "daily_digest_state.json")
     monkeypatch.setattr(daily_actionable_digest, "urls", lambda: ["https://hook"])
     monkeypatch.setattr(daily_actionable_digest.settings, "POSITION_LIFECYCLE", {"daily_digest_utc": "00:00"}, raising=False)
-    monkeypatch.setattr(daily_actionable_digest, "datetime", mock.Mock(now=lambda tz=None: datetime(2026, 7, 6, 21, 0, tzinfo=timezone.utc)))
+    monkeypatch.setattr(daily_actionable_digest, "datetime", mock.Mock(
+        now=lambda tz=None: datetime(2026, 7, 6, 21, 0, tzinfo=timezone.utc),
+        fromisoformat=datetime.fromisoformat,
+    ))    
     with mock.patch("scripts.daily_actionable_digest.requests.post", return_value=Resp(500)):
         assert daily_actionable_digest.main() == 0
     assert not daily_actionable_digest.STATE.exists()
-    with mock.patch("scripts.daily_actionable_digest.requests.post", return_value=Resp(200)):
+    def post(_url, json, timeout):
+        payloads.append(json)
+        return Resp(200)
+    with mock.patch("scripts.daily_actionable_digest.requests.post", side_effect=post):
         assert daily_actionable_digest.main() == 0
     assert daily_actionable_digest.STATE.exists()
+    desc = payloads[-1]["embeds"][0]["description"]
+    assert "Mai jelzés-jelöltek: 1" in desc
+    assert "Kiküldött ENTRY kártyák: 1" in desc    
 
 
 def test_webhook_delivery_rotates_by_configured_size(tmp_path, monkeypatch):
