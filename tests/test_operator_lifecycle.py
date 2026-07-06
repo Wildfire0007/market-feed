@@ -70,3 +70,19 @@ def test_hard_exit_hysteresis_and_volatility_shock(tmp_path, monkeypatch):
     _write(lc.STATE_PATH, {"positions":{"GOLD_CFD":{"status":"open","side":"long","entry":2300,"sl":2290,"tp1":2310}}})
     _write(tmp_path / "GOLD_CFD" / "signal.json", {"atr":{"atr5m":4,"atr5m_median_20d":1}})
     lc.process(); assert json.loads(lc.STATE_PATH.read_text())["positions"]["GOLD_CFD"]["close_detail"] == "volatility_shock"
+
+
+def test_expired_pending_dispatches_cancel_alert_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(lc, "PUBLIC_DIR", tmp_path)
+    monkeypatch.setattr(lc, "INBOX_PATH", tmp_path / "_position_lifecycle_inbox.jsonl")
+    monkeypatch.setattr(lc, "STATE_PATH", tmp_path / "_position_lifecycle_state.json")
+    monkeypatch.setattr(lc, "EXPIRY_NOTIFY_STATE_PATH", tmp_path / "_position_expiry_notify_state.json")
+    monkeypatch.setattr(lc, "_cfg", lambda: {"entry_validity_minutes": 1, "entry_validity_atr_adaptive": False})
+    sent=[]
+    monkeypatch.setattr(lc, "_send_expiry_cancel_alert", lambda asset, pos, now: sent.append((asset,pos.copy())) or True)
+    lc.INBOX_PATH.write_text(json.dumps({"event":"entry_signal","ts_utc":"2026-07-05T10:00:00Z","asset":"XAGUSD","direction":"buy","order_type":"LIMIT","entry":30,"sl":29,"tp1":31})+'\n', encoding='utf-8')
+    _write(tmp_path / "XAGUSD" / "signal.json", {"spot":{"price":30.5}})
+    with freeze_time("2026-07-05T10:02:00Z"):
+        lc.process(); lc.process()
+    assert len(sent) == 1
+    assert sent[0][0] == "XAGUSD"
