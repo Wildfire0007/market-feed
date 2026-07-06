@@ -108,6 +108,7 @@ def _ensure_db_initialized(db_path: Optional[Path] = None) -> None:
     target_path = db_path or state_db.DEFAULT_DB_PATH
     if _DB_INITIALIZED and _DB_PATH == target_path:
         return
+    target_path.parent.mkdir(parents=True, exist_ok=True)        
     state_db.initialize(target_path)
     _DB_INITIALIZED = True
     _DB_PATH = target_path
@@ -131,6 +132,10 @@ def resolve_repo_path(path: str, start: Optional[Path] = None) -> Path:
     candidate = Path(path)
     if candidate.is_absolute():
         return candidate
+    if candidate.parts and candidate.parts[0] == "public":
+        public_override = os.getenv("NOTIFY_PUBLIC_DIR") or os.getenv("PUBLIC_DIR")
+        if public_override:
+            return (Path(public_override) / Path(*candidate.parts[1:])).resolve()        
 
     repo_root = _find_repo_root(start=start)
     return (repo_root / candidate).resolve()
