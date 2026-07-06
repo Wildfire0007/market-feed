@@ -33,3 +33,9 @@ Targets, hit rates, and expectancy statistics are probabilistic validation aids.
 `ambiguous_bar_counts_as` controls same-bar SL/TP handling and defaults to `sl`.
 `state_unknown_max_age_minutes` controls stale heartbeat alerts, and `state_unknown_include_pending` can include pending orders.
 `daily_digest_utc` controls the one-per-day actionable digest time.
+
+## TP1 feasibility horizon
+
+`profit_target.max_required_move_atr1h_mult` caps the required gross TP1 move against 1h ATR. The cap is `2.4` because the operator TP1 horizon is 1–4 hours, and diffusive scaling makes the reachable move approximately `ATR1h × sqrt(t)`. A 1h-ATR × 1.2 cap structurally rejects normal-volatility sessions; on 2026-07-06 GOLD_CFD had ATR1h ≈ 0.353% while the required move was ≈ 0.56%.
+
+When the feasibility gate blocks an entry, the gap log records the required move, ATR1h percentage, and ceiling so the calibration can be measured from `public/debug/entry_gate_gap_log.jsonl`.
