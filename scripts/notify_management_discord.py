@@ -157,29 +157,44 @@ def _event_triggered(event: str, side: str, spot: Optional[float], pos: Dict[str
     return False
 
 
-def _build_embed(event: str, asset: str, side: str, entry: Any, spot: Any, reason: str) -> Dict[str, Any]:
-    now_dt = datetime.now(timezone.utc)    
+def _pnl_usd(side: str, entry: Any, spot: Any, units: Any) -> Optional[float]:
+    entry_f, spot_f, units_f = safe_float(entry), safe_float(spot), safe_float(units)
+    if entry_f is None or spot_f is None or units_f is None:
+        return None
+    return (spot_f - entry_f) * units_f * (1 if side == "long" else -1)
+
+
+def _build_embed(event: str, asset: str, side: str, pos: Dict[str, Any], spot: Any, reason: str) -> Dict[str, Any]:
+    now_dt = datetime.now(timezone.utc)
+    entry = pos.get("entry")
+    units = safe_float(pos.get("size_units"))
+    pnl = _pnl_usd(side, entry, spot, units)
     side_label = "LONG" if side == "long" else "SHORT"
-    presets = {
-        "tp1_hit": ("🟠 RÉSZZÁRÁS (TP1) ELÉRVE!", "Zárd a pozíciót TP1-en / húzd a Stop-Loss-t nullába a konfiguráció szerint.", COLOR_ORANGE),        
-        "tp2_hit": ("🟢 CÉLÁR ELÉRVE!", "Pozíció nyereségben lezárva.", COLOR_GREEN),
-        "sl_hit": ("🔴 STOP LOSS KIÜTVE!", "Pozíció veszteségben lezárva.", COLOR_RED),
-        "hard_exit": ("🔴 AZONNAL ZÁRD A POZÍCIÓT! (Hard Exit)", f"Ok: {reason or 'Hard exit jelzés'}", COLOR_RED),
-    }
-    title, description, color = presets[event]
-    return {
-        "title": title,
-        "description": description,
-        "color": color,
-        "fields": [
-            {"name": "Eszköz", "value": f"`{asset}`", "inline": True},
-            {"name": "Irány", "value": f"`{side_label}`", "inline": True},
-            {"name": "Eredeti Belépő", "value": f"`{format_price(entry)}`", "inline": True},
-            {"name": "Aktuális Spot Ár", "value": f"`{format_price(spot)}`", "inline": True},
-            {"name": "🕒 Időbélyeg", "value": f"`{format_budapest_time(now_dt)}` (Budapest)", "inline": False},
-        ],
-        "footer": {"text": f"Management Notify • Budapest: {format_budapest_time(now_dt)} • Anti-spam aktív"},
-    }
+    if event == "tp1_hit" and bool(pos.get("tp1_closes_position", True)):
+        title, description, color = "🟢 TP1 ELÉRVE – ZÁRD A TELJES POZÍCIÓT", f"Zárd a teljes {asset} {side_label} pozíciót piaci áron most. Elért ár: {format_price(spot)}.", COLOR_GREEN
+    elif event == "tp1_hit":
+        partial = safe_float(pos.get("partial_close_pct")) or 0.5
+        units_partial = units * partial if units is not None else None
+        title, description, color = "🟠 TP1 ELÉRVE – RÉSZZÁRÁS + BE", f"Zárd a pozíció {partial:.0%}-át ({format_price(units_partial)} egység), majd állítsd az SL-t erre: {format_price(pos.get('breakeven_sl'))}. A maradék runner célja: TP2 = {format_price(pos.get('tp2'))}.", COLOR_ORANGE
+    elif event == "tp2_hit":
+        title, description, color = "🟢 CÉLÁR ELÉRVE – ZÁRD A POZÍCIÓT", f"Zárd a {asset} pozíciót piaci áron most. Becsült realizált PnL: ${pnl:.2f}." if pnl is not None else f"Zárd a {asset} pozíciót piaci áron most. Becsült realizált PnL: N/A.", COLOR_GREEN
+    elif event == "sl_hit":
+        title, description, color = "🔴 STOP LOSS SZINT ELÉRVE – ZÁRD A POZÍCIÓT", f"Ha az SL nem volt beállítva a brókernél, zárd piaci áron most. Becsült PnL: ${pnl:.2f}." if pnl is not None else "Ha az SL nem volt beállítva a brókernél, zárd piaci áron most. Becsült PnL: N/A.", COLOR_RED
+    else:
+        title, description, color = "🔴 AZONNAL ZÁRD A POZÍCIÓT! (Hard Exit)", "Zárd a pozíciót piaci áron most.", COLOR_RED
+    fields = [
+        {"name": "Eszköz", "value": f"`{asset}`", "inline": True},
+        {"name": "Irány", "value": f"`{side_label}`", "inline": True},
+        {"name": "Eredeti Belépő", "value": f"`{format_price(entry)}`", "inline": True},
+        {"name": "Aktuális Spot Ár", "value": f"`{format_price(spot)}`", "inline": True},
+    ]
+    if event == "hard_exit":
+        fields.extend([
+            {"name": "Becsült PnL", "value": f"`${pnl:.2f}`" if pnl is not None else "`N/A`", "inline": True},
+            {"name": "Ok", "value": f"`{reason or 'Hard exit jelzés'}`", "inline": False},
+        ])
+    fields.append({"name": "🕒 Időbélyeg", "value": f"`{format_budapest_time(now_dt)}` (Budapest)", "inline": False})
+    return {"title": title, "description": description, "color": color, "fields": fields, "footer": {"text": f"Management Notify • Budapest: {format_budapest_time(now_dt)} • Anti-spam aktív"}}    
 
 
 def _send_embed(embed: Dict[str, Any]) -> None:
@@ -273,7 +288,7 @@ def process() -> None:
                 continue
             if not _event_triggered(event, side, spot, pos, exit_state):
                 continue
-            _send_embed(_build_embed(event, asset, side, pos.get("entry"), spot, exit_reason))
+            _send_embed(_build_embed(event, asset, side, pos, spot, exit_reason))
             sent_events[event] = now_iso
             sent_now.append(event)
             notify_changed = True
