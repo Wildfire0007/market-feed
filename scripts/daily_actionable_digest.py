@@ -62,4 +62,8 @@ def main():
     if sent:
         STATE.parent.mkdir(parents=True,exist_ok=True); STATE.write_text(json.dumps({'last_digest_utc_day':day,'sent_at_utc':now.isoformat().replace('+00:00','Z')},indent=2),encoding='utf-8')        
     return 0
-if __name__=='__main__': raise SystemExit(main())
+if __name__=='__main__':
+    if any(arg in {'-h', '--help'} for arg in sys.argv[1:]):
+        print('usage: daily_actionable_digest.py [--help]')
+        raise SystemExit(0)
+    raise SystemExit(main())
