@@ -36,3 +36,23 @@ def test_daily_digest_state_written_only_on_success(tmp_path, monkeypatch):
     with mock.patch("scripts.daily_actionable_digest.requests.post", return_value=Resp(200)):
         assert daily_actionable_digest.main() == 0
     assert daily_actionable_digest.STATE.exists()
+
+
+def test_webhook_delivery_rotates_by_configured_size(tmp_path, monkeypatch):
+    public_dir = tmp_path / "public"
+    settings = tmp_path / "analysis_settings.json"
+    settings.write_text(json.dumps({"webhook_delivery_log": {"max_mb": 0.0001, "keep_files": 1}}), encoding="utf-8")
+    path = public_dir / "monitoring" / "webhook_delivery.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("x" * 256, encoding="utf-8")
+    monkeypatch.setenv("NOTIFY_PUBLIC_DIR", str(public_dir))
+    monkeypatch.setenv("ANALYSIS_SETTINGS_PATH", str(settings))
+
+    record("unit", "diagnostic", 200, True)
+
+    rotated = public_dir / "monitoring" / "webhook_delivery.1.jsonl"
+    assert rotated.exists()
+    assert rotated.read_text(encoding="utf-8") == "x" * 256
+    rows = path.read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 1
+    assert json.loads(rows[0])["script"] == "unit"    
