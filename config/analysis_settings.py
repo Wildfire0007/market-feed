@@ -319,6 +319,7 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
         proxy_targets = {str(proxy).upper() for proxy in raw_proxies.values() if proxy}
         
     valid_assets: List[str] = []
+    invalid_requested_assets: Set[str] = set()    
     issues: List[str] = []
 
     for asset in assets:
@@ -346,6 +347,7 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
             issues.append(
                 f"Asset {asset_key} missing {', '.join(missing_fields)}. {'; '.join(hints)}."
             )
+            invalid_requested_assets.add(asset_key)            
             continue
 
         valid_assets.append(asset_key)
@@ -386,21 +388,15 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
     config: Dict[str, Any] = dict(raw)
     config["assets"] = valid_assets
     config["leverage"] = leverage_map
-    config["session_windows_utc"] = _build_session_windows(
-        {asset: session_windows.get(asset, {}) for asset in valid_assets}
-    )
-    config["session_time_rules"] = _build_session_time_rules(
-        {asset: session_time_rules.get(asset, {}) for asset in valid_assets}
-    )
+    # Keep inactive per-asset timing metadata available for tests, diagnostics,
+    # and quick re-enable paths; only config["assets"] controls active analysis.
+    config["session_windows_utc"] = _build_session_windows(session_windows)
+    config["session_time_rules"] = _build_session_time_rules(session_time_rules)   
     config["ema_slope_sign_enforced"] = set(raw.get("ema_slope_sign_enforced", []))
-    filtered_momentum_assets = {asset for asset in momentum_assets if asset in valid_asset_set}
-    removed_momentum = momentum_assets - filtered_momentum_assets
-    if removed_momentum:
-        LOGGER.warning(
-            "Dropping momentum flags for assets removed during validation: %s",
-            sorted(removed_momentum),
-        )
-    config["enable_momentum_assets"] = filtered_momentum_assets
+    if os.getenv(_ENV_OVERRIDE):
+        config["enable_momentum_assets"] = {asset for asset in momentum_assets if asset in valid_asset_set}
+    else:
+        config["enable_momentum_assets"] = momentum_assets - invalid_requested_assets
     config["manual_trade_model"] = _normalize_manual_trade_model(
         raw.get("manual_trade_model")
     )
@@ -2131,10 +2127,9 @@ def describe_entry_threshold_profile(profile_name: Optional[str] = None) -> Dict
             for asset, value in raw_map.items()
             if asset != "default"
         }
-        by_asset = {
-            asset: float(raw_map.get(asset, default_value))
-            for asset in ASSETS
-        }
+        by_asset = {asset: float(raw_map.get(asset, default_value)) for asset in ASSETS}
+        for asset, value in overrides.items():
+            by_asset.setdefault(asset, float(value))
         return {
             "default": default_value,
             "overrides": overrides,
