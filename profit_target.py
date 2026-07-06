@@ -64,6 +64,17 @@ def build_profit_target_levels(
 
     if entry <= 0:
         return ProfitTargetResult(False, "profit_target_infeasible", entry, None, None, None, None, meta)
+    if atr1h is not None and atr1h > 0:
+        atr1h_pct = float(atr1h) / entry
+        ceiling = max_atr1h_mult * atr1h_pct
+        meta.update({
+            "atr1h_pct": atr1h_pct,
+            "max_required_move_atr1h_mult": max_atr1h_mult,
+            "required_move_atr1h_ceiling": ceiling,
+            "required_move_over_ceiling": required_gross_move - ceiling,
+        })
+        if required_gross_move > ceiling:
+            return ProfitTargetResult(False, "profit_target_infeasible", entry, None, None, None, None, meta)        
     if atr1h is not None and atr1h > 0 and required_gross_move > max_atr1h_mult * (float(atr1h) / entry):
         meta["atr1h_pct"] = float(atr1h) / entry
         meta["max_required_move_atr1h_mult"] = max_atr1h_mult
