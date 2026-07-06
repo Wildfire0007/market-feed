@@ -75,11 +75,9 @@ def _notify_daily_lockout_once(state: Dict[str, Any], *, now: datetime) -> None:
         except Exception:
             pass
 
-def evaluate_daily_lockout(config: Dict[str, Any], journal_path: Path, *, now: datetime) -> Dict[str, Any]:
-    """Compute today's labeled loss count/PnL and return a hard-lockout decision."""
-    cfg = config.get("risk_limits") or {}
-    if not cfg.get("enabled", False):
-        return {"locked": False, "enabled": False}
+def compute_daily_labeled_pnl(config: Dict[str, Any], journal_path: Path, *, now: datetime) -> Dict[str, Any]:
+    """Compute today's labeled loss count/PnL using the risk-lockout rules."""
+    cfg = config.get("risk_limits") or {}    
     scope = {str(a).upper() for a in cfg.get("lockout_scope", [])}
     start = _day_start(now.astimezone(timezone.utc), str(cfg.get("day_boundary_utc", "00:00")))
     losses = 0
@@ -105,8 +103,17 @@ def evaluate_daily_lockout(config: Dict[str, Any], journal_path: Path, *, now: d
                 pnl += rr * 10.0
                 if outcome in loss_outcomes or rr < 0:
                     losses += 1
-    locked = pnl <= -float(cfg.get("daily_loss_limit_usd", 15) or 15) or losses >= int(cfg.get("daily_max_losing_trades", 2) or 2)
-    result = {"enabled": True, "locked": locked, "day_start_utc": start.isoformat().replace("+00:00", "Z"), "realized_pnl_usd": round(pnl, 4), "losing_trades": losses, "labeled_trades": count}
+    return {"day_start_utc": start.isoformat().replace("+00:00", "Z"), "realized_pnl_usd": round(pnl, 4), "losing_trades": losses, "labeled_trades": count}
+
+
+def evaluate_daily_lockout(config: Dict[str, Any], journal_path: Path, *, now: datetime) -> Dict[str, Any]:
+    """Compute today's labeled loss count/PnL and return a hard-lockout decision."""
+    cfg = config.get("risk_limits") or {}
+    if not cfg.get("enabled", False):
+        return {"locked": False, "enabled": False}
+    metrics = compute_daily_labeled_pnl(config, journal_path, now=now)
+    locked = metrics["realized_pnl_usd"] <= -float(cfg.get("daily_loss_limit_usd", 15) or 15) or metrics["losing_trades"] >= int(cfg.get("daily_max_losing_trades", 2) or 2)
+    result = {"enabled": True, "locked": locked, **metrics}    
     if locked:
         _notify_daily_lockout_once(result, now=now)
     return result   
