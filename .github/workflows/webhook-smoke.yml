@@ -1,0 +1,26 @@
+name: Webhook smoke test
+on: workflow_dispatch
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    env:
+      URL_ACTIONABLE: ${{ secrets.DISCORD_WEBHOOK_URL_ACTIONABLE }}
+      URL_DIAGNOSTIC: ${{ secrets.DISCORD_WEBHOOK_URL_DIAGNOSTIC }}
+      URL_BASE: ${{ secrets.DISCORD_WEBHOOK_URL }}
+    steps:
+      - name: POST test messages via secrets
+        run: |
+          for name in URL_ACTIONABLE URL_DIAGNOSTIC URL_BASE; do
+            raw="${!name}"
+            if [ -z "$raw" ]; then echo "$name: NINCS BEALLITVA (secret ures vagy nevelteres)"; continue; fi
+            i=0
+            echo "$raw" | tr ',' '\n' | while read -r u; do
+              u="$(echo "$u" | tr -d '[:space:]')"
+              [ -z "$u" ] && continue
+              i=$((i+1))
+              code=$(curl -s -o /tmp/resp -w "%{http_code}" -H "Content-Type: application/json" \
+                -d "{\"content\":\"Smoke test: $name #$i, $(date -u +%FT%TZ)\"}" "$u")
+              echo "$name #$i -> HTTP $code"
+              if [ "$code" != "204" ]; then echo "valasz: $(head -c 200 /tmp/resp)"; fi
+            done
+          done
