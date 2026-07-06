@@ -100,3 +100,22 @@ def test_management_live_quote_fallback_unblocks_tp_sl(monkeypatch, tmp_path: Pa
     assert summary["event"] == "management_eval"
     assert summary["spot_fresh"] is True
     assert summary["sent_events"] == ["tp2_hit"]
+
+
+def test_tp1_embed_full_close_and_partial_numeric(monkeypatch, tmp_path: Path):
+    module = _load_module(monkeypatch, tmp_path)
+    full = module._build_embed("tp1_hit", "XAGUSD", "long", {"entry": 30, "tp1_closes_position": True, "size_units": 10}, 31, "")
+    assert full["title"] == "🟢 TP1 ELÉRVE – ZÁRD A TELJES POZÍCIÓT"
+    assert "Zárd a teljes XAGUSD LONG pozíciót" in full["description"]
+    partial = module._build_embed("tp1_hit", "XAGUSD", "long", {"entry": 30, "tp1_closes_position": False, "partial_close_pct": 0.5, "size_units": 10, "breakeven_sl": 30.02, "tp2": 32}, 31, "")
+    assert partial["title"] == "🟠 TP1 ELÉRVE – RÉSZZÁRÁS + BE"
+    assert "50%-át (5.00000 egység)" in partial["description"]
+    assert "30.02" in partial["description"]
+
+
+def test_close_embed_estimated_pnl_math(monkeypatch, tmp_path: Path):
+    module = _load_module(monkeypatch, tmp_path)
+    embed = module._build_embed("tp2_hit", "BTCUSD", "long", {"entry": 100, "size_units": 2}, 105, "")
+    assert "Becsült realizált PnL: $10.00" in embed["description"]
+    sl = module._build_embed("sl_hit", "BTCUSD", "short", {"entry": 100, "size_units": 3}, 102, "")
+    assert "Becsült PnL: $-6.00" in sl["description"]    
