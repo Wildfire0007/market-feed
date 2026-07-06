@@ -72,4 +72,8 @@ def main() -> int:
         DEDUP.parent.mkdir(parents=True, exist_ok=True)
         DEDUP.write_text(json.dumps(dedup, ensure_ascii=False, indent=2), encoding="utf-8")
     return 0
-if __name__ == "__main__": raise SystemExit(main())
+if __name__ == "__main__":
+    if any(arg in {'-h', '--help'} for arg in sys.argv[1:]):
+        print('usage: state_unknown_guard.py [--help]')
+        raise SystemExit(0)
+    raise SystemExit(main())
