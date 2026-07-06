@@ -208,7 +208,7 @@ def _load_open_positions() -> Dict[str, Dict[str, Any]]:
     try:
         import position_tracker
 
-        tracked = position_tracker.load_positions("public/trading.db", treat_missing_as_flat=True)
+        tracked = position_tracker.load_positions(str(PUBLIC_DIR / "trading.db"), treat_missing_as_flat=True)
         return {
             asset: pos
             for asset, pos in tracked.items()
