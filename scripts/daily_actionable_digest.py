@@ -9,6 +9,7 @@ except Exception: requests=None
 ROOT=Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path: sys.path.insert(0,str(ROOT))
 from config import analysis_settings as settings
+from risk_limits import compute_daily_labeled_pnl
 from scripts.webhook_delivery import log_exception as _webhook_log_exception, log_response as _webhook_log_response
 LOGGER=logging.getLogger(__name__)
 PUBLIC=Path(os.getenv("NOTIFY_PUBLIC_DIR","public")); STATE=PUBLIC/"monitoring"/"daily_digest_state.json"
@@ -18,6 +19,21 @@ def load(p):
 def urls():
     raw=os.getenv('DISCORD_WEBHOOK_URL_ACTIONABLE') or os.getenv('DISCORD_WEBHOOK_URL','')
     return [u.strip() for u in raw.replace('\n',',').split(',') if u.strip()]
+def _parse_utc(v):
+    try: return datetime.fromisoformat(str(v).replace('Z','+00:00')).astimezone(timezone.utc)
+    except Exception: return None
+def _same_utc_day(v, day):
+    ts=_parse_utc(v); return ts is not None and ts.date().isoformat()==day
+def _journal_today(journal: Path, day: str):
+    outcomes={}; sent=0
+    if journal.exists():
+        with journal.open(newline='',encoding='utf-8') as fh:
+            for r in csv.DictReader(fh):
+                if not _same_utc_day(r.get('analysis_timestamp'), day): continue
+                sent += 1
+                outcome=str(r.get('validation_outcome') or '').strip().lower()
+                if outcome: outcomes[outcome]=outcomes.get(outcome,0)+1
+    return sent,outcomes    
 def main():
     cfg=getattr(settings,'POSITION_LIFECYCLE',{}) or {}; now=datetime.now(timezone.utc); day=now.date().isoformat()
     hh,mm=[int(x) for x in str(cfg.get('daily_digest_utc','20:30')).split(':')[:2]]
@@ -26,10 +42,15 @@ def main():
     if st.get('last_digest_utc_day')==day: return 0
     lifecycle=load(PUBLIC/'_position_lifecycle_state.json').get('positions') or {}
     active=[f"{a}: {p.get('status')} @ {p.get('entry')}" for a,p in lifecycle.items() if isinstance(p,dict) and str(p.get('status')).lower() in {'open','pending'}]
-    outcomes={}; journal=Path('reports/trade_journal_labeled.csv')
-    if journal.exists():
-        for r in csv.DictReader(journal.open(encoding='utf-8')): outcomes[r.get('validation_outcome','')]=outcomes.get(r.get('validation_outcome',''),0)+1
-    embed={'title':f'📋 Napi actionable összefoglaló – {day} UTC','description':f"Aktív/pending pozíciók:\n"+("\n".join(active) or 'nincs')+f"\n\nKimenetek: {outcomes or 'N/A'}",'color':0x3498DB}
+    expired=sum(1 for p in lifecycle.values() if isinstance(p,dict) and str(p.get('close_reason')).lower()=='expired' and _same_utc_day(p.get('closed_at_utc'), day))
+    journal=PUBLIC/'journal'/'trade_journal.csv'
+    sent_count,outcomes=_journal_today(journal, day)
+    risk_cfg=load(ROOT/'config'/'analysis_settings.json')
+    pnl=compute_daily_labeled_pnl(risk_cfg, journal, now=now)
+    desc=(f"Mai jelzések: {sent_count} kiküldött / {expired} lejárt\n"
+          f"Realizált napi PnL: ${pnl.get('realized_pnl_usd',0.0):.2f} (vesztes ügyletek: {pnl.get('losing_trades',0)})\n\n"
+          f"Aktív/pending pozíciók:\n"+("\n".join(active) or 'nincs')+f"\n\nKimenetek: {outcomes or 'N/A'}")
+    embed={'title':f'📋 Napi actionable összefoglaló – {day} UTC','description':desc,'color':0x3498DB}
     sent=False    
     for u in urls():
         if requests:
