@@ -29,6 +29,7 @@ BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
 from config import analysis_settings as settings
 from scripts.reset_notify_state import build_default_state, _default_asset_state
 import position_tracker
+from scripts.webhook_delivery import log_exception as _webhook_log_exception, log_response as _webhook_log_response
 
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
 ENTRY_COOLDOWN_MINUTES = 30
@@ -431,11 +432,13 @@ def send_discord_embed(embed: Dict[str, Any]) -> bool:
             try:
                 resp = requests.post(url, json=payload, timeout=8) if requests else None
                 status = getattr(resp, "status_code", 204)
+                ok_status = _webhook_log_response(LOGGER, "notify_discord", "actionable", resp)                
                 _append_notify_event({"url_index": idx, "status": status})
-                if 200 <= int(status) < 300:
+                if ok_status:
                     NOTIFY_SUCCESSES += 1
                     return True
             except Exception as exc:
+                _webhook_log_exception(LOGGER, "notify_discord", "actionable", exc)                
                 _append_notify_event({"url_index": idx, "error": repr(exc)})
     NOTIFY_FAILURES += 1
     return ok
@@ -454,6 +457,7 @@ def post_batches(hook: str, content: str, embeds: List[Dict[str, Any]], batch_si
             try:
                 resp = requests.post(hook, json=payload, timeout=8) if requests else None
                 status = getattr(resp, "status_code", 204)
+                _webhook_log_response(LOGGER, "notify_discord", "actionable", resp)                
                 if status == 429:
                     retry = float(getattr(resp, "headers", {}).get("Retry-After", 1.0) or 1.0)
                     _WEBHOOK_COOLDOWN_UNTIL[hook] = time.time() + retry
@@ -464,6 +468,7 @@ def post_batches(hook: str, content: str, embeds: List[Dict[str, Any]], batch_si
                 success = 200 <= int(status) < 300
                 break
             except Exception as exc:
+                _webhook_log_exception(LOGGER, "notify_discord", "actionable", exc)                
                 error = str(exc)
                 break
         batch_results.append({"attempted": True, "success": success, "http_status": status, "error": error, "message_id": None, "batch_index": i // batch_size, "embed_count": len(batch)})
