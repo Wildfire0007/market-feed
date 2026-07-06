@@ -27,7 +27,8 @@ jobs:
     env:
       TZ: UTC
       OUT_DIR: public
-      TD_PAUSE: "8"
+      TD_PAUSE: "2"
+      TD_ASSET_FILTER: "GOLD_CFD,XAGUSD,USOIL"
       TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
       SESSION_OVERRIDE_24_7: "1"
       PIPELINE_MAX_LAG_SECONDS: "800"
@@ -93,7 +94,8 @@ jobs:
           print("joblib:", joblib.__version__)
           PY
 
-      # Trading always runs first. Public is synced immediately afterwards
+      # Trading always runs first. Grow 55 pacing: ~17 calls/run at 2s pause ≈25/min peak, capped at 45/min for safety.
+      # Public is synced immediately afterwards
       # so that analysis consumes the fresh trading artefacts instead of
       # anything stale from a previous workflow run.
       - name: Run Trading.py (pull all OHLC spot with backoff)
@@ -256,6 +258,17 @@ jobs:
           git fetch origin main
           git reset --hard origin/main
 
+      - name: Preserve notify state before public refresh
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/public-notify-state
+          for path in public/monitoring/daily_digest_state.json public/monitoring/state_unknown_guard.json public/monitoring/risk_lockout_notify_state.json public/_management_notify_state.json public/_position_lifecycle_state.json public/_position_lifecycle_inbox.jsonl public/.notify_discord.lock public/.notify_management_discord.lock; do
+            if [ -e "$path" ]; then
+              mkdir -p "/tmp/public-notify-state/$(dirname "$path")"
+              cp -a "$path" "/tmp/public-notify-state/$path"
+            fi
+          done
+
       - name: Prepare public directory
         run: |
           rm -rf public
@@ -272,6 +285,13 @@ jobs:
         with:
           name: pipeline-log
           path: public/monitoring
+
+      - name: Restore notify state after public refresh
+        run: |
+          set -euo pipefail
+          if [ -d /tmp/public-notify-state/public ]; then
+            cp -a /tmp/public-notify-state/public/. public/
+          fi
 
       - name: Bootstrap manual positions from published state
         env:
