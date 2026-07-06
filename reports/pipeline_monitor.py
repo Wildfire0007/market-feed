@@ -287,7 +287,11 @@ def _derive_status_from_summary(summary: Dict[str, Any]) -> Optional[Dict[str, A
             or payload.get("state")
             or "no entry",
         }
-
+        if "market_open" in payload:
+            asset_entry["market_open"] = bool(payload.get("market_open"))
+        elif isinstance(payload.get("session_info"), dict):
+            session_info = payload.get("session_info") or {}
+            asset_entry["market_open"] = bool(session_info.get("market_open", session_info.get("open")))
         prob_stack = payload.get("probability_stack")
         if isinstance(prob_stack, dict):
             latency = prob_stack.get("latest_latency_seconds") or prob_stack.get("latency_seconds")
