@@ -125,7 +125,7 @@ def _notify_expired_once(asset: str, pos: Dict[str, Any], now: datetime) -> None
     if st.get(key):
         return
     if _send_expiry_cancel_alert(asset, pos, now):
-       st[key] = to_utc_iso(now)
+        st[key] = to_utc_iso(now)
         save_json(EXPIRY_NOTIFY_STATE_PATH, st)
     
 def _read_inbox_new_lines(path: Path, last_line: int) -> tuple[list[Dict[str, Any]], int]:
