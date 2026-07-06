@@ -2382,6 +2382,7 @@ def session_state(asset: str, now: Optional[datetime] = None) -> Tuple[bool, Dic
     if allowed:
         info["allowed_weekdays"] = list(allowed)
     info["open"] = open_now
+    info["market_open"] = open_now
     info["entry_open"] = entry_open
     info["within_window"] = entry_window_ok
     info["within_entry_window"] = entry_window_ok
@@ -5210,7 +5211,7 @@ def _probability_stack_missing(metadata: Dict[str, Any]) -> bool:
     return False
 
 
-def _probability_stack_saveworthy(metadata: Dict[str, Any]) -> bool:
+def _probability_stack_saveworthy(metadata: Dict[str, Any]) -> bool:  
     if not metadata:
         return False
     status = str(metadata.get("status") or "").lower()
@@ -5297,6 +5298,16 @@ def _apply_probability_stack_gap_guard(
     return metadata
 
 
+def session_market_open(session_meta: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(session_meta, dict):
+        return False
+    return bool(session_meta.get("market_open", session_meta.get("open")))
+
+
+def session_closed_signal_label(session_meta: Optional[Dict[str, Any]]) -> str:
+    return "entry window closed" if session_market_open(session_meta) else "market closed"
+
+
 def build_data_gap_signal(
     asset: str,
     spot_price: Any,
@@ -5328,11 +5339,12 @@ def build_data_gap_signal(
         open_now = bool(session_meta.get("open"))
         monitor_ok = bool(session_meta.get("within_monitor_window"))
         entry_open = bool(session_meta.get("entry_open"))
-        if not open_now and not monitor_ok and not entry_open:
+        if not entry_open and (open_now or (not open_now and not monitor_ok)):
             gates_mode = "session_closed"
             required = ["session"]
             missing = ["session"]
-            signal = "market closed"
+            signal = session_closed_signal_label(session_meta)
+            session_payload["market_open"] = session_market_open(session_meta)
             status_note = session_meta.get("status_note")
             if status_note and status_note not in reasons_payload:
                 reasons_payload.insert(0, status_note)
@@ -5371,6 +5383,7 @@ def build_data_gap_signal(
             "retrieved_at_utc": spot_retrieved,
         },
         "signal": signal,
+        "market_open": session_market_open(session_payload),
         "probability": 0,
         "probability_model": None,
         "probability_model_raw": None,
@@ -5516,8 +5529,12 @@ def build_status_snapshot(summary: Dict[str, Any], public_dir: Path) -> Dict[str
             "ok": asset_ok is not False,
             "signal": payload.get("signal") or payload.get("decision") or payload.get("state") or "no entry",
         }
+        if "market_open" in payload:
+            status_assets[asset]["market_open"] = bool(payload.get("market_open"))
+        elif isinstance(payload.get("session_info"), dict):
+            status_assets[asset]["market_open"] = session_market_open(payload.get("session_info"))
 
-        if latency_seconds is not None:
+        if latency_seconds is not None:  
             status_assets[asset]["latency_seconds"] = latency_seconds
         if expected_latency is not None:
             status_assets[asset]["expected_latency_seconds"] = expected_latency
@@ -15226,7 +15243,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         status_note = session_meta.get("status_note") or "Session zárva"
         if status_note not in reasons:
             reasons.insert(0, status_note)
-        decision = "market closed"
+        decision = session_closed_signal_label(session_meta)
         P = 0
         entry = sl = tp1 = tp2 = rr = None
         mode = "session_closed"
@@ -15641,7 +15658,8 @@ def analyze(asset: str) -> Dict[str, Any]:
             "entry_open": bool(session_meta.get("entry_open")),
             "monitor_window": bool(session_meta.get("within_monitor_window")),
             "status": session_meta.get("status"),
-        }
+            "market_open": session_market_open(session_meta),
+        }      
         status_note = session_meta.get("status_note")
         if isinstance(status_note, str) and status_note.strip():
             session_window_status["status_note"] = status_note.strip()
@@ -15705,6 +15723,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             "realtime_stats": realtime_stats if realtime_stats else None,
         },
         "signal": decision,
+        "market_open": session_market_open(session_meta),
         "probability": probability_percent,
         "probability_raw": int(P),
         "entry": entry,
