@@ -5,7 +5,7 @@ Manual operators act only on actionable cards; silence means no action is requir
 ```
 flat --ENTRY--> pending --price trades through entry--> open
   ^              |                                      |
-  |              +--validity expires (silent)-----------+
+  |              +--validity expires -> CANCEL alert----+
   |                                                     |
   +-- CLOSE / HARD EXIT / TP1 closes position <---------+
 ```
@@ -17,6 +17,7 @@ ATR-adaptive pending validity uses `base_minutes * median_atr5m_20d / current_at
 | Event | Meaning | Channel |
 |---|---|---|
 | ENTRY | Open position card | ACTIONABLE |
+| ENTRY EXPIRED | Pending limit/stop signal expired; delete broker order | ACTIONABLE |
 | BE / `tp1_hit` | Close/partial close and move SL to breakeven | ACTIONABLE |
 | CLOSE | SL, TP2 or session force-close | ACTIONABLE |
 | HARD EXIT | Macro lockout, volatility shock, or confirmed trend reversal | ACTIONABLE |
