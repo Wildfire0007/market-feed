@@ -111,6 +111,7 @@ def test_precision_flow_missing_components_logged_for_special_assets():
 def test_gate_summary_writes_hungarian_context(tmp_path, monkeypatch):
     monkeypatch.setattr(analysis, "ENTRY_GATE_STATS_PATH", tmp_path / "entry_gate_stats.json")
     monkeypatch.setattr(analysis, "ENTRY_GATE_GAP_LOG_PATH", tmp_path / "entry_gate_gap_log.jsonl")
+    monkeypatch.setattr(analysis, "ENTRY_GATE_LOG_DIR", tmp_path / "entry_gates")    
     decision = {
         "gates": {"mode": "ok", "missing": []},
         "entry_thresholds": {"profile": "baseline", "atr_ratio_ok": True, "spread_gate_ok": True},
@@ -149,6 +150,7 @@ def test_gate_summary_writes_hungarian_context(tmp_path, monkeypatch):
 @CI_ONLY
 def test_gate_summary_persists_core_artifacts(tmp_path, monkeypatch):
     monkeypatch.setattr(analysis, "ENTRY_GATE_STATS_PATH", tmp_path / "entry_gate_stats.json")
+    monkeypatch.setattr(analysis, "ENTRY_GATE_LOG_DIR", tmp_path / "entry_gates")    
     decision = {
         "gates": {"mode": "session_closed", "missing": ["session"]},
         "entry_thresholds": {
