@@ -54,8 +54,13 @@ def _load_active_assets(
     assets = data.get("assets") if isinstance(data, dict) else None
     if not isinstance(assets, list):
         return None
+    raw_assets = list(assets)
+    for key in ("asset_classes", "leverage"):
+        extra = data.get(key) if isinstance(data, dict) else None
+        if isinstance(extra, dict):
+            raw_assets.extend(extra.keys())        
     ordered_assets: List[str] = []
-    for asset in assets:
+    for asset in raw_assets:
         name = str(asset).strip().upper()
         if not name:
             continue
