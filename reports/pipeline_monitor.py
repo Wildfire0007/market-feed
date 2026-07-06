@@ -463,11 +463,15 @@ def _load_known_symbols() -> set[str]:
             from config.analysis_settings import load_config
 
             cfg = load_config()
+            symbols = set()            
             assets = cfg.get("assets")
             if isinstance(assets, Iterable) and not isinstance(assets, (str, bytes)):
-                _KNOWN_SYMBOLS = {str(asset).upper() for asset in assets if str(asset).strip()}
-            else:
-                _KNOWN_SYMBOLS = set()
+                symbols.update(str(asset).upper() for asset in assets if str(asset).strip())
+            for key in ("asset_classes", "leverage"):
+                extra = cfg.get(key)
+                if isinstance(extra, dict):
+                    symbols.update(str(asset).upper() for asset in extra if str(asset).strip())
+            _KNOWN_SYMBOLS = symbols
         except Exception:
             _KNOWN_SYMBOLS = set()
     return _KNOWN_SYMBOLS
