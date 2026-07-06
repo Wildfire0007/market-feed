@@ -279,6 +279,9 @@ def process() -> None:
 
 
 if __name__ == "__main__":
+    if any(arg in {'-h', '--help'} for arg in sys.argv[1:]):
+        print('usage: position_lifecycle.py [--help]')
+        raise SystemExit(0)    
     if not PUBLIC_DIR.exists():
         sys.exit(0)
     with LOCK_PATH.open("w", encoding="utf-8") as lock:
