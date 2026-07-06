@@ -560,7 +560,7 @@ def _coerce_price(value: Any) -> Optional[float]:
     return safe_float(value)
 
 
-def _operator_instruction_lines(signal_data: Dict[str, Any], *, size_units: Optional[float] = None, expiry_dt: Optional[datetime] = None) -> Li
+def _operator_instruction_lines(signal_data: Dict[str, Any], *, size_units: Optional[float] = None, expiry_dt: Optional[datetime] = None) -> List[str]:
     management = signal_data.get("management") if isinstance(signal_data, dict) else None
     instructions = signal_data.get("operator_instructions") if isinstance(signal_data, dict) else None
     if isinstance(management, dict):
