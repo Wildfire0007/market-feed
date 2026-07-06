@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Send one actionable alert per stale-data episode while a position is open."""
 from __future__ import annotations
-import json, os, sys
+import json, os, sys, logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -12,6 +12,8 @@ except Exception:
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
 from config import analysis_settings as settings
+from scripts.webhook_delivery import log_exception as _webhook_log_exception, log_response as _webhook_log_response
+LOGGER=logging.getLogger(__name__)
 PUBLIC_DIR = Path(os.getenv("NOTIFY_PUBLIC_DIR", "public"))
 STATE = PUBLIC_DIR / "_position_lifecycle_state.json"
 DEDUP = PUBLIC_DIR / "monitoring" / "state_unknown_guard.json"
@@ -59,7 +61,12 @@ def main() -> int:
         if dedup.get(str(asset)) == key: continue
         embed={"title":"⚠️ Nyitott pozíció, elavult adat — kezeld manuálisan","description":f"Eszköz: `{asset}`\nOk: `{condition}`\nSpot: `{fmt(spot)}`\nSL: `{fmt(pos.get('sl'))}`\nTP1: `{fmt(pos.get('tp1'))}`","color":0xE74C3C}
         for url in urls():
-            if requests: requests.post(url,json={"embeds":[embed]},timeout=8)
+            if requests:
+                try:
+                    resp=requests.post(url,json={"embeds":[embed]},timeout=8)
+                    _webhook_log_response(LOGGER,'state_unknown_guard','actionable',resp)
+                except Exception as exc:
+                    _webhook_log_exception(LOGGER,'state_unknown_guard','actionable',exc)            
         dedup[str(asset)] = key; changed=True
     if changed:
         DEDUP.parent.mkdir(parents=True, exist_ok=True)
