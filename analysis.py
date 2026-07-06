@@ -8968,6 +8968,12 @@ def analyze(asset: str) -> Dict[str, Any]:
         spot_safe_mode_age = (now - spot_ts).total_seconds()
         if spot_safe_mode_age > spot_safe_mode_limit:
             spot_safe_mode_active = True
+            LOGGER.info(
+                "SAFE MODE triggered for %s: spot age %.0fs > limit %ss",
+                asset,
+                spot_safe_mode_age,
+                spot_safe_mode_limit,
+            )          
             spot_safe_mode_note = (
                 "SAFE MODE: spot timestamp "
                 f"{int(spot_safe_mode_age)}s old (limit {spot_safe_mode_limit}s)"
@@ -13161,9 +13167,7 @@ def analyze(asset: str) -> Dict[str, Any]:
     if not regime_ok and "regime" in conds_core:
         if asset in {"GOLD_CFD", "XAGUSD", "USOIL"} and asset_entry_profile == "precision_metal_oil" and entry_profile_flag(asset, "choppy_hard_block"):
             if "choppy_hard_block" not in critical_missing:
-                critical_missing.append("choppy_hard_block")
-            if "choppy_hard_block" not in missing:
-                missing.append("choppy_hard_block")
+                critical_missing.append("choppy_hard_block")           
             reasons.append("Regime kapu: CHOPPY hard block aktív a precision_metal_oil profilban")
         else:
             P -= 10.0
@@ -13564,6 +13568,8 @@ def analyze(asset: str) -> Dict[str, Any]:
     lev = LEVERAGE.get(asset, 2.0)
     mode = "core"
     missing = list(missing_core)
+    if "choppy_hard_block" in critical_missing and "choppy_hard_block" not in missing:
+        missing.append("choppy_hard_block")      
     required_list: List[str] = list(core_required)
     min_stoploss_ok = True
     tp1_net_pct_value: Optional[float] = None
