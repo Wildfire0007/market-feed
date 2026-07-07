@@ -38,4 +38,4 @@ Targets, hit rates, and expectancy statistics are probabilistic validation aids.
 
 `profit_target.max_required_move_atr1h_mult` caps the required gross TP1 move against 1h ATR. The cap is `2.4` because the operator TP1 horizon is 1–4 hours, and diffusive scaling makes the reachable move approximately `ATR1h × sqrt(t)`. A 1h-ATR × 1.2 cap structurally rejects normal-volatility sessions; on 2026-07-06 GOLD_CFD had ATR1h ≈ 0.353% while the required move was ≈ 0.56%.
 
-When the feasibility gate blocks an entry, the gap log records the required move, ATR1h percentage, and ceiling so the calibration can be measured from `public/debug/entry_gate_gap_log.jsonl`.
+On every entry-window evaluation where the profit-target feasibility check runs, the gap log writes one `profit_target_feasibility` row to `public/debug/entry_gate_gap_log.jsonl`. The row includes `ts_utc`, `asset`, `gate`, `result` (`pass` or `reject`), `required_gross_move_pct`, `atr1h_pct`, `ceiling_pct` (`max_required_move_atr1h_mult × atr1h_pct`), and `mult`; percentage fields are stored as rounded percentage-point floats for calibration dashboards.
