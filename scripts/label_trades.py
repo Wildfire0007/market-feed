@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import datetime as _dt
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -149,6 +150,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--now",
         default=None,
         help="UTC timestamp used for horizon guard (default: current UTC)",
+    )
+    parser.add_argument(
+        "--hourly-state",
+        default=None,
+        help="Optional JSON state file for once-per-UTC-hour execution guard",      
     )  
     parser.add_argument(
         "--precision-skip-signals",
@@ -157,6 +163,39 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     return parser.parse_args(argv)
 
+
+
+def _current_utc_hour(now: pd.Timestamp | None = None) -> str:
+    if now is None:
+        current = _dt.datetime.now(_dt.timezone.utc)
+    else:
+        current = now.to_pydatetime()
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=_dt.timezone.utc)
+        else:
+            current = current.astimezone(_dt.timezone.utc)
+    return current.replace(minute=0, second=0, microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _load_last_labeled_hour(state_path: Path) -> Optional[str]:
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("last_labeled_utc_hour")
+    return str(value) if value else None
+
+
+def _write_last_labeled_hour(state_path: Path, hour: str) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps({"last_labeled_utc_hour": hour}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 def _load_price_history(asset: str, price_root: Path) -> pd.DataFrame:
     price_path = price_root / asset / "klines_1m.json"
@@ -731,6 +770,13 @@ def _write_summary(summary_path: Path, journal_df: pd.DataFrame, *, now: pd.Time
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    now = pd.to_datetime(args.now, utc=True) if args.now else pd.Timestamp(_dt.datetime.now(_dt.timezone.utc))
+    state_path = Path(args.hourly_state) if args.hourly_state else None
+    current_hour = _current_utc_hour(now)
+    if state_path and _load_last_labeled_hour(state_path) == current_hour:
+        print(f"Journal labeling already completed for {current_hour}; skipping")
+        return 0
+  
     journal_path = Path(args.journal)
     if not journal_path.exists():
         raise FileNotFoundError(f"Trade journal not found: {journal_path}")
@@ -739,7 +785,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         if col not in journal_df.columns:
             journal_df[col] = ""
     processing_df = journal_df.copy()
-    now = pd.to_datetime(args.now, utc=True) if args.now else pd.Timestamp.utcnow()
     horizon_guard = now - pd.Timedelta(minutes=int(max(args.horizon, 1)))
     ts = pd.to_datetime(processing_df.get("analysis_timestamp"), utc=True, errors="coerce")
     unlabeled = processing_df["validation_outcome"].astype(str).str.strip() == ""
@@ -758,6 +803,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     executable = processing_df[signal_lower.isin({"buy", "sell"})]
     if executable.empty:
         print("No executable trades found in journal")
+        if state_path:
+            _write_last_labeled_hour(state_path, current_hour)
+            print(f"Recorded journal labeling hour {current_hour} in {state_path}")      
         return 0
 
     assets = (
@@ -842,6 +890,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"  {asset}: {breakdown}")
     else:
         print("No trades processed")
+    if state_path:
+        _write_last_labeled_hour(state_path, current_hour)
+        print(f"Recorded journal labeling hour {current_hour} in {state_path}"      
     return 0
 
 
