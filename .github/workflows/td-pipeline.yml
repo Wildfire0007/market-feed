@@ -538,6 +538,9 @@ jobs:
           mkdir -p config
           cp public/_manual_positions.json config/manual_positions.json
 
+      - name: Label journal outcomes once per UTC hour
+        run: .venv/bin/python scripts/label_trades.py --update-journal --summary public/journal/summary.json --hourly-state public/monitoring/labeler_state.json
+
       - name: Commit and push refreshed public outputs
         if: github.ref == 'refs/heads/main'
         run: |
