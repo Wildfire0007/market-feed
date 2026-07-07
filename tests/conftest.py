@@ -1,4 +1,5 @@
 import importlib
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,6 +10,9 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+os.environ.pop("CI", None)
+os.environ.pop("GITHUB_ACTIONS", None)
 
 # Offline fallback: expose lightweight stubs (tests/_stubs) ONLY when the real
 # package is not installed. The real packages from requirements.lock always
@@ -29,6 +33,13 @@ def _reload_analysis(monkeypatch: pytest.MonkeyPatch):
     if "analysis" in sys.modules:
         return importlib.reload(sys.modules["analysis"])
     return importlib.import_module("analysis")
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "real_public_paths: allow a test to use repository public/ path constants",
+    )
 
 
 def pytest_ignore_collect(collection_path, config):
@@ -87,8 +98,10 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 @pytest.fixture(autouse=True)
-def isolate_public_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def isolate_public_dirs(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     public_dir = tmp_path / "public"
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)    
     monkeypatch.setenv("NOTIFY_PUBLIC_DIR", str(public_dir))
     monkeypatch.setenv("PUBLIC_DIR", str(public_dir))
     monkeypatch.setenv("MANUAL_POS_AUDIT_FILE", str(public_dir / "_manual_positions_audit.jsonl"))
@@ -97,12 +110,24 @@ def isolate_public_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         monkeypatch.setattr(state_db, "DEFAULT_DB_PATH", tmp_path / "trading.db")
     except Exception:
         pass
-    module = sys.modules.get("analysis")
-    if module is not None:
+    def _isolate_analysis_paths(module):
         monkeypatch.setattr(module, "PUBLIC_DIR", str(public_dir), raising=False)
         monkeypatch.setattr(module, "ENTRY_GATE_LOG_DIR", public_dir / "debug" / "entry_gates", raising=False)
         monkeypatch.setattr(module, "ENTRY_GATE_STATS_PATH", public_dir / "debug" / "entry_gate_stats.json", raising=False)
         monkeypatch.setattr(module, "ENTRY_GATE_GAP_LOG_PATH", public_dir / "debug" / "entry_gate_gap_log.jsonl", raising=False)
+        return module
+
+    if request.node.get_closest_marker("real_public_paths") is None:
+        real_reload = importlib.reload
+
+        def _isolating_reload(module):
+            reloaded = real_reload(module)
+            if getattr(reloaded, "__name__", None) == "analysis":
+                _isolate_analysis_paths(reloaded)
+            return reloaded
+
+        monkeypatch.setattr(importlib, "reload", _isolating_reload)
+        _isolate_analysis_paths(sys.modules.get("analysis") or importlib.import_module("analysis"))        
     for module_name in ("scripts.notify_discord", "scripts.notify_management_discord"):
         module = sys.modules.get(module_name)
         if module is None:
