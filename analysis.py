@@ -31,7 +31,7 @@ from zoneinfo import ZoneInfo
 LOCAL_TZ = ZoneInfo("Europe/Budapest")
 
 from logging_utils import ensure_json_file_handler
-from profit_target import build_profit_target_levels
+from profit_target import build_profit_target_levels, _round_trip_cost as pt_round_trip_cost
 from risk_limits import evaluate_daily_lockout
 from trade_management import build_management_plan
 
@@ -1627,7 +1627,49 @@ def _profit_target_feasibility_gap_record(
         "mult": meta.get("max_required_move_atr1h_mult"),
     }
 
-      
+
+def _log_profit_target_feasibility_always(asset_key: str, payload: Dict[str, Any]) -> None:
+    """Eszközönként pontosan egy feasibility-mérősor futásonként,
+    a korábbi hard-gate rövidzárlatoktól függetlenül (bemenet: a kész signal-payload)."""
+    try:
+        signal_label = str(payload.get("signal") or "").strip().lower()
+        if signal_label in {"market closed", "entry window closed"}:
+            return
+        spot = payload.get("spot") or {}
+        price = spot.get("price") if isinstance(spot, dict) else None
+        if price in (None, 0):
+            price = payload.get("spot_price")
+        atr1h = payload.get("atr1h")
+        if not price or not atr1h:
+            return
+        price_f = float(price)
+        atr1h_pct = float(atr1h) / price_f
+        lev = max(float(LEVERAGE.get(asset_key, 1.0) or 1.0), 1e-9)
+        margin = float(PROFIT_TARGET_CONFIG.get("margin_usd", 100.0) or 100.0)
+        net_min = float(PROFIT_TARGET_CONFIG.get("net_tp1_usd_min", 10.0) or 10.0)
+        mult = float(PROFIT_TARGET_CONFIG.get("max_required_move_atr1h_mult", 2.4) or 2.4)
+        required = net_min / (margin * lev) + pt_round_trip_cost(
+            asset_key, ASSET_COST_MODEL, DEFAULT_COST_MODEL
+        )
+        ceiling = mult * atr1h_pct
+        meta = payload.get("entry_thresholds_meta") or {}
+        missing = payload.get("missing") or []
+        _append_gate_gap_log([{
+            "ts_utc": to_utc_iso(datetime.now(timezone.utc)),
+            "asset": asset_key,
+            "gate": "profit_target_feasibility",
+            "result": "pass" if required <= ceiling else "reject",
+            "required_gross_move_pct": round(required * 100, 4),
+            "atr1h_pct": round(atr1h_pct * 100, 4),
+            "ceiling_pct": round(ceiling * 100, 4),
+            "mult": mult,
+            "evaluated_in_flow": bool(meta.get("profit_target")),
+            "blocked_by": (missing[0] if missing else None),
+        }])
+    except Exception:
+        LOGGER.debug("pt_feasibility_always_log_failed", exc_info=True)
+
+ 
 def _render_entry_gate_chart(stats: Dict[str, Any]) -> None:
     """Render a lightweight HTML bar chart for entry gate rejections."""
 
@@ -6762,6 +6804,7 @@ def _apply_daily_top_entry_budget(
                 signal_state["last_notified_side"] = None
                 signal_state["last_notified_at_utc"] = None
                 save_json(str(signal_state_path), signal_state)
+        _log_profit_target_feasibility_always(asset_key, payload)              
         save_json(str(public_dir / asset_key / "signal.json"), payload)
 
     state["selected"] = selected_records[:target_max]
@@ -15650,10 +15693,6 @@ def analyze(asset: str) -> Dict[str, Any]:
             atr5_noise_mult=float(ATR5_MIN_MULT_ASSET.get(asset, ATR5_MIN_MULT) or 0.4),
         )
         entry_thresholds_meta["profit_target"] = pt_result.meta
-        pt_meta = pt_result.meta or {}
-        _append_gate_gap_log([
-            _profit_target_feasibility_gap_record(asset, pt_meta, pt_result.feasible, analysis_now)
-        ])      
         if not pt_result.feasible:
             if "profit_target_feasibility" not in missing:
                 missing.append("profit_target_feasibility")
