@@ -1723,6 +1723,7 @@ def _resolve_atr_percentiles() -> Dict[str, Any]:
 ATR_PERCENTILE_TOD: Dict[str, Any] = _resolve_atr_percentiles()
 P_SCORE_TIME_BONUS: Dict[str, Any] = dict(_get_config_value("p_score_time_bonus") or {})
 ADX_RR_BANDS: Dict[str, Any] = dict(_get_config_value("adx_rr_bands") or {})
+ADX_STRONG_TREND_THRESHOLD: float = float(_get_config_value("adx_strong_trend_threshold") or 25.0)
 ASSET_CLASS_MAP: Dict[str, str] = {
     str(asset).upper(): str(class_name)
     for asset, class_name in dict(_get_config_value("asset_classes") or {}).items()
