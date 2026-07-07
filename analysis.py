@@ -984,6 +984,8 @@ ENTRY_GATE_STATS_PATH: Path = (
 ENTRY_GATE_GAP_LOG_PATH: Path = (
     _ANALYSIS_BASE_DIR / PUBLIC_DIR / "debug" / "entry_gate_gap_log.jsonl"
 ).resolve()
+ENTRY_GATE_GAP_LOG_MAX_BYTES = 10 * 1024 * 1024
+ENTRY_GATE_GAP_LOG_KEEP_FILES = 1
 PROB_STACK_SNAPSHOT_FILENAME = "probability_stack_snapshot.json"
 PROB_STACK_EXPORT_FILENAME = "probability_stack.json"
 PROB_STACK_GAP_ENV_DISABLE = "DISABLE_PROB_STACK_GAP_FALLBACK"
@@ -1557,6 +1559,24 @@ def _append_entry_gate_stats(summary: Dict[str, Any]) -> None:
         LOGGER.debug("entry_gate_stats_append_failed", exc_info=True)
 
 
+def _rotated_jsonl_path(path: Path, index: int) -> Path:
+    return path.with_name(f"{path.stem}.{index}{path.suffix}")
+
+
+def _rotate_jsonl_if_needed(path: Path, max_bytes: int, keep_files: int) -> None:
+    if max_bytes <= 0 or not path.exists() or path.stat().st_size <= max_bytes:
+        return
+    if keep_files <= 0:
+        path.unlink(missing_ok=True)
+        return
+    _rotated_jsonl_path(path, keep_files).unlink(missing_ok=True)
+    for index in range(keep_files - 1, 0, -1):
+        src = _rotated_jsonl_path(path, index)
+        if src.exists():
+            os.replace(src, _rotated_jsonl_path(path, index + 1))
+    os.replace(path, _rotated_jsonl_path(path, 1))
+
+
 def _append_gate_gap_log(entries: Sequence[Dict[str, Any]]) -> None:
     if os.getenv(ENTRY_GATE_EXTRA_LOGS_DISABLE):
         return
@@ -1564,6 +1584,11 @@ def _append_gate_gap_log(entries: Sequence[Dict[str, Any]]) -> None:
         return
     try:
         ENTRY_GATE_GAP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _rotate_jsonl_if_needed(
+            ENTRY_GATE_GAP_LOG_PATH,
+            ENTRY_GATE_GAP_LOG_MAX_BYTES,
+            ENTRY_GATE_GAP_LOG_KEEP_FILES,
+        )      
         with ENTRY_GATE_GAP_LOG_PATH.open("a", encoding="utf-8") as handle:
             for entry in entries:
                 handle.write(json.dumps(entry, ensure_ascii=False, sort_keys=True))
@@ -1572,6 +1597,37 @@ def _append_gate_gap_log(entries: Sequence[Dict[str, Any]]) -> None:
         LOGGER.debug("entry_gate_gap_log_failed", exc_info=True)
 
 
+def _pct_meta_value(meta: Dict[str, Any], key: str) -> Optional[float]:
+    try:
+        value = meta.get(key)
+        if value is None:
+            return None
+        numeric = float(value) * 100.0
+        if np.isnan(numeric):
+            return None
+        return round(numeric, 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def _profit_target_feasibility_gap_record(
+    asset: str,
+    meta: Dict[str, Any],
+    feasible: bool,
+    timestamp: datetime,
+) -> Dict[str, Any]:
+    return {
+        "ts_utc": to_utc_iso(timestamp),
+        "asset": asset,
+        "gate": "profit_target_feasibility",
+        "result": "pass" if feasible else "reject",
+        "required_gross_move_pct": _pct_meta_value(meta, "required_gross_move"),
+        "atr1h_pct": _pct_meta_value(meta, "atr1h_pct"),
+        "ceiling_pct": _pct_meta_value(meta, "required_move_atr1h_ceiling"),
+        "mult": meta.get("max_required_move_atr1h_mult"),
+    }
+
+      
 def _render_entry_gate_chart(stats: Dict[str, Any]) -> None:
     """Render a lightweight HTML bar chart for entry gate rejections."""
 
@@ -11268,7 +11324,7 @@ def analyze(asset: str) -> Dict[str, Any]:
         P += regime_points
         reasons.append(f"EMA21 slope {ema_ratio:.2f}× küszöb (+{regime_points:.1f})")
     else:
-        reasons.append("Regime filter inaktív")
+        reasons.append("Regime soft-szűrő inaktív (pontozás e körben nem módosul)")
         P -= 4.0
 
     if swept:
@@ -13188,7 +13244,7 @@ def analyze(asset: str) -> Dict[str, Any]:
             reasons.append("Regime kapu: CHOPPY hard block aktív a precision_metal_oil profilban")
         else:
             P -= 10.0
-            reasons.append("Regime kapu: CHOPPY miatt −10 P-score, pozícióskálázás csökkentve")
+            reasons.append("Regime soft-szűrő: CHOPPY miatt −10 P-score, pozícióskálázás csökkentve")
     if not atr_ok:
         P -= 5.0
         position_size_scale *= 0.5
@@ -15594,27 +15650,15 @@ def analyze(asset: str) -> Dict[str, Any]:
             atr5_noise_mult=float(ATR5_MIN_MULT_ASSET.get(asset, ATR5_MIN_MULT) or 0.4),
         )
         entry_thresholds_meta["profit_target"] = pt_result.meta
+        pt_meta = pt_result.meta or {}
+        _append_gate_gap_log([
+            _profit_target_feasibility_gap_record(asset, pt_meta, pt_result.feasible, analysis_now)
+        ])      
         if not pt_result.feasible:
             if "profit_target_feasibility" not in missing:
                 missing.append("profit_target_feasibility")
             if pt_result.reason and pt_result.reason not in missing:
-                missing.append(pt_result.reason)
-            pt_meta = pt_result.meta or {}
-            _append_gate_gap_log([
-                {
-                    "asset": asset,
-                    "kapu": "profit_target_feasibility",
-                    "profil": entry_thresholds_meta.get("profile"),
-                    "required_move": pt_meta.get("required_gross_move"),
-                    "atr1h": pt_meta.get("atr1h_pct"),
-                    "ceiling": pt_meta.get("required_move_atr1h_ceiling"),
-                    "érték": pt_meta.get("required_gross_move"),
-                    "küszöb": pt_meta.get("required_move_atr1h_ceiling"),
-                    "rés": pt_meta.get("required_move_over_ceiling"),
-                    "ok": False,
-                    "timestamp_utc": to_utc_iso(analysis_now),
-                }
-            ])              
+                missing.append(pt_result.reason)              
             reasons.append("Profit target infeasible: TP1/SL/volatilitási korlát ütközik")
             decision = "no entry"
             entry = sl = tp1 = tp2 = rr = None
