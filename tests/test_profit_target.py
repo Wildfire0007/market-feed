@@ -69,3 +69,48 @@ def test_profit_target_feasibility_gap_record_pass_fields():
         "ceiling_pct": pytest.approx(0.72),
         "mult": 2.4,
     }    
+
+
+def test_log_profit_target_feasibility_always_blocked_path(tmp_path, monkeypatch):
+    gap_path = tmp_path / "entry_gate_gap_log.jsonl"
+    monkeypatch.setattr(analysis, "ENTRY_GATE_GAP_LOG_PATH", gap_path)
+    payload = {
+        "signal": "no entry",
+        "spot": {"price": 4000.0},
+        "atr1h": 12.0,
+        "entry_thresholds_meta": {},
+        "missing": ["choppy_hard_block"],
+    }
+
+    analysis._log_profit_target_feasibility_always("GOLD_CFD", payload)
+
+    rows = [analysis.json.loads(line) for line in gap_path.read_text(encoding="utf-8").splitlines()]
+    lev = max(float(analysis.LEVERAGE.get("GOLD_CFD", 1.0) or 1.0), 1e-9)
+    margin = float(analysis.PROFIT_TARGET_CONFIG.get("margin_usd", 100.0) or 100.0)
+    net_min = float(analysis.PROFIT_TARGET_CONFIG.get("net_tp1_usd_min", 10.0) or 10.0)
+    required = net_min / (margin * lev) + analysis.pt_round_trip_cost(
+       "GOLD_CFD", analysis.ASSET_COST_MODEL, analysis.DEFAULT_COST_MODEL
+    )
+    required_pct = round(required * 100, 4)
+
+    assert len(rows) == 1
+    assert rows[0]["gate"] == "profit_target_feasibility"
+    assert rows[0]["evaluated_in_flow"] is False
+    assert rows[0]["blocked_by"] == "choppy_hard_block"
+    assert rows[0]["atr1h_pct"] == pytest.approx(0.3)
+    assert rows[0]["ceiling_pct"] == pytest.approx(0.72)
+    assert rows[0]["required_gross_move_pct"] == pytest.approx(required_pct)
+    assert rows[0]["result"] == ("pass" if required_pct <= 0.72 else "reject")
+
+
+def test_log_profit_target_feasibility_always_skips_entry_window_closed(tmp_path, monkeypatch):
+    gap_path = tmp_path / "entry_gate_gap_log.jsonl"
+    monkeypatch.setattr(analysis, "ENTRY_GATE_GAP_LOG_PATH", gap_path)
+    payload = {
+        "signal": "entry window closed",
+        "spot": {"price": 4000.0},
+        "atr1h": 12.0,
+    }
+    analysis._log_profit_target_feasibility_always("GOLD_CFD", payload)
+
+    assert not gap_path.exists()
