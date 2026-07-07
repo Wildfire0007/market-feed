@@ -1,0 +1,39 @@
+name: CI gate
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+      - name: Compile every entrypoint (syntax gate)
+        run: |
+          python -m py_compile analysis.py Trading.py profit_target.py \
+            risk_limits.py trade_management.py position_tracker.py \
+            dynamic_logic.py news_feed.py volatility_metrics.py ml_model.py \
+            active_anchor.py scripts/*.py
+      - name: Full test suite
+        run: python -m pytest tests/ -q
+      - name: Discord alert on failure
+        if: failure()
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL_ACTIONABLE }}
+        run: |
+          MSG="❌ CI gate FAILED on main @ ${GITHUB_SHA::8} — a legutóbbi commit eltörte a kódot. Futás: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          curl -s -H "Content-Type: application/json" \
+            -d "{\"embeds\":[{\"title\":\"CI gate hiba\",\"description\":\"${MSG}\",\"color\":15158332}]}" \
+            "${HOOK}" || true
