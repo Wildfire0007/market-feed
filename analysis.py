@@ -1516,6 +1516,7 @@ def _entry_gate_log_payload(
         "asset": str(symbol).upper(),
         "gate": gate,
         "timestamp": ts.isoformat(),
+        "ts_utc": ts.isoformat().replace("+00:00", "Z"),      
         "utc_ts": ts.isoformat(),
         "bud_ts": bud_ts.isoformat(),
         "reasons": unique_reasons,
@@ -1740,6 +1741,7 @@ def _gate_timestamp_fields(timestamp: Optional[datetime]) -> Dict[str, str]:
     ts_utc = ts_ref.astimezone(timezone.utc)
     ts_fmt = "%Y-%m-%d %H:%M:%S"
     return {
+        "ts_utc": ts_utc.isoformat().replace("+00:00", "Z"),      
         "timestamp_utc": ts_utc.strftime(ts_fmt),
         "timestamp_bud": ts_utc.astimezone(LOCAL_TZ).strftime(ts_fmt),
     }
