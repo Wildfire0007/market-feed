@@ -892,7 +892,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("No trades processed")
     if state_path:
         _write_last_labeled_hour(state_path, current_hour)
-        print(f"Recorded journal labeling hour {current_hour} in {state_path}"      
+        print(f"Recorded journal labeling hour {current_hour} in {state_path}")   
     return 0
 
 
