@@ -38,3 +38,34 @@ def test_soft_penalty_cap():
 def test_bos_direction_consistency():
     assert analysis._bos_direction_to_bias("bos_up") == "long"
     assert analysis._bos_direction_to_bias("bos_down") == "short"
+
+
+def test_profit_target_feasibility_gap_record_pass_fields():
+    cfg = dict(CFG, max_required_move_atr1h_mult=2.4)
+    r = build_profit_target_levels(
+        asset="GOLD_CFD",
+        side="buy",
+        entry=100.0,
+        leverage=20,
+        config=cfg,
+        asset_cost_model=COSTS,
+        min_stoploss_pct=0.001,
+        atr5=0.01,
+        atr1h=0.3,
+    )
+
+    record = analysis._profit_target_feasibility_gap_record(
+        "GOLD_CFD", r.meta, r.feasible, analysis.parse_utc_timestamp("2026-07-07T08:00:00Z")
+    )
+
+    assert r.feasible
+    assert record == {
+        "ts_utc": "2026-07-07T08:00:00Z",
+        "asset": "GOLD_CFD",
+        "gate": "profit_target_feasibility",
+        "result": "pass",
+        "required_gross_move_pct": pytest.approx(0.56),
+        "atr1h_pct": pytest.approx(0.3),
+        "ceiling_pct": pytest.approx(0.72),
+        "mult": 2.4,
+    }    
