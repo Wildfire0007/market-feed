@@ -114,3 +114,43 @@ def test_log_profit_target_feasibility_always_skips_entry_window_closed(tmp_path
     analysis._log_profit_target_feasibility_always("GOLD_CFD", payload)
 
     assert not gap_path.exists()
+
+
+def test_log_profit_target_feasibility_always_dedupes_per_asset(tmp_path, monkeypatch):
+    gap_path = tmp_path / "entry_gate_gap_log.jsonl"
+    monkeypatch.setattr(analysis, "ENTRY_GATE_GAP_LOG_PATH", gap_path)
+    analysis._PT_FEAS_LOGGED_ASSETS.clear()
+    payload = {
+        "signal": "no entry",
+        "spot": {"price": 4000.0},
+        "atr1h": 12.0,
+    }
+
+    analysis._log_profit_target_feasibility_always("GOLD_CFD", payload)
+    analysis._log_profit_target_feasibility_always("GOLD_CFD", payload)
+
+    rows = gap_path.read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 1
+
+
+def test_backfill_signal_probability_metadata_logs_feasibility_for_no_entry(tmp_path, monkeypatch):
+    public_dir = tmp_path / "public"
+    signal_dir = public_dir / "GOLD_CFD"
+    signal_dir.mkdir(parents=True)
+    gap_path = tmp_path / "entry_gate_gap_log.jsonl"
+    monkeypatch.setattr(analysis, "ENTRY_GATE_GAP_LOG_PATH", gap_path)
+    analysis._PT_FEAS_LOGGED_ASSETS.clear()
+    analysis.save_json(signal_dir / "signal.json", {
+        "signal": "no entry",
+        "spot": {"price": 4000.0},
+        "atr1h": 12.0,
+        "missing": ["choppy_hard_block"],
+    })
+
+    analysis._backfill_signal_probability_metadata("gold_cfd", base_dir=public_dir)
+
+    rows = [analysis.json.loads(line) for line in gap_path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["asset"] == "GOLD_CFD"
+    assert rows[0]["gate"] == "profit_target_feasibility"
+    assert rows[0]["blocked_by"] == "choppy_hard_block"
