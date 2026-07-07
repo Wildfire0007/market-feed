@@ -1494,6 +1494,7 @@ MANUAL_TRADE_MODEL: Dict[str, Any] = _normalize_manual_trade_model(
     _get_config_value("manual_trade_model")
 )
 POSITION_LIFECYCLE: Dict[str, Any] = dict(_get_config_value("position_lifecycle") or {})
+WEEKLY_REPORT: Dict[str, Any] = dict(_get_config_value("weekly_report") or {})
 WATCHDOG: Dict[str, Any] = dict(_get_config_value("watchdog") or {})
 COST_MULT_DEFAULT: float = float(_get_config_value("cost_mult_default") or 0.0)
 COST_MULT_HIGH_VOL: float = float(_get_config_value("cost_mult_high_vol") or 0.0)
