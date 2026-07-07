@@ -1,5 +1,8 @@
+import json
+
 import pandas as pd
 import pytest
+from freezegun import freeze_time
 
 from scripts import label_trades as lt
 
@@ -167,3 +170,27 @@ def test_ambiguous_exit_when_same_bar_hits_tp_and_sl():
     assert result.outcome == lt.OUTCOME_AMBIGUOUS
     assert result.label is None
     assert result.exit_timestamp == pd.Timestamp("2024-01-01T10:00:00Z", tz="UTC")
+
+
+def test_hourly_guard_skips_within_same_hour(tmp_path):
+    state_path = tmp_path / "labeler_state.json"
+    state_path.write_text(json.dumps({"last_labeled_utc_hour": "2026-07-07T10:00:00Z"}), encoding="utf-8")
+
+    with freeze_time("2026-07-07T10:34:00Z"):
+        assert lt.main(["--hourly-state", str(state_path), "--journal", str(tmp_path / "missing.csv")]) == 0
+
+    assert json.loads(state_path.read_text(encoding="utf-8"))["last_labeled_utc_hour"] == "2026-07-07T10:00:00Z"
+
+
+def test_hourly_guard_runs_on_hour_change(tmp_path):
+    state_path = tmp_path / "monitoring" / "labeler_state.json"
+    journal_path = tmp_path / "journal.csv"
+    summary_path = tmp_path / "summary.json"
+    journal_path.write_text("asset,analysis_timestamp,signal,validation_outcome\n", encoding="utf-8")
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(json.dumps({"last_labeled_utc_hour": "2026-07-07T10:00:00Z"}), encoding="utf-8")
+
+    with freeze_time("2026-07-07T11:01:00Z"):
+        assert lt.main(["--hourly-state", str(state_path), "--journal", str(journal_path), "--summary", str(summary_path)]) == 0
+
+    assert json.loads(state_path.read_text(encoding="utf-8"))["last_labeled_utc_hour"] == "2026-07-07T11:00:00Z"
