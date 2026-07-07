@@ -27,6 +27,12 @@ ATR-adaptive pending validity uses `base_minutes * median_atr5m_20d / current_at
 
 `DISCORD_WEBHOOK_URL_ACTIONABLE` and `DISCORD_WEBHOOK_URL_DIAGNOSTIC` are optional; if unset, both fall back to `DISCORD_WEBHOOK_URL`.
 
+## Heartbeat watchdog quiet hours
+
+The standalone heartbeat watchdog is context-aware for the overnight UTC quiet window (`22:00`–`05:00`). When no lifecycle position is `open` or `pending`, stale heartbeat alerts use the quiet-hours threshold (`150` minutes) and route to DIAGNOSTIC. If any position is open or pending, the override keeps the normal `30` minute threshold and routes to ACTIONABLE even during quiet hours.
+
+The watchdog is stateless, so it self-deduplicates stale episodes by sending only near the first detection edge and hourly escalation edges derived from the active threshold. Alert cards include stale-since time in UTC and Europe/Budapest, whether quiet hours are active, and the open/pending lifecycle position count.
+
 ## Manual position audit log retention
 
 `config/analysis_settings.json` controls append-only manual position audit file retention with `audit_log.max_mb` (rotate once the active JSONL file exceeds this size in MiB) and `audit_log.keep_files` (number of rotated `*.jsonl` files to retain).
