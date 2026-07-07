@@ -7,6 +7,7 @@ ENTRYPOINTS = [
     "scripts/heartbeat_watchdog.py",
     "scripts/state_unknown_guard.py",
     "scripts/daily_actionable_digest.py",
+    "scripts/weekly_report_discord.py",    
     "scripts/notify_discord.py",
     "scripts/notify_management_discord.py",
     "scripts/position_lifecycle.py",
