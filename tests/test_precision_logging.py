@@ -24,6 +24,20 @@ class ListHandler(logging.Handler):
         self.records.append(record)
 
 
+def test_entry_gate_log_row_contains_valid_ts_utc(tmp_path, monkeypatch):
+    monkeypatch.setattr(analysis, "ENTRY_GATE_LOG_DIR", tmp_path / "entry_gates")
+
+    analysis.log_entry_gate_decision(
+        "BTCUSD",
+        datetime(2026, 7, 7, 9, 15, tzinfo=timezone.utc),
+        ["atr"],
+    )
+
+    log_path = tmp_path / "entry_gates" / "entry_gates_2026-07-07.jsonl"
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+    assert row["ts_utc"] == "2026-07-07T09:15:00Z"
+    assert datetime.fromisoformat(row["ts_utc"].replace("Z", "+00:00")).tzinfo is not None
+
 def test_precision_gate_log_captures_missing_ofi():
     handler = ListHandler()
     logger = logging.getLogger("analysis.precision_test")
