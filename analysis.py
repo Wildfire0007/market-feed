@@ -275,6 +275,7 @@ from config.analysis_settings import (
     COST_MULT_DEFAULT,
     COST_MULT_HIGH_VOL,
     ADX_RR_BANDS,
+    ADX_STRONG_TREND_THRESHOLD,
     FUNDING_RATE_RULES,
     CORE_RR_MIN,
     DEFAULT_COST_MODEL,
@@ -1198,6 +1199,7 @@ P_SCORE_OFI_BONUS = float(P_SCORE_TIME_BONUS.get("ofi_bonus") or 0.0)
 ADX_TREND_BAND = dict(ADX_RR_BANDS.get("trend") or {})
 ADX_RANGE_BAND = dict(ADX_RR_BANDS.get("range") or {})
 ADX_TREND_MIN = float(ADX_TREND_BAND.get("adx_min") or 0.0)
+ADX_STRONG_TREND_MIN = float(ADX_STRONG_TREND_THRESHOLD or 25.0)
 ADX_RANGE_MAX = float(ADX_RANGE_BAND.get("adx_max") or ADX_TREND_MIN)
 ADX_TREND_CORE_RR = float(ADX_TREND_BAND.get("core_rr_min") or MIN_R_CORE)
 ADX_TREND_MOM_RR = float(ADX_TREND_BAND.get("momentum_rr_min") or MIN_R_MOMENTUM)
@@ -1628,9 +1630,14 @@ def _profit_target_feasibility_gap_record(
     }
 
 
+_PT_FEAS_LOGGED_ASSETS: set = set()
+
+
 def _log_profit_target_feasibility_always(asset_key: str, payload: Dict[str, Any]) -> None:
     """Eszközönként pontosan egy feasibility-mérősor futásonként,
     a korábbi hard-gate rövidzárlatoktól függetlenül (bemenet: a kész signal-payload)."""
+    if asset_key in _PT_FEAS_LOGGED_ASSETS:
+        return  
     try:
         signal_label = str(payload.get("signal") or "").strip().lower()
         if signal_label in {"market closed", "entry window closed"}:
@@ -1666,6 +1673,7 @@ def _log_profit_target_feasibility_always(asset_key: str, payload: Dict[str, Any
             "evaluated_in_flow": bool(meta.get("profit_target")),
             "blocked_by": (missing[0] if missing else None),
         }])
+        _PT_FEAS_LOGGED_ASSETS.add(asset_key)      
     except Exception:
         LOGGER.debug("pt_feasibility_always_log_failed", exc_info=True)
 
@@ -8521,6 +8529,7 @@ class RegimeClassifier:
         ema_lookback: int = EMA_SLOPE_LOOKBACK,
         ema_threshold: float = EMA_SLOPE_TH,
         adx_trend_threshold: float = ADX_TREND_MIN,
+        adx_strong_trend_threshold: float = ADX_STRONG_TREND_MIN,      
         adx_range_threshold: float = ADX_RANGE_MAX,
     ) -> None:
         self.adx_period = adx_period
@@ -8528,6 +8537,7 @@ class RegimeClassifier:
         self.ema_lookback = ema_lookback
         self.ema_threshold = ema_threshold
         self.adx_trend_threshold = adx_trend_threshold
+        self.adx_strong_trend_threshold = adx_strong_trend_threshold      
         self.adx_range_threshold = adx_range_threshold
 
     def classify(self, k5m: pd.DataFrame, k1h: pd.DataFrame) -> Dict[str, Any]:
@@ -8546,11 +8556,14 @@ class RegimeClassifier:
 
         label = "CHOPPY"
         if adx_value is not None and np.isfinite(adx_value):
-            if adx_value >= self.adx_trend_threshold and slope_abs >= self.ema_threshold:
+            if (
+                adx_value >= self.adx_strong_trend_threshold
+                or (adx_value >= self.adx_trend_threshold and slope_abs >= self.ema_threshold)
+            ):          
                 label = "TRENDING"
             elif adx_value < self.adx_range_threshold:
                 label = "RANGING"
-            elif slope_ok:
+            else:
                 label = "CHOPPY"
 
         return {
@@ -16418,6 +16431,8 @@ def _backfill_signal_probability_metadata(
     if not isinstance(payload, dict):
         return
 
+    _log_profit_target_feasibility_always(asset.upper(), payload)
+  
     prob_meta = ensure_probability_metadata(payload.get("probability_stack"))
     changed = prob_meta != payload.get("probability_stack")
     if changed:
