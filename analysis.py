@@ -1516,7 +1516,7 @@ def _entry_gate_log_payload(
         "asset": str(symbol).upper(),
         "gate": gate,
         "timestamp": ts.isoformat(),
-        "ts_utc": ts.isoformat().replace("+00:00", "Z"),      
+        "ts_utc": ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         "utc_ts": ts.isoformat(),
         "bud_ts": bud_ts.isoformat(),
         "reasons": unique_reasons,
@@ -1662,7 +1662,7 @@ def _log_profit_target_feasibility_always(asset_key: str, payload: Dict[str, Any
         ceiling = mult * atr1h_pct
         meta = payload.get("entry_thresholds_meta") or {}
         missing = payload.get("missing") or []
-        _append_gate_gap_log([{
+        record = {
             "ts_utc": to_utc_iso(datetime.now(timezone.utc)),
             "asset": asset_key,
             "gate": "profit_target_feasibility",
@@ -1673,7 +1673,12 @@ def _log_profit_target_feasibility_always(asset_key: str, payload: Dict[str, Any
             "mult": mult,
             "evaluated_in_flow": bool(meta.get("profit_target")),
             "blocked_by": (missing[0] if missing else None),
-        }])
+        }
+        if signal_label in {"buy", "sell"} and not record["evaluated_in_flow"]:
+            # ENTRY döntésnek mindig át kell mennie a deep profit-target kiértékelésen; False érték flow bugra utal és hangos jelzés kell.
+            record["invariant_violation"] = True
+            LOGGER.warning("pt_feasibility_invariant_violation", extra={"asset": asset_key})
+        _append_gate_gap_log([record])
         _PT_FEAS_LOGGED_ASSETS.add(asset_key)      
     except Exception:
         LOGGER.debug("pt_feasibility_always_log_failed", exc_info=True)
