@@ -154,3 +154,35 @@ def test_backfill_signal_probability_metadata_logs_feasibility_for_no_entry(tmp_
     assert rows[0]["asset"] == "GOLD_CFD"
     assert rows[0]["gate"] == "profit_target_feasibility"
     assert rows[0]["blocked_by"] == "choppy_hard_block"
+
+
+def test_entry_gate_payload_writes_ts_utc_and_bud_ts():
+    row = analysis._entry_gate_log_payload("GOLD_CFD", analysis.parse_utc_timestamp("2026-07-07T08:00:00Z"), ["session"])
+    assert row["ts_utc"] == "2026-07-07T08:00:00Z"
+    assert row["ts_utc"].endswith("Z")
+    assert row["bud_ts"]
+
+
+def test_log_profit_target_feasibility_entry_missing_meta_flags_invariant(tmp_path, monkeypatch, caplog):
+    gap_path = tmp_path / "entry_gate_gap_log.jsonl"
+    monkeypatch.setattr(analysis, "ENTRY_GATE_GAP_LOG_PATH", gap_path)
+    analysis._PT_FEAS_LOGGED_ASSETS.clear()
+    payload = {"signal": "buy", "spot": {"price": 4000.0}, "atr1h": 12.0, "entry_thresholds_meta": {}}
+
+    analysis._log_profit_target_feasibility_always("GOLD_CFD", payload)
+
+    row = analysis.json.loads(gap_path.read_text(encoding="utf-8").splitlines()[0])
+    assert row["invariant_violation"] is True
+    assert "pt_feasibility_invariant_violation" in caplog.text
+
+
+def test_log_profit_target_feasibility_entry_with_meta_has_no_invariant(tmp_path, monkeypatch):
+    gap_path = tmp_path / "entry_gate_gap_log.jsonl"
+    monkeypatch.setattr(analysis, "ENTRY_GATE_GAP_LOG_PATH", gap_path)
+    analysis._PT_FEAS_LOGGED_ASSETS.clear()
+    payload = {"signal": "sell", "spot": {"price": 4000.0}, "atr1h": 12.0, "entry_thresholds_meta": {"profit_target": {"tp1": 1}}}
+
+    analysis._log_profit_target_feasibility_always("GOLD_CFD", payload)
+
+    row = analysis.json.loads(gap_path.read_text(encoding="utf-8").splitlines()[0])
+    assert not row.get("invariant_violation", False)    
