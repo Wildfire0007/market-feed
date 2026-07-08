@@ -38,6 +38,7 @@ INBOX_PATH = PUBLIC_DIR / "_position_lifecycle_inbox.jsonl"
 STATE_PATH = PUBLIC_DIR / "_position_lifecycle_state.json"
 EXPIRY_NOTIFY_STATE_PATH = PUBLIC_DIR / "_position_expiry_notify_state.json"
 CLOSE_NOTIFY_STATE_PATH = PUBLIC_DIR / "_position_close_notify_state.json"
+STALE_OPEN_POSITION_NOTIFY_STATE_PATH = PUBLIC_DIR / "_position_stale_open_notify_state.json"
 CLOSE_STATES = {"hard_exit", "stop_loss_hit", "take_profit_hit", "take_profit_2_hit", "closed"}
 
 
@@ -151,7 +152,7 @@ def _exit_level_for_reason(pos: Dict[str, Any], reason: str) -> Any:
         return pos.get("tp2")
     if reason == "stop_loss_hit":
         return pos.get("sl")
-    if reason == "hard_exit":
+    if reason in {"hard_exit", "session_force_close"}:
         return pos.get("close_spot") or pos.get("last_spot") or pos.get("entry")        
     return pos.get("entry")
 
@@ -165,14 +166,21 @@ def _send_close_alert(asset: str, pos: Dict[str, Any], reason: str, now: datetim
         "take_profit_hit": "🟢 TP1 ELÉRVE – ZÁRD A TELJES POZÍCIÓT" if bool(pos.get("tp1_closes_position", True)) else "🟠 TP1 ELÉRVE – RÉSZZÁRÁS + BE",
         "take_profit_2_hit": "🟢 CÉLÁR ELÉRVE – ZÁRD A POZÍCIÓT",
         "stop_loss_hit": "🔴 STOP LOSS SZINT ELÉRVE – ZÁRD A POZÍCIÓT",
-        "hard_exit": "🔴 AZONNAL ZÁRD A POZÍCIÓT – HARD EXIT",        
+        "hard_exit": "🔴 AZONNAL ZÁRD A POZÍCIÓT – HARD EXIT",
+        "session_force_close": "🟠 SESSION ZÁRÁS – ZÁRD A POZÍCIÓT MOST",        
     }.get(reason, "🔴 ZÁRD A POZÍCIÓT")
     detail = str(pos.get("close_detail") or "hard_exit")
     fields = [
         {"name": "Eszköz", "value": f"`{asset}`", "inline": True},
         {"name": "Irány", "value": f"`{side_label}`", "inline": True},
     ]
-    if reason == "hard_exit":
+    if reason == "session_force_close":
+        fields.extend([
+            {"name": "Aktuális spot", "value": f"`{_format_price(exit_level)}`", "inline": True},
+            {"name": "Becsült PnL", "value": f"`${pnl:.2f}`" if pnl is not None else "`N/A`", "inline": True},
+            {"name": "Utasítás", "value": f"Zárd a teljes {asset} {side_label} pozíciót piaci áron most.", "inline": False},
+        ])
+    elif reason == "hard_exit":
         fields.extend([
             {"name": "Aktuális spot", "value": f"`{_format_price(exit_level)}`", "inline": True},
             {"name": "Becsült PnL", "value": f"`${pnl:.2f}`" if pnl is not None else "`N/A`", "inline": True},
@@ -188,8 +196,8 @@ def _send_close_alert(asset: str, pos: Dict[str, Any], reason: str, now: datetim
     fields.append({"name": "🕒 Időbélyeg", "value": f"`{to_utc_iso(now)}` UTC", "inline": False})
     embed = {
         "title": title,
-        "description": f"Ok: {detail}" if reason == "hard_exit" else "",
-        "color": 0x2ECC71 if reason.startswith("take_profit") else 0xE74C3C,
+        "description": "A kereskedési ablak zárul / max. tartási idő letelt — zárd piaci áron. Becsült PnL: " + (f"${pnl:.2f}" if pnl is not None else "N/A") + "." if reason == "session_force_close" else (f"Ok: {detail}" if reason == "hard_exit" else ""),
+        "color": 0xF39C12 if reason == "session_force_close" else (0x2ECC71 if reason.startswith("take_profit") else 0xE74C3C),
         "fields": fields,
     }
     sent = False
@@ -205,7 +213,7 @@ def _send_close_alert(asset: str, pos: Dict[str, Any], reason: str, now: datetim
 
 
 def _notify_close_once(asset: str, pos: Dict[str, Any], reason: str, now: datetime) -> None:
-    if reason not in {"take_profit_hit", "take_profit_2_hit", "stop_loss_hit", "hard_exit"}:
+    if reason not in {"take_profit_hit", "take_profit_2_hit", "stop_loss_hit", "hard_exit", "session_force_close"}:    
         return
     st = load_json(CLOSE_NOTIFY_STATE_PATH)
     key = f"{asset}|{pos.get('opened_at_utc') or pos.get('pending_since_utc') or pos.get('updated_at_utc') or ''}|{reason}|{pos.get('entry')}|{_exit_level_for_reason(pos, reason)}"
@@ -214,6 +222,72 @@ def _notify_close_once(asset: str, pos: Dict[str, Any], reason: str, now: dateti
     if _send_close_alert(asset, pos, reason, now):
         st[key] = to_utc_iso(now)
         save_json(CLOSE_NOTIFY_STATE_PATH, st)
+
+
+def _spot_timestamp(asset_dir: Path, signal: Dict[str, Any]) -> Optional[datetime]:
+    spot = load_json(asset_dir / "spot.json")
+    if not spot and isinstance(signal.get("spot"), dict):
+        spot = signal.get("spot") or {}
+    return parse_utc(spot.get("utc") or spot.get("timestamp") or spot.get("retrieved_at_utc"))
+
+
+def _send_stale_open_position_alert(asset: str, age_minutes: float, now: datetime) -> bool:
+    embed = {
+        "title": "⚠️ ADATKIESÉS NYITOTT POZÍCIÓ MELLETT – FIGYELD KÉZZEL",
+        "color": 0xF39C12,
+        "fields": [
+            {"name": "Eszköz", "value": f"`{asset}`", "inline": True},
+            {"name": "Utolsó adat kora", "value": f"`{age_minutes:.1f} perc`", "inline": True},
+            {"name": "Utasítás", "value": "Kezeld az SL/TP-t kézzel a brókernél, amíg az adatfolyam helyre nem áll.", "inline": False},
+            {"name": "🕒 Időbélyeg", "value": f"`{to_utc_iso(now)}` UTC", "inline": False},
+        ],
+    }
+    sent = False
+    for url in _webhook_urls():
+        if requests is None:
+            continue
+        try:
+            resp = requests.post(url, json={"embeds": [embed]}, timeout=8)
+            sent = _webhook_log_response(__import__("logging").getLogger(__name__), "position_lifecycle", "actionable", resp) or sent
+        except Exception as exc:
+            _webhook_log_exception(__import__("logging").getLogger(__name__), "position_lifecycle", "actionable", exc)
+    return sent
+
+
+def _notify_stale_open_position_once(asset: str, pos: Dict[str, Any], age_minutes: float, now: datetime) -> None:
+    st = load_json(STALE_OPEN_POSITION_NOTIFY_STATE_PATH)
+    key = f"{asset}|{pos.get('opened_at_utc') or pos.get('pending_since_utc') or pos.get('updated_at_utc') or ''}"
+    if st.get(key):
+        return
+    if _send_stale_open_position_alert(asset, age_minutes, now):
+        st[key] = to_utc_iso(now)
+        save_json(STALE_OPEN_POSITION_NOTIFY_STATE_PATH, st)
+
+
+def _clear_stale_open_position_episode(asset: str, pos: Dict[str, Any]) -> None:
+    st = load_json(STALE_OPEN_POSITION_NOTIFY_STATE_PATH)
+    key = f"{asset}|{pos.get('opened_at_utc') or pos.get('pending_since_utc') or pos.get('updated_at_utc') or ''}"
+    if key in st:
+        st.pop(key, None)
+        save_json(STALE_OPEN_POSITION_NOTIFY_STATE_PATH, st)
+
+
+def _session_force_close_due(now: datetime, cfg: Dict[str, Any]) -> bool:
+    raw = str(cfg.get("session_force_close_utc") or "").strip()
+    if not raw or now.weekday() >= 5:
+        return False
+    try:
+        hour, minute = [int(part) for part in raw.split(":", 1)]
+    except Exception:
+        return False
+    cutoff = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return now >= cutoff
+
+
+def _max_hold_due(pos: Dict[str, Any], now: datetime, cfg: Dict[str, Any]) -> bool:
+    max_hold = safe_float(cfg.get("max_hold_minutes"))
+    opened = parse_utc(pos.get("opened_at_utc"))
+    return bool(max_hold and opened and now - opened >= timedelta(minutes=max_hold))
 
 def _read_inbox_new_lines(path: Path, last_line: int) -> tuple[list[Dict[str, Any]], int]:
     if not path.exists():
@@ -322,6 +396,21 @@ def process() -> None:
         signal = load_json(asset_dir / "signal.json")
         side = str(pos.get("side") or "").lower()
         bar = _latest_bar(asset_dir)
+        status = str(pos.get("status") or "").lower()
+        if status == "open" and (_session_force_close_due(now_dt, cfg) or _max_hold_due(pos, now_dt, cfg)):
+            pos["close_spot"] = safe_float((signal.get("spot") or {}).get("price")) or safe_float(bar.get("close") or bar.get("c")) or pos.get("entry")
+            pos = _close(pos, "session_force_close", now_dt, outcome="force_closed")
+            close_reason = pos.pop("_notify_close_reason", None)
+            if close_reason:
+                _notify_close_once(asset, pos, close_reason, now_dt)
+            positions[asset] = pos
+            continue
+        spot_ts = _spot_timestamp(asset_dir, signal)
+        stale_limit = safe_float(cfg.get("open_position_data_stale_minutes")) or 10.0
+        if spot_ts and now_dt - spot_ts > timedelta(minutes=stale_limit):
+            _notify_stale_open_position_once(asset, pos, (now_dt - spot_ts).total_seconds() / 60.0, now_dt)
+        else:
+            _clear_stale_open_position_episode(asset, pos)        
         if pos.get("status") == "pending":
             price = safe_float((signal.get("spot") or {}).get("price"))
             if _pending_filled(pos, price):
