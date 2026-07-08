@@ -41,3 +41,7 @@ The watchdog is stateless, so it self-deduplicates stale episodes by sending onl
 ## Notify state preservation and webhook audit
 The TD notify job refreshes `public/` from the analysis artifact, so notify-owned state is saved before `rm -rf public` and restored after artifact download. The saved paths include the daily digest dedup file, weekly report dedup file, state-unknown guard state, risk lockout notify state, management/lifecycle state, lifecycle inbox, and notify lock files.
 Webhook delivery attempts from notification scripts append JSON lines to `public/monitoring/webhook_delivery.jsonl` with `ts_utc`, `script`, `channel_kind`, `status`, and `ok`. The file is rotated according to `webhook_delivery_log.max_mb` (MiB threshold, default 5) and `webhook_delivery_log.keep_files` (rotated files retained, default 1).
+
+## 2026-07-08 momentum override entry gate
+
+`config/analysis_settings.json` keeps `momentum_override_entries.enabled` off by default during the live measurement phase. If operators enable it later, `respect_p_score_min: true` preserves the effective `p_score_min` gate so micro-bias/momentum override entries cannot dispatch below the configured P-score minimum.
