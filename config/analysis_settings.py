@@ -1494,6 +1494,7 @@ MANUAL_TRADE_MODEL: Dict[str, Any] = _normalize_manual_trade_model(
     _get_config_value("manual_trade_model")
 )
 POSITION_LIFECYCLE: Dict[str, Any] = dict(_get_config_value("position_lifecycle") or {})
+MANAGEMENT_NOTIFIER_EXIT_CARDS: bool = bool(_get_config_value("management_notifier_exit_cards") or False)
 MOMENTUM_OVERRIDE_ENTRIES: Dict[str, Any] = dict(_get_config_value("momentum_override_entries") or {"enabled": False, "respect_p_score_min": True})
 WEEKLY_REPORT: Dict[str, Any] = dict(_get_config_value("weekly_report") or {})
 WATCHDOG: Dict[str, Any] = dict(_get_config_value("watchdog") or {})
