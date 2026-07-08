@@ -37,6 +37,7 @@ LOCK_PATH = PUBLIC_DIR / ".position_lifecycle.lock"
 INBOX_PATH = PUBLIC_DIR / "_position_lifecycle_inbox.jsonl"
 STATE_PATH = PUBLIC_DIR / "_position_lifecycle_state.json"
 EXPIRY_NOTIFY_STATE_PATH = PUBLIC_DIR / "_position_expiry_notify_state.json"
+CLOSE_NOTIFY_STATE_PATH = PUBLIC_DIR / "_position_close_notify_state.json"
 CLOSE_STATES = {"hard_exit", "stop_loss_hit", "take_profit_hit", "take_profit_2_hit", "closed"}
 
 
@@ -91,6 +92,20 @@ def _position_key(asset: str, pos: Dict[str, Any]) -> str:
     return f"{asset}|{pos.get('pending_since_utc') or pos.get('updated_at_utc') or ''}|{pos.get('entry')}|{pos.get('order_type')}"
 
 
+def _format_price(value: Any) -> str:
+    n = safe_float(value)
+    if n is None:
+        return "N/A"
+    return f"{n:.5f}".rstrip("0").rstrip(".")
+
+
+def _pnl_usd(side: str, entry: Any, exit_level: Any, units: Any) -> Optional[float]:
+    entry_f, exit_f, units_f = safe_float(entry), safe_float(exit_level), safe_float(units)
+    if entry_f is None or exit_f is None or units_f is None:
+        return None
+    return (exit_f - entry_f) * units_f * (1 if side == "long" else -1)
+
+
 def _send_expiry_cancel_alert(asset: str, pos: Dict[str, Any], now: datetime) -> bool:
     side = str(pos.get("side") or "").lower()
     direction = "BUY" if side == "long" else "SELL"
@@ -127,7 +142,65 @@ def _notify_expired_once(asset: str, pos: Dict[str, Any], now: datetime) -> None
     if _send_expiry_cancel_alert(asset, pos, now):
         st[key] = to_utc_iso(now)
         save_json(EXPIRY_NOTIFY_STATE_PATH, st)
-    
+
+
+def _exit_level_for_reason(pos: Dict[str, Any], reason: str) -> Any:
+    if reason == "take_profit_hit":
+        return pos.get("tp1")
+    if reason == "take_profit_2_hit":
+        return pos.get("tp2")
+    if reason == "stop_loss_hit":
+        return pos.get("sl")
+    return pos.get("entry")
+
+
+def _send_close_alert(asset: str, pos: Dict[str, Any], reason: str, now: datetime) -> bool:
+    side = str(pos.get("side") or "").lower()
+    side_label = "LONG" if side == "long" else "SHORT"
+    exit_level = _exit_level_for_reason(pos, reason)
+    pnl = _pnl_usd(side, pos.get("entry"), exit_level, pos.get("size_units"))
+    title = {
+        "take_profit_hit": "🟢 TP1 ELÉRVE – ZÁRD A TELJES POZÍCIÓT" if bool(pos.get("tp1_closes_position", True)) else "🟠 TP1 ELÉRVE – RÉSZZÁRÁS + BE",
+        "take_profit_2_hit": "🟢 CÉLÁR ELÉRVE – ZÁRD A POZÍCIÓT",
+        "stop_loss_hit": "🔴 STOP LOSS SZINT ELÉRVE – ZÁRD A POZÍCIÓT",
+    }.get(reason, "🔴 ZÁRD A POZÍCIÓT")
+    embed = {
+        "title": title,
+        "color": 0x2ECC71 if reason.startswith("take_profit") else 0xE74C3C,
+        "fields": [
+            {"name": "Eszköz", "value": f"`{asset}`", "inline": True},
+            {"name": "Irány", "value": f"`{side_label}`", "inline": True},
+            {"name": "Belépő", "value": f"`{_format_price(pos.get('entry'))}`", "inline": True},
+            {"name": "Kilépési szint", "value": f"`{_format_price(exit_level)}`", "inline": True},
+            {"name": "Méret", "value": f"`{_format_price(pos.get('size_units'))}`", "inline": True},
+            {"name": "Becsült PnL", "value": f"`${pnl:.2f}`" if pnl is not None else "`N/A`", "inline": True},
+            {"name": "Utasítás", "value": f"Zárd a teljes {asset} {side_label} pozíciót piaci áron most.", "inline": False},
+            {"name": "🕒 Időbélyeg", "value": f"`{to_utc_iso(now)}` UTC", "inline": False},
+        ],
+    }
+    sent = False
+    for url in _webhook_urls():
+        if requests is None:
+            continue
+        try:
+            resp = requests.post(url, json={"embeds": [embed]}, timeout=8)
+            sent = _webhook_log_response(__import__("logging").getLogger(__name__), "position_lifecycle", "actionable", resp) or sent
+        except Exception as exc:
+            _webhook_log_exception(__import__("logging").getLogger(__name__), "position_lifecycle", "actionable", exc)
+    return sent
+
+
+def _notify_close_once(asset: str, pos: Dict[str, Any], reason: str, now: datetime) -> None:
+    if reason not in {"take_profit_hit", "take_profit_2_hit", "stop_loss_hit"}:
+        return
+    st = load_json(CLOSE_NOTIFY_STATE_PATH)
+    key = f"{asset}|{pos.get('opened_at_utc') or pos.get('pending_since_utc') or pos.get('updated_at_utc') or ''}|{reason}|{pos.get('entry')}|{_exit_level_for_reason(pos, reason)}"
+    if st.get(key):
+        return
+    if _send_close_alert(asset, pos, reason, now):
+        st[key] = to_utc_iso(now)
+        save_json(CLOSE_NOTIFY_STATE_PATH, st)
+
 def _read_inbox_new_lines(path: Path, last_line: int) -> tuple[list[Dict[str, Any]], int]:
     if not path.exists():
         return [], last_line
@@ -194,7 +267,10 @@ def _bar_hits(side: str, pos: Dict[str, Any], bar: Dict[str, Any]) -> tuple[bool
 
 
 def _close(pos: Dict[str, Any], reason: str, now: datetime, *, outcome: Optional[str] = None, detail: str = "") -> Dict[str, Any]:
+    was_open = str(pos.get("status") or "").lower() == "open"    
     pos.update({"status": "closed", "close_reason": reason, "outcome": outcome or reason, "close_detail": detail, "closed_at_utc": to_utc_iso(now), "updated_at_utc": to_utc_iso(now)})
+    if was_open:
+        pos["_notify_close_reason"] = reason    
     return pos
 
 
@@ -239,8 +315,8 @@ def process() -> None:
             else:
                 since = parse_utc(pos.get("pending_since_utc") or pos.get("updated_at_utc")) or now_dt
                 if now_dt - since >= timedelta(minutes=_validity_minutes(signal, cfg)):
-                    pos.update({"status": "closed", "close_reason": "expired", "outcome": "expired", "closed_at_utc": to_utc_iso(now_dt), "updated_at_utc": to_utc_iso(now_dt)})
                     _notify_expired_once(asset, pos, now_dt)                    
+                    pos.update({"status": "closed", "close_reason": "expired", "outcome": "expired", "closed_at_utc": to_utc_iso(now_dt), "updated_at_utc": to_utc_iso(now_dt)})
             positions[asset] = pos
             continue
         exit_signal = signal.get("position_exit_signal") if isinstance(signal.get("position_exit_signal"), dict) else signal.get("exit_signal")
@@ -271,6 +347,9 @@ def process() -> None:
             elif tp1_hit or exit_state == "take_profit_hit":
                 if cfg.get("tp1_closes_position", True):
                     pos = _close(pos, "take_profit_hit", now_dt, outcome="tp1_closed")
+        close_reason = pos.pop("_notify_close_reason", None)
+        if close_reason:
+            _notify_close_once(asset, pos, close_reason, now_dt)                    
         positions[asset] = pos
 
     state["_meta"] = {**meta, "last_inbox_line": new_last_line}
