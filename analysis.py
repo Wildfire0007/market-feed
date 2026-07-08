@@ -299,6 +299,7 @@ from config.analysis_settings import (
     MIN_RISK_ABS,
     MEAN_REVERT_ADJUSTMENTS,
     MOMENTUM_RR_MIN,
+    MOMENTUM_OVERRIDE_ENTRIES,
     XAGUSD_ATR_5M_FLOOR,
     XAGUSD_ATR_5M_FLOOR_ENABLED,
     OFI_Z_SETTINGS,
@@ -14393,6 +14394,17 @@ def analyze(asset: str) -> Dict[str, Any]:
                     if msg_net not in reasons:
                         reasons.append(msg_net)
     elif not reversal_mode_used:
+        momentum_entry_cfg = MOMENTUM_OVERRIDE_ENTRIES if isinstance(MOMENTUM_OVERRIDE_ENTRIES, dict) else {}
+        momentum_entries_enabled = bool(momentum_entry_cfg.get("enabled", False))
+        momentum_respects_p_score = bool(momentum_entry_cfg.get("respect_p_score_min", True))
+        if mom_dir is not None and (not momentum_entries_enabled or (momentum_respects_p_score and P < p_score_min_local)):
+            if not momentum_entries_enabled:
+                missing_mom.append("momentum_override_entries_disabled")
+                reasons.append("Momentum override entries kikapcsolva a mérési fázisban")
+            elif P < p_score_min_local:
+                missing_mom.append(f"P_score>={p_score_min_local:g}")
+                reasons.append("Momentum override entry blokkolva: P-score minimum nincs meg")
+            mom_dir = None      
         if mom_dir is not None:
             mode = "momentum"
             required_list = list(mom_required)
