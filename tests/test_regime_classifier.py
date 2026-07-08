@@ -19,6 +19,17 @@ def test_regime_classifier_strong_adx_trending_without_ema_slope(monkeypatch):
     assert _classify(monkeypatch, 41.0, 0.0) == "TRENDING"
 
 
+def test_regime_classifier_missing_adx_unknown(monkeypatch):
+    assert _classify(monkeypatch, None, 0.0) == "UNKNOWN"
+
+
 def test_regime_classifier_range_and_choppy_bands(monkeypatch):
     assert _classify(monkeypatch, 15.0, 0.0) == "RANGING"
     assert _classify(monkeypatch, 21.0, 0.0) == "CHOPPY"
+
+
+def test_unknown_regime_soft_penalty_skips_choppy_hard_block():
+    source = open(analysis.__file__, encoding="utf-8").read()
+    assert 'regime_label != "unknown"' in source
+    assert "Regime: ADX nem elérhető — soft büntetés, hard block kihagyva" in source
+
