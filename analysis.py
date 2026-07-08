@@ -8551,8 +8551,8 @@ class RegimeClassifier:
         """Return regime label + raw metrics based on 5m ADX and 1h EMA slope."""
 
         if k5m is None or k1h is None or k5m.empty or k1h.empty:
-            return {"label": "CHOPPY", "adx": None, "ema_slope": None, "ema_slope_signed": None}
-
+            return {"label": "UNKNOWN", "adx": None, "ema_slope": None, "ema_slope_signed": None}
+          
         adx_value = latest_adx(k5m, period=self.adx_period)
         slope_ok, slope_abs, slope_signed = ema_slope_ok(
             k1h,
@@ -8561,8 +8561,9 @@ class RegimeClassifier:
             th=self.ema_threshold,
         )
 
-        label = "CHOPPY"
+        label = "UNKNOWN"
         if adx_value is not None and np.isfinite(adx_value):
+            label = "CHOPPY"          
             if (
                 adx_value >= self.adx_strong_trend_threshold
                 or (adx_value >= self.adx_trend_threshold and slope_abs >= self.ema_threshold)
@@ -13301,13 +13302,21 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     soft_penalty_score_before = float(P)
     if not regime_ok and "regime" in conds_core:
-        if asset in {"GOLD_CFD", "XAGUSD", "USOIL"} and asset_entry_profile == "precision_metal_oil" and entry_profile_flag(asset, "choppy_hard_block"):
+        if (
+            regime_label != "unknown"
+            and asset in {"GOLD_CFD", "XAGUSD", "USOIL"}
+            and asset_entry_profile == "precision_metal_oil"
+            and entry_profile_flag(asset, "choppy_hard_block")
+        ):  
             if "choppy_hard_block" not in critical_missing:
                 critical_missing.append("choppy_hard_block")           
             reasons.append("Regime kapu: CHOPPY hard block aktív a precision_metal_oil profilban")
         else:
             P -= 10.0
-            reasons.append("Regime soft-szűrő: CHOPPY miatt −10 P-score, pozícióskálázás csökkentve")
+            if regime_label == "unknown":
+                reasons.append("Regime: ADX nem elérhető — soft büntetés, hard block kihagyva")
+            else:
+                reasons.append("Regime soft-szűrő: CHOPPY miatt −10 P-score, pozícióskálázás csökkentve")          
     if not atr_ok:
         P -= 5.0
         position_size_scale *= 0.5
