@@ -21,6 +21,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 requests = importlib.import_module("requests") if importlib.util.find_spec("requests") else None
+from config import analysis_settings as settings
 from scripts.webhook_delivery import log_exception as _webhook_log_exception, log_response as _webhook_log_response
 LOGGER = logging.getLogger(__name__)
 BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
@@ -43,6 +44,13 @@ COLOR_GREEN, COLOR_RED, COLOR_ORANGE = 0x2ECC71, 0xE74C3C, 0xE67E22
 SPOT_MAX_AGE_SECONDS = max(5, int(os.getenv("MANAGEMENT_SPOT_MAX_AGE_SECONDS", "180")))
 ENABLE_LIVE_QUOTE_FALLBACK = os.getenv("MANAGEMENT_LIVE_QUOTE_FALLBACK", "1").strip().lower() not in {"0", "false", "no"}
 MANAGEMENT_DIAG_PATH = PUBLIC_DIR / "debug" / "management_notify_events.jsonl"
+
+
+def _exit_cards_enabled() -> bool:
+    return bool(
+        getattr(settings, "MANAGEMENT_NOTIFIER_EXIT_CARDS", False)
+        or getattr(settings, "management_notifier_exit_cards", False)
+    )
 
 
 def load_json(path: Path) -> Dict[str, Any]:
@@ -279,8 +287,8 @@ def process() -> None:
         sent_events = notify_state.get(key) if isinstance(notify_state.get(key), dict) else {}
         skip_reason = ""
         sent_now = []
-
-        for event in ("hard_exit", "sl_hit", "tp2_hit", "tp1_hit"):
+        
+        for event in (("hard_exit", "sl_hit", "tp2_hit", "tp1_hit") if _exit_cards_enabled() else ()):
             if sent_events.get(event):
                 continue
             if event in {"sl_hit", "tp2_hit", "tp1_hit"} and not spot_fresh:
