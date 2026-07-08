@@ -151,6 +151,8 @@ def _exit_level_for_reason(pos: Dict[str, Any], reason: str) -> Any:
         return pos.get("tp2")
     if reason == "stop_loss_hit":
         return pos.get("sl")
+    if reason == "hard_exit":
+        return pos.get("close_spot") or pos.get("last_spot") or pos.get("entry")        
     return pos.get("entry")
 
 
@@ -163,20 +165,32 @@ def _send_close_alert(asset: str, pos: Dict[str, Any], reason: str, now: datetim
         "take_profit_hit": "🟢 TP1 ELÉRVE – ZÁRD A TELJES POZÍCIÓT" if bool(pos.get("tp1_closes_position", True)) else "🟠 TP1 ELÉRVE – RÉSZZÁRÁS + BE",
         "take_profit_2_hit": "🟢 CÉLÁR ELÉRVE – ZÁRD A POZÍCIÓT",
         "stop_loss_hit": "🔴 STOP LOSS SZINT ELÉRVE – ZÁRD A POZÍCIÓT",
+        "hard_exit": "🔴 AZONNAL ZÁRD A POZÍCIÓT – HARD EXIT",        
     }.get(reason, "🔴 ZÁRD A POZÍCIÓT")
-    embed = {
-        "title": title,
-        "color": 0x2ECC71 if reason.startswith("take_profit") else 0xE74C3C,
-        "fields": [
-            {"name": "Eszköz", "value": f"`{asset}`", "inline": True},
-            {"name": "Irány", "value": f"`{side_label}`", "inline": True},
+    detail = str(pos.get("close_detail") or "hard_exit")
+    fields = [
+        {"name": "Eszköz", "value": f"`{asset}`", "inline": True},
+        {"name": "Irány", "value": f"`{side_label}`", "inline": True},
+    ]
+    if reason == "hard_exit":
+        fields.extend([
+            {"name": "Aktuális spot", "value": f"`{_format_price(exit_level)}`", "inline": True},
+            {"name": "Becsült PnL", "value": f"`${pnl:.2f}`" if pnl is not None else "`N/A`", "inline": True},
+        ])
+    else:
+        fields.extend([    
             {"name": "Belépő", "value": f"`{_format_price(pos.get('entry'))}`", "inline": True},
             {"name": "Kilépési szint", "value": f"`{_format_price(exit_level)}`", "inline": True},
             {"name": "Méret", "value": f"`{_format_price(pos.get('size_units'))}`", "inline": True},
             {"name": "Becsült PnL", "value": f"`${pnl:.2f}`" if pnl is not None else "`N/A`", "inline": True},
             {"name": "Utasítás", "value": f"Zárd a teljes {asset} {side_label} pozíciót piaci áron most.", "inline": False},
-            {"name": "🕒 Időbélyeg", "value": f"`{to_utc_iso(now)}` UTC", "inline": False},
-        ],
+        ])
+    fields.append({"name": "🕒 Időbélyeg", "value": f"`{to_utc_iso(now)}` UTC", "inline": False})
+    embed = {
+        "title": title,
+        "description": f"Ok: {detail}" if reason == "hard_exit" else "",
+        "color": 0x2ECC71 if reason.startswith("take_profit") else 0xE74C3C,
+        "fields": fields,
     }
     sent = False
     for url in _webhook_urls():
@@ -191,7 +205,7 @@ def _send_close_alert(asset: str, pos: Dict[str, Any], reason: str, now: datetim
 
 
 def _notify_close_once(asset: str, pos: Dict[str, Any], reason: str, now: datetime) -> None:
-    if reason not in {"take_profit_hit", "take_profit_2_hit", "stop_loss_hit"}:
+    if reason not in {"take_profit_hit", "take_profit_2_hit", "stop_loss_hit", "hard_exit"}:
         return
     st = load_json(CLOSE_NOTIFY_STATE_PATH)
     key = f"{asset}|{pos.get('opened_at_utc') or pos.get('pending_since_utc') or pos.get('updated_at_utc') or ''}|{reason}|{pos.get('entry')}|{_exit_level_for_reason(pos, reason)}"
@@ -325,11 +339,13 @@ def process() -> None:
         atr_now, atr_med = _atr_values(signal)
         shock = atr_now and atr_med and atr_now > float(hard_cfg.get("volatility_shock_atr5m_median_mult", 3.0) or 3.0) * atr_med
         if (exit_state == "hard_exit" and exit_reason in immediate_on) or ("volatility_shock" in immediate_on and shock):
+            pos["close_spot"] = safe_float((signal.get("spot") or {}).get("price")) or safe_float(bar.get("close") or bar.get("c")) or safe_float(bar.get("open") or bar.get("o")) or pos.get("entry")            
             pos = _close(pos, "hard_exit", now_dt, outcome="hard_exit", detail="volatility_shock" if shock else exit_reason)
         elif exit_state == "hard_exit":
             key = f"hard_exit_counter_{asset}"
             meta[key] = int(meta.get(key) or 0) + 1
             if meta[key] >= int(((hard_cfg.get("trend_reversal_requires") or {}).get("consecutive_runs")) or 2):
+                pos["close_spot"] = safe_float((signal.get("spot") or {}).get("price")) or safe_float(bar.get("close") or bar.get("c")) or safe_float(bar.get("open") or bar.get("o")) or pos.get("entry")                
                 pos = _close(pos, "hard_exit", now_dt, outcome="hard_exit", detail=exit_reason or "trend_reversal")
         else:
             meta[f"hard_exit_counter_{asset}"] = 0
