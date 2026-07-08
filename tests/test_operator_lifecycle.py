@@ -62,14 +62,25 @@ def test_hard_exit_hysteresis_and_volatility_shock(tmp_path, monkeypatch):
     monkeypatch.setattr(lc, "PUBLIC_DIR", tmp_path)
     monkeypatch.setattr(lc, "STATE_PATH", tmp_path / "_position_lifecycle_state.json")
     monkeypatch.setattr(lc, "INBOX_PATH", tmp_path / "missing.jsonl")
+    monkeypatch.setattr(lc, "CLOSE_NOTIFY_STATE_PATH", tmp_path / "_position_close_notify_state.json")    
     monkeypatch.setattr(lc, "_cfg", lambda: {"hard_exit":{"immediate_on":["volatility_shock"],"volatility_shock_atr5m_median_mult":3,"trend_reversal_requires":{"consecutive_runs":2}}})
-    _write(lc.STATE_PATH, {"positions":{"XAGUSD":{"status":"open","side":"long","entry":30,"sl":29,"tp1":31}}})
-    _write(tmp_path / "XAGUSD" / "signal.json", {"exit_signal":{"state":"hard_exit","reason":"trend_reversal"}})
+    sent = []
+    monkeypatch.setattr(lc, "_send_close_alert", lambda asset, pos, reason, now: sent.append((asset, reason, pos.copy())) or True)
+
+    _write(lc.STATE_PATH, {"positions":{"XAGUSD":{"status":"open","side":"long","entry":30,"sl":29,"tp1":31,"opened_at_utc":"2026-07-08T09:00:00Z","size_units":10}}})
+    _write(tmp_path / "XAGUSD" / "signal.json", {"exit_signal":{"state":"hard_exit","reason":"trend_reversal"}, "spot":{"price":29.5}})
     lc.process(); assert json.loads(lc.STATE_PATH.read_text())["positions"]["XAGUSD"]["status"] == "open"
+    assert sent == []    
     lc.process(); assert json.loads(lc.STATE_PATH.read_text())["positions"]["XAGUSD"]["status"] == "closed"
-    _write(lc.STATE_PATH, {"positions":{"GOLD_CFD":{"status":"open","side":"long","entry":2300,"sl":2290,"tp1":2310}}})
-    _write(tmp_path / "GOLD_CFD" / "signal.json", {"atr":{"atr5m":4,"atr5m_median_20d":1}})
-    lc.process(); assert json.loads(lc.STATE_PATH.read_text())["positions"]["GOLD_CFD"]["close_detail"] == "volatility_shock"
+    assert [(asset, reason, pos["close_detail"]) for asset, reason, pos in sent] == [("XAGUSD", "hard_exit", "trend_reversal")]
+
+    sent.clear()
+    _write(lc.STATE_PATH, {"positions":{"GOLD_CFD":{"status":"open","side":"long","entry":2300,"sl":2290,"tp1":2310,"opened_at_utc":"2026-07-08T10:00:00Z","size_units":2}}})
+    _write(tmp_path / "GOLD_CFD" / "signal.json", {"atr":{"atr5m":4,"atr5m_median_20d":1}, "spot":{"price":2295}})
+    lc.process()
+    pos = json.loads(lc.STATE_PATH.read_text())["positions"]["GOLD_CFD"]
+    assert pos["close_detail"] == "volatility_shock"
+    assert [(asset, reason, payload["close_detail"]) for asset, reason, payload in sent] == [("GOLD_CFD", "hard_exit", "volatility_shock")]
 
 
 def test_expired_pending_dispatches_cancel_alert_once(tmp_path, monkeypatch):
