@@ -10,4 +10,5 @@ def test_notify_job_preserves_state_files():
     assert "scripts/preserve_public_append_logs.py restore" in workflow
     helper = Path("scripts/preserve_public_append_logs.py").read_text(encoding="utf-8")
     assert "journal/trade_journal.csv" in helper
+    assert "journal/trade_ledger.csv" in helper
 
