@@ -14402,6 +14402,26 @@ def analyze(asset: str) -> Dict[str, Any]:
         momentum_respects_p_score = bool(momentum_entry_cfg.get("respect_p_score_min", True))
         if mom_dir is not None and (not momentum_entries_enabled or (momentum_respects_p_score and P < p_score_min_local)):
             if not momentum_entries_enabled:
+                shadow_side = mom_dir
+                saved_levels = (entry, sl, tp1, tp2, rr, last_computed_risk)
+                if compute_levels(shadow_side, momentum_rr_min, mom_tp1_mult, mom_tp2_mult):
+                    try:
+                        record_signal_event(asset, {
+                            "retrieved_at_utc": analysis_timestamp,
+                            "signal": shadow_side,
+                            "probability": probability_percent,
+                            "entry": entry,
+                            "sl": sl,
+                            "tp1": tp1,
+                            "tp2": tp2,
+                            "rr": (round(rr, 2) if rr else None),
+                            "spot": {"price": display_spot, "utc": spot_utc},
+                            "gates": {"mode": "suppressed_momentum"},
+                            "reasons": ["Momentum override entries kikapcsolva a mérési fázisban"],
+                        })
+                    except Exception:
+                        pass
+                entry, sl, tp1, tp2, rr, last_computed_risk = saved_levels              
                 missing_mom.append("momentum_override_entries_disabled")
                 reasons.append("Momentum override entries kikapcsolva a mérési fázisban")
             elif P < p_score_min_local:
