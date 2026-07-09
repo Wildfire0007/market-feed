@@ -504,4 +504,5 @@ if __name__ == "__main__":
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             sys.exit(0)
+        backfill_closed_positions()
         process()
