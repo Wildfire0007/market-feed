@@ -207,7 +207,7 @@ def test_suppressed_momentum_row_is_executable_for_labeler():
             "stop_loss": 1.0950,
             "take_profit_1": 1.1100,
             "signal": "buy",
-            "mode": "suppressed_momentum",
+            "mode": "suppressed_concurrency",
             "spot_price": 1.1000,
         }
     )
