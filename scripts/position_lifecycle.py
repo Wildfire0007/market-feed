@@ -25,6 +25,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from config import analysis_settings as settings
 from scripts.webhook_delivery import log_exception as _webhook_log_exception, log_response as _webhook_log_response
+from scripts.trade_ledger import append_position as _append_ledger_position
 
 requests = importlib.import_module("requests") if importlib.util.find_spec("requests") else None
 
@@ -36,6 +37,7 @@ if not PUBLIC_DIR.exists() and (BASE_DIR.parent / "public").exists():
 LOCK_PATH = PUBLIC_DIR / ".position_lifecycle.lock"
 INBOX_PATH = PUBLIC_DIR / "_position_lifecycle_inbox.jsonl"
 STATE_PATH = PUBLIC_DIR / "_position_lifecycle_state.json"
+LEDGER_PATH = PUBLIC_DIR / "journal" / "trade_ledger.csv"
 EXPIRY_NOTIFY_STATE_PATH = PUBLIC_DIR / "_position_expiry_notify_state.json"
 CLOSE_NOTIFY_STATE_PATH = PUBLIC_DIR / "_position_close_notify_state.json"
 STALE_OPEN_POSITION_NOTIFY_STATE_PATH = PUBLIC_DIR / "_position_stale_open_notify_state.json"
@@ -362,6 +364,32 @@ def _close(pos: Dict[str, Any], reason: str, now: datetime, *, outcome: Optional
     return pos
 
 
+def _ledger_path() -> Path:
+    if LEDGER_PATH.parent.parent == PUBLIC_DIR:
+        return LEDGER_PATH
+    return PUBLIC_DIR / "journal" / "trade_ledger.csv"
+
+
+def _append_trade_ledger_once(asset: str, pos: Dict[str, Any], meta: Dict[str, Any]) -> None:
+    if str(pos.get("status") or "").lower() != "closed":
+        return
+    _append_ledger_position(_ledger_path(), asset, pos, meta)
+
+
+def backfill_closed_positions() -> int:
+    state = load_json(STATE_PATH)
+    meta = state.get("_meta") if isinstance(state.get("_meta"), dict) else {}
+    positions = state.get("positions") if isinstance(state.get("positions"), dict) else {}
+    count = 0
+    for asset, pos in positions.items():
+        if isinstance(pos, dict) and str(pos.get("status") or "").lower() == "closed":
+            count += int(_append_ledger_position(_ledger_path(), str(asset), pos, meta))
+    state["_meta"] = meta
+    state["positions"] = positions
+    save_json(STATE_PATH, state)
+    return count
+
+
 def process() -> None:
     if not PUBLIC_DIR.exists():
         return
@@ -403,6 +431,7 @@ def process() -> None:
             close_reason = pos.pop("_notify_close_reason", None)
             if close_reason:
                 _notify_close_once(asset, pos, close_reason, now_dt)
+            _append_trade_ledger_once(asset, pos, meta)               
             positions[asset] = pos
             continue
         spot_ts = _spot_timestamp(asset_dir, signal)
@@ -420,6 +449,7 @@ def process() -> None:
                 if now_dt - since >= timedelta(minutes=_validity_minutes(signal, cfg)):
                     _notify_expired_once(asset, pos, now_dt)                    
                     pos.update({"status": "closed", "close_reason": "expired", "outcome": "expired", "closed_at_utc": to_utc_iso(now_dt), "updated_at_utc": to_utc_iso(now_dt)})
+                    _append_trade_ledger_once(asset, pos, meta)                    
             positions[asset] = pos
             continue
         exit_signal = signal.get("position_exit_signal") if isinstance(signal.get("position_exit_signal"), dict) else signal.get("exit_signal")
@@ -454,7 +484,8 @@ def process() -> None:
                     pos = _close(pos, "take_profit_hit", now_dt, outcome="tp1_closed")
         close_reason = pos.pop("_notify_close_reason", None)
         if close_reason:
-            _notify_close_once(asset, pos, close_reason, now_dt)                    
+            _notify_close_once(asset, pos, close_reason, now_dt)
+        _append_trade_ledger_once(asset, pos, meta)            
         positions[asset] = pos
 
     state["_meta"] = {**meta, "last_inbox_line": new_last_line}
