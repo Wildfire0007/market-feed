@@ -44,12 +44,12 @@ def test_weekly_boundary_and_dedupe(tmp_path, monkeypatch):
 
 def test_weekly_wilson_line_fixture(tmp_path, monkeypatch):
     setup_public(tmp_path, monkeypatch)
-    journal = tmp_path / "journal" / "trade_journal.csv"
-    journal.parent.mkdir(parents=True)
-    lines = ["analysis_timestamp,asset,validation_outcome,validation_rr"]
-    lines += [f"2026-06-30T12:0{i}:00Z,GOLD_CFD,tp1,1" for i in range(7)]
-    lines += [f"2026-06-30T13:0{i}:00Z,XAGUSD,stopped,-1" for i in range(3)]
-    journal.write_text("\n".join(lines), encoding="utf-8")
+    ledger = tmp_path / "journal" / "trade_ledger.csv"
+    ledger.parent.mkdir(parents=True)
+    lines = ["ledger_id,asset,side,order_type,entry,sl,tp1,tp2,size_units,opened_at_utc,closed_at_utc,close_reason,outcome,est_pnl_usd,source_signal,entry_signature"]
+    lines += [f"w{i},GOLD_CFD,long,LIMIT,1,0,2,,10,2026-06-30T11:00:00Z,2026-06-30T12:0{i}:00Z,take_profit_hit,tp1_closed,10,," for i in range(7)]
+    lines += [f"l{i},XAGUSD,long,LIMIT,1,0,2,,10,2026-06-30T12:00:00Z,2026-06-30T13:0{i}:00Z,stop_loss_hit,stopped,-10,," for i in range(3)]
+    ledger.write_text("\n".join(lines), encoding="utf-8")    
     embed = weekly.build_embed(weekly.datetime.fromisoformat("2026-07-05T20:31:00+00:00"))
     lo, hi = _wilson_interval(7, 10)
     assert "Címkézett ügyletek: 10" in embed["description"]
