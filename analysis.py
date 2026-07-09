@@ -397,6 +397,9 @@ _ADAPTIVE_PARAMS_MISSING: Set[str] = set()
 
 @lru_cache(maxsize=1)
 def _load_adaptive_params() -> Dict[str, Any]:
+    if not bool(SETTINGS.get("adaptive_params_enabled", True)):
+        LOGGER.info("adaptive params disabled — measurement freeze")
+        return {}  
     if not ADAPTIVE_PARAMS_PATH.exists():
         LOGGER.warning("Adaptive paraméterek hiányoznak: %s", ADAPTIVE_PARAMS_PATH)
         return {}
