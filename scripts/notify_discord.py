@@ -30,6 +30,7 @@ from config import analysis_settings as settings
 from scripts.reset_notify_state import build_default_state, _default_asset_state
 import position_tracker
 from scripts.webhook_delivery import log_exception as _webhook_log_exception, log_response as _webhook_log_response
+from reports import trade_journal as _trade_journal
 
 DRY_RUN = os.getenv("NOTIFY_DRY_RUN", "").lower() in {"1", "true", "yes"}
 ENTRY_COOLDOWN_MINUTES = 30
@@ -55,6 +56,7 @@ if not PUBLIC_DIR.exists() and (BASE_DIR.parent / "public").exists():
 NOTIFY_LOCK_PATH = PUBLIC_DIR / ".notify_discord.lock"
 COLOR_GREEN, COLOR_RED, COLOR_YELLOW = 0x2ECC71, 0xE74C3C, 0xF1C40F
 LIFECYCLE_INBOX_PATH = PUBLIC_DIR / "_position_lifecycle_inbox.jsonl"
+LIFECYCLE_STATE_PATH = PUBLIC_DIR / "_position_lifecycle_state.json"
 
 LAST_SENT_RETENTION_DAYS = 14
 ASSETS = ["BTCUSD", "XAGUSD", "GOLD_CFD", "USOIL", "NVDA", "EURUSD"]
@@ -183,6 +185,46 @@ def _append_lifecycle_entry_event(path: Path, payload: Dict[str, Any]) -> None:
         pass
 
 
+
+def _max_concurrent_positions() -> int:
+    try:
+        value = settings.load_config().get("max_concurrent_positions", 0)
+        return max(int(value or 0), 0)
+    except Exception:
+        return 0
+
+
+def _open_lifecycle_position_count(path: Optional[Path] = None) -> int:
+    state = load_json(path or LIFECYCLE_STATE_PATH)
+    positions = state.get("positions") if isinstance(state.get("positions"), dict) else {}
+    return sum(
+        1
+        for pos in positions.values()
+        if isinstance(pos, dict) and str(pos.get("status") or "").strip().lower() in {"open", "pending"}
+    )
+
+
+def _record_suppressed_concurrency(asset: str, payload: Dict[str, Any], *, direction: str, entry: Any, sl: Any, tp1: Any, tp2: Any, probability: Any, now_iso: str) -> None:
+    shadow = dict(payload or {})
+    shadow["retrieved_at_utc"] = shadow.get("retrieved_at_utc") or now_iso
+    shadow["signal"] = direction
+    shadow["probability"] = shadow.get("probability", probability)
+    shadow["entry"] = entry
+    shadow["sl"] = sl
+    shadow["tp1"] = tp1
+    shadow["tp2"] = tp2
+    shadow["gates"] = {**(shadow.get("gates") or {}), "mode": "suppressed_concurrency"}
+    reasons = shadow.get("reasons") if isinstance(shadow.get("reasons"), list) else []
+    shadow["reasons"] = [*reasons, "Konkurencia-plafon miatt kihagyva"]
+    old_dir, old_file, old_summary = _trade_journal.JOURNAL_DIR, _trade_journal.JOURNAL_FILE, _trade_journal.SUMMARY_FILE
+    try:
+        _trade_journal.JOURNAL_DIR = PUBLIC_DIR / "journal"
+        _trade_journal.JOURNAL_FILE = _trade_journal.JOURNAL_DIR / "trade_journal.csv"
+        _trade_journal.SUMMARY_FILE = _trade_journal.JOURNAL_DIR / "summary.json"
+        _trade_journal.record_signal_event(asset, shadow)
+    finally:
+        _trade_journal.JOURNAL_DIR, _trade_journal.JOURNAL_FILE, _trade_journal.SUMMARY_FILE = old_dir, old_file, old_summary
+        
 def load_json(path: Path) -> Dict[str, Any]:
     try:
         with path.open("r", encoding="utf-8") as h:
@@ -904,6 +946,11 @@ def check_and_notify() -> None:
             "footer": {"text": f"Signal • Budapest: {format_budapest_time(now_dt)} • Várakozás (30 perc csend indítva)"},
         }
 
+        max_concurrent_positions = _max_concurrent_positions()
+        if max_concurrent_positions > 0 and _open_lifecycle_position_count() >= max_concurrent_positions:
+            _record_suppressed_concurrency(asset_name, data, direction=direction, entry=entry, sl=sl, tp1=tp1, tp2=tp2, probability=p_score, now_iso=to_utc_iso(now_dt))
+            continue
+        
         sent_result = send_discord_embed(embed)
         if sent_result is False:
             continue
