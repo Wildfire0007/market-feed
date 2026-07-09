@@ -759,11 +759,38 @@ def _summary_bucket(frame: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
+def _ledger_summary_bucket(frame: pd.DataFrame) -> Dict[str, Any]:
+    closed = frame[frame.get("outcome", pd.Series(dtype=str)).astype(str).str.lower() != "expired"]
+    count = int(len(closed))
+    tp = int(closed.get("outcome", pd.Series(dtype=str)).astype(str).str.lower().isin({"tp1_closed", "take_profit_2_hit"}).sum()) if count else 0
+    lo, hi = _wilson_interval(tp, count)
+    pnl = pd.to_numeric(closed.get("est_pnl_usd"), errors="coerce") if count else pd.Series(dtype=float)
+    return {
+        "labeled_trade_count": count,
+        "tp1_before_sl_rate": round(tp / count, 4) if count else 0.0,
+        "tp1_before_sl_wilson_95": [round(lo, 4), round(hi, 4)],
+        "stopped_rate": round(int((closed.get("outcome", pd.Series(dtype=str)).astype(str).str.lower() == "stopped").sum()) / count, 4) if count else 0.0,
+        "ambiguous_count": 0,
+        "no_fill_count": 0,
+        "average_validation_rr": 0.0,
+        "expectancy_usd": round(float(pnl.mean()) if count and not pnl.dropna().empty else 0.0, 4),
+        "realized_pnl_usd": round(float(pnl.sum()) if count else 0.0, 4),
+    }
+
+
 def _write_summary(summary_path: Path, journal_df: pd.DataFrame, *, now: pd.Timestamp) -> None:
-    assets = sorted(set(journal_df.get("asset", pd.Series(dtype=str)).dropna().astype(str).str.upper()))
-    payload = {"generated_at_utc": now.isoformat().replace("+00:00", "Z"), "assets": {}, "combined": _summary_bucket(journal_df)}
-    for asset in assets:
-        payload["assets"][asset] = _summary_bucket(journal_df[journal_df["asset"].astype(str).str.upper() == asset])
+    ledger_path = summary_path.parent / "trade_ledger.csv"
+    if ledger_path.exists():
+        ledger_df = pd.read_csv(ledger_path)
+        assets = sorted(set(ledger_df.get("asset", pd.Series(dtype=str)).dropna().astype(str).str.upper()))
+        payload = {"generated_at_utc": now.isoformat().replace("+00:00", "Z"), "assets": {}, "combined": _ledger_summary_bucket(ledger_df)}
+        for asset in assets:
+            payload["assets"][asset] = _ledger_summary_bucket(ledger_df[ledger_df["asset"].astype(str).str.upper() == asset])
+    else:
+        assets = sorted(set(journal_df.get("asset", pd.Series(dtype=str)).dropna().astype(str).str.upper()))
+        payload = {"generated_at_utc": now.isoformat().replace("+00:00", "Z"), "assets": {}, "combined": _summary_bucket(journal_df)}
+        for asset in assets:
+            payload["assets"][asset] = _summary_bucket(journal_df[journal_df["asset"].astype(str).str.upper() == asset])    
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")      
 
