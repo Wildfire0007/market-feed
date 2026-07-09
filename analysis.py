@@ -1521,7 +1521,6 @@ def _entry_gate_log_payload(
         "gate": gate,
         "timestamp": ts.isoformat(),
         "ts_utc": ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "utc_ts": ts.isoformat(),
         "bud_ts": bud_ts.isoformat(),
         "reasons": unique_reasons,
         "reason": unique_reasons[0] if unique_reasons else None,
@@ -1678,7 +1677,15 @@ def _log_profit_target_feasibility_always(asset_key: str, payload: Dict[str, Any
             "evaluated_in_flow": bool(meta.get("profit_target")),
             "blocked_by": (missing[0] if missing else None),
         }
-        if signal_label in {"buy", "sell"} and not record["evaluated_in_flow"]:
+        precision_plan = payload.get("precision_plan") if isinstance(payload.get("precision_plan"), dict) else {}
+        active_meta = payload.get("active_position_meta") if isinstance(payload.get("active_position_meta"), dict) else {}
+        has_armed_levels = (
+            all(precision_plan.get(key) is not None for key in ("entry", "sl", "tp1"))
+            or all(precision_plan.get(key) is not None for key in ("entry", "stop_loss", "take_profit_1"))
+            or all(active_meta.get(key) is not None for key in ("entry", "sl", "tp1"))
+        )
+        entry_signal = signal_label in {"buy", "sell"} or (signal_label == "precision_arming" and has_armed_levels)
+        if entry_signal and not record["evaluated_in_flow"]:      
             # ENTRY döntésnek mindig át kell mennie a deep profit-target kiértékelésen; False érték flow bugra utal és hangos jelzés kell.
             record["invariant_violation"] = True
             LOGGER.warning("pt_feasibility_invariant_violation", extra={"asset": asset_key})
