@@ -194,3 +194,37 @@ def test_hourly_guard_runs_on_hour_change(tmp_path):
         assert lt.main(["--hourly-state", str(state_path), "--journal", str(journal_path), "--summary", str(summary_path)]) == 0
 
     assert json.loads(state_path.read_text(encoding="utf-8"))["last_labeled_utc_hour"] == "2026-07-07T11:00:00Z"
+
+
+def test_suppressed_momentum_row_is_executable_for_labeler():
+    analysis_ts = pd.Timestamp("2024-01-01T10:00:00Z")
+    trade = pd.Series(
+        {
+            "asset": "EURUSD",
+            "journal_id": "shadow-1",
+            "analysis_timestamp": analysis_ts.isoformat(),
+            "entry_price": 1.1000,
+            "stop_loss": 1.0950,
+            "take_profit_1": 1.1100,
+            "signal": "buy",
+            "mode": "suppressed_momentum",
+            "spot_price": 1.1000,
+        }
+    )
+    prices = _make_price_frame(
+        ("2024-01-01T10:00:00Z", 1.1000, 1.1050, 1.0970, 1.1005),
+        ("2024-01-01T10:01:00Z", 1.1005, 1.1150, 1.1000, 1.1110),
+    )
+
+    result = lt._evaluate_trade(
+        trade,
+        prices,
+        horizon_minutes=60,
+        entry_grace_minutes=5,
+        entry_tolerance=0.0005,
+        precision_state_column=None,
+        executed_precision_states=None,
+    )
+
+    assert result.outcome == lt.OUTCOME_PROFIT
+    assert result.label == 1
