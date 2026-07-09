@@ -80,7 +80,8 @@ def _existing_ids(path: Path) -> set[str]:
 def append_position(path: Path, asset: str, pos: Dict[str, Any], state_meta: Dict[str, Any]) -> bool:
     lid = ledger_id(asset, pos)
     done = state_meta.setdefault("ledger_ids", [])
-    if lid in set(done) or lid in _existing_ids(path):
+    existing_ids = _existing_ids(path)
+    if lid in existing_ids:
         if lid not in done:
             done.append(lid)
         return False
@@ -111,7 +112,8 @@ def append_position(path: Path, asset: str, pos: Dict[str, Any], state_meta: Dic
         if write_header:
             writer.writeheader()
         writer.writerow(row)
-    done.append(lid)
+    if lid not in done:
+        done.append(lid)    
     return True
 
 
