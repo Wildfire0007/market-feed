@@ -9,7 +9,7 @@ except Exception: requests=None
 ROOT=Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path: sys.path.insert(0,str(ROOT))
 from config import analysis_settings as settings
-from risk_limits import compute_daily_labeled_pnl
+from scripts.trade_ledger import rows_between, stats
 from scripts.webhook_delivery import log_exception as _webhook_log_exception, log_response as _webhook_log_response
 LOGGER=logging.getLogger(__name__)
 PUBLIC=Path(os.getenv("NOTIFY_PUBLIC_DIR","public")); STATE=PUBLIC/"monitoring"/"daily_digest_state.json"
@@ -25,15 +25,20 @@ def _parse_utc(v):
 def _same_utc_day(v, day):
     ts=_parse_utc(v); return ts is not None and ts.date().isoformat()==day
 def _journal_today(journal: Path, day: str):
-    outcomes={}; sent=0
+    sent=0
     if journal.exists():
         with journal.open(newline='',encoding='utf-8') as fh:
             for r in csv.DictReader(fh):
-                if not _same_utc_day(r.get('analysis_timestamp'), day): continue
-                sent += 1
-                outcome=str(r.get('validation_outcome') or '').strip().lower()
-                if outcome: outcomes[outcome]=outcomes.get(outcome,0)+1
-    return sent,outcomes
+                if _same_utc_day(r.get('analysis_timestamp'), day): sent += 1
+    return sent,{}
+
+def _ledger_today(ledger: Path, day: str):
+    start=datetime.fromisoformat(day+"T00:00:00+00:00"); end=datetime.fromisoformat(day+"T23:59:59+00:00")
+    rows=rows_between(ledger,start,end); outcomes={}
+    for r in rows:
+        outcome=str(r.get("outcome") or "").strip().lower()
+        if outcome: outcomes[outcome]=outcomes.get(outcome,0)+1
+    return rows,outcomes
 def _entry_cards_today(path: Path, day: str):
     count=0
     if path.exists():
@@ -54,13 +59,13 @@ def main():
     active=[f"{a}: {p.get('status')} @ {p.get('entry')}" for a,p in lifecycle.items() if isinstance(p,dict) and str(p.get('status')).lower() in {'open','pending'}]
     expired=sum(1 for p in lifecycle.values() if isinstance(p,dict) and str(p.get('close_reason')).lower()=='expired' and _same_utc_day(p.get('closed_at_utc'), day))
     journal=PUBLIC/'journal'/'trade_journal.csv'
-    sent_count,outcomes=_journal_today(journal, day)
+    sent_count,_=_journal_today(journal, day)
+    ledger_rows,outcomes=_ledger_today(PUBLIC/'journal'/'trade_ledger.csv', day)    
     entry_cards=_entry_cards_today(PUBLIC/'monitoring'/'webhook_delivery.jsonl', day)    
-    risk_cfg=load(ROOT/'config'/'analysis_settings.json')
-    pnl=compute_daily_labeled_pnl(risk_cfg, journal, now=now)
+    ledger_stats=stats(ledger_rows)
     desc=(f"Mai jelzés-jelöltek: {sent_count} / {expired} lejárt\n"
           f"Kiküldött ENTRY kártyák: {entry_cards}\n"
-          f"Realizált napi PnL: ${pnl.get('realized_pnl_usd',0.0):.2f} (vesztes ügyletek: {pnl.get('losing_trades',0)})\n\n"
+          f"Realizált napi PnL: ${ledger_stats['pnl']:.2f} (vesztes ügyletek: {ledger_stats['losses']})\n\n"
           f"Aktív/pending pozíciók:\n"+("\n".join(active) or 'nincs')+f"\n\nKimenetek: {outcomes or 'N/A'}")
     embed={'title':f'📋 Napi actionable összefoglaló – {day} UTC','description':desc,'color':0x3498DB}
     sent=False    
