@@ -50,9 +50,19 @@ def test_weekly_wilson_line_fixture(tmp_path, monkeypatch):
     lines += [f"w{i},GOLD_CFD,long,LIMIT,1,0,2,,10,2026-06-30T11:00:00Z,2026-06-30T12:0{i}:00Z,take_profit_hit,tp1_closed,10,," for i in range(7)]
     lines += [f"l{i},XAGUSD,long,LIMIT,1,0,2,,10,2026-06-30T12:00:00Z,2026-06-30T13:0{i}:00Z,stop_loss_hit,stopped,-10,," for i in range(3)]
     ledger.write_text("\n".join(lines), encoding="utf-8")    
+    journal = tmp_path / "journal" / "trade_journal.csv"
+    journal.write_text(
+        "journal_id,asset,analysis_timestamp,signal,mode,validation_outcome\n"
+        + "\n".join(
+            [f"s{i},GOLD_CFD,2026-06-30T11:0{i}:00Z,buy,suppressed_momentum,tp_hit" for i in range(7)]
+            + [f"x{i},GOLD_CFD,2026-06-30T12:0{i}:00Z,buy,suppressed_momentum,stopped" for i in range(3)]
+        ),
+        encoding="utf-8",
+    )    
     embed = weekly.build_embed(weekly.datetime.fromisoformat("2026-07-05T20:31:00+00:00"))
     lo, hi = _wilson_interval(7, 10)
-    assert "Címkézett ügyletek: 10" in embed["description"]
+    assert f"Precision (élő): 70% — 95% Wilson CI: [{lo*100:.0f}%, {hi*100:.0f}%] (N=10)" in embed["description"]
+    assert f"Momentum (árnyék): 70% — 95% Wilson CI: [{lo*100:.0f}%, {hi*100:.0f}%] (N=10)" in embed["description"]    
     assert f"TP1-találat SL előtt: 70% — 95% Wilson CI: [{lo*100:.0f}%, {hi*100:.0f}%]" in embed["description"]
 
 
@@ -60,5 +70,6 @@ def test_weekly_zero_data_variants(tmp_path, monkeypatch):
     setup_public(tmp_path, monkeypatch)
     embed = weekly.build_embed(weekly.datetime.fromisoformat("2026-07-05T20:31:00+00:00"))
     assert "nincs adat" in embed["description"]
-    assert "még nincs értékelhető ügylet" in embed["description"]
+    assert "Precision (élő): nincs értékelhető minta (N=0)" in embed["description"]
+    assert "Momentum (árnyék): nincs értékelhető minta (N=0)" in embed["description"]   
     assert "Feasibility pass-arány: nincs adat" in embed["description"]
