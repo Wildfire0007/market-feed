@@ -27,6 +27,7 @@ def test_webhook_delivery_jsonl_populated(tmp_path, monkeypatch):
 def test_daily_digest_state_written_only_on_success(tmp_path, monkeypatch):
     (tmp_path / "journal").mkdir()
     (tmp_path / "journal" / "trade_journal.csv").write_text("analysis_timestamp,asset\n2026-07-06T20:00:00Z,GOLD_CFD\n", encoding="utf-8")
+    (tmp_path / "journal" / "trade_ledger.csv").write_text("ledger_id,asset,side,order_type,entry,sl,tp1,tp2,size_units,opened_at_utc,closed_at_utc,close_reason,outcome,est_pnl_usd,source_signal,entry_signature\nl1,GOLD_CFD,long,LIMIT,1,0,2,,10,2026-07-06T19:00:00Z,2026-07-06T20:30:00Z,take_profit_hit,tp1_closed,12.5,,\n", encoding="utf-8")    
     (tmp_path / "monitoring").mkdir()
     (tmp_path / "monitoring" / "webhook_delivery.jsonl").write_text(json.dumps({"ts_utc":"2026-07-06T20:10:00Z","script":"notify_discord","ok":True}) + "\n", encoding="utf-8")
     payloads = []    
@@ -49,7 +50,9 @@ def test_daily_digest_state_written_only_on_success(tmp_path, monkeypatch):
     assert daily_actionable_digest.STATE.exists()
     desc = payloads[-1]["embeds"][0]["description"]
     assert "Mai jelzés-jelöltek: 1" in desc
-    assert "Kiküldött ENTRY kártyák: 1" in desc    
+    assert "Kiküldött ENTRY kártyák: 1" in desc
+    assert "Kimenetek: {'tp1_closed': 1}" in desc
+    assert "Realizált napi PnL: $12.50" in desc       
 
 
 def test_webhook_delivery_rotates_by_configured_size(tmp_path, monkeypatch):
