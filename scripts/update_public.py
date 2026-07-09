@@ -149,6 +149,7 @@ def main() -> int:
         target_root,
         (            
             "_active_position_state.json",
+            "journal/trade_ledger.csv",
         ),
     )
 
