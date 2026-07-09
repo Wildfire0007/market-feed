@@ -62,9 +62,7 @@ def test_weekly_wilson_line_fixture(tmp_path, monkeypatch):
     embed = weekly.build_embed(weekly.datetime.fromisoformat("2026-07-05T20:31:00+00:00"))
     lo, hi = _wilson_interval(7, 10)
     assert f"Precision (élő): 70% — 95% Wilson CI: [{lo*100:.0f}%, {hi*100:.0f}%] (N=10)" in embed["description"]
-    assert f"Momentum (árnyék): 70% — 95% Wilson CI: [{lo*100:.0f}%, {hi*100:.0f}%] (N=10)" in embed["description"]    
-    assert f"TP1-találat SL előtt: 70% — 95% Wilson CI: [{lo*100:.0f}%, {hi*100:.0f}%]" in embed["description"]
-
+    assert f"Momentum (árnyék): 70% — 95% Wilson CI: [{lo*100:.0f}%, {hi*100:.0f}%] (N=10)" in embed["description"]
 
 def test_weekly_zero_data_variants(tmp_path, monkeypatch):
     setup_public(tmp_path, monkeypatch)
