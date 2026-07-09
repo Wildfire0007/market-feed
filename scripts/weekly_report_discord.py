@@ -50,6 +50,10 @@ def _in(ts,start,end): return ts is not None and start <= ts <= end
 def _float(v):
     try: return float(v or 0)
     except Exception: return 0.0
+def _precision_line(title,hits,n):
+    if n:
+        lo,hi=_wilson_interval(hits,n); return f"{title}: {hits/n*100:.0f}% — 95% Wilson CI: [{lo*100:.0f}%, {hi*100:.0f}%] (N={n})"
+    return f"{title}: nincs értékelhető minta (N=0)"        
 def _journal_rows(path,start,end):
     if not path.exists(): return []
     with path.open(newline='',encoding='utf-8') as fh:
@@ -63,9 +67,10 @@ def build_embed(now=None):
     assets=Counter(str(r.get('asset') or 'N/A').upper() for r in closed); hits=sum(1 for r in closed if str(r.get('outcome') or '').strip().lower() in {'tp1_closed','take_profit_2_hit'})
     asset_txt=', '.join(f'{a}: {n}' for a,n in assets.items()) or 'nincs adat'; n=len(closed)
     line1=f"Címkézett ügyletek: {n} (eszközönként: {asset_txt})" + (" — nincs adat" if not n else "")
-    if n:
-        lo,hi=_wilson_interval(hits,n); line2=f"TP1-találat SL előtt: {hits/n*100:.0f}% — 95% Wilson CI: [{lo*100:.0f}%, {hi*100:.0f}%]"
-    else: line2="TP1-találat SL előtt: még nincs értékelhető ügylet — a konfidenciaintervallum N≥1-től számolható"
+    line2=_precision_line('Precision (élő)',hits,n)
+    shadow=[r for r in rows if str(r.get('mode') or '').strip().lower()=='suppressed_momentum' and str(r.get('validation_outcome') or '').strip().lower() in {'tp_hit','tp1_closed','stopped'}]
+    shadow_hits=sum(1 for r in shadow if str(r.get('validation_outcome') or '').strip().lower() in {'tp_hit','tp1_closed'})
+    line2b=_precision_line('Momentum (árnyék)',shadow_hits,len(shadow))    
     ledger_stats=stats(ledger_rows); line3=f"Realizált heti PnL: ${ledger_stats['pnl']:.2f} (vesztes ügyletek: {ledger_stats['losses']})"
     lifecycle=load(PUBLIC/'_position_lifecycle_state.json').get('positions') or {}; expired=sum(1 for p in lifecycle.values() if isinstance(p,dict) and str(p.get('close_reason')).lower()=='expired' and _in(_parse_utc(p.get('closed_at_utc')),start,end))
     delivered=sum(1 for r in _iter_jsonl(PUBLIC/'monitoring'/'webhook_delivery.jsonl') if r.get('script')=='notify_discord' and r.get('ok') and _in(_parse_utc(r.get('ts_utc')),start,end))
@@ -77,7 +82,7 @@ def build_embed(now=None):
     line5='Kapu-vétók top 5: '+(', '.join(f'{k}: {v}' for k,v in reasons.most_common(5)) or 'nincs adat')
     feas=[r for r in _iter_jsonl(PUBLIC/'debug'/'entry_gate_gap_log.jsonl') if r.get('gate')=='profit_target_feasibility' and _in(_parse_utc(r.get('ts_utc')),start,end)]
     passed=sum(1 for r in feas if r.get('result')=='pass'); line6=f"Feasibility pass-arány: {(passed/len(feas)*100):.0f}% ({len(feas)} kiértékelés)" if feas else "Feasibility pass-arány: nincs adat (0 kiértékelés)"
-    desc='\n'.join([line1,line2,line3,line4,line5,line6])
+    desc='\n'.join([line1,line2,line2b,line3,line4,line5,line6])    
     return {'title':f'📊 Heti mérési riport – {start.date().isoformat()}–{end.date().isoformat()}','description':desc,'footer':{'text':'(a heti határ utáni első futáson küldve)'},'color':0x2ECC71,'_iso_week':iso}
 def main():
     embed=build_embed();
