@@ -71,3 +71,17 @@ def test_weekly_zero_data_variants(tmp_path, monkeypatch):
     assert "Precision (élő): nincs értékelhető minta (N=0)" in embed["description"]
     assert "Momentum (árnyék): nincs értékelhető minta (N=0)" in embed["description"]   
     assert "Feasibility pass-arány: nincs adat" in embed["description"]
+
+
+def test_weekly_concurrency_suppression_count_fixture(tmp_path, monkeypatch):
+    setup_public(tmp_path, monkeypatch)
+    journal = tmp_path / "journal" / "trade_journal.csv"
+    journal.parent.mkdir(parents=True)
+    journal.write_text(
+        "journal_id,asset,analysis_timestamp,signal,mode,validation_outcome\n"
+        "c1,XAGUSD,2026-06-30T11:00:00Z,buy,suppressed_concurrency,\n"
+        "c2,USOIL,2026-06-30T12:00:00Z,sell,suppressed_concurrency,\n",
+        encoding="utf-8",
+    )
+    embed = weekly.build_embed(weekly.datetime.fromisoformat("2026-07-05T20:31:00+00:00"))
+    assert "Konkurencia-plafon miatt kihagyva: 2" in embed["description"]
