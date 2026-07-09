@@ -205,4 +205,31 @@ def test_stale_data_no_card_without_position(tmp_path, monkeypatch):
     _write(tmp_path / "SPY" / "signal.json", {})
     with freeze_time("2026-07-08T12:00:00Z"):
         lc.process()
-    assert sent == []    
+    assert sent == []
+
+
+def test_terminal_transition_writes_one_trade_ledger_row_with_pnl(tmp_path, monkeypatch):
+    monkeypatch.setattr(lc, "PUBLIC_DIR", tmp_path)
+    monkeypatch.setattr(lc, "STATE_PATH", tmp_path / "_position_lifecycle_state.json")
+    monkeypatch.setattr(lc, "LEDGER_PATH", tmp_path / "journal" / "trade_ledger.csv")
+    monkeypatch.setattr(lc, "INBOX_PATH", tmp_path / "missing.jsonl")
+    monkeypatch.setattr(lc, "_cfg", lambda: {"tp1_closes_position": True, "ambiguous_bar_counts_as": "sl"})
+    _write(lc.STATE_PATH, {"positions":{"XAGUSD":{"status":"open","side":"short","order_type":"LIMIT","entry":58.75034,"sl":59.13905171,"tp1":57.97291657,"tp2":57.58420486,"opened_at_utc":"2026-07-08T08:56:25Z","size_units":25.72600627,"source_signal":"precision_arming","entry_signature":"sell_LIMIT"}}})
+    _write(tmp_path / "XAGUSD" / "signal.json", {})
+    _write(tmp_path / "XAGUSD" / "klines_5m.json", {"values":[{"open":58.7,"high":58.8,"low":57.9}]})
+    with freeze_time("2026-07-08T09:22:43Z"):
+        lc.process(); lc.process()
+    rows = (tmp_path / "journal" / "trade_ledger.csv").read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 2
+    assert "XAGUSD,short,LIMIT,58.75034" in rows[1]
+    assert ",take_profit_hit,tp1_closed,20.00," in rows[1]
+
+
+def test_backfill_closed_positions_is_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setattr(lc, "PUBLIC_DIR", tmp_path)
+    monkeypatch.setattr(lc, "STATE_PATH", tmp_path / "_position_lifecycle_state.json")
+    monkeypatch.setattr(lc, "LEDGER_PATH", tmp_path / "journal" / "trade_ledger.csv")
+    _write(lc.STATE_PATH, {"positions":{"XAGUSD":{"status":"closed","side":"short","order_type":"LIMIT","entry":58.75034,"tp1":57.97291657,"opened_at_utc":"2026-07-08T08:56:25Z","closed_at_utc":"2026-07-08T09:22:43Z","close_reason":"take_profit_hit","outcome":"tp1_closed","size_units":25.72600627}}})
+    assert lc.backfill_closed_positions() == 1
+    assert lc.backfill_closed_positions() == 0
+    assert len((tmp_path / "journal" / "trade_ledger.csv").read_text(encoding="utf-8").splitlines()) == 2
