@@ -9,6 +9,7 @@ from pathlib import Path
 
 APPEND_PRESERVE_PATTERNS = (
     "journal/trade_journal.csv",
+    "journal/trade_ledger.csv",
     "debug/entry_gates/*.jsonl",
     "debug/entry_gate_gap_log.jsonl",
     "monitoring/webhook_delivery.jsonl",
