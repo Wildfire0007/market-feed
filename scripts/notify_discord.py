@@ -575,7 +575,7 @@ def build_entry_gate_summary_embed(now: Optional[datetime] = None) -> Optional[D
             for line in path.read_text(encoding="utf-8").splitlines():
                 try: row = json.loads(line)
                 except Exception: continue
-                ts = _parse_utc(row.get("timestamp") or row.get("utc_ts"))
+                ts = _parse_utc(row.get("ts_utc") or row.get("timestamp"))                    
                 if ts and ts < cutoff:
                     continue
                 asset = row.get("asset")
@@ -624,6 +624,7 @@ def _operator_instruction_lines(signal_data: Dict[str, Any], *, size_units: Opti
             if size_units is not None:
                 units_partial = size_units * partial
                 lines = [line.replace(f"{partial:.0%}-át manuálisan.", f"{partial:.0%}-át (≈{units_partial:.2f} egység) manuálisan.") for line in lines]
+    lines.append("Minimál-tétes protokoll: Amount × 0.1–0.2 az első 10 trade-re.")                
     if expiry_dt is not None:
         lines.append(f"Ha {expiry_dt:%H:%M} UTC-ig nem töltődik, töröld a megbízást — külön értesítést is kapsz.")
     return lines
@@ -898,8 +899,12 @@ def check_and_notify() -> None:
             continue
 
         size_units = sl_risk_usd / abs(entry - sl) if abs(entry - sl) > 0 else None
-        units_text = f"{size_units:.2f} Egység (Units)" if size_units is not None else "N/A"        
-
+        units_text = f"{size_units:.2f} Egység (Units)" if size_units is not None else "N/A"
+        entry_notional_usd = (size_units * entry) if size_units is not None else None
+        leverage_map = getattr(settings, "LEVERAGE", {}) or {}
+        asset_leverage = safe_float(leverage_map.get(asset_name.upper())) or 1.0
+        etoro_amount_usd = (entry_notional_usd / asset_leverage) if entry_notional_usd is not None and asset_leverage else None        
+        
         entry_sig = f"{direction}_{order_type}"
 
         if asset_state.get("last_entry_signature") == entry_sig and asset_state.get("last_entry_sent_utc"):
@@ -935,9 +940,9 @@ def check_and_notify() -> None:
             "color": color,
             "fields": [
                 {"name": "📊 Árfolyam", "value": f"Spot ár: `{format_price(safe_float((data.get('spot') or {}).get('price')))}`\nBelépő: `{format_price(entry)}`", "inline": False},
-                {"name": "🎯 Profit cél", "value": f"Várható nettó TP1: `+${tp1_net_usd:.2f}`\nMinimum: `${tp1_min_net_usd:.2f}`\nTőkeáttételes méret: `${expected.get('notional_usd'):.2f}`", "inline": False},
+                {"name": "🎯 Profit cél", "value": f"Várható nettó TP1: `+${tp1_net_usd:.2f}`\nMinimum: `${tp1_min_net_usd:.2f}`\nProfit-cél számítási alap: `${expected.get('notional_usd'):.2f}`", "inline": False},                
                 {"name": "⏱️ Várható idő TP1-ig", "value": eta_text, "inline": False},
-                {"name": "⚙️ Paraméterek az eToro-hoz", "value": f"MÉRET: `{units_text}` ({sl_risk_usd} USD kockázat)\nSL: `{format_price(sl)}`\nTP1: `{format_price(tp1)}`" + (f"\nTP2: `{format_price(tp2)}`" if tp2 else ""), "inline": False},
+                {"name": "⚙️ Paraméterek az eToro-hoz", "value": f"MÉRET: `{units_text}` ({sl_risk_usd} USD kockázat)\nNotional: `${entry_notional_usd:.2f}`\neToro Amount (X{asset_leverage:g}): `${etoro_amount_usd:.2f}`\nSL: `{format_price(sl)}`\nTP1: `{format_price(tp1)}`" + (f"\nTP2: `{format_price(tp2)}`" if tp2 else ""), "inline": False},                
                 {"name": "🎯 Belépési pontosság", "value": f"Aktuális chase: `{expected.get('current_chase_r')}R`\n{entry_limit_text}", "inline": False},
                 {"name": "💡 Indoklás", "value": reasons_text, "inline": False},
                 *([{"name": "🧭 Kezelési terv", "value": "\n".join(f"• {line}" for line in _operator_instruction_lines(data, size_units=size_units, expiry_dt=expiry_dt))[:1024], "inline": False}] if _operator_instruction_lines(data, size_units=size_units, expiry_dt=expiry_dt) else []),
