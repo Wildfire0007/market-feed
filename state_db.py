@@ -89,9 +89,10 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     """Open a SQLite connection with WAL configured."""
 
     path = Path(db_path)
-    connection = sqlite3.connect(path)
+    connection = sqlite3.connect(path, timeout=15)
     connection.execute("PRAGMA journal_mode=WAL;")
     connection.execute("PRAGMA synchronous=NORMAL;")
+    connection.execute("PRAGMA busy_timeout=15000;")
     return connection
 
 
