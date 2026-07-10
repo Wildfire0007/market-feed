@@ -10,8 +10,8 @@ from typing import Any, Dict, Iterable, Optional
 
 LEDGER_HEADER = [
     "ledger_id", "asset", "side", "order_type", "entry", "sl", "tp1", "tp2", "size_units",
-    "opened_at_utc", "closed_at_utc", "close_reason", "outcome", "est_pnl_usd",
-    "source_signal", "entry_signature",
+    "opened_at_utc", "closed_at_utc", "trigger_bar_utc", "close_reason", "outcome", "est_pnl_usd",
+    "source_signal", "entry_signature", "voided", "void_reason",
 ]
 WIN_OUTCOMES = {"tp1_closed", "take_profit_2_hit"}
 TERMINAL_EXCLUDE = {"expired"}
@@ -99,11 +99,14 @@ def append_position(path: Path, asset: str, pos: Dict[str, Any], state_meta: Dic
         "size_units": fmt(pos.get("size_units")),
         "opened_at_utc": str(pos.get("opened_at_utc") or pos.get("pending_since_utc") or ""),
         "closed_at_utc": str(pos.get("closed_at_utc") or ""),
+        "trigger_bar_utc": str(pos.get("trigger_bar_utc") or ""),        
         "close_reason": reason,
         "outcome": str(pos.get("outcome") or reason),
         "est_pnl_usd": "" if pnl is None else f"{pnl:.2f}",
         "source_signal": str(pos.get("source_signal") or ""),
         "entry_signature": str(pos.get("entry_signature") or ""),
+        "voided": "false",
+        "void_reason": "",        
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not path.exists() or path.stat().st_size == 0
@@ -121,11 +124,11 @@ def rows_between(path: Path, start: datetime, end: datetime) -> list[dict[str, s
     if not path.exists():
         return []
     with path.open(newline="", encoding="utf-8") as handle:
-        return [r for r in csv.DictReader(handle) if (ts := parse_utc(r.get("closed_at_utc"))) and start <= ts <= end]
+        return [r for r in csv.DictReader(handle) if str(r.get("voided") or "").strip().lower() != "true" and (ts := parse_utc(r.get("closed_at_utc"))) and start <= ts <= end]
 
 
 def stats(rows: Iterable[dict[str, str]]) -> Dict[str, Any]:
-    closed = [r for r in rows if str(r.get("outcome") or "").lower() not in TERMINAL_EXCLUDE]
+    closed = [r for r in rows if str(r.get("voided") or "").strip().lower() != "true" and str(r.get("outcome") or "").lower() not in TERMINAL_EXCLUDE]    
     wins = sum(1 for r in closed if str(r.get("outcome") or "").lower() in WIN_OUTCOMES)
     losses = sum(1 for r in closed if (safe_float(r.get("est_pnl_usd")) or 0.0) < 0)
     pnl = sum(safe_float(r.get("est_pnl_usd")) or 0.0 for r in closed)
