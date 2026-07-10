@@ -928,8 +928,11 @@ def check_and_notify() -> None:
             except Exception:
                 pass
 
-        prefix, color = ("🟡", COLOR_YELLOW) if order_type in ["LIMIT", "STOP"] else (("🟢", COLOR_GREEN) if direction == "buy" else ("🔴", COLOR_RED))
-        title = f"{prefix} NYISS {'LONG' if direction == 'buy' else 'SHORT'} – {'BUY' if direction == 'buy' else 'SELL'} {order_type} @ {format_price(entry)}"
+        prefix, color = (("🟢", COLOR_GREEN) if direction == "buy" else ("🔴", COLOR_RED))
+        side_text = "LONG" if direction == "buy" else "SHORT"
+        action_text = "BUY" if direction == "buy" else "SELL"
+        asset_emoji = {"GOLD_CFD": "🥇", "XAGUSD": "🥈", "USOIL": "🛢️"}.get(asset_name.upper(), "📊")
+        title = f"{prefix} NYISS {side_text} — {asset_emoji} {asset_name} · {action_text} {order_type} @ {format_price(entry)}"       
 
         p_score = safe_float(data.get("probability_raw") or data.get("probability"))
         if not _entry_gate_passes(data, p_score):
@@ -943,8 +946,9 @@ def check_and_notify() -> None:
             f"Gyors: `{_format_minutes(safe_float(expected.get('eta_minutes_fast')))}`\n"
             f"Normál: `{_format_minutes(safe_float(expected.get('eta_minutes_base')))}`\n"
             f"Konzervatív: `{_format_minutes(safe_float(expected.get('eta_minutes_conservative')))}`\n"
-            f"Jel érvényessége: `{_format_minutes(valid_minutes)}` (érvényes eddig: `{expiry_dt:%H:%M} UTC` / `{expiry_dt.astimezone(BUDAPEST_TZ):%H:%M} Budapest`)"
+            f"Jel érvényessége: `{_format_minutes(valid_minutes)}`"            
         )
+        validity_text = f"⏳ Érvényes eddig: {expiry_dt:%H:%M} UTC ({expiry_dt.astimezone(BUDAPEST_TZ):%H:%M} Budapest)"        
         entry_limit_text = (
             f"Ne nyiss, ha spot > `{format_price(expected.get('max_entry_price'))}`"
             if direction == "buy"
@@ -957,9 +961,9 @@ def check_and_notify() -> None:
             "color": color,
             "fields": [
                 {"name": "📊 Árfolyam", "value": f"Spot ár: `{format_price(safe_float((data.get('spot') or {}).get('price')))}`\nBelépő: `{format_price(entry)}`", "inline": False},
+                {"name": "⚙️ Paraméterek az eToro-hoz", "value": f"MÉRET: `{units_text}` ({sl_risk_usd} USD kockázat)\nNotional: `${entry_notional_usd:.2f}`\neToro Amount (X{asset_leverage:g}): `${etoro_amount_usd:.2f}`\nSL: `{format_price(sl)}`\nTP1: `{format_price(tp1)}`" + (f"\nTP2: `{format_price(tp2)}`" if tp2 else "") + f"\n{validity_text}", "inline": False},                
                 {"name": "🎯 Profit cél", "value": f"Várható nettó TP1: `+${tp1_net_usd:.2f}`\nMinimum: `${tp1_min_net_usd:.2f}`\nProfit-cél számítási alap: `${expected.get('notional_usd'):.2f}`", "inline": False},                
                 {"name": "⏱️ Várható idő TP1-ig", "value": eta_text, "inline": False},
-                {"name": "⚙️ Paraméterek az eToro-hoz", "value": f"MÉRET: `{units_text}` ({sl_risk_usd} USD kockázat)\nNotional: `${entry_notional_usd:.2f}`\neToro Amount (X{asset_leverage:g}): `${etoro_amount_usd:.2f}`\nSL: `{format_price(sl)}`\nTP1: `{format_price(tp1)}`" + (f"\nTP2: `{format_price(tp2)}`" if tp2 else ""), "inline": False},                
                 {"name": "🎯 Belépési pontosság", "value": f"Aktuális chase: `{expected.get('current_chase_r')}R`\n{entry_limit_text}", "inline": False},
                 {"name": "💡 Indoklás", "value": reasons_text, "inline": False},
                 *([{"name": "🧭 Kezelési terv", "value": "\n".join(f"• {line}" for line in _operator_instruction_lines(data, size_units=size_units, expiry_dt=expiry_dt))[:1024], "inline": False}] if _operator_instruction_lines(data, size_units=size_units, expiry_dt=expiry_dt) else []),
