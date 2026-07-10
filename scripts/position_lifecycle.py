@@ -18,6 +18,7 @@ import importlib.util
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -42,6 +43,7 @@ EXPIRY_NOTIFY_STATE_PATH = PUBLIC_DIR / "_position_expiry_notify_state.json"
 CLOSE_NOTIFY_STATE_PATH = PUBLIC_DIR / "_position_close_notify_state.json"
 STALE_OPEN_POSITION_NOTIFY_STATE_PATH = PUBLIC_DIR / "_position_stale_open_notify_state.json"
 CLOSE_STATES = {"hard_exit", "stop_loss_hit", "take_profit_hit", "take_profit_2_hit", "closed"}
+BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
 
 
 def _cfg() -> Dict[str, Any]:
@@ -50,6 +52,12 @@ def _cfg() -> Dict[str, Any]:
 
 def to_utc_iso(dt: datetime) -> str:
     return dt.replace(microsecond=0).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _dual_time(dt: datetime) -> str:
+    utc = dt.astimezone(timezone.utc)
+    bud = utc.astimezone(BUDAPEST_TZ)
+    return f"`{to_utc_iso(utc)}` UTC / `{bud:%Y-%m-%d %H:%M:%S %Z}` Budapest"
 
 
 def parse_utc(value: Any) -> Optional[datetime]:
@@ -122,7 +130,7 @@ def _send_expiry_cancel_alert(asset: str, pos: Dict[str, Any], now: datetime) ->
             {"name": "Irány", "value": f"`{side_label}`", "inline": True},
             {"name": "Megbízás", "value": f"`{order_type} @ {pos.get('entry')}`", "inline": True},
             {"name": "Utasítás", "value": f"Töröld a függő {asset} {direction} {order_type} megbízást a brókernél most — a jel érvényessége lejárt.", "inline": False},
-            {"name": "🕒 Időbélyeg", "value": f"`{to_utc_iso(now)}` UTC", "inline": False},
+            {"name": "🕒 Időbélyeg", "value": _dual_time(now), "inline": False},
         ],
     }
     sent = False
@@ -195,7 +203,7 @@ def _send_close_alert(asset: str, pos: Dict[str, Any], reason: str, now: datetim
             {"name": "Becsült PnL", "value": f"`${pnl:.2f}`" if pnl is not None else "`N/A`", "inline": True},
             {"name": "Utasítás", "value": f"Zárd a teljes {asset} {side_label} pozíciót piaci áron most.", "inline": False},
         ])
-    fields.append({"name": "🕒 Időbélyeg", "value": f"`{to_utc_iso(now)}` UTC", "inline": False})
+    fields.append({"name": "🕒 Időbélyeg", "value": _dual_time(now), "inline": False})
     embed = {
         "title": title,
         "description": "A kereskedési ablak zárul / max. tartási idő letelt — zárd piaci áron. Becsült PnL: " + (f"${pnl:.2f}" if pnl is not None else "N/A") + "." if reason == "session_force_close" else (f"Ok: {detail}" if reason == "hard_exit" else ""),
@@ -309,13 +317,24 @@ def _read_inbox_new_lines(path: Path, last_line: int) -> tuple[list[Dict[str, An
     return events, current_line
 
 
-def _latest_bar(asset_dir: Path) -> Dict[str, Any]:
+def _bar_timestamp(row: Dict[str, Any]) -> Optional[datetime]:
+    for key in ("datetime", "timestamp", "time", "ts", "utc"):
+        if key in row:
+            ts = parse_utc(row.get(key))
+            if ts:
+                return ts
+    return None
+
+
+def _latest_bar(asset_dir: Path) -> tuple[Dict[str, Any], Optional[datetime]]:
     for name in ("klines_5m.json", "k1m.json", "klines_1m.json"):
         data = load_json(asset_dir / name)
         rows = data.get("values") or data.get("data") or data.get("candles") or []
         if isinstance(rows, list) and rows:
-            return rows[0] if isinstance(rows[0], dict) else {}
-    return {}
+            stamped = [(row, ts) for row in rows if isinstance(row, dict) and (ts := _bar_timestamp(row))]
+            if stamped:
+                return max(stamped, key=lambda item: item[1])
+    return {}, None    
 
 
 def _atr_values(signal: Dict[str, Any]) -> tuple[Optional[float], Optional[float]]:
@@ -423,7 +442,7 @@ def process() -> None:
             continue
         signal = load_json(asset_dir / "signal.json")
         side = str(pos.get("side") or "").lower()
-        bar = _latest_bar(asset_dir)
+        bar, bar_ts = _latest_bar(asset_dir)
         status = str(pos.get("status") or "").lower()
         if status == "open" and (_session_force_close_due(now_dt, cfg) or _max_hold_due(pos, now_dt, cfg)):
             pos["close_spot"] = safe_float((signal.get("spot") or {}).get("price")) or safe_float(bar.get("close") or bar.get("c")) or pos.get("entry")
@@ -442,10 +461,13 @@ def process() -> None:
             _clear_stale_open_position_episode(asset, pos)        
         if pos.get("status") == "pending":
             price = safe_float((signal.get("spot") or {}).get("price"))
+            pending_since = parse_utc(pos.get("pending_since_utc") or pos.get("updated_at_utc")) or now_dt
+            if spot_ts and spot_ts < pending_since:
+                price = None            
             if _pending_filled(pos, price):
                 pos.update({"status": "open", "opened_at_utc": to_utc_iso(now_dt), "updated_at_utc": to_utc_iso(now_dt)})
             else:
-                since = parse_utc(pos.get("pending_since_utc") or pos.get("updated_at_utc")) or now_dt
+                since = pending_since
                 if now_dt - since >= timedelta(minutes=_validity_minutes(signal, cfg)):
                     _notify_expired_once(asset, pos, now_dt)                    
                     pos.update({"status": "closed", "close_reason": "expired", "outcome": "expired", "closed_at_utc": to_utc_iso(now_dt), "updated_at_utc": to_utc_iso(now_dt)})
@@ -468,7 +490,8 @@ def process() -> None:
                 pos = _close(pos, "hard_exit", now_dt, outcome="hard_exit", detail=exit_reason or "trend_reversal")
         else:
             meta[f"hard_exit_counter_{asset}"] = 0
-            sl_hit, tp1_hit, tp2_hit, open_ = _bar_hits(side, pos, bar)
+            opened = parse_utc(pos.get("opened_at_utc"))
+            sl_hit, tp1_hit, tp2_hit, open_ = _bar_hits(side, pos, bar) if bar_ts and opened and bar_ts >= opened else (False, False, False, None)            
             if sl_hit and tp1_hit and ambiguous_as == "sl":
                 tp1_hit = tp2_hit = False
             gap = ""
@@ -476,11 +499,17 @@ def process() -> None:
             if sl_hit and open_ is not None and sl is not None and ((side == "long" and open_ < sl) or (side == "short" and open_ > sl)):
                 gap = f"azonnali piaci zárás — gap az SL alatt/felett ({abs(open_ - sl):.5g})"
             if sl_hit or exit_state == "stop_loss_hit":
+                if sl_hit:
+                    pos["trigger_bar_utc"] = to_utc_iso(bar_ts)                
                 pos = _close(pos, "stop_loss_hit", now_dt, outcome="stopped", detail=gap)
             elif tp2_hit or exit_state == "take_profit_2_hit":
+                if tp2_hit:
+                    pos["trigger_bar_utc"] = to_utc_iso(bar_ts)                
                 pos = _close(pos, "take_profit_2_hit", now_dt, outcome="tp_hit")
             elif tp1_hit or exit_state == "take_profit_hit":
                 if cfg.get("tp1_closes_position", True):
+                    if tp1_hit:
+                        pos["trigger_bar_utc"] = to_utc_iso(bar_ts)                    
                     pos = _close(pos, "take_profit_hit", now_dt, outcome="tp1_closed")
         close_reason = pos.pop("_notify_close_reason", None)
         if close_reason:
