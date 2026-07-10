@@ -132,7 +132,6 @@ def _normalize_manual_trade_model(raw: Any) -> Dict[str, Any]:
         "tp1_close_fraction": 1.0,
         "tp1_min_net_usd": 10.0,
         "tp2_min_net_usd": 10.0,
-        "sl_risk_usd": 10.0,
         "eta_min_minutes": 5.0,
         "eta_max_minutes": 240.0,
         "max_chase_r": 0.2,
@@ -148,7 +147,6 @@ def _normalize_manual_trade_model(raw: Any) -> Dict[str, Any]:
         "tp1_close_fraction",
         "tp1_min_net_usd",
         "tp2_min_net_usd",
-        "sl_risk_usd",
         "eta_min_minutes",
         "eta_max_minutes",
         "max_chase_r",
@@ -1493,6 +1491,8 @@ DEFAULT_COST_MODEL: Dict[str, Any] = dict(_get_config_value("default_cost_model"
 MANUAL_TRADE_MODEL: Dict[str, Any] = _normalize_manual_trade_model(
     _get_config_value("manual_trade_model")
 )
+PROFIT_TARGET_CONFIG: Dict[str, Any] = dict(_get_config_value("profit_target") or {})
+STAKE_CONFIG: Dict[str, Any] = dict(_get_config_value("stake") or {})
 POSITION_LIFECYCLE: Dict[str, Any] = dict(_get_config_value("position_lifecycle") or {})
 MANAGEMENT_NOTIFIER_EXIT_CARDS: bool = bool(_get_config_value("management_notifier_exit_cards") or False)
 MOMENTUM_OVERRIDE_ENTRIES: Dict[str, Any] = dict(_get_config_value("momentum_override_entries") or {"enabled": False, "respect_p_score_min": True})
