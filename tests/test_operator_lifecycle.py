@@ -35,9 +35,9 @@ def test_open_tp1_closes_position(tmp_path, monkeypatch):
     monkeypatch.setattr(lc, "STATE_PATH", tmp_path / "_position_lifecycle_state.json")
     monkeypatch.setattr(lc, "INBOX_PATH", tmp_path / "missing.jsonl")
     monkeypatch.setattr(lc, "_cfg", lambda: {"tp1_closes_position": True, "ambiguous_bar_counts_as": "sl"})
-    _write(lc.STATE_PATH, {"positions":{"GOLD_CFD":{"status":"open","side":"long","entry":2300,"sl":2290,"tp1":2310}}})
-    _write(tmp_path / "GOLD_CFD" / "signal.json", {})
-    _write(tmp_path / "GOLD_CFD" / "klines_5m.json", {"values":[{"open":2301,"high":2311,"low":2300}]})
+    _write(lc.STATE_PATH, {"positions":{"GOLD_CFD":{"status":"open","side":"long","entry":2300,"sl":2290,"tp1":2310,"opened_at_utc":"2026-07-08T09:00:00Z"}}})
+    _write(tmp_path / "GOLD_CFD" / "signal.json", {})    
+    _write(tmp_path / "GOLD_CFD" / "klines_5m.json", {"values":[{"datetime":"2026-07-08T09:05:00Z","open":2301,"high":2311,"low":2300}]})
     lc.process()
     pos=json.loads(lc.STATE_PATH.read_text())["positions"]["GOLD_CFD"]
     assert pos["status"] == "closed"
@@ -49,9 +49,9 @@ def test_sl_gap_detail_and_ambiguous_counts_as_sl(tmp_path, monkeypatch):
     monkeypatch.setattr(lc, "STATE_PATH", tmp_path / "_position_lifecycle_state.json")
     monkeypatch.setattr(lc, "INBOX_PATH", tmp_path / "missing.jsonl")
     monkeypatch.setattr(lc, "_cfg", lambda: {"ambiguous_bar_counts_as": "sl"})
-    _write(lc.STATE_PATH, {"positions":{"USOIL":{"status":"open","side":"long","entry":80,"sl":79,"tp1":81}}})
+    _write(lc.STATE_PATH, {"positions":{"USOIL":{"status":"open","side":"long","entry":80,"sl":79,"tp1":81,"opened_at_utc":"2026-07-08T09:00:00Z"}}})    
     _write(tmp_path / "USOIL" / "signal.json", {})
-    _write(tmp_path / "USOIL" / "klines_5m.json", {"values":[{"open":78.5,"high":81.2,"low":78.4}]})
+    _write(tmp_path / "USOIL" / "klines_5m.json", {"values":[{"datetime":"2026-07-08T09:05:00Z","open":78.5,"high":81.2,"low":78.4}]})    
     lc.process()
     pos=json.loads(lc.STATE_PATH.read_text())["positions"]["USOIL"]
     assert pos["outcome"] == "stopped"
@@ -109,7 +109,7 @@ def test_close_transition_dispatches_actionable_card_once(tmp_path, monkeypatch)
     monkeypatch.setattr(lc, "_send_close_alert", lambda asset, pos, reason, now: sent.append((asset, reason, pos.copy())) or True)
     _write(lc.STATE_PATH, {"positions":{"GOLD_CFD":{"status":"open","side":"long","entry":2300,"sl":2290,"tp1":2310,"opened_at_utc":"2026-07-08T09:00:00Z","size_units":5,"tp1_closes_position":True}}})
     _write(tmp_path / "GOLD_CFD" / "signal.json", {})
-    _write(tmp_path / "GOLD_CFD" / "klines_5m.json", {"values":[{"open":2301,"high":2311,"low":2300}]})
+    _write(tmp_path / "GOLD_CFD" / "klines_5m.json", {"values":[{"datetime":"2026-07-08T09:05:00Z","open":2301,"high":2311,"low":2300}]})    
     lc.process(); lc.process()
     assert [(asset, reason) for asset, reason, _ in sent] == [("GOLD_CFD", "take_profit_hit")]
 
@@ -216,7 +216,7 @@ def test_terminal_transition_writes_one_trade_ledger_row_with_pnl(tmp_path, monk
     monkeypatch.setattr(lc, "_cfg", lambda: {"tp1_closes_position": True, "ambiguous_bar_counts_as": "sl"})
     _write(lc.STATE_PATH, {"positions":{"XAGUSD":{"status":"open","side":"short","order_type":"LIMIT","entry":58.75034,"sl":59.13905171,"tp1":57.97291657,"tp2":57.58420486,"opened_at_utc":"2026-07-08T08:56:25Z","size_units":25.72600627,"source_signal":"precision_arming","entry_signature":"sell_LIMIT"}}})
     _write(tmp_path / "XAGUSD" / "signal.json", {})
-    _write(tmp_path / "XAGUSD" / "klines_5m.json", {"values":[{"open":58.7,"high":58.8,"low":57.9}]})
+    _write(tmp_path / "XAGUSD" / "klines_5m.json", {"values":[{"datetime":"2026-07-08T09:00:00Z","open":58.7,"high":58.8,"low":57.9}]})    
     with freeze_time("2026-07-08T09:22:43Z"):
         lc.process(); lc.process()
     rows = (tmp_path / "journal" / "trade_ledger.csv").read_text(encoding="utf-8").splitlines()
@@ -247,3 +247,28 @@ def test_backfill_closed_positions_real_fixture_is_idempotent(tmp_path, monkeypa
     rows = (tmp_path / "journal" / "trade_ledger.csv").read_text(encoding="utf-8").splitlines()
     assert len(rows) == 4
     assert any("XAGUSD,short,LIMIT,58.75034" in row and ",20.00," in row for row in rows)
+
+def test_latest_bar_is_order_agnostic(tmp_path):
+    d = tmp_path / "GOLD_CFD"; d.mkdir()
+    rows = [
+        {"datetime":"2026-07-10T10:00:00Z","open":1,"high":2,"low":0,"close":1},
+        {"datetime":"2026-07-10T10:05:00Z","open":3,"high":4,"low":2,"close":3},
+    ]
+    _write(d / "klines_5m.json", {"values": rows})
+    bar, ts = lc._latest_bar(d)
+    assert bar["open"] == 3
+    _write(d / "klines_5m.json", {"values": list(reversed(rows))})
+    bar, ts = lc._latest_bar(d)
+    assert bar["open"] == 3
+
+
+def test_bar_older_than_open_does_not_close(tmp_path, monkeypatch):
+    monkeypatch.setattr(lc, "PUBLIC_DIR", tmp_path)
+    monkeypatch.setattr(lc, "STATE_PATH", tmp_path / "_position_lifecycle_state.json")
+    monkeypatch.setattr(lc, "INBOX_PATH", tmp_path / "_position_lifecycle_inbox.jsonl")
+    monkeypatch.setattr(lc, "_cfg", lambda: {"tp1_closes_position": True})
+    _write(lc.STATE_PATH, {"positions":{"GOLD_CFD":{"status":"open","side":"long","entry":100,"sl":90,"tp1":110,"opened_at_utc":"2026-07-10T10:05:00Z","size_units":1}}})
+    _write(tmp_path / "GOLD_CFD" / "signal.json", {"spot":{"price":100,"utc":"2026-07-10T10:06:00Z"}})
+    _write(tmp_path / "GOLD_CFD" / "klines_5m.json", {"values":[{"datetime":"2026-07-10T10:00:00Z","open":100,"high":111,"low":99,"close":110}]})
+    lc.process()
+    assert json.loads(lc.STATE_PATH.read_text())["positions"]["GOLD_CFD"]["status"] == "open"    
