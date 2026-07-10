@@ -391,6 +391,26 @@ def _manual_trade_model_for_asset(asset_name: str, manual_trade_model: Dict[str,
     return model
 
 
+def _stake_margin_usd() -> float:
+    profit_target = getattr(settings, "PROFIT_TARGET_CONFIG", {}) or {}
+    return safe_float(profit_target.get("margin_usd")) or 100.0
+
+
+def _stake_multiplier() -> float:
+    stake = getattr(settings, "STAKE_CONFIG", {}) or {}
+    return safe_float(stake.get("multiplier")) or 1.0
+
+
+def _stake_amount_usd() -> float:
+    return _stake_margin_usd() * _stake_multiplier()
+
+
+def _fixed_margin_size_units(entry: Optional[float], leverage: Optional[float]) -> Optional[float]:
+    if entry is None or entry <= 0 or leverage is None or leverage <= 0:
+        return None
+    return (_stake_amount_usd() * leverage) / entry
+
+
 def build_expected_trade_outcome(
     asset_dir: Path,
     asset_name: str,
@@ -402,7 +422,7 @@ def build_expected_trade_outcome(
     manual_trade_model: Dict[str, Any],
 ) -> Dict[str, Any]:
     model = _manual_trade_model_for_asset(asset_name, manual_trade_model)
-    equity_usd = safe_float(model.get("equity_usd")) or 100.0
+    stake_amount_usd = _stake_amount_usd()    
     leverage = safe_float(model.get("leverage")) or 20.0
     tp1_close_fraction = safe_float(model.get("tp1_close_fraction")) or 1.0
     min_net_usd = safe_float(model.get("tp1_min_net_usd")) or 10.0
@@ -414,7 +434,7 @@ def build_expected_trade_outcome(
     cost_pct = float((settings.ASSET_COST_MODEL.get(asset_name) or {}).get("round_trip_pct", 0.0))
     gross_pct = abs(entry - tp1) / entry if entry else 0.0
     net_pct = gross_pct - cost_pct
-    notional = equity_usd * leverage
+    notional = stake_amount_usd * leverage    
     tp1_net_usd = net_pct * notional * tp1_close_fraction
     risk = abs(entry - sl)
     spot = safe_float((data.get("spot") or {}).get("price")) or entry
@@ -432,7 +452,7 @@ def build_expected_trade_outcome(
     no_chase_gate = chase_r <= max_chase_r
 
     return {
-        "equity_usd": round(equity_usd, 2),
+        "stake_amount_usd": round(stake_amount_usd, 2),        
         "leverage": round(leverage, 2),
         "notional_usd": round(notional, 2),
         "tp1_net_usd": round(tp1_net_usd, 2),
@@ -833,7 +853,6 @@ def check_and_notify() -> None:
         return
     manual_trade_model = settings.MANUAL_TRADE_MODEL or {}
     tp1_min_net_usd = safe_float(manual_trade_model.get("tp1_min_net_usd")) or 10.0
-    sl_risk_usd = safe_float(manual_trade_model.get("sl_risk_usd")) or 50.0
     
     notify_state_path = PUBLIC_DIR / "_notify_state.json"
     notify_state = load_json(notify_state_path)
@@ -912,12 +931,13 @@ def check_and_notify() -> None:
         if not expected.get("passes") and ((asset_dir / "klines_1m.json").exists() or (asset_dir / "klines_5m.json").exists()):
             continue
 
-        size_units = sl_risk_usd / abs(entry - sl) if abs(entry - sl) > 0 else None
-        units_text = f"{size_units:.2f} Egység (Units)" if size_units is not None else "N/A"
-        entry_notional_usd = (size_units * entry) if size_units is not None else None
         leverage_map = getattr(settings, "LEVERAGE", {}) or {}
         asset_leverage = safe_float(leverage_map.get(asset_name.upper())) or 1.0
-        etoro_amount_usd = (entry_notional_usd / asset_leverage) if entry_notional_usd is not None and asset_leverage else None        
+        stake_amount_usd = _stake_amount_usd()
+        size_units = _fixed_margin_size_units(entry, asset_leverage)
+        units_text = f"{size_units:.2f} Egység (Units)" if size_units is not None else "N/A"
+        entry_notional_usd = (size_units * entry) if size_units is not None else None
+        sl_risk_to_stop_usd = (size_units * abs(entry - sl)) if size_units is not None and sl is not None else None
         
         entry_sig = f"{direction}_{order_type}"
 
@@ -961,8 +981,8 @@ def check_and_notify() -> None:
             "color": color,
             "fields": [
                 {"name": "📊 Árfolyam", "value": f"Spot ár: `{format_price(safe_float((data.get('spot') or {}).get('price')))}`\nBelépő: `{format_price(entry)}`", "inline": False},
-                {"name": "⚙️ Paraméterek az eToro-hoz", "value": f"MÉRET: `{units_text}` ({sl_risk_usd} USD kockázat)\nNotional: `${entry_notional_usd:.2f}`\neToro Amount (X{asset_leverage:g}): `${etoro_amount_usd:.2f}`\nSL: `{format_price(sl)}`\nTP1: `{format_price(tp1)}`" + (f"\nTP2: `{format_price(tp2)}`" if tp2 else "") + f"\n{validity_text}", "inline": False},                
-                {"name": "🎯 Profit cél", "value": f"Várható nettó TP1: `+${tp1_net_usd:.2f}`\nMinimum: `${tp1_min_net_usd:.2f}`\nProfit-cél számítási alap: `${expected.get('notional_usd'):.2f}`", "inline": False},                
+                {"name": "⚙️ Paraméterek az eToro-hoz", "value": f"MÉRET: `{units_text}` (~${sl_risk_to_stop_usd:.2f} kockázat SL-ig)\nNotional: `${entry_notional_usd:.2f}`\neToro Amount (X{asset_leverage:g}): `${stake_amount_usd:.2f}`\nSL: `{format_price(sl)}`\nTP1: `{format_price(tp1)}`" + (f"\nTP2: `{format_price(tp2)}`" if tp2 else "") + f"\n{validity_text}", "inline": False},
+                {"name": "🎯 Profit cél", "value": f"Várható nettó TP1: `+${tp1_net_usd:.2f}`\nMinimum: `${tp1_min_net_usd:.2f}`\nProfit-cél számítási alap: `${expected.get('notional_usd'):.2f}`", "inline": False},                        
                 {"name": "⏱️ Várható idő TP1-ig", "value": eta_text, "inline": False},
                 {"name": "🎯 Belépési pontosság", "value": f"Aktuális chase: `{expected.get('current_chase_r')}R`\n{entry_limit_text}", "inline": False},
                 {"name": "💡 Indoklás", "value": reasons_text, "inline": False},
