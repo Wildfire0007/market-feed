@@ -13780,7 +13780,6 @@ def analyze(asset: str) -> Dict[str, Any]:
         mt_tp1_frac = safe_float(manual_trade_model.get("tp1_close_fraction"))
         mt_tp1_min_net = safe_float(manual_trade_model.get("tp1_min_net_usd"))
         mt_tp2_min_net = safe_float(manual_trade_model.get("tp2_min_net_usd"))
-        mt_sl_risk = safe_float(manual_trade_model.get("sl_risk_usd"))
         if None not in (mt_equity, mt_leverage, mt_tp1_frac, mt_tp1_min_net):
             manual_trade_required_tp1_pct = compute_required_gross_tp_pct(
                 asset,
@@ -13796,7 +13795,6 @@ def analyze(asset: str) -> Dict[str, Any]:
             "tp1_close_fraction": mt_tp1_frac,
             "tp1_min_net_usd": mt_tp1_min_net,
             "tp2_min_net_usd": mt_tp2_min_net,
-            "sl_risk_usd": mt_sl_risk,
             "required_gross_tp1_pct": manual_trade_required_tp1_pct,
         }
 
