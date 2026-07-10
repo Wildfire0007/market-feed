@@ -107,7 +107,6 @@ def _capture_single_entry_embed(tmp_path, monkeypatch, asset, payload):
     monkeypatch.setattr(notify.settings, "LEVERAGE", {asset: 10.0})
     monkeypatch.setattr(notify.settings, "ASSET_COST_MODEL", {asset: {"round_trip_pct": 0.0}})
     monkeypatch.setattr(notify.settings, "MANUAL_TRADE_MODEL", {
-        "sl_risk_usd": 50.0,
         "equity_usd": 100.0,
         "leverage": 10.0,
         "tp1_close_fraction": 1.0,
@@ -197,7 +196,6 @@ def test_entry_embed_shows_broker_ready_sizing_lines(tmp_path, monkeypatch):
     monkeypatch.setattr(notify.settings, "LEVERAGE", {"XAGUSD": 10.0})
     monkeypatch.setattr(notify.settings, "ASSET_COST_MODEL", {"XAGUSD": {"round_trip_pct": 0.0}})
     monkeypatch.setattr(notify.settings, "MANUAL_TRADE_MODEL", {
-        "sl_risk_usd": 50.0,
         "equity_usd": 100.0,
         "leverage": 10.0,
         "tp1_close_fraction": 1.0,
@@ -215,6 +213,6 @@ def test_entry_embed_shows_broker_ready_sizing_lines(tmp_path, monkeypatch):
     fields = {field["name"]: field["value"] for field in embed["fields"]}
     assert "Profit-cél számítási alap:" in fields["🎯 Profit cél"]
     assert "Tőkeáttételes méret:" not in fields["🎯 Profit cél"]
-    assert "Notional: `$1511.42`" in fields["⚙️ Paraméterek az eToro-hoz"]
-    assert "eToro Amount (X10): `$151.14`" in fields["⚙️ Paraméterek az eToro-hoz"]
+    assert "Notional: `$1000.00`" in fields["⚙️ Paraméterek az eToro-hoz"]
+    assert "eToro Amount (X10): `$100.00`" in fields["⚙️ Paraméterek az eToro-hoz"]
     assert "Minimál-tétes protokoll: Amount × 0.1–0.2 az első 10 trade-re." in fields["🧭 Kezelési terv"]    
