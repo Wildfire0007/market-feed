@@ -205,6 +205,10 @@ def _open_lifecycle_position_count(path: Optional[Path] = None) -> int:
 
 
 def _record_suppressed_concurrency(asset: str, payload: Dict[str, Any], *, direction: str, entry: Any, sl: Any, tp1: Any, tp2: Any, probability: Any, now_iso: str) -> None:
+    _record_suppressed_shadow(asset, payload, direction=direction, entry=entry, sl=sl, tp1=tp1, tp2=tp2, probability=probability, now_iso=now_iso, mode="suppressed_concurrency", reason="Konkurencia-plafon miatt kihagyva")
+
+
+def _record_suppressed_shadow(asset: str, payload: Dict[str, Any], *, direction: str, entry: Any, sl: Any, tp1: Any, tp2: Any, probability: Any, now_iso: str, mode: str, reason: str) -> None:    
     shadow = dict(payload or {})
     shadow["retrieved_at_utc"] = shadow.get("retrieved_at_utc") or now_iso
     shadow["signal"] = direction
@@ -213,9 +217,9 @@ def _record_suppressed_concurrency(asset: str, payload: Dict[str, Any], *, direc
     shadow["sl"] = sl
     shadow["tp1"] = tp1
     shadow["tp2"] = tp2
-    shadow["gates"] = {**(shadow.get("gates") or {}), "mode": "suppressed_concurrency"}
+    shadow["gates"] = {**(shadow.get("gates") or {}), "mode": mode}
     reasons = shadow.get("reasons") if isinstance(shadow.get("reasons"), list) else []
-    shadow["reasons"] = [*reasons, "Konkurencia-plafon miatt kihagyva"]
+    shadow["reasons"] = [*reasons, reason]
     old_dir, old_file, old_summary = _trade_journal.JOURNAL_DIR, _trade_journal.JOURNAL_FILE, _trade_journal.SUMMARY_FILE
     try:
         _trade_journal.JOURNAL_DIR = PUBLIC_DIR / "journal"
@@ -224,7 +228,17 @@ def _record_suppressed_concurrency(asset: str, payload: Dict[str, Any], *, direc
         _trade_journal.record_signal_event(asset, shadow)
     finally:
         _trade_journal.JOURNAL_DIR, _trade_journal.JOURNAL_FILE, _trade_journal.SUMMARY_FILE = old_dir, old_file, old_summary
-        
+
+
+def _entry_gate_passes(data: Dict[str, Any], p_score: Optional[float]) -> bool:
+    gates = data.get("gates") if isinstance(data.get("gates"), dict) else {}
+    missing = [str(item) for item in (gates.get("missing") or [])]
+    critical_missing = [str(item) for item in (gates.get("critical_missing") or data.get("critical_missing") or [])]
+    thresholds = data.get("entry_thresholds") if isinstance(data.get("entry_thresholds"), dict) else {}
+    threshold = safe_float(thresholds.get("p_score_min_effective") or thresholds.get("p_score_min"))
+    score_ok = True if threshold is None else (p_score is not None and p_score >= threshold)
+    return score_ok and not missing and not critical_missing
+    
 def load_json(path: Path) -> Dict[str, Any]:
     try:
         with path.open("r", encoding="utf-8") as h:
@@ -917,7 +931,10 @@ def check_and_notify() -> None:
         prefix, color = ("🟡", COLOR_YELLOW) if order_type in ["LIMIT", "STOP"] else (("🟢", COLOR_GREEN) if direction == "buy" else ("🔴", COLOR_RED))
         title = f"{prefix} NYISS {'LONG' if direction == 'buy' else 'SHORT'} – {'BUY' if direction == 'buy' else 'SELL'} {order_type} @ {format_price(entry)}"
 
-        p_score = safe_float(data.get("probability_raw"))
+        p_score = safe_float(data.get("probability_raw") or data.get("probability"))
+        if not _entry_gate_passes(data, p_score):
+            _record_suppressed_shadow(asset_name, data, direction=direction, entry=entry, sl=sl, tp1=tp1, tp2=tp2, probability=p_score, now_iso=to_utc_iso(now_dt), mode="suppressed_gate_mismatch", reason="Entry gate elutasítás miatt kihagyva")
+            continue        
         reasons = "\n".join([f"• {_hu_reason(r)}" for r in (data.get("reasons") or [])[:2]]) or "• Rendszer jelzés"
         reasons_text = f"P Score: **{p_score:.1f}** (Erősség)\n{reasons}" if p_score else reasons
         valid_minutes = safe_float(expected.get('valid_for_minutes'))
