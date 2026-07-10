@@ -93,6 +93,88 @@ def test_entry_gate_summary_falls_back_to_jsonl(tmp_path, monkeypatch):
 
 
 
+
+def _capture_single_entry_embed(tmp_path, monkeypatch, asset, payload):
+    public_dir = tmp_path / f"public_{asset}"
+    asset_dir = public_dir / asset
+    asset_dir.mkdir(parents=True)
+    (asset_dir / "signal.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    captured = []
+    monkeypatch.setattr(notify, "PUBLIC_DIR", public_dir)
+    monkeypatch.setattr(notify, "DISCORD_NOTIFY_ASSETS", {asset})
+    monkeypatch.setattr(notify, "DRY_RUN", True)
+    monkeypatch.setattr(notify.settings, "LEVERAGE", {asset: 10.0})
+    monkeypatch.setattr(notify.settings, "ASSET_COST_MODEL", {asset: {"round_trip_pct": 0.0}})
+    monkeypatch.setattr(notify.settings, "MANUAL_TRADE_MODEL", {
+        "sl_risk_usd": 50.0,
+        "equity_usd": 100.0,
+        "leverage": 10.0,
+        "tp1_close_fraction": 1.0,
+        "tp1_min_net_usd": 1.0,
+        "eta_min_minutes": 1,
+        "eta_max_minutes": 999,
+        "max_chase_r": 999,
+    })
+    monkeypatch.setattr(notify.position_tracker, "load_positions", lambda *args, **kwargs: {})
+    monkeypatch.setattr(notify, "send_discord_embed", lambda embed: captured.append(embed) or True)
+
+    notify.check_and_notify()
+
+    assert len(captured) == 1
+    return captured[0]
+
+
+def test_entry_embed_long_direction_first_title_color_field_order_and_validity(tmp_path, monkeypatch):
+    embed = _capture_single_entry_embed(tmp_path, monkeypatch, "USOIL", {
+        "signal": "buy",
+        "order_type": "LIMIT",
+        "spot": {"price": 75.0},
+        "entry": 75.0,
+        "sl": 74.0,
+        "tp1": 76.0,
+        "tp2": 77.0,
+        "probability_raw": 40,
+        "reasons": ["fixture"],
+    })
+
+    assert embed["color"] == 3066993
+    assert embed["title"].startswith("🟢 NYISS LONG — 🛢️ USOIL")
+    assert " · BUY LIMIT @ 75.00000" in embed["title"]
+    assert [field["name"] for field in embed["fields"]] == [
+        "📊 Árfolyam",
+        "⚙️ Paraméterek az eToro-hoz",
+        "🎯 Profit cél",
+        "⏱️ Várható idő TP1-ig",
+        "🎯 Belépési pontosság",
+        "💡 Indoklás",
+        "🧭 Kezelési terv",
+        "🕒 Időbélyeg",
+    ]
+    fields = {field["name"]: field["value"] for field in embed["fields"]}
+    assert "⏳ Érvényes eddig:" in fields["⚙️ Paraméterek az eToro-hoz"]
+    assert " UTC (" in fields["⚙️ Paraméterek az eToro-hoz"]
+    assert " Budapest)" in fields["⚙️ Paraméterek az eToro-hoz"]
+    assert "Érvényes eddig" not in fields["⏱️ Várható idő TP1-ig"]
+
+
+def test_entry_embed_short_direction_first_title_and_color(tmp_path, monkeypatch):
+    embed = _capture_single_entry_embed(tmp_path, monkeypatch, "GOLD_CFD", {
+        "signal": "sell",
+        "order_type": "STOP",
+        "spot": {"price": 2400.0},
+        "entry": 2400.0,
+        "sl": 2410.0,
+        "tp1": 2390.0,
+        "tp2": 2380.0,
+        "probability_raw": 40,
+        "reasons": ["fixture"],
+    })
+
+    assert embed["color"] == 15158332
+    assert embed["title"].startswith("🔴 NYISS SHORT — 🥇 GOLD_CFD")
+    assert " · SELL STOP @ 2,400.0" in embed["title"]
+
 def test_entry_embed_shows_broker_ready_sizing_lines(tmp_path, monkeypatch):
     public_dir = tmp_path / "public"
     asset_dir = public_dir / "XAGUSD"
