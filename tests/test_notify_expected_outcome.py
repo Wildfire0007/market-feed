@@ -139,3 +139,29 @@ def test_expected_trade_outcome_uses_capped_xag_and_oil_leverage(tmp_path, monke
 
 def test_default_discord_notify_assets_are_metals_and_oil_only():
     assert notify_discord.DISCORD_NOTIFY_ASSETS == {"GOLD_CFD", "XAGUSD", "USOIL"}
+
+
+def test_fixed_margin_size_units_hand_checked_metals(monkeypatch):
+    monkeypatch.setattr(notify_discord.settings, "PROFIT_TARGET_CONFIG", {"margin_usd": 100.0})
+    monkeypatch.setattr(notify_discord.settings, "STAKE_CONFIG", {"multiplier": 1.0})
+
+    gold_units = notify_discord._fixed_margin_size_units(4106.2, 20.0)
+    assert round(gold_units, 4) == 0.4871
+    assert round(gold_units * abs(4106.2 - 4094.6), 2) == 5.65
+    assert round(gold_units * abs(4106.2 - 4083.0), 2) == 11.30
+
+    xag_units = notify_discord._fixed_margin_size_units(58.75, 10.0)
+    assert round(xag_units, 2) == 17.02
+
+
+def test_fixed_margin_multiplier_scales_linearly(monkeypatch):
+    monkeypatch.setattr(notify_discord.settings, "PROFIT_TARGET_CONFIG", {"margin_usd": 100.0})
+    monkeypatch.setattr(notify_discord.settings, "STAKE_CONFIG", {"multiplier": 1.0})
+    base = notify_discord._fixed_margin_size_units(58.75, 10.0)
+    base_amount = notify_discord._stake_amount_usd()
+
+    monkeypatch.setattr(notify_discord.settings, "STAKE_CONFIG", {"multiplier": 2.0})
+    doubled = notify_discord._fixed_margin_size_units(58.75, 10.0)
+
+    assert notify_discord._stake_amount_usd() == base_amount * 2
+    assert doubled == base * 2
