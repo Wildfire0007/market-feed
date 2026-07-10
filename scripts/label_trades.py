@@ -760,7 +760,8 @@ def _summary_bucket(frame: pd.DataFrame) -> Dict[str, Any]:
 
 
 def _ledger_summary_bucket(frame: pd.DataFrame) -> Dict[str, Any]:
-    closed = frame[frame.get("outcome", pd.Series(dtype=str)).astype(str).str.lower() != "expired"]
+    live = frame[frame.get("voided", pd.Series("", index=frame.index)).astype(str).str.lower() != "true"]
+    closed = live[live.get("outcome", pd.Series(dtype=str)).astype(str).str.lower() != "expired"]  
     count = int(len(closed))
     tp = int(closed.get("outcome", pd.Series(dtype=str)).astype(str).str.lower().isin({"tp1_closed", "take_profit_2_hit"}).sum()) if count else 0
     lo, hi = _wilson_interval(tp, count)
