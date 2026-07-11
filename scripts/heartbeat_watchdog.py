@@ -39,15 +39,17 @@ def _parse_hhmm(value: str) -> time:
     return time(int(hour), int(minute), tzinfo=timezone.utc)
 
 
-def _in_quiet_hours(now: datetime, window: Any) -> bool:
+def _quiet_context(now: datetime, window: Any, weekend_as_quiet: bool = False) -> str:
+    utc_now = now.astimezone(timezone.utc)
+    if weekend_as_quiet and utc_now.weekday() >= 5:
+        return "hétvége"    
     if not isinstance(window, list) or len(window) != 2:
-        return False
+        return "nem"
     start = _parse_hhmm(window[0])
     end = _parse_hhmm(window[1])
-    current = now.astimezone(timezone.utc).timetz().replace(second=0, microsecond=0)
-    if start <= end:
-        return start <= current < end
-    return current >= start or current < end
+    current = utc_now.timetz().replace(second=0, microsecond=0)
+    in_window = start <= current < end if start <= end else current >= start or current < end
+    return "éjszaka" if in_window else "nem"
 
 
 def _position_count(public_dir: Path) -> int:
@@ -59,7 +61,7 @@ def _position_count(public_dir: Path) -> int:
     return count
 
 
-def _is_detection_band(age_min: float, threshold_min: float) -> bool:
+def _is_detection_band(age_min: float, threshold_min: float, *, first_band_min: float = 5.0) -> bool:    
     """Return true only in stateless alert bands for a stale episode.
 
     A job with no persisted state can still deduplicate by alerting only in the
@@ -73,7 +75,7 @@ def _is_detection_band(age_min: float, threshold_min: float) -> bool:
     if age_min < threshold_min:
         return False
     elapsed = age_min - threshold_min
-    if elapsed < 5:
+    if elapsed < first_band_min:    
         return True
     return elapsed >= 60 and (elapsed % 60) < 5
 
@@ -103,11 +105,11 @@ def _format_stamp(stamp: Optional[datetime]) -> str:
     return f"{utc} / {budapest}"
 
 
-def _message(text: str, *, stamp: Optional[datetime], quiet: bool, position_count: int) -> str:
+def _message(text: str, *, stamp: Optional[datetime], quiet_context: str, position_count: int) -> str:    
     return "\n".join([
         text,
         f"Stale since: `{_format_stamp(stamp)}` (UTC / Europe/Budapest)",
-        f"Quiet hours active: `{str(quiet).lower()}`",
+        f"Csendes időszak: `{quiet_context}`",        
         f"Open/pending positions: `{position_count}`",
     ])
 
@@ -123,7 +125,8 @@ def _main() -> int:
     public_dir = Path(args.public_dir)
     cfg = getattr(settings, "WATCHDOG", {}) or {}
     now = datetime.now(timezone.utc)
-    quiet = _in_quiet_hours(now, cfg.get("quiet_hours_utc"))
+    quiet_context = _quiet_context(now, cfg.get("quiet_hours_utc"), bool(cfg.get("weekend_as_quiet")))
+    quiet = quiet_context != "nem"    
     position_count = _position_count(public_dir)
     threshold = float(args.max_age_min)
     channel = "actionable"
@@ -131,27 +134,28 @@ def _main() -> int:
         threshold = float(cfg.get("quiet_hours_max_age_min", threshold) or threshold)
         channel = str(cfg.get("quiet_hours_channel") or "diagnostic").lower()    
     if not path.exists():
-        msg = _message(f"Heartbeat hiányzik: {path}", stamp=None, quiet=quiet, position_count=position_count)        
+        msg = _message(f"Heartbeat hiányzik: {path}", stamp=None, quiet_context=quiet_context, position_count=position_count)        
     else:
         payload = json.loads(path.read_text(encoding="utf-8"))
         stamp_raw = payload.get("last_update_utc") or payload.get("generated_at_utc")
         stamp = parse_utc(str(stamp_raw)) if stamp_raw else None
         if stamp is None:
-            msg = _message(f"Heartbeat timestamp hiányzik: {path}", stamp=None, quiet=quiet, position_count=position_count)
+            msg = _message(f"Heartbeat timestamp hiányzik: {path}", stamp=None, quiet_context=quiet_context, position_count=position_count)            
         else:
             age_min = (now - stamp).total_seconds() / 60.0
             if args.force_alert:
-                msg = _message(f"TD pipeline heartbeat test alert: heartbeat age {age_min:.1f} min", stamp=stamp, quiet=quiet, position_count=position_count)
+                msg = _message(f"TD pipeline heartbeat test alert: heartbeat age {age_min:.1f} min", stamp=stamp, quiet_context=quiet_context, position_count=position_count)                
                 print(f"WATCHDOG ALERT — heartbeat age {age_min:.1f} min")
                 _alert(msg, "⚠️ TD watchdog test alert", channel=channel)
                 return 0
             if age_min <= threshold:
                 print(f"WATCHDOG OK — heartbeat age {age_min:.1f} min")
                 return 0
-            if not _is_detection_band(age_min, threshold):
+            first_band_min = 15.0 if quiet and position_count <= 0 else 5.0
+            if not _is_detection_band(age_min, threshold, first_band_min=first_band_min):                
                 print(f"WATCHDOG SUPPRESSED — heartbeat age {age_min:.1f} min")
                 return 0
-            msg = _message(f"TD pipeline heartbeat stale: {age_min:.1f} min > {threshold:.1f} min", stamp=stamp, quiet=quiet, position_count=position_count)    
+            msg = _message(f"TD pipeline heartbeat stale: {age_min:.1f} min > {threshold:.1f} min", stamp=stamp, quiet_context=quiet_context, position_count=position_count)                
     print(msg, file=sys.stderr)
     _alert(msg, channel=channel)
     return 1
