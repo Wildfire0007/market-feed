@@ -31,7 +31,7 @@ def _run(monkeypatch, tmp_path: Path, heartbeat: Path) -> tuple[int, list[dict]]
     monkeypatch.setattr(
         heartbeat_watchdog.settings,
         "WATCHDOG",
-        {"quiet_hours_utc": ["22:00", "05:00"], "quiet_hours_max_age_min": 150, "quiet_hours_channel": "diagnostic"},
+        {"quiet_hours_utc": ["22:00", "05:00"], "quiet_hours_max_age_min": 150, "quiet_hours_channel": "diagnostic", "weekend_as_quiet": True},        
     )
     monkeypatch.setattr(sys, "argv", ["heartbeat_watchdog.py", "--heartbeat", str(heartbeat), "--public-dir", str(tmp_path), "--max-age-min", "30"])
     return heartbeat_watchdog.main(), calls
@@ -59,9 +59,47 @@ def test_position_override_uses_actionable_normal_threshold(monkeypatch, tmp_pat
     assert code == 1
     assert calls[0]["url"] == "https://example.test/actionable"
     description = calls[0]["json"]["embeds"][0]["description"]
-    assert "Quiet hours active: `true`" in description
+    assert "Csendes időszak: `éjszaka`" in description    
     assert "Open/pending positions: `1`" in description
     assert "Europe/Budapest" in description
+
+
+@freeze_time("2026-07-11T09:00:00Z")
+def test_weekend_quiet_suppresses_below_quiet_threshold(monkeypatch, tmp_path):
+    heartbeat = _write_heartbeat(tmp_path, "2026-07-11T08:20:00Z")
+
+    code, calls = _run(monkeypatch, tmp_path, heartbeat)
+
+    assert code == 0
+    assert calls == []
+
+
+@freeze_time("2026-07-11T09:00:00Z")
+def test_weekend_quiet_routes_stale_to_diagnostic(monkeypatch, tmp_path):
+    heartbeat = _write_heartbeat(tmp_path, "2026-07-11T06:20:00Z")
+
+    code, calls = _run(monkeypatch, tmp_path, heartbeat)
+
+    assert code == 1
+    assert calls[0]["url"] == "https://example.test/diagnostic"
+    description = calls[0]["json"]["embeds"][0]["description"]
+    assert "Csendes időszak: `hétvége`" in description
+
+
+@freeze_time("2026-07-11T09:00:00Z")
+def test_weekend_position_override_uses_actionable_normal_threshold(monkeypatch, tmp_path):
+    heartbeat = _write_heartbeat(tmp_path, "2026-07-11T08:29:00Z")
+    (tmp_path / "_position_lifecycle_state.json").write_text(
+        json.dumps({"positions": {"GOLD_CFD": {"status": "open"}}}), encoding="utf-8"
+    )
+
+    code, calls = _run(monkeypatch, tmp_path, heartbeat)
+
+    assert code == 1
+    assert calls[0]["url"] == "https://example.test/actionable"
+    description = calls[0]["json"]["embeds"][0]["description"]
+    assert "Csendes időszak: `hétvége`" in description
+    assert "Open/pending positions: `1`" in description
 
 
 @freeze_time("2026-07-07T10:00:00Z")
