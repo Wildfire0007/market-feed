@@ -376,6 +376,7 @@ SETTINGS: Dict[str, Any] = load_config()
 PROFIT_TARGET_CONFIG: Dict[str, Any] = dict(SETTINGS.get("profit_target") or {})
 TP1_MANAGEMENT_CONFIG: Dict[str, Any] = dict(SETTINGS.get("tp1_management") or {})
 SOFT_PENALTY_CAP: float = float((SETTINGS.get("entry_logic") or {}).get("soft_penalty_cap", 12.0) or 12.0)
+CHOPPY_BLOCK_H1_ADX_EXEMPT: float = float((SETTINGS.get("entry_logic") or {}).get("choppy_block_h1_adx_exempt", 25.0) or 25.0)
 
 
 def _cap_soft_penalty(score_before: float, score_after: float, cap: float = SOFT_PENALTY_CAP) -> float:
@@ -13319,9 +13320,14 @@ def analyze(asset: str) -> Dict[str, Any]:
             and asset_entry_profile == "precision_metal_oil"
             and entry_profile_flag(asset, "choppy_hard_block")
         ):  
-            if "choppy_hard_block" not in critical_missing:
-                critical_missing.append("choppy_hard_block")           
-            reasons.append("Regime kapu: CHOPPY hard block aktív a precision_metal_oil profilban")
+            h1_adx_value = latest_adx(k1h_closed, period=14)
+            if h1_adx_value is not None and h1_adx_value >= CHOPPY_BLOCK_H1_ADX_EXEMPT:
+                P -= 10.0
+                reasons.append("Regime: 5m chop 1h-trendben — soft büntetés (hard block felmentve)")
+            else:
+                if "choppy_hard_block" not in critical_missing:
+                    critical_missing.append("choppy_hard_block")           
+                reasons.append("Regime kapu: CHOPPY hard block aktív a precision_metal_oil profilban")          
         else:
             P -= 10.0
             if regime_label == "unknown":
