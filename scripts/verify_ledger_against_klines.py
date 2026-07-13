@@ -2,7 +2,7 @@
 """Verify non-voided closed ledger exits against stored OHLC candles."""
 from __future__ import annotations
 import argparse, csv, json, sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -76,10 +76,15 @@ def verify(public_dir: Path, ledger_path: Path) -> list[str]:
             level = exit_level(row)
             if level is None:
                 continue
+            entry = safe_float(row.get("entry"))                
             opened, closed = parse_utc(row.get("opened_at_utc")), parse_utc(row.get("closed_at_utc"))
             asset = str(row.get("asset") or "").strip()
-            if not opened or not closed or not asset or not touched(public_dir / asset, opened, closed, level):
-                violations.append(f"{row.get('ledger_id') or '?'} {asset} {row.get('close_reason')} level={level}")
+            asset_dir = public_dir / asset
+            ledger_id = row.get("ledger_id") or "?"
+            if not opened or not closed or not asset or not touched(asset_dir, opened, closed, level):
+                violations.append(f"{ledger_id} {asset} {row.get('close_reason')} level={level}")
+            if entry is None or not opened or not closed or not asset or not touched(asset_dir, opened - timedelta(minutes=10), closed, entry):
+                violations.append(f"{ledger_id} {asset} entry_never_touched level={entry}")        
     return violations
 
 
