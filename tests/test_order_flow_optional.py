@@ -1,6 +1,9 @@
+import inspect
+
 import numpy as np
 import pandas as pd
 
+import analysis
 from analysis import compute_order_flow_metrics, compute_precision_entry
 from order_flow import aggregate_ticks
 
@@ -93,3 +96,23 @@ def test_precision_entry_overrides_stalled_flow_when_trigger_fires():
     assert plan["order_flow_ready"] is True
     assert plan.get("order_flow_fallback") == "stalled_flow_trigger_fire"
     assert any("stalled" in reason for reason in plan["trigger_reasons"])
+
+
+def test_live_precision_trigger_path_uses_closed_frames():
+    source = inspect.getsource(analysis.analyze)
+    assert "k1m_closed = ensure_closed_candles(k1m, now, 60)" in source
+    assert "k5m_closed = ensure_closed_candles(k5m, now, 300)" in source
+    assert (
+        "compute_precision_entry(\n"
+        "            asset,\n"
+        "            precision_direction,\n"
+        "            k1m_closed,\n"
+        "            k5m_closed,"
+    ) in source
+    assert (
+        "compute_precision_entry(\n"
+        "            asset,\n"
+        "            counter_direction,\n"
+        "            k1m_closed,\n"
+        "            k5m_closed,"
+    ) in source
