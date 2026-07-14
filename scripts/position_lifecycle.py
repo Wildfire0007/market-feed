@@ -203,6 +203,7 @@ def _send_close_alert(asset: str, pos: Dict[str, Any], reason: str, now: datetim
             {"name": "Becsült PnL", "value": f"`${pnl:.2f}`" if pnl is not None else "`N/A`", "inline": True},
             {"name": "Utasítás", "value": f"Zárd a teljes {asset} {side_label} pozíciót piaci áron most.", "inline": False},
         ])
+    fields.append({"name": "Adatforrás", "value": "Ár-forrás: TD/OANDA — a bróker árfolyama eltérhet", "inline": False})        
     fields.append({"name": "🕒 Időbélyeg", "value": _dual_time(now), "inline": False})
     embed = {
         "title": title,
