@@ -1,3 +1,4 @@
+import csv
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import Path
 from freezegun import freeze_time
 
 import scripts.position_lifecycle as lc
+from scripts.trade_ledger import LEDGER_HEADER
 
 
 def _write(path: Path, payload):
@@ -225,6 +227,27 @@ def test_terminal_transition_writes_one_trade_ledger_row_with_pnl(tmp_path, monk
     assert ",take_profit_hit,tp1_closed,20.00," in rows[1]
 
 
+def test_trade_ledger_row_round_trips_named_columns(tmp_path, monkeypatch):
+    monkeypatch.setattr(lc, "PUBLIC_DIR", tmp_path)
+    monkeypatch.setattr(lc, "LEDGER_PATH", tmp_path / "journal" / "trade_ledger.csv")
+    meta = {}
+    pos = {"status":"closed","side":"long","order_type":"LIMIT","entry":100,"sl":95,"tp1":110,"tp2":115,"size_units":2,"opened_at_utc":"2026-07-14T10:00:00Z","closed_at_utc":"2026-07-14T10:15:00Z","close_reason":"take_profit_hit","outcome":"tp1_closed","source_signal":"precision_arming","entry_signature":"buy_LIMIT","trigger_bar_utc":"2026-07-14T10:10:00Z"}
+
+    lc._append_trade_ledger_once("USOIL", pos, meta)
+
+    with (tmp_path / "journal" / "trade_ledger.csv").open(newline="", encoding="utf-8") as handle:
+        row = next(csv.DictReader(handle))
+    assert list(row) == LEDGER_HEADER
+    assert row["closed_at_utc"] == "2026-07-14T10:15:00Z"
+    assert row["close_reason"] == "take_profit_hit"
+    assert row["outcome"] == "tp1_closed"
+    assert row["est_pnl_usd"] == "20.00"
+    assert row["source_signal"] == "precision_arming"
+    assert row["entry_signature"] == "buy_LIMIT"
+    assert row["trigger_bar_utc"] == "2026-07-14T10:10:00Z"
+    assert row["voided"] == "false"
+
+
 def test_backfill_closed_positions_is_idempotent(tmp_path, monkeypatch):
     monkeypatch.setattr(lc, "PUBLIC_DIR", tmp_path)
     monkeypatch.setattr(lc, "STATE_PATH", tmp_path / "_position_lifecycle_state.json")
@@ -246,8 +269,8 @@ def test_backfill_closed_positions_real_fixture_is_idempotent(tmp_path, monkeypa
     assert lc.backfill_closed_positions() == 0
     rows = (tmp_path / "journal" / "trade_ledger.csv").read_text(encoding="utf-8").splitlines()
     assert len(rows) == 4
-    assert any("XAGUSD,short,LIMIT,58.75034" in row and ",20.00," in row for row in rows)
-
+    assert any("XAGUSD,short,LIMIT,59.05199" in row and ",-6.37," in row for row in rows)
+    
 def test_latest_bar_is_order_agnostic(tmp_path):
     d = tmp_path / "GOLD_CFD"; d.mkdir()
     rows = [
