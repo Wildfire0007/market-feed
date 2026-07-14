@@ -74,16 +74,17 @@ def verify(public_dir: Path, ledger_path: Path) -> list[str]:
             if str(row.get("voided") or "").strip().lower() == "true":
                 continue
             level = exit_level(row)
-            if level is None:
-                continue
             entry = safe_float(row.get("entry"))                
             opened, closed = parse_utc(row.get("opened_at_utc")), parse_utc(row.get("closed_at_utc"))
             asset = str(row.get("asset") or "").strip()
             asset_dir = public_dir / asset
             ledger_id = row.get("ledger_id") or "?"
-            if not opened or not closed or not asset or not touched(asset_dir, opened, closed, level):
+            if level is None or entry is None or not opened or not closed or not asset:
+                violations.append(f"{ledger_id} {asset} unparseable_row")
+                continue
+            if not touched(asset_dir, opened, closed, level):            
                 violations.append(f"{ledger_id} {asset} {row.get('close_reason')} level={level}")
-            if entry is None or not opened or not closed or not asset or not touched(asset_dir, opened - timedelta(minutes=10), closed, entry):
+            if not touched(asset_dir, opened - timedelta(minutes=10), closed, entry):                
                 violations.append(f"{ledger_id} {asset} entry_never_touched level={entry}")        
     return violations
 
