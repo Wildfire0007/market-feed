@@ -10,8 +10,8 @@ from typing import Any, Dict, Iterable, Optional
 
 LEDGER_HEADER = [
     "ledger_id", "asset", "side", "order_type", "entry", "sl", "tp1", "tp2", "size_units",
-    "opened_at_utc", "closed_at_utc", "trigger_bar_utc", "close_reason", "outcome", "est_pnl_usd",
-    "source_signal", "entry_signature", "voided", "void_reason",
+    "opened_at_utc", "closed_at_utc", "close_reason", "outcome", "est_pnl_usd",
+    "source_signal", "entry_signature", "trigger_bar_utc", "voided", "void_reason",
 ]
 WIN_OUTCOMES = {"tp1_closed", "take_profit_2_hit"}
 TERMINAL_EXCLUDE = {"expired"}
