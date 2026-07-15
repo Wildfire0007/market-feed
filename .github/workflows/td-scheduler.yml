@@ -16,7 +16,6 @@ jobs:
       - name: Evaluate pipeline gap and trigger fallback dispatch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TD_BOT_PAT: ${{ secrets.TD_BOT_PAT }}
         run: |
           python - <<'PY'
           import json
@@ -54,7 +53,8 @@ jobs:
           status, payload = github_request("GET", list_url, os.environ["GH_TOKEN"])          
           if status != 200:
             raise SystemExit(f"Failed listing runs ({status})")
-          runs = payload.get("workflow_runs", [])
+            
+          runs = body.get("workflow_runs", [])
 
           now = datetime.now(timezone.utc)
           newest = runs[0] if runs else None
@@ -89,18 +89,6 @@ jobs:
               body_text = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
               dispatch_error = f"HTTP {exc.code}: {body_text}"
 
-              if exc.code == 403 and "Resource not accessible by integration" in body_text and os.environ.get("TD_BOT_PAT"):
-                try:
-                  dispatch_status, _ = github_request("POST", dispatch_url, os.environ["TD_BOT_PAT"], dispatch_payload)
-                  if dispatch_status == 204:
-                    dispatch_happened = True
-                    dispatch_error = ""
-                  else:
-                    dispatch_error = f"PAT HTTP {dispatch_status}"
-                except urllib.error.HTTPError as pat_exc:
-                  pat_body = pat_exc.read().decode("utf-8", errors="replace") if hasattr(pat_exc, "read") else ""
-                  dispatch_error = f"PAT HTTP {pat_exc.code}: {pat_body}"
-
           latest_id = newest.get("id") if newest else "none"
           latest_status = newest.get("status") if newest else "none"
           age_value = age_seconds if age_seconds is not None else "none"
@@ -110,7 +98,5 @@ jobs:
           )
 
           if dispatch_error:
-            print(f"dispatch_error={dispatch_error}")
-            if "Resource not accessible by integration" in dispatch_error:
-              print("fallback_hint=Set TD_BOT_PAT secret with repo+workflow scopes for dispatch fallback")
+            print(f"dispatch_error={dispatch_error}")            
           PY
