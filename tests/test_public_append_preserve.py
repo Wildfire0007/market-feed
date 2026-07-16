@@ -10,6 +10,7 @@ def test_append_preserve_survives_second_run_artifact_refresh(tmp_path):
     journal = public / "journal" / "trade_journal.csv"
     gate = public / "debug" / "entry_gates" / "entry_gates_2026-07-06.jsonl"
     gap = public / "debug" / "entry_gate_gap_log.jsonl"
+    telemetry = public / "debug" / "trigger_telemetry.jsonl"
     webhook = public / "monitoring" / "webhook_delivery.jsonl"
     ledger = public / "journal" / "trade_ledger.csv"
 
@@ -21,9 +22,10 @@ def test_append_preserve_survives_second_run_artifact_refresh(tmp_path):
     gate.write_text(json.dumps({"ts": "run1", "asset": "GOLD_CFD"}) + "\n", encoding="utf-8")
     feasibility = {"ts_utc": "2026-07-07T08:00:00Z", "asset": "GOLD_CFD", "gate": "profit_target_feasibility", "result": "pass", "required_gross_move_pct": 0.56, "atr1h_pct": 0.3, "ceiling_pct": 0.72, "mult": 2.4}
     gap.write_text(json.dumps(feasibility) + "\n", encoding="utf-8")
+    telemetry.write_text(json.dumps({"ts_utc": "2026-07-07T08:00:00Z"}) + "\n", encoding="utf-8")
     webhook.write_text(json.dumps({"ts_utc": "2026-07-06T16:55:00Z", "script": "notify_discord"}) + "\n", encoding="utf-8")
 
-    assert save(public, state) == 5
+    assert save(public, state) == 6
 
     # Simulate rm -rf public + download-artifact on the second run.
     for child in public.iterdir():
@@ -39,9 +41,10 @@ def test_append_preserve_survives_second_run_artifact_refresh(tmp_path):
     ledger.write_text("ledger_id,asset,closed_at_utc,outcome\nl2,XAGUSD,2026-07-06T20:32:00Z,stopped\n", encoding="utf-8")    
     gate.write_text(json.dumps({"ts": "run2", "asset": "XAGUSD"}) + "\n", encoding="utf-8")
     gap.write_text(json.dumps({"ts": "run2", "kapu": "spread"}) + "\n", encoding="utf-8")
+    telemetry.write_text(json.dumps({"ts_utc": "2026-07-07T08:05:00Z"}) + "\n", encoding="utf-8")
     webhook.write_text(json.dumps({"ts_utc": "2026-07-06T20:32:00Z", "script": "daily_actionable_digest"}) + "\n", encoding="utf-8")
 
-    assert restore(public, state) == 5
+    assert restore(public, state) == 6
 
     assert "2026-07-06T16:55:00Z" in journal.read_text(encoding="utf-8")
     assert "2026-07-06T20:32:00Z" in journal.read_text(encoding="utf-8")
@@ -52,5 +55,6 @@ def test_append_preserve_survives_second_run_artifact_refresh(tmp_path):
     gap_rows = [json.loads(line) for line in gap.read_text(encoding="utf-8").splitlines()]
     assert feasibility in gap_rows
     assert {"ts": "run2", "kapu": "spread"} in gap_rows
+    assert len(telemetry.read_text(encoding="utf-8").splitlines()) == 2
     assert "16:55" in webhook.read_text(encoding="utf-8")
     assert "20:32" in webhook.read_text(encoding="utf-8")
