@@ -55,6 +55,10 @@ def exit_level(row: dict[str, str]) -> Optional[float]:
     return None
 
 
+def candle_times(asset_dir: Path) -> list[datetime]:
+    return sorted(ts for candle in candles(asset_dir) if (ts := row_ts(candle)))
+
+
 def touched(asset_dir: Path, opened: datetime, closed: datetime, level: float) -> bool:
     for candle in candles(asset_dir):
         ts = row_ts(candle)
@@ -67,25 +71,57 @@ def touched(asset_dir: Path, opened: datetime, closed: datetime, level: float) -
     return False
 
 
-def verify(public_dir: Path, ledger_path: Path) -> list[str]:
+def _stamp() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def verify(public_dir: Path, ledger_path: Path, *, now_stamp: Optional[str] = None) -> list[str]:
     violations = []
+    warnings = []
+    changed = False    
     with ledger_path.open(newline="", encoding="utf-8") as handle:
-        for row in csv.DictReader(handle):
-            if str(row.get("voided") or "").strip().lower() == "true":
-                continue
-            level = exit_level(row)
-            entry = safe_float(row.get("entry"))                
-            opened, closed = parse_utc(row.get("opened_at_utc")), parse_utc(row.get("closed_at_utc"))
-            asset = str(row.get("asset") or "").strip()
-            asset_dir = public_dir / asset
-            ledger_id = row.get("ledger_id") or "?"
-            if level is None or entry is None or not opened or not closed or not asset:
-                violations.append(f"{ledger_id} {asset} unparseable_row")
-                continue
-            if not touched(asset_dir, opened, closed, level):            
-                violations.append(f"{ledger_id} {asset} {row.get('close_reason')} level={level}")
-            if not touched(asset_dir, opened - timedelta(minutes=10), closed, entry):                
-                violations.append(f"{ledger_id} {asset} entry_never_touched level={entry}")        
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        for field in ("truth_verified_utc", "verify_note"):
+            if field not in fieldnames:
+                fieldnames.append(field)
+        rows = list(reader)
+    for row in rows:
+        if str(row.get("truth_verified_utc") or "").strip():
+            continue
+        if str(row.get("voided") or "").strip().lower() == "true":
+            continue
+        level = exit_level(row)
+        entry = safe_float(row.get("entry"))
+        opened, closed = parse_utc(row.get("opened_at_utc")), parse_utc(row.get("closed_at_utc"))
+        asset = str(row.get("asset") or "").strip()
+        asset_dir = public_dir / asset
+        ledger_id = row.get("ledger_id") or "?"
+        if level is None or entry is None or not opened or not closed or not asset:
+            violations.append(f"{ledger_id} {asset} unparseable_row")
+            continue
+        times = candle_times(asset_dir)
+        oldest = times[0] if times else None
+        if oldest and closed < oldest:
+            warnings.append(f"{ledger_id} {asset} outside_retention oldest_candle={oldest.isoformat().replace('+00:00', 'Z')}")
+            continue
+        ok = True
+        if not touched(asset_dir, opened, closed, level):
+            violations.append(f"{ledger_id} {asset} {row.get('close_reason')} level={level}")
+            ok = False
+        if not touched(asset_dir, opened - timedelta(minutes=10), closed, entry):
+            violations.append(f"{ledger_id} {asset} entry_never_touched level={entry}")
+            ok = False
+        if ok:
+            row["truth_verified_utc"] = now_stamp or _stamp()
+            changed = True
+    for item in warnings:
+        print(f"WARNING {item}")
+    if changed:
+        with ledger_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)        
     return violations
 
 
