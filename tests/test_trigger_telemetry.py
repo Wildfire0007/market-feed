@@ -1,0 +1,50 @@
+import json
+from datetime import datetime, timezone
+
+
+def test_armed_trigger_writes_all_subconditions(analysis_module, tmp_path):
+    path = tmp_path / "debug" / "trigger_telemetry.jsonl"
+    analysis_module.TRIGGER_TELEMETRY_PATH = path
+    subconditions = {
+        "score_ready": {"value": 72.0, "threshold": 70.0, "passed": True},
+        "retest_touch": True,
+        "bos_confirm": True,
+        "stabilization": {"required": False, "passed": True},
+        "order_flow": {"ready": True, "strength": 1.2},
+        "price_trigger": {"inside_window": False, "hit_entry": False},
+        "spread_guard": True,
+        "other_gates": {"passed": True, "missing": []},
+    }
+
+    analysis_module._append_trigger_telemetry(
+        "XAGUSD",
+        73.5,
+        {"trigger_state": "arming"},
+        subconditions,
+        datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
+    )
+
+    rows = path.read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 1
+    row = json.loads(rows[0])
+    assert row["asset"] == "XAGUSD"
+    assert row["p_score"] == 73.5
+    assert row["trigger_state"] == "arming"
+    assert set(row["subconditions"]) == set(subconditions)
+
+
+def test_trigger_telemetry_uses_size_cap_rotation(analysis_module, tmp_path):
+    path = tmp_path / "debug" / "trigger_telemetry.jsonl"
+    analysis_module.TRIGGER_TELEMETRY_PATH = path
+    analysis_module.TRIGGER_TELEMETRY_MAX_BYTES = 1
+    analysis_module._append_trigger_telemetry(
+        "XAGUSD", 73.5, {"trigger_state": "arming"}, {"spread_guard": True},
+        datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
+    )
+    analysis_module._append_trigger_telemetry(
+        "XAGUSD", 73.5, {"trigger_state": "arming"}, {"spread_guard": True},
+        datetime(2026, 7, 16, 12, 1, tzinfo=timezone.utc),
+    )
+
+    assert path.with_name("trigger_telemetry.1.jsonl").exists()
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 1
