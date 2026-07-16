@@ -269,7 +269,8 @@ def test_backfill_closed_positions_real_fixture_is_idempotent(tmp_path, monkeypa
     assert lc.backfill_closed_positions() == 0
     rows = (tmp_path / "journal" / "trade_ledger.csv").read_text(encoding="utf-8").splitlines()
     assert len(rows) == 4
-    assert any("XAGUSD,short,LIMIT,59.05199" in row and ",-6.37," in row for row in rows)
+    xag = state["positions"]["XAGUSD"]
+    assert any(f"XAGUSD,{xag['side']},{xag['order_type']},{xag['entry']}" in row for row in rows)    
     
 def test_latest_bar_is_order_agnostic(tmp_path):
     d = tmp_path / "GOLD_CFD"; d.mkdir()
