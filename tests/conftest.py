@@ -115,6 +115,7 @@ def isolate_public_dirs(request: pytest.FixtureRequest, monkeypatch: pytest.Monk
         monkeypatch.setattr(module, "ENTRY_GATE_LOG_DIR", public_dir / "debug" / "entry_gates", raising=False)
         monkeypatch.setattr(module, "ENTRY_GATE_STATS_PATH", public_dir / "debug" / "entry_gate_stats.json", raising=False)
         monkeypatch.setattr(module, "ENTRY_GATE_GAP_LOG_PATH", public_dir / "debug" / "entry_gate_gap_log.jsonl", raising=False)
+        monkeypatch.setattr(module, "TRIGGER_TELEMETRY_PATH", public_dir / "debug" / "trigger_telemetry.jsonl", raising=False)
         return module
 
     if request.node.get_closest_marker("real_public_paths") is None:
@@ -161,6 +162,7 @@ def analysis_module(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fixed_now: 
     monkeypatch.setattr(analysis, "ENTRY_GATE_LOG_DIR", public_dir / "debug" / "entry_gates", raising=False)
     monkeypatch.setattr(analysis, "ENTRY_GATE_STATS_PATH", public_dir / "debug" / "entry_gate_stats.json", raising=False)
     monkeypatch.setattr(analysis, "ENTRY_GATE_GAP_LOG_PATH", public_dir / "debug" / "entry_gate_gap_log.jsonl", raising=False)
+    monkeypatch.setattr(analysis, "TRIGGER_TELEMETRY_PATH", public_dir / "debug" / "trigger_telemetry.jsonl", raising=False)
     lifecycle = dict(getattr(analysis, "POSITION_LIFECYCLE", {}) or {})
     lifecycle["positions_file"] = str(public_dir / "trading.db")
     lifecycle["pending_exit_file"] = str(public_dir / "trading.db")
