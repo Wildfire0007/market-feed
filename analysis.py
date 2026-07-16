@@ -992,6 +992,11 @@ ENTRY_GATE_GAP_LOG_PATH: Path = (
 ).resolve()
 ENTRY_GATE_GAP_LOG_MAX_BYTES = 10 * 1024 * 1024
 ENTRY_GATE_GAP_LOG_KEEP_FILES = 1
+TRIGGER_TELEMETRY_PATH: Path = (
+    _ANALYSIS_BASE_DIR / PUBLIC_DIR / "debug" / "trigger_telemetry.jsonl"
+).resolve()
+TRIGGER_TELEMETRY_MAX_BYTES = 10 * 1024 * 1024
+TRIGGER_TELEMETRY_KEEP_FILES = 1
 PROB_STACK_SNAPSHOT_FILENAME = "probability_stack_snapshot.json"
 PROB_STACK_EXPORT_FILENAME = "probability_stack.json"
 PROB_STACK_GAP_ENV_DISABLE = "DISABLE_PROB_STACK_GAP_FALLBACK"
@@ -1602,6 +1607,36 @@ def _append_gate_gap_log(entries: Sequence[Dict[str, Any]]) -> None:
                 handle.write("\n")
     except Exception:
         LOGGER.debug("entry_gate_gap_log_failed", exc_info=True)
+
+
+def _append_trigger_telemetry(
+    asset: str,
+    p_score: Optional[float],
+    precision_plan: Dict[str, Any],
+    subconditions: Dict[str, Any],
+    timestamp: datetime,
+) -> None:
+    """Record an armed precision trigger without affecting its evaluation."""
+    if str(precision_plan.get("trigger_state") or "").lower() != "arming":
+        return
+    try:
+        TRIGGER_TELEMETRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _rotate_jsonl_if_needed(
+            TRIGGER_TELEMETRY_PATH,
+            TRIGGER_TELEMETRY_MAX_BYTES,
+            TRIGGER_TELEMETRY_KEEP_FILES,
+        )
+        row = {
+            "ts_utc": timestamp.astimezone(timezone.utc).isoformat(),
+            "asset": asset,
+            "p_score": p_score,
+            "trigger_state": precision_plan.get("trigger_state"),
+            "subconditions": subconditions,
+        }
+        with TRIGGER_TELEMETRY_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    except Exception:
+        LOGGER.debug("trigger_telemetry_append_failed", exc_info=True)        
 
 
 def _pct_meta_value(meta: Dict[str, Any], key: str) -> Optional[float]:
@@ -15095,7 +15130,79 @@ def analyze(asset: str) -> Dict[str, Any]:
                             ),
                         }
                     )
-        _emit_precision_gate_log(
+        if (
+            precision_trigger_state == "arming"
+            and precision_ready_for_entry
+            and precision_flow_ready
+            and spread_gate_ok
+            and not other_missing
+        ):
+            direction_for_trigger = "long" if precision_direction == "buy" else "short"
+            window_for_trigger = precision_plan.get("entry_window")
+            window_low = safe_float(window_for_trigger[0]) if window_for_trigger else None
+            window_high = safe_float(window_for_trigger[1]) if window_for_trigger else None
+            entry_for_trigger = safe_float(precision_plan.get("entry"))
+            price_for_trigger = safe_float(price_for_calc)
+            settings_for_trigger = precision_plan.get("order_flow_settings") or {}
+            snapshot_for_trigger = precision_plan.get("order_flow_snapshot") or {}
+            stabilization_required = regime_label == "choppy"
+            _append_trigger_telemetry(
+                asset,
+                safe_float(P),
+                precision_plan,
+                {
+                    "score_ready": {
+                        "value": precision_score_val,
+                        "threshold": precision_threshold_value,
+                        "passed": precision_ready_for_entry,
+                    },
+                    "retest_touch": retest_level(k5m_closed, direction_for_trigger),
+                    "bos_confirm": detect_bos(k1m_closed, direction_for_trigger),
+                    "stabilization": {
+                        "required": stabilization_required,
+                        "passed": (not stabilization_required)
+                        or _micro_bos_stabilized(k1m_closed, direction_for_trigger),
+                    },
+                    "order_flow": {
+                        "ready": precision_flow_ready,
+                        "optional": bool(precision_plan.get("order_flow_optional")),
+                        "signals": precision_plan.get("order_flow_signals"),
+                        "min_signals": settings_for_trigger.get("min_signals"),
+                        "strength": precision_plan.get("order_flow_strength"),
+                        "strength_floor": settings_for_trigger.get("strength_floor"),
+                        "imbalance": snapshot_for_trigger.get("imbalance"),
+                        "imbalance_threshold": settings_for_trigger.get("imbalance_threshold"),
+                        "pressure": snapshot_for_trigger.get("pressure"),
+                        "pressure_threshold": settings_for_trigger.get("pressure_threshold"),
+                        "delta_volume": snapshot_for_trigger.get("delta_volume"),
+                        "blockers": precision_plan.get("order_flow_blockers"),
+                    },
+                    "price_trigger": {
+                        "value": price_for_trigger,
+                        "entry": entry_for_trigger,
+                        "window_low": window_low,
+                        "window_high": window_high,
+                        "hit_entry": bool(
+                            price_for_trigger is not None
+                            and entry_for_trigger is not None
+                            and (
+                                (precision_direction == "buy" and price_for_trigger <= entry_for_trigger)
+                                or (precision_direction == "sell" and price_for_trigger >= entry_for_trigger)
+                            )
+                        ),
+                        "inside_window": bool(
+                            price_for_trigger is not None
+                            and window_low is not None
+                            and window_high is not None
+                            and window_low <= price_for_trigger <= window_high
+                        ),
+                    },
+                    "spread_guard": bool(spread_gate_ok),
+                    "other_gates": {"passed": not other_missing, "missing": list(other_missing)},
+                },
+                analysis_now,
+            )
+        _emit_precision_gate_log(                        
             asset,
             "precision_state",
             decision in {"buy", "sell", "precision_ready", "precision_arming"},
