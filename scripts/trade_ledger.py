@@ -12,6 +12,7 @@ LEDGER_HEADER = [
     "ledger_id", "asset", "side", "order_type", "entry", "sl", "tp1", "tp2", "size_units",
     "opened_at_utc", "closed_at_utc", "close_reason", "outcome", "est_pnl_usd",
     "source_signal", "entry_signature", "trigger_bar_utc", "voided", "void_reason",
+    "truth_verified_utc", "verify_note",    
 ]
 WIN_OUTCOMES = {"tp1_closed", "take_profit_2_hit"}
 TERMINAL_EXCLUDE = {"expired"}
@@ -106,7 +107,9 @@ def append_position(path: Path, asset: str, pos: Dict[str, Any], state_meta: Dic
         "source_signal": str(pos.get("source_signal") or ""),
         "entry_signature": str(pos.get("entry_signature") or ""),
         "voided": "false",
-        "void_reason": "",        
+        "void_reason": "",
+        "truth_verified_utc": "",
+        "verify_note": "",            
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not path.exists() or path.stat().st_size == 0
