@@ -12,6 +12,7 @@ APPEND_PRESERVE_PATTERNS = (
     "journal/trade_ledger.csv",
     "debug/entry_gates/*.jsonl",
     "debug/entry_gate_gap_log.jsonl",
+    "debug/trigger_telemetry*.jsonl",
     "monitoring/webhook_delivery.jsonl",
 )
 
