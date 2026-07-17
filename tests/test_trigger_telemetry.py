@@ -1,6 +1,8 @@
 import json
 from datetime import datetime, timezone
 
+import numpy as np
+
 
 def test_armed_trigger_writes_all_subconditions(analysis_module, tmp_path):
     path = tmp_path / "debug" / "trigger_telemetry.jsonl"
@@ -31,6 +33,26 @@ def test_armed_trigger_writes_all_subconditions(analysis_module, tmp_path):
     assert row["p_score"] == 73.5
     assert row["trigger_state"] == "arming"
     assert set(row["subconditions"]) == set(subconditions)
+
+
+def test_armed_trigger_serializes_numpy_subconditions(analysis_module, tmp_path):
+    path = tmp_path / "debug" / "trigger_telemetry.jsonl"
+    analysis_module.TRIGGER_TELEMETRY_PATH = path
+
+    analysis_module._append_trigger_telemetry(
+        "GOLD_CFD",
+        73.5,
+        {"trigger_state": "arming"},
+        {"passed": np.bool_(False), "strength": np.float64(1.5)},
+        datetime(2026, 7, 17, 15, 8, tzinfo=timezone.utc),
+    )
+
+    rows = path.read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 1
+    assert json.loads(rows[0])["subconditions"] == {
+        "passed": False,
+        "strength": 1.5,
+    }
 
 
 def test_trigger_telemetry_uses_size_cap_rotation(analysis_module, tmp_path):
