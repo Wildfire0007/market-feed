@@ -1634,9 +1634,14 @@ def _append_trigger_telemetry(
             "subconditions": subconditions,
         }
         with TRIGGER_TELEMETRY_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.write(json.dumps(
+                row,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=lambda value: value.item() if hasattr(value, "item") else str(value),
+            ) + "\n")
     except Exception:
-        LOGGER.debug("trigger_telemetry_append_failed", exc_info=True)        
+        LOGGER.warning("trigger_telemetry_append_failed", exc_info=True)  
 
 
 def _pct_meta_value(meta: Dict[str, Any], key: str) -> Optional[float]:
