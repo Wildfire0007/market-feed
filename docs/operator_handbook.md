@@ -56,8 +56,9 @@
 ## 7. KARBANTARTÁSI NAPTÁR
 
 - **PAT-lejárat:** a GitHub tokened lejárati dátuma a naptáradban legyen; lejárat előtt új token → Secrets frissítés (GH_TOKEN a repóban ÉS a CF worker env-ben!).
+- **Cloudflare Access a worker URL-jén (dokumentálva: 2026-07-18):** a gh-dispatch-td-5m.czipo-agnes.workers.dev Production URL "Restricted" módban fut (Workers & Pages → worker → Domains fül): csak Access-belépés után érhető el, a policy az operátor e-mailjét engedi; a Preview URL kikapcsolva. Szándékosan marad így — a cronokat nem érinti, a külső szondázás ellen véd. Külső, hitelesítetlen lekérés (pl. curl) 302-t kap: ez a védelem normál jele, NEM hiba. Kikapcsolás csak indokolt esetben, ugyanott (Restricted → váltás).
 - **Fagyasztás utáni nagy ablak (a GO-döntés után):** 1) dead-code gyomlálás a dormant-leltárból (BTC/EURUSD/NVDA), 2) analysis.py modularizálás lépésenként, 3) timestamp-helper egységesítés, 4) bud_ts elhagyása, 5) optimizer-hibataxonómia (ha valaha visszakapcsoljuk), 6) PR-flow + branch protection.
-- **Heti:** vasárnapi rituálé. **Havi:** backup-workflow kézi próbafuttatás; a CF worker és a webhookok szúrópróbája (/heartbeat).
+- **Heti:** vasárnapi rituálé. **Havi:** backup-workflow kézi próbafuttatás; a CF worker és a webhookok szúrópróbája (/heartbeat) — böngészőből, Cloudflare Access-belépéssel (e-mail + kód); elvárás a JSON-ban: ok=true és ageMin a küszöb alatt (hétköznap 30, hétvége/éjjel 150 perc).
 
 ## 8. A RENDSZER ÁLLAPOTA E DOKUMENTUM ÍRÁSAKOR (2026-07-17)
 
