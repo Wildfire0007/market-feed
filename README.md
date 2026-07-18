@@ -1,4 +1,6 @@
 # Market Feed
+📖 **Üzemeltetés:** a teljes operátori protokoll, döntési kapuk és hibaelhárítás: [docs/operator_handbook.md](docs/operator_handbook.md)
+
 
 ## Assumed position tracking
 Manual/assumed positions are persisted in `trading.db`, and both the analysis
