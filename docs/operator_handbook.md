@@ -16,7 +16,7 @@
 
 **Vas-szabályok:** TP1-en teljes zárás (nincs runner, nincs kézi SL-húzás — a TP2-kérdésre a kontrafaktuális elemzés válaszol majd); P Score alapján NEM válogatsz (minden kártya azonos téttel — különben a statisztika az ízlésedet méri); napi −$15 lockout és minden kártya-utasítás feltétel nélkül követendő; paraméterhez csak a 6. fejezet rendje szerint nyúlunk.
 
-**Kártya-szótár:** 🟢/🔴 NYISS = nyitás a fenti lépésekkel · ❌ JEL LEJÁRT = függő megbízás törlése · 🟢 TP1 ELÉRVE / 🔴 SL ELÉRVE = zárás/ellenőrzés · 🔴 HARD EXIT / 🟠 SESSION ZÁRÁS = azonnali kézi piaci zárás · ⚠️ ADATKIESÉS = kézi felügyelet, amíg új kártya nem jön · 📋/📊 összefoglalók = olvasnivaló. Az "Ár-forrás: TD/OANDA" lábjegyzet emlékeztet: a rendszer és a bróker árfolyama eltérhet — ezért zárol kártyára, nem árra.
+**Kártya-szótár:** 🟢/🔴 NYISS = nyitás a fenti lépésekkel · ❌ JEL LEJÁRT = függő megbízás törlése; nyitott pozíció ebből a jelzésből → azonnali zárás (átmeneti szabály, mérés alatt: 4. fejezet 8. pont) · 🟢 TP1 ELÉRVE / 🔴 SL ELÉRVE = zárás/ellenőrzés · 🔴 HARD EXIT / 🟠 SESSION ZÁRÁS = azonnali kézi piaci zárás · ⚠️ ADATKIESÉS = kézi felügyelet, amíg új kártya nem jön · 📋/📊 összefoglalók = olvasnivaló. Az "Ár-forrás: TD/OANDA" lábjegyzet emlékeztet: a rendszer és a bróker árfolyama eltérhet — ezért zárol kártyára, nem árra.
 
 ## 2. HETI RITUÁLÉ (vasárnap este, ~30 perc)
 
@@ -40,6 +40,7 @@
 5. **Graze-szabály** (folyamatos): a TP/SL-érintések hány %-a "hajszál" (<0,05%)? Ha >20% → záróár-megerősítés megfontolandó érintés helyett.
 6. **P-kalibráció** (N≥30): P-sávonkénti találati arány — ha monoton nő, a P árazható (méret-szorzó); ha nem, a küszöb az egyetlen érvényes használat.
 7. **ADX-késés friss trendben:** a choppy-vétók hány %-a esik olyan órákra, ahol az 1h-ADX 20–25 közt van ÉS a nap iránya egyértelmű? Ha jelentős → a felmentési küszöb 25→22 kalibráció mérlegelhető.
+8. **Árva-pozíció kontrafaktuális (N≥5, előjegyezve: 2026-07-20):** árva = bróker-oldali nyitott pozíció, amelynek rendszer-jele kitöltés nélkül lejárt (jegyzőkönyv-jelölés kötelező). Mérés gyertyákból: a ❌ kártyakori azonnali zárás vs a bróker-TP/SL-ig tartás kumulált kimenete. Ha N≥5-nél a tartás kumulált többlete pozitív ÉS meghaladja a követetlen kockázat felvállalt árát → az átmeneti szabály felülvizsgálható, egyetlen változtatásként.
 
 ## 5. HIBAELHÁRÍTÁS (tünet → teendő)
 
