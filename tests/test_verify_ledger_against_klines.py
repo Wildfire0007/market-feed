@@ -79,3 +79,21 @@ def test_verify_ledger_warns_for_aged_unverified_rows(tmp_path: Path, capsys):
         w.writerow({"ledger_id":"aged","asset":"GOLD_CFD","entry":"100","tp1":"120","opened_at_utc":"2026-07-10T10:00:00Z","closed_at_utc":"2026-07-10T10:10:00Z","close_reason":"take_profit_hit","voided":"false"})
     assert verify(public, ledger) == []
     assert "WARNING aged GOLD_CFD outside_retention" in capsys.readouterr().out
+
+
+def test_verify_ledger_stamps_market_close_rows_entry_only(tmp_path: Path):
+    public = tmp_path / "public"
+    asset = public / "GOLD_CFD"; asset.mkdir(parents=True)
+    (asset / "klines_5m.json").write_text(json.dumps({"values":[{"datetime":"2026-07-10T10:05:00Z","open":100,"high":111,"low":99,"close":110}]}), encoding="utf-8")
+    ledger = public / "journal" / "trade_ledger.csv"; ledger.parent.mkdir()
+    fields = ["ledger_id","asset","entry","tp1","opened_at_utc","closed_at_utc","close_reason","voided"]
+    with ledger.open("w", newline="", encoding="utf-8") as h:
+        w = csv.DictWriter(h, fieldnames=fields); w.writeheader()
+        w.writerow({"ledger_id":"hx","asset":"GOLD_CFD","entry":"100","tp1":"","opened_at_utc":"2026-07-10T10:00:00Z","closed_at_utc":"2026-07-10T10:10:00Z","close_reason":"hard_exit","voided":"false"})
+        w.writerow({"ledger_id":"sx","asset":"GOLD_CFD","entry":"100","tp1":"","opened_at_utc":"2026-07-10T10:00:00Z","closed_at_utc":"2026-07-10T10:10:00Z","close_reason":"session_force_close","voided":"false"})
+        w.writerow({"ledger_id":"ux","asset":"GOLD_CFD","entry":"100","tp1":"","opened_at_utc":"2026-07-10T10:00:00Z","closed_at_utc":"2026-07-10T10:10:00Z","close_reason":"weird_reason","voided":"false"})
+    assert verify(public, ledger) == ["ux GOLD_CFD unparseable_row"]
+    rows = {r["ledger_id"]: r for r in csv.DictReader(ledger.open(encoding="utf-8"))}
+    assert rows["hx"]["truth_verified_utc"] and rows["hx"]["verify_note"] == "market_close_entry_only"
+    assert rows["sx"]["truth_verified_utc"] and rows["sx"]["verify_note"] == "market_close_entry_only"
+    assert not rows["ux"].get("truth_verified_utc")
