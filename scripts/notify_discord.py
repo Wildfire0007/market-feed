@@ -660,7 +660,8 @@ def _operator_instruction_lines(signal_data: Dict[str, Any], *, size_units: Opti
                 lines = [line.replace(f"{partial:.0%}-át manuálisan.", f"{partial:.0%}-át (≈{units_partial:.2f} egység) manuálisan.") for line in lines]
     lines.append("Minimál-tétes protokoll: Amount × 0.1–0.2 az első 10 trade-re.")                
     if expiry_dt is not None:
-        lines.append(f"Ha {expiry_dt:%H:%M} UTC-ig nem töltődik a rendszer-limit, lejáratkor ❌ JEL LEJÁRT kártya érkezik — függő megbízásod ekkor töröld.")        
+        lines.append(f"Ha {expiry_dt:%H:%M} UTC-ig nem töltődik a rendszer-limit, lejáratkor ❌ JEL LEJÁRT kártya érkezik — függő megbízásod ekkor töröld.")
+        lines.append("A ❌ kártyakor: ha nyitott pozíciód van ebből a jelzésből, zárd azonnal — a rendszer onnantól nem követi.")        
     return lines
 
 
