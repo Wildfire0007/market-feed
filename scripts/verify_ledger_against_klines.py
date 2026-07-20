@@ -91,6 +91,8 @@ def verify(public_dir: Path, ledger_path: Path, *, now_stamp: Optional[str] = No
             continue
         if str(row.get("voided") or "").strip().lower() == "true":
             continue
+        if str(row.get("close_reason") or "").strip().lower() == "expired":
+            continue            
         level = exit_level(row)
         entry = safe_float(row.get("entry"))
         opened, closed = parse_utc(row.get("opened_at_utc")), parse_utc(row.get("closed_at_utc"))
