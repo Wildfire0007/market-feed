@@ -10,7 +10,7 @@
 
 **Amikor ENTRY-kártya jön (🟢 zöld = LONG/Buy fül, 🔴 piros = SHORT/Short fül):**
 1. HÁROM KÉRDÉS: (a) Érvényes még? (⏳ sor az eToro-blokkban) (b) A spot a "Ne nyiss" határon belül? (c) Van margó és ~1 óra jelenlét? — Bármelyik NEM → kihagyod, és a jegyzőkönyvbe írod az okát. Mind IGEN → nyitsz, gépiesen.
-2. VÉGREHAJTÁS (divergencia-adapter protokoll): AZONNALI piaci nyitás a kártya iránya szerint → Amount = a kártya "eToro Amount" sora (minimál fázisban ×0,1–0,2; teljes fázisban natúr) → tőkeáttét a kártyáról → SL/TP beállítása Rate-nézetben OFFSET-tEL: TP = kártya-TP1 mínusz offset, SL = kártya-SL plusz offset (offszetek: GOLD ±1,5$ · SILVER ±0,08$ · OIL ±0,10$).
+2. VÉGREHAJTÁS (divergencia-adapter protokoll): AZONNALI piaci nyitás a kártya iránya szerint → Amount = a kártya "eToro Amount" sora (minimál fázisban ×0,1–0,2; teljes fázisban natúr) → tőkeáttét a kártyáról → SL/TP beállítása Rate-nézetben OFFSET-tEL: TP/SL = a kártya "TP1 eToro" és "SL eToro" sorai (képlet: SHORT → TP1+offset és SL+offset; LONG → TP1−offset és SL−offset) (offszetek: GOLD ±1,5$ · SILVER ±0,08$ · OIL ±0,10$).
 3. ZÁRÓ KÁRTYA = AZONNALI ZÁRÁS az eToro-ártól függetlenül (TP1/SL/HARD EXIT/SESSION — mind felszólító módban mondja a teendőt). Ha a bróker-TP/SL már zárt, a kártya csak megerősítés.
 4. JEGYZŐKÖNYV trade-enként: `kártya-idő | fill-idő | fill-ár | rendszer-kimenet | bróker-kimenet | bróker-P&L` — kihagyásnál: `kihagyva: <ok>`.
 
