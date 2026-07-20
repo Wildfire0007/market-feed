@@ -99,7 +99,8 @@ def verify(public_dir: Path, ledger_path: Path, *, now_stamp: Optional[str] = No
         asset = str(row.get("asset") or "").strip()
         asset_dir = public_dir / asset
         ledger_id = row.get("ledger_id") or "?"
-        if level is None or entry is None or not opened or not closed or not asset:
+        market_close = str(row.get("close_reason") or "").strip().lower() in ("hard_exit", "session_force_close")
+        if (level is None and not market_close) or entry is None or not opened or not closed or not asset:        
             violations.append(f"{ledger_id} {asset} unparseable_row")
             continue
         times = candle_times(asset_dir)
@@ -108,7 +109,7 @@ def verify(public_dir: Path, ledger_path: Path, *, now_stamp: Optional[str] = No
             warnings.append(f"{ledger_id} {asset} outside_retention oldest_candle={oldest.isoformat().replace('+00:00', 'Z')}")
             continue
         ok = True
-        if not touched(asset_dir, opened, closed, level):
+        if level is not None and not touched(asset_dir, opened, closed, level):        
             violations.append(f"{ledger_id} {asset} {row.get('close_reason')} level={level}")
             ok = False
         if not touched(asset_dir, opened - timedelta(minutes=10), closed, entry):
@@ -116,6 +117,8 @@ def verify(public_dir: Path, ledger_path: Path, *, now_stamp: Optional[str] = No
             ok = False
         if ok:
             row["truth_verified_utc"] = now_stamp or _stamp()
+            if market_close:
+                row["verify_note"] = "market_close_entry_only"            
             changed = True
     for item in warnings:
         print(f"WARNING {item}")
