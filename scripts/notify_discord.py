@@ -660,7 +660,7 @@ def _operator_instruction_lines(signal_data: Dict[str, Any], *, size_units: Opti
                 lines = [line.replace(f"{partial:.0%}-át manuálisan.", f"{partial:.0%}-át (≈{units_partial:.2f} egység) manuálisan.") for line in lines]
     lines.append("Minimál-tétes protokoll: Amount × 0.1–0.2 az első 10 trade-re.")                
     if expiry_dt is not None:
-        lines.append(f"Ha {expiry_dt:%H:%M} UTC-ig nem töltődik, töröld a megbízást — külön értesítést is kapsz.")
+        lines.append(f"Ha {expiry_dt:%H:%M} UTC-ig nem töltődik a rendszer-limit, lejáratkor ❌ JEL LEJÁRT kártya érkezik — függő megbízásod ekkor töröld.")        
     return lines
 
 
@@ -974,15 +974,23 @@ def check_and_notify() -> None:
             if direction == "buy"
             else f"Ne nyiss, ha spot < `{format_price(expected.get('min_entry_price'))}`"
         )
-        
+        _etoro_off = {"GOLD_CFD": 1.5, "XAGUSD": 0.08, "USOIL": 0.10}.get(asset_name.upper())
+        _tp1f, _slf = safe_float(tp1), safe_float(sl)
+        sl_etoro_text, tp1_etoro_text = "", ""
+        if _etoro_off is not None and _tp1f is not None and _slf is not None:
+            _sgn = 1.0 if direction == "sell" else -1.0
+            _od = f"{'+' if _sgn > 0 else '-'}{_etoro_off:g}"
+            sl_etoro_text = f"\nSL eToro (offszet {_od}): `{format_price(_slf + _sgn * _etoro_off)}`"
+            tp1_etoro_text = f"\nTP1 eToro (offszet {_od}): `{format_price(_tp1f + _sgn * _etoro_off)}`"        
+            
         embed = {
             "title": title,
             "description": f"{_asset_emoji(asset_name)} Eszköz: `{asset_name}`",
             "color": color,
             "fields": [
-                {"name": "📊 Árfolyam", "value": f"Spot ár: `{format_price(safe_float((data.get('spot') or {}).get('price')))}`\nBelépő: `{format_price(entry)}`", "inline": False},
-                {"name": "⚙️ Paraméterek az eToro-hoz", "value": f"MÉRET: `{units_text}` (~${sl_risk_to_stop_usd:.2f} kockázat SL-ig)\nNotional: `${entry_notional_usd:.2f}`\neToro Amount (X{asset_leverage:g}): `${stake_amount_usd:.2f}`\nSL: `{format_price(sl)}`\nTP1: `{format_price(tp1)}`" + (f"\nTP2: `{format_price(tp2)}`" if tp2 else "") + f"\n{validity_text}", "inline": False},
-                {"name": "🎯 Profit cél", "value": f"Várható nettó TP1: `+${tp1_net_usd:.2f}`\nMinimum: `${tp1_min_net_usd:.2f}`\nProfit-cél számítási alap: `${expected.get('notional_usd'):.2f}`", "inline": False},                        
+                {"name": "📊 Árfolyam", "value": f"Spot ár: `{format_price(safe_float((data.get('spot') or {}).get('price')))}`\nBelépő (LIMIT): `{format_price(entry)}`", "inline": False},
+                {"name": "⚙️ Paraméterek az eToro-hoz", "value": f"MÉRET: `{units_text}` (~${sl_risk_to_stop_usd:.2f} kockázat SL-ig)\nNotional: `${entry_notional_usd:.2f}`\neToro Amount (X{asset_leverage:g}): `${stake_amount_usd:.2f}`\nSL: `{format_price(sl)}`{sl_etoro_text}\nTP1: `{format_price(tp1)}`{tp1_etoro_text}" + (f"\nTP2: `{format_price(tp2)}`" if tp2 else "") + f"\n{validity_text}", "inline": False},
+                {"name": "🎯 Profit cél", "value": f"Várható nettó TP1: `+${tp1_net_usd:.2f}`\nMinimum: `${tp1_min_net_usd:.2f}`\nProfit-cél számítási alap: `${expected.get('notional_usd'):.2f}`", "inline": False},
                 {"name": "⏱️ Várható idő TP1-ig", "value": eta_text, "inline": False},
                 {"name": "🎯 Belépési pontosság", "value": f"Aktuális chase: `{expected.get('current_chase_r')}R`\n{entry_limit_text}", "inline": False},
                 {"name": "💡 Indoklás", "value": reasons_text, "inline": False},
