@@ -1631,6 +1631,9 @@ def _append_trigger_telemetry(
             "asset": asset,
             "p_score": p_score,
             "trigger_state": precision_plan.get("trigger_state"),
+            "direction": precision_plan.get("direction"),
+            "entry": precision_plan.get("entry"),
+            "stop_loss": precision_plan.get("stop_loss"),          
             "subconditions": subconditions,
         }
         with TRIGGER_TELEMETRY_PATH.open("a", encoding="utf-8") as handle:
