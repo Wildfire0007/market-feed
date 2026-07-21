@@ -21,7 +21,7 @@ def test_armed_trigger_writes_all_subconditions(analysis_module, tmp_path):
     analysis_module._append_trigger_telemetry(
         "XAGUSD",
         73.5,
-        {"trigger_state": "arming"},
+        {"trigger_state": "arming", "direction": "sell", "entry": 58.9, "stop_loss": 59.25},    
         subconditions,
         datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
     )
@@ -32,6 +32,9 @@ def test_armed_trigger_writes_all_subconditions(analysis_module, tmp_path):
     assert row["asset"] == "XAGUSD"
     assert row["p_score"] == 73.5
     assert row["trigger_state"] == "arming"
+    assert row["direction"] == "sell"
+    assert row["entry"] == 58.9
+    assert row["stop_loss"] == 59.25    
     assert set(row["subconditions"]) == set(subconditions)
 
 
