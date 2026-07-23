@@ -1455,6 +1455,60 @@ def _sort_series_values(raw: Dict[str, Any]) -> Dict[str, Any]:
     return new_raw
 
 
+def _append_revision_telemetry(out_dir: str, name: str, new_raw: Dict[str, Any]) -> None:
+    """Measurement-only: compare overlapping candle closes between the previously
+    saved series and the fresh payload before overwrite; log an event row when
+    already-served candles changed. Must never break the fetch."""
+    try:
+        from datetime import datetime, timezone
+        raw_path = os.path.join(out_dir, f"{name}.json")
+        old = load_json(raw_path)
+        old_vals = old.get("values") if isinstance(old, dict) else None
+        new_vals = new_raw.get("values") if isinstance(new_raw, dict) else None
+        if not old_vals or not new_vals:
+            return
+        def _closes(vals):
+            out = {}
+            for v in vals:
+                try:
+                    out[str(v.get("datetime"))] = float(v.get("close"))
+                except (TypeError, ValueError):
+                    continue
+            return out
+        o, n = _closes(old_vals), _closes(new_vals)
+        if not o:
+            return
+        newest_old = max(o)
+        deltas = []
+        for ts, oc in o.items():
+            if ts == newest_old:
+                continue
+            nc = n.get(ts)
+            if nc is not None and abs(nc - oc) > 1e-9:
+                deltas.append((abs(nc - oc), ts, oc, nc))
+        if not deltas:
+            return
+        deltas.sort(reverse=True)
+        top = deltas[0]
+        row = {
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            "asset": os.path.basename(out_dir),
+            "series": name,
+            "overlap": sum(1 for ts in o if ts != newest_old and ts in n),
+            "revised_count": len(deltas),
+            "max_abs_delta": round(top[0], 6),
+            "max_delta_ts": top[1],
+            "old_close": round(top[2], 6),
+            "new_close": round(top[3], 6),
+        }
+        debug_dir = os.path.join(os.path.dirname(out_dir.rstrip(os.sep)) or ".", "debug")
+        os.makedirs(debug_dir, exist_ok=True)
+        with open(os.path.join(debug_dir, "revision_telemetry.jsonl"), "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        LOGGER.debug("revision telemetry skipped", exc_info=True)
+
+  
 def save_series_payload(out_dir: str, name: str, payload: Dict[str, Any]) -> None:
     ensure_dir(out_dir)
     raw_path = os.path.join(out_dir, f"{name}.json")
@@ -1484,6 +1538,8 @@ def save_series_payload(out_dir: str, name: str, payload: Dict[str, Any]) -> Non
         if isinstance(raw_candidate, dict):
             raw = _sort_series_values(raw_candidate)
         meta = {k: v for k, v in payload.items() if k != "raw"}
+    if name.startswith("klines_"):
+        _append_revision_telemetry(out_dir, name, raw)      
     save_json(raw_path, raw)
     if meta:
         save_json(meta_path, meta)
