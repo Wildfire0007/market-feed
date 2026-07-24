@@ -262,7 +262,11 @@ def test_backfill_closed_positions_real_fixture_is_idempotent(tmp_path, monkeypa
     monkeypatch.setattr(lc, "PUBLIC_DIR", tmp_path)
     monkeypatch.setattr(lc, "STATE_PATH", tmp_path / "_position_lifecycle_state.json")
     monkeypatch.setattr(lc, "LEDGER_PATH", tmp_path / "journal" / "trade_ledger.csv")
-    state = json.loads(Path("public/_position_lifecycle_state.json").read_text(encoding="utf-8"))
+    state = {"positions": {
+        "XAGUSD": {"status": "closed", "side": "short", "order_type": "LIMIT", "entry": 58.75034, "tp1": 57.97291657, "opened_at_utc": "2026-07-08T08:56:25Z", "closed_at_utc": "2026-07-08T09:22:43Z", "close_reason": "take_profit_hit", "outcome": "tp1_closed", "size_units": 25.72600627},
+        "GOLD_CFD": {"status": "closed", "side": "long", "order_type": "LIMIT", "entry": 3987.83671, "tp1": 4011.63447, "opened_at_utc": "2026-07-17T09:00:00Z", "closed_at_utc": "2026-07-17T10:30:00Z", "close_reason": "take_profit_hit", "outcome": "tp1_closed", "size_units": 0.501},
+        "USOIL": {"status": "closed", "side": "long", "order_type": "LIMIT", "entry": 88.46283, "tp1": 89.80265, "opened_at_utc": "2026-07-23T08:52:00Z", "closed_at_utc": "2026-07-23T09:29:00Z", "close_reason": "take_profit_hit", "outcome": "tp1_closed", "size_units": 11.30418},
+    }}    
     _write(lc.STATE_PATH, state)
 
     assert lc.backfill_closed_positions() == 3
