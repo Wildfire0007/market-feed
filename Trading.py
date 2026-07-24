@@ -1461,8 +1461,8 @@ def _append_revision_telemetry(out_dir: str, name: str, new_raw: Dict[str, Any])
     already-served candles changed. Must never break the fetch."""
     try:
         from datetime import datetime, timezone
-        raw_path = os.path.join(out_dir, f"{name}.json")
-        old = load_json(raw_path)
+        baseline_path = os.path.join("public", os.path.basename(out_dir.rstrip(os.sep)), f"{name}.json")
+        old = load_json(baseline_path)  
         old_vals = old.get("values") if isinstance(old, dict) else None
         new_vals = new_raw.get("values") if isinstance(new_raw, dict) else None
         if not old_vals or not new_vals:
@@ -1501,7 +1501,7 @@ def _append_revision_telemetry(out_dir: str, name: str, new_raw: Dict[str, Any])
             "old_close": round(top[2], 6),
             "new_close": round(top[3], 6),
         }
-        debug_dir = os.path.join(os.path.dirname(out_dir.rstrip(os.sep)) or ".", "debug")
+        debug_dir = os.path.join("public", "debug")      
         os.makedirs(debug_dir, exist_ok=True)
         with open(os.path.join(debug_dir, "revision_telemetry.jsonl"), "a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
