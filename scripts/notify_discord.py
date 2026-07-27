@@ -29,6 +29,7 @@ BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
 from config import analysis_settings as settings
 from scripts.reset_notify_state import build_default_state, _default_asset_state
 import position_tracker
+from risk_limits import evaluate_daily_lockout_from_ledger
 from scripts.webhook_delivery import log_exception as _webhook_log_exception, log_response as _webhook_log_response
 from reports import trade_journal as _trade_journal
 
@@ -896,6 +897,18 @@ def check_and_notify() -> None:
         if signal not in {"buy", "sell", "precision_arming"}:
             continue
 
+        risk_state = evaluate_daily_lockout_from_ledger(
+            settings.load_config(), PUBLIC_DIR / "journal" / "trade_ledger.csv", now=now_dt
+        )
+        if risk_state.get("locked"):
+            LOGGER.warning(
+                "daily_risk_lockout_blocked_entry asset=%s pnl=%s losses=%s",
+                asset_name,
+                risk_state.get("realized_pnl_usd"),
+                risk_state.get("losing_trades"),
+            )
+            continue
+        
         entry, sl, tp1, tp2 = safe_float(data.get("entry")), safe_float(data.get("sl")), safe_float(data.get("tp1")), safe_float(data.get("tp2"))
         order_type, direction = str(data.get("order_type") or "MARKET").upper(), signal
         
