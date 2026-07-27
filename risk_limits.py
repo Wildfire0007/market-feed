@@ -116,4 +116,55 @@ def evaluate_daily_lockout(config: Dict[str, Any], journal_path: Path, *, now: d
     result = {"enabled": True, "locked": locked, **metrics}    
     if locked:
         _notify_daily_lockout_once(result, now=now)
-    return result   
+    return result
+
+
+def evaluate_daily_lockout_from_ledger(config: Dict[str, Any], ledger_path: Path, *, now: datetime) -> Dict[str, Any]:
+    """Ledger-based daily lockout: realized PnL / losing-trade cap from trade_ledger.csv.
+
+    Independent of the labeled journal (which only covers buy/sell signals);
+    counts every non-voided, non-expired row closed in today's UTC window.
+    """
+    cfg = config.get("risk_limits") or {}
+    if not cfg.get("enabled", False):
+        return {"locked": False, "enabled": False}
+    scope = {str(a).upper() for a in cfg.get("lockout_scope", [])}
+    start = _day_start(now.astimezone(timezone.utc), str(cfg.get("day_boundary_utc", "00:00")))
+    losses = 0
+    pnl = 0.0
+    count = 0
+    if ledger_path.exists():
+        with ledger_path.open(newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                if str(row.get("voided") or "").strip().lower() == "true":
+                    continue
+                outcome = str(row.get("outcome") or "").strip().lower()
+                if not outcome or outcome == "expired":
+                    continue
+                asset = str(row.get("asset") or "").upper()
+                if scope and asset not in scope:
+                    continue
+                closed = _parse_utc(row.get("closed_at_utc"))
+                if closed is None or closed < start or closed > now:
+                    continue
+                try:
+                    est = float(row.get("est_pnl_usd") or 0.0)
+                except (TypeError, ValueError):
+                    est = 0.0
+                count += 1
+                pnl += est
+                if est < 0:
+                    losses += 1
+    locked = pnl <= -float(cfg.get("daily_loss_limit_usd", 15) or 15) or losses >= int(cfg.get("daily_max_losing_trades", 2) or 2)
+    result = {
+        "enabled": True,
+        "locked": locked,
+        "source": "ledger",
+        "day_start_utc": start.isoformat().replace("+00:00", "Z"),
+        "realized_pnl_usd": round(pnl, 4),
+        "losing_trades": losses,
+        "labeled_trades": count,
+    }
+    if locked:
+        _notify_daily_lockout_once(result, now=now)
+    return result
