@@ -1501,6 +1501,7 @@ def _entry_gate_log_payload(
     bar_time: Optional[datetime],
     reasons: Sequence[str],
     gate: str = "entry_gate",
+    plan: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     ts = bar_time
     if ts is None:
@@ -1521,7 +1522,7 @@ def _entry_gate_log_payload(
     unique_reasons = list(dict.fromkeys(normalized))
     result = "rejected" if unique_reasons else "accepted"
 
-    return {
+    payload = {
         "symbol": symbol,
         "asset": str(symbol).upper(),
         "gate": gate,
@@ -1532,6 +1533,13 @@ def _entry_gate_log_payload(
         "reason": unique_reasons[0] if unique_reasons else None,
         "result": result,
     }
+    if isinstance(plan, dict):
+        for key in ("direction", "entry", "stop_loss"):
+            if plan.get(key) is not None:
+                payload[key] = plan.get(key)
+        if plan.get("score") is not None:
+            payload["plan_score"] = plan.get("score")
+    return payload
 
 
 def log_entry_gate_decision(
@@ -1539,12 +1547,13 @@ def log_entry_gate_decision(
     bar_time: Optional[datetime],
     reasons: Sequence[str],
     gate: str = "entry_gate",
+    plan: Optional[Dict[str, Any]] = None,  
 ) -> None:
     """Append a JSONL entry describing the gate outcome for a candidate."""
 
     try:
         ENTRY_GATE_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        payload = _entry_gate_log_payload(symbol, bar_time, reasons, gate=gate)
+        payload = _entry_gate_log_payload(symbol, bar_time, reasons, gate=gate, plan=plan)
         ts = _parse_utc_timestamp(payload.get("timestamp")) or datetime.now(timezone.utc)
         log_path = ENTRY_GATE_LOG_DIR / f"entry_gates_{ts.date().isoformat()}.jsonl"
         with log_path.open("a", encoding="utf-8") as handle:
@@ -15925,7 +15934,7 @@ def analyze(asset: str) -> Dict[str, Any]:
 
     missing = list(dict.fromkeys(missing))
     entry_missing_snapshot = list(missing)
-    log_entry_gate_decision(asset, last5_closed_ts, missing)
+    log_entry_gate_decision(asset, last5_closed_ts, missing, plan=locals().get("precision_plan"))
 
     analysis_timestamp = nowiso()
     probability_percent = int(max(0, min(100, round(combined_probability * 100))))
