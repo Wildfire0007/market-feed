@@ -41,7 +41,8 @@
 6. **P-kalibráció** (N≥30): P-sávonkénti találati arány — ha monoton nő, a P árazható (méret-szorzó); ha nem, a küszöb az egyetlen érvényes használat.
 7. **ADX-késés friss trendben:** a choppy-vétók hány %-a esik olyan órákra, ahol az 1h-ADX 20–25 közt van ÉS a nap iránya egyértelmű? Ha jelentős → a felmentési küszöb 25→22 kalibráció mérlegelhető.
 8. **Árva-pozíció kontrafaktuális (N≥5, előjegyezve: 2026-07-20):** árva = bróker-oldali nyitott pozíció, amelynek rendszer-jele kitöltés nélkül lejárt (jegyzőkönyv-jelölés kötelező). Mérés gyertyákból: a ❌ kártyakori azonnali zárás vs a bróker-TP/SL-ig tartás kumulált kimenete. Ha N≥5-nél a tartás kumulált többlete pozitív ÉS meghaladja a követetlen kockázat felvállalt árát → az átmeneti szabály felülvizsgálható, egyetlen változtatásként.
-
+9. **Küszöb-alatti (P-vétós) árnyék-követés (előjegyezve: 2026-07-28):** árnyék-jelölt = olyan kapu-elutasítás, ahol a reasons lista KIZÁRÓLAG P_score>=* elemekből áll (minden más kapu átment) és a naplósor terv-geometriát hordoz (direction/entry/stop_loss). Epizód-képzés és árnyék-kimenet: az 1. pont fagyasztott definíciójával. Döntési kritérium: N≥30 küszöb-alatti epizódnál, ha az átlagos árnyék-kimenet ≥ +0,25R a mért költségek felett → a P-küszöbcsalád kalibrálható, EGYETLEN küszöb-lépésben, changelog-gal és a változtatás utáni 2 hetes új mérési ablakkal; egyébként a küszöbök maradnak, és a kérdés N-ig lezárva.
+ 
 ## 5. HIBAELHÁRÍTÁS (tünet → teendő)
 
 - **"CF-őr: heartbeat elavult" (hangos, napközben):** nézd a kártya "Open/pending positions" sorát. 0 pozíció → figyeld 10 percig, általában öngyógyul (a hét során minden elakadás magától helyreállt); ha 30+ percig áll, Actions → td-pipeline → utolsó futás hibája → a piros lépés naplójának utolsó sorai + képernyőkép a Codexnek/asszisztensnek. Nyitott pozíció mellett: a pozíciót KÉZZEL kezeled a brókernél (SL/TP be van állítva — a bróker véd), a rendszert utána javítod.
