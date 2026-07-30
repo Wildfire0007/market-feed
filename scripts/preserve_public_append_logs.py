@@ -13,6 +13,7 @@ APPEND_PRESERVE_PATTERNS = (
     "debug/entry_gates/*.jsonl",
     "debug/entry_gate_gap_log.jsonl",
     "debug/trigger_telemetry*.jsonl",
+    "debug/revision_telemetry.jsonl",
     "monitoring/webhook_delivery.jsonl",
 )
 
