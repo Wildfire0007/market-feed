@@ -1,5 +1,10 @@
 # Config changelog
 
+## 2026-08-01
+- USOIL felfüggesztve az aktív roster-ből (feed-integritási karantén): a TD WTI-feed
+  2026-07-20 óta dokumentáltan revizionista (396+ esemény, Δmax 1.77, fantom-SL 07-30),
+  a fémek feedje tiszta. Visszavétel: docs/operator_handbook.md szerinti próbahét-eljárással.
+
 - Napi kockázati lockout: új ledger-alapú kiértékelés (`evaluate_daily_lockout_from_ledger`)
   és ENTRY-kártya kapu a notify_discord kibocsátási pontján — a precision_arming út is a
   −$15 / 2 vesztes napi sapka alá tartozik. (Bizonyított hiba javítása: a 2026-07-24-i
