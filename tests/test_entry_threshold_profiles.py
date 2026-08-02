@@ -36,11 +36,11 @@ def test_default_profile_configuration(monkeypatch):
     assert profile["p_score_min"]["by_asset"]["GOLD_CFD"] == pytest.approx(30.0)
     assert profile["p_score_min"]["by_asset"]["BTCUSD"] == pytest.approx(38.0)
     assert profile["p_score_min"]["by_asset"]["NVDA"] == pytest.approx(38.0)
-    assert profile["p_score_min"]["by_asset"]["USOIL"] == pytest.approx(36.0)
+    assert "USOIL" not in profile["p_score_min"]["by_asset"]
     assert profile["p_score_min"]["by_asset"]["XAGUSD"] == pytest.approx(28.0)
 
     assert profile["atr_threshold_multiplier"]["default"] == pytest.approx(1.1)
-    assert profile["atr_threshold_multiplier"]["by_asset"]["USOIL"] == pytest.approx(1.1)
+    assert "USOIL" not in profile["atr_threshold_multiplier"]["by_asset"]
     assert profile["atr_threshold_multiplier"]["by_asset"]["GOLD_CFD"] == pytest.approx(1.15)
     assert profile["atr_threshold_multiplier"]["by_asset"]["BTCUSD"] == pytest.approx(1.0)
 
