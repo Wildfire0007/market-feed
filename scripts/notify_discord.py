@@ -29,8 +29,7 @@ BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
 from config import analysis_settings as settings
 from scripts.reset_notify_state import build_default_state, _default_asset_state
 import position_tracker
-from risk_limits import evaluate_daily_lockout_from_ledger, evaluate_plan_feasibility
-from profit_target import _round_trip_cost as _plan_round_trip_cost
+from risk_limits import evaluate_daily_lockout_from_ledger
 from scripts.webhook_delivery import log_exception as _webhook_log_exception, log_response as _webhook_log_response
 from reports import trade_journal as _trade_journal
 
