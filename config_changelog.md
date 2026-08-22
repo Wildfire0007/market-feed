@@ -1,12 +1,5 @@
 # Config changelog
 
-- Terv-feasibility kapu az ENTRY-kártya kibocsátási pontján (`evaluate_plan_feasibility`
-  + notify_discord kapu): min_stoploss_pct floor, TP1 nettó-minimum (RR=2 rögzített) és
-  2,4×ATR1h plafon — a precision_arming út is a floor/feasibility szabályok alá tartozik,
-  hiányzó ATR1h esetén fail-closed. (Bizonyított hiba javítása: P2 feasibility-bypass +
-  P3 floor-bypass — audit: claude_audit_P2_P3_2026-08-13.md; a 10 éles trade-ből 4 floor
-  alatt ment ki.)
-
 ## 2026-08-01
 - USOIL felfüggesztve az aktív roster-ből (feed-integritási karantén): a TD WTI-feed
   2026-07-20 óta dokumentáltan revizionista (396+ esemény, Δmax 1.77, fantom-SL 07-30),
