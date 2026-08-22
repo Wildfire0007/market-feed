@@ -168,3 +168,70 @@ def evaluate_daily_lockout_from_ledger(config: Dict[str, Any], ledger_path: Path
     if locked:
         _notify_daily_lockout_once(result, now=now)
     return result
+
+
+def evaluate_plan_feasibility(
+    asset: str,
+    entry: Optional[float],
+    sl: Optional[float],
+    atr1h: Optional[float],
+    *,
+    min_stoploss_pct: float,
+    profit_target_config: Dict[str, Any],
+    leverage: Optional[float],
+    round_trip_cost: float,
+) -> Dict[str, Any]:
+    """Fail-closed plan-geometry feasibility for ENTRY-card emission.
+
+    Mirrors the deep profit-target rules on the precision path, where
+    ``build_profit_target_levels`` does not run: min_stoploss floor,
+    TP1 net-minimum (RR=2.0 fixed on this path) and the ATR1h feasibility
+    ceiling. Missing or invalid inputs are infeasible by design.
+    """
+    cfg = profit_target_config or {}
+    margin = float(cfg.get("margin_usd", 100.0) or 100.0)
+    net_min = float(cfg.get("net_tp1_usd_min", 10.0) or 10.0)
+    mult = float(cfg.get("max_required_move_atr1h_mult", 2.4) or 2.4)
+    lev = max(float(leverage or 0.0), 0.0)
+    result: Dict[str, Any] = {
+        "feasible": False,
+        "reason": None,
+        "r_pct": None,
+        "required_pct": None,
+        "ceiling_pct": None,
+        "min_stoploss_pct": round(float(min_stoploss_pct or 0.0), 6),
+    }
+    try:
+        entry_f = float(entry)
+        sl_f = float(sl)
+    except (TypeError, ValueError):
+        result["reason"] = "invalid_levels"
+        return result
+    if not (entry_f > 0.0) or not (sl_f > 0.0) or entry_f == sl_f or lev <= 0.0:
+        result["reason"] = "invalid_levels"
+        return result
+    r_pct = abs(entry_f - sl_f) / entry_f
+    result["r_pct"] = round(r_pct, 6)
+    required = net_min / (margin * lev) + max(0.0, float(round_trip_cost or 0.0))
+    result["required_pct"] = round(required, 6)
+    if r_pct + 1e-12 < float(min_stoploss_pct or 0.0):
+        result["reason"] = "min_stoploss_floor"
+        return result
+    if 2.0 * r_pct + 1e-12 < required:
+        result["reason"] = "tp1_net_min"
+        return result
+    try:
+        atr_f = float(atr1h)
+    except (TypeError, ValueError):
+        atr_f = 0.0
+    if not (atr_f > 0.0):
+        result["reason"] = "atr1h_missing"
+        return result
+    ceiling = mult * (atr_f / entry_f)
+    result["ceiling_pct"] = round(ceiling, 6)
+    if required > ceiling + 1e-12:
+        result["reason"] = "atr1h_ceiling"
+        return result
+    result["feasible"] = True
+    return result
+    
