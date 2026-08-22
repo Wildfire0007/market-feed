@@ -29,7 +29,8 @@ BUDAPEST_TZ = ZoneInfo("Europe/Budapest")
 from config import analysis_settings as settings
 from scripts.reset_notify_state import build_default_state, _default_asset_state
 import position_tracker
-from risk_limits import evaluate_daily_lockout_from_ledger
+from risk_limits import evaluate_daily_lockout_from_ledger, evaluate_plan_feasibility
+from profit_target import _round_trip_cost as _plan_round_trip_cost
 from scripts.webhook_delivery import log_exception as _webhook_log_exception, log_response as _webhook_log_response
 from reports import trade_journal as _trade_journal
 
@@ -924,6 +925,28 @@ def check_and_notify() -> None:
             continue
 
         if not _levels_match_direction(direction, entry, sl, tp1):
+            continue
+        feas_state = evaluate_plan_feasibility(
+            asset_name,
+            entry,
+            sl,
+            safe_float(data.get("atr1h")),
+            min_stoploss_pct=settings.get_min_stoploss_pct(asset_name),
+            profit_target_config=settings.PROFIT_TARGET_CONFIG,
+            leverage=settings.LEVERAGE.get(asset_name),
+            round_trip_cost=_plan_round_trip_cost(
+                asset_name, settings.ASSET_COST_MODEL, settings.DEFAULT_COST_MODEL
+            ),
+        )
+        if not feas_state.get("feasible"):
+            LOGGER.warning(
+                "plan_feasibility_blocked_entry asset=%s reason=%s r_pct=%s required_pct=%s ceiling_pct=%s",
+                asset_name,
+                feas_state.get("reason"),
+                feas_state.get("r_pct"),
+                feas_state.get("required_pct"),
+                feas_state.get("ceiling_pct"),
+            )
             continue
 
         if isinstance(pos, dict) and str(pos.get("status") or "").lower() == "open":
