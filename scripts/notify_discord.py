@@ -925,28 +925,6 @@ def check_and_notify() -> None:
 
         if not _levels_match_direction(direction, entry, sl, tp1):
             continue
-        feas_state = evaluate_plan_feasibility(
-            asset_name,
-            entry,
-            sl,
-            safe_float(data.get("atr1h")),
-            min_stoploss_pct=settings.get_min_stoploss_pct(asset_name),
-            profit_target_config=settings.PROFIT_TARGET_CONFIG,
-            leverage=settings.LEVERAGE.get(asset_name),
-            round_trip_cost=_plan_round_trip_cost(
-                asset_name, settings.ASSET_COST_MODEL, settings.DEFAULT_COST_MODEL
-            ),
-        )
-        if not feas_state.get("feasible"):
-            LOGGER.warning(
-                "plan_feasibility_blocked_entry asset=%s reason=%s r_pct=%s required_pct=%s ceiling_pct=%s",
-                asset_name,
-                feas_state.get("reason"),
-                feas_state.get("r_pct"),
-                feas_state.get("required_pct"),
-                feas_state.get("ceiling_pct"),
-            )
-            continue
 
         if isinstance(pos, dict) and str(pos.get("status") or "").lower() == "open":
             current_side = "buy" if str(pos.get("side") or "").lower() in {"long", "buy"} else "sell" if str(pos.get("side") or "").lower() in {"short", "sell"} else None
