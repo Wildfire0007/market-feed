@@ -1,5 +1,10 @@
 # Config changelog
 
+- H2 swing árnyék-modul (`scripts/swing_shadow.py` + workflow-lépés): Donchian(20)/Chandelier(3×ATR14)
+  a 4h gyertyákon, SHADOW-jelölt kártyákkal, saját journallal (public/swing_shadow/). NEM élő:
+  mérési infrastruktúra a 2. hipotézishez (előjegyzés: claude/hipotezis2_swing_elojegyzes_2026-08-25.md,
+  walk-forward: OOS +0,337R/trade, N=137). A fagyott intraday rendszert nem érinti.
+
 ## 2026-08-01
 - USOIL felfüggesztve az aktív roster-ből (feed-integritási karantén): a TD WTI-feed
   2026-07-20 óta dokumentáltan revizionista (396+ esemény, Δmax 1.77, fantom-SL 07-30),
